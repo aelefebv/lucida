@@ -276,7 +276,6 @@ export class CpuCache {
   private settledWhileInFlight = new Set<string>();
 
   private lruCounter = 0;
-  private admittedChunks = 0;
 
   private counters = new TelemetryCounters();
   private burstFailures = new BurstLogger("cache", "cache.failure_burst");
@@ -898,7 +897,6 @@ export class CpuCache {
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.rejectionTracker.clear();
-    this.deliveryState.onPlanRebuildStart();
     // The submits that follow carry the new wanted set and re-arm for it.
     this.wantedRequests = [];
     this.disarmReconcile();
@@ -1066,15 +1064,6 @@ export class CpuCache {
     }
 
     return this.levelResidencyScratch;
-  }
-
-  /**
-   * Chunks admitted since construction. Two readings that differ mean
-   * something arrived in between, which resident bytes cannot say once
-   * eviction makes room for it.
-   */
-  get admissions(): number {
-    return this.admittedChunks;
   }
 
   /**
@@ -1576,7 +1565,6 @@ export class CpuCache {
     // Cache admission: the moment decoded bytes become resident. Counted, not
     // timed — the insert is well under the platform's clock floor.
     traceRecorder.countPhase(CountedPhaseIndex.CacheAdmission);
-    this.admittedChunks++;
 
     this.notifyListeners();
 

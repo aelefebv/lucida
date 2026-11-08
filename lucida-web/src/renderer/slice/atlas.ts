@@ -1,6 +1,6 @@
 /**
  * Slice atlas state: pool allocation, indirection sizing, per-entity Z
- * metadata, stale-on-Z-change tracking.
+ * metadata, and the plane each slot was cut from.
  *
  * Composed cleanups (`removeSliceResources`, `destroyAllSliceResources`) live
  * in `slice/index.ts` so this module stays free of dependencies on
@@ -178,8 +178,12 @@ export interface SliceAtlasState {
   entityZInfo: Map<string, Map<number, SliceEntityZInfo>>;
   /** Current T, C, full-res Z — pool-wide. */
   z: number; t: number; c: number;
-  /** Composite keys with stale 2D slice data after a Z change. */
-  staleSliceKeys: Set<string> | null;
+  /**
+   * slotIndex → the level plane its 2D data was cut from, -1 when empty. A
+   * slot whose plane is not the one the current Z maps to is stale: the remap
+   * leaves it unmapped and the wanted set reports it missing.
+   */
+  slotLevelZ: Int32Array<ArrayBuffer>;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
 }
@@ -226,7 +230,7 @@ function createSliceAtlas(
     entityMetas: new Map(),
     entityZInfo: new Map(),
     z, t, c,
-    staleSliceKeys: null,
+    slotLevelZ: new Int32Array(totalSlots).fill(-1),
     intensityMin: 65535, intensityMax: 0,
     indirectionDirty: true,
   };
@@ -251,9 +255,6 @@ export function getOrCreateSlicePool(
   const atlases = ctx.state.sliceAtlases;
   const existing = atlases.get(poolKey);
   if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY) {
-    if (z !== existing.z && existing.slots.size > 0) {
-      existing.staleSliceKeys = new Set(existing.slots.keys());
-    }
     existing.z = z;
     existing.t = t;
     existing.c = c;

@@ -1,107 +1,260 @@
-//! Cross-platform dataset URL helpers: the one place that turns a
-//! user-typed dataset path into its canonical string
-//! ([`normalize_dataset_url`]), classifies it as local or remote
-//! ([`is_local_dataset_url`]), and derives its id and cache hash
-//! ([`dataset_id_for_url`], [`dataset_url_hash16`]) from one BLAKE3 digest.
+//! Dataset locations: where a dataset lives, parsed once where it enters
+//! ([`DatasetLocation::parse`]), and the id and cache hash derived from its
+//! canonical string ([`dataset_id_for_url`], [`dataset_url_hash16`]).
 //!
-//! Normalization is pure string work, not `canonicalize`: `..` is not
-//! resolved, symlinks are not followed, the path need not exist, and it is
-//! idempotent, so any boundary may call it.
+//! Parsing is pure string work, not `canonicalize`: `..` is not resolved,
+//! symlinks are not followed, and the path need not exist. The canonical
+//! string is what dataset ids and cache directories hash, so a canonical
+//! string parses to itself, and a form that once parsed keeps its spelling.
 
-/// Strip a leading `file://` or `file:///`+ prefix, lowercase the drive
-/// letter on Windows-style paths, forward-slashify backslashes, and
-/// canonicalize UNC `\\server\share\…` to `//server/share/…`. URL schemes
-/// are case-insensitive (RFC 3986 §3.1), so a leading scheme is lowercased
-/// — and only the scheme: bucket names and object paths are case-sensitive
-/// and pass through untouched. Unix paths and already-lowercase
-/// remote-scheme URLs (`gs://`, `s3://`, `http://`, `https://`) pass
-/// through unchanged.
+use std::fmt;
+use std::str::FromStr;
+
+/// Where a dataset lives: a path on the server's filesystem, or a URL in an
+/// object store, in canonical form.
 ///
-/// Idempotent: `normalize_dataset_url(normalize_dataset_url(s)) ==
-/// normalize_dataset_url(s)` for every input.
-///
-/// Examples (see the `tests` module for the authoritative table):
-///   - `"/foo/bar"` → `"/foo/bar"`
-///   - `"C:\\foo"` → `"c:/foo"`
-///   - `"C:/foo"` → `"c:/foo"`
-///   - `"file:///C:/foo"` → `"c:/foo"`
-///   - `"\\\\server\\share\\foo"` → `"//server/share/foo"`
-///   - `"gs://bucket/path"` → `"gs://bucket/path"` (unchanged)
-///   - `"HTTP://host/Path"` → `"http://host/Path"` (scheme only)
-pub fn normalize_dataset_url(raw: &str) -> String {
-    // Empty stays empty.
-    if raw.is_empty() {
-        return String::new();
-    }
-
-    // Canonical scheme form is lowercase. This also lets an uppercase
-    // `FILE://` prefix reach the strip below.
-    let raw = &*lowercase_scheme(raw);
-
-    // Remote schemes (gs://, s3://, http://, https://) pass through
-    // unchanged. file:// is handled specially below.
-    if is_remote_scheme(raw) {
-        return raw.to_string();
-    }
-
-    // Strip leading `file://` and any extra slashes (`file:///` is the
-    // browser-produced form for `file://` + an absolute path). After
-    // strip, the remainder is treated like any other raw path and goes
-    // through drive-letter / UNC / Unix recognition below.
-    let stripped = strip_file_uri(raw);
-
-    // UNC: `\\server\share\…` (two leading backslashes, no drive). The
-    // input must literally start with `\\` before the file:// strip
-    // *or* after it (a `file:////server/share/foo` form). Forward-slash
-    // form `//server/share/foo` is already canonical — passthrough.
-    if stripped.starts_with("\\\\") {
-        // Convert all backslashes to forward slashes; the leading `\\`
-        // becomes `//`, which is the canonical UNC form.
-        let forward: String = stripped.chars().map(swap_backslash).collect();
-        return forward;
-    }
-
-    // Drive-letter pattern: ASCII letter, colon, then optionally a
-    // separator and a remainder. Examples: `C:`, `C:\foo`, `c:/foo`,
-    // `C:/foo\bar/baz`.
-    if let Some(canonical) = canonicalize_drive_letter(&stripped) {
-        return canonical;
-    }
-
-    // Unix-style passthrough (including bare `/` and relative paths the
-    // caller chose to hand us). No transformation; backslashes here are
-    // legal Unix filename bytes and we don't second-guess them.
-    stripped.into_owned()
+/// Canonical forms (the `tests` module holds the authoritative table):
+///   - Unix paths pass through: `/srv/a.zarr`.
+///   - Drive-letter paths lowercase the drive and use forward slashes:
+///     `C:\data\a.zarr` → `c:/data/a.zarr`.
+///   - UNC paths use forward slashes: `\\server\share\a.zarr` →
+///     `//server/share/a.zarr`.
+///   - A `file://` URL becomes the path it names (RFC 8089):
+///     `file:///srv/a.zarr` → `/srv/a.zarr`, `file:///C:/a.zarr` →
+///     `c:/a.zarr`, `file://server/share/a.zarr` → `//server/share/a.zarr`.
+///   - `gs://`, `s3://`, `http://`, and `https://` URLs lowercase the scheme
+///     and nothing else, since bucket names and object paths are
+///     case-sensitive.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DatasetLocation {
+    scheme: LocationScheme,
+    canonical: String,
 }
 
-/// `true` if `canonical` (already normalized) refers to a filesystem
-/// path on the server: Unix (`/foo`), drive-letter (`c:/foo`), or UNC
-/// (`//server/share/foo`). `false` for empty input and for the remote
-/// schemes (`gs://`, `s3://`, `http://`, `https://`).
-///
-/// Callers should normalize first; see [`normalize_dataset_url`]. The
-/// recommended idiom is `is_local_dataset_url(normalize_dataset_url(s))`.
-pub fn is_local_dataset_url(canonical: &str) -> bool {
-    if canonical.is_empty() {
-        return false;
+/// How a [`DatasetLocation`] is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocationScheme {
+    /// A path on the server's filesystem.
+    Local,
+    Gcs,
+    S3,
+    Http,
+    Https,
+}
+
+impl LocationScheme {
+    /// The storage kind named in open diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LocationScheme::Local => "local",
+            LocationScheme::Gcs => "gcs",
+            LocationScheme::S3 => "s3",
+            LocationScheme::Http | LocationScheme::Https => "http",
+        }
     }
-    if is_remote_scheme(canonical) {
-        return false;
+}
+
+/// Why a string is not a [`DatasetLocation`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocationError {
+    Empty,
+    /// A path that is not absolute. Only the client knows the working
+    /// directory it is relative to, so the client resolves it.
+    RelativePath {
+        input: String,
+    },
+    /// A URL whose scheme names no storage this server reads.
+    UnknownScheme {
+        scheme: String,
+    },
+    /// A `gs://` or `s3://` URL without a bucket.
+    MissingBucket {
+        scheme: &'static str,
+    },
+    /// An `http://` or `https://` URL without a host.
+    MissingHost {
+        scheme: &'static str,
+    },
+}
+
+impl fmt::Display for LocationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LocationError::Empty => f.write_str("the dataset location is empty"),
+            LocationError::RelativePath { input } => write!(
+                f,
+                "relative path \"{input}\": a dataset path must be absolute"
+            ),
+            LocationError::UnknownScheme { scheme } => write!(
+                f,
+                "unsupported URL scheme {scheme}://: use a path, or a gs://, s3://, http://, or https:// URL"
+            ),
+            LocationError::MissingBucket { scheme } => {
+                write!(f, "{scheme}:// URL has no bucket name")
+            }
+            LocationError::MissingHost { scheme } => write!(f, "{scheme}:// URL has no host name"),
+        }
     }
-    // UNC: `//server/share/…`. A bare `//` with no host isn't a UNC
-    // path — but it also isn't a remote scheme and isn't a drive
-    // letter, so we'd fall through to the Unix branch. The classifier
-    // treats anything `//…` after normalization as UNC; if the input
-    // doesn't have a server/share the storage backend will fail open.
-    if canonical.starts_with("//") {
-        return true;
+}
+
+impl std::error::Error for LocationError {}
+
+impl LocationError {
+    /// A stable snake_case name for the variant, for clients that word the
+    /// problem themselves.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            LocationError::Empty => "empty",
+            LocationError::RelativePath { .. } => "relative_path",
+            LocationError::UnknownScheme { .. } => "unknown_scheme",
+            LocationError::MissingBucket { .. } => "missing_bucket",
+            LocationError::MissingHost { .. } => "missing_host",
+        }
     }
-    // Drive-letter pattern: `c:` or `c:/…` (lowercased by normalize).
-    if is_drive_letter_canonical(canonical) {
-        return true;
+}
+
+impl DatasetLocation {
+    /// Parse a user-typed path or URL. Fails, naming what is wrong, for an
+    /// empty or relative path, an unknown scheme, or a URL with nothing
+    /// after its scheme.
+    pub fn parse(raw: &str) -> Result<Self, LocationError> {
+        if raw.is_empty() {
+            return Err(LocationError::Empty);
+        }
+        let relative = || LocationError::RelativePath {
+            input: raw.to_string(),
+        };
+        let Some((scheme, rest)) = split_scheme(raw) else {
+            return local_path(raw).map(Self::local).ok_or_else(relative);
+        };
+        match scheme.to_ascii_lowercase().as_str() {
+            "gs" => Self::bucket(LocationScheme::Gcs, "gs", rest),
+            "s3" => Self::bucket(LocationScheme::S3, "s3", rest),
+            "http" => Self::host(LocationScheme::Http, "http", rest),
+            "https" => Self::host(LocationScheme::Https, "https", rest),
+            "file" => file_url_path(rest).map(Self::local).ok_or_else(relative),
+            _ => Err(LocationError::UnknownScheme {
+                scheme: scheme.to_string(),
+            }),
+        }
     }
-    // Unix path: anything starting with `/`.
-    canonical.starts_with('/')
+
+    fn local(canonical: String) -> Self {
+        Self {
+            scheme: LocationScheme::Local,
+            canonical,
+        }
+    }
+
+    fn bucket(
+        scheme: LocationScheme,
+        name: &'static str,
+        rest: &str,
+    ) -> Result<Self, LocationError> {
+        if rest.is_empty() || rest.starts_with('/') {
+            return Err(LocationError::MissingBucket { scheme: name });
+        }
+        Ok(Self {
+            scheme,
+            canonical: format!("{name}://{rest}"),
+        })
+    }
+
+    fn host(scheme: LocationScheme, name: &'static str, rest: &str) -> Result<Self, LocationError> {
+        if rest.is_empty() || rest.starts_with('/') {
+            return Err(LocationError::MissingHost { scheme: name });
+        }
+        Ok(Self {
+            scheme,
+            canonical: format!("{name}://{rest}"),
+        })
+    }
+
+    /// The canonical string: what is hashed, broadcast, persisted, and shown.
+    pub fn as_str(&self) -> &str {
+        &self.canonical
+    }
+
+    pub fn into_string(self) -> String {
+        self.canonical
+    }
+
+    pub fn scheme(&self) -> LocationScheme {
+        self.scheme
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.scheme == LocationScheme::Local
+    }
+
+    /// The bucket of a `gs://` or `s3://` location.
+    pub fn bucket_name(&self) -> Option<&str> {
+        self.bucket_and_prefix().map(|(bucket, _)| bucket)
+    }
+
+    /// The object key prefix of a `gs://` or `s3://` location, when it
+    /// names more than a bucket.
+    pub fn object_prefix(&self) -> Option<&str> {
+        self.bucket_and_prefix().and_then(|(_, prefix)| prefix)
+    }
+
+    fn bucket_and_prefix(&self) -> Option<(&str, Option<&str>)> {
+        let scheme_len = match self.scheme {
+            LocationScheme::Gcs => "gs://".len(),
+            LocationScheme::S3 => "s3://".len(),
+            _ => return None,
+        };
+        let rest = &self.canonical[scheme_len..];
+        Some(match rest.split_once('/') {
+            Some((bucket, prefix)) if !prefix.is_empty() => (bucket, Some(prefix)),
+            Some((bucket, _)) => (bucket, None),
+            None => (rest, None),
+        })
+    }
+
+    /// The source-derived dataset id; see [`dataset_id_for_url`].
+    pub fn source_id(&self) -> String {
+        dataset_id_for_url(&self.canonical)
+    }
+
+    /// The proxy cache's directory hash; see [`dataset_url_hash16`].
+    pub fn hash16(&self) -> [u8; 16] {
+        dataset_url_hash16(&self.canonical)
+    }
+
+    /// The last path component, which names a newly opened dataset.
+    pub fn display_name(&self) -> &str {
+        self.canonical
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or("dataset")
+    }
+}
+
+impl fmt::Display for DatasetLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.canonical)
+    }
+}
+
+impl FromStr for DatasetLocation {
+    type Err = LocationError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+/// The canonical string for `raw` when it parses, and `raw` unchanged when
+/// it does not. For comparing and showing what was typed; anything that
+/// opens a dataset parses a [`DatasetLocation`] and handles the error.
+pub fn normalize_dataset_url(raw: &str) -> String {
+    DatasetLocation::parse(raw).map_or_else(|_| raw.to_string(), DatasetLocation::into_string)
+}
+
+/// `true` if `url` parses as a path on the server's filesystem.
+pub fn is_local_dataset_url(url: &str) -> bool {
+    DatasetLocation::parse(url).is_ok_and(|location| location.is_local())
 }
 
 /// Stable, URL-derived `DatasetId` for a dataset URL. Format:
@@ -110,8 +263,8 @@ pub fn is_local_dataset_url(canonical: &str) -> bool {
 /// Two opens of the same URL produce the same id, which is how the server
 /// dedupes a reopen. The id hashes the URL, not the bytes, so one local
 /// path gets one id on every server, whatever file it names there. Pass a
-/// [`normalize_dataset_url`]-canonicalized URL for equivalence across
-/// Windows and UNC spellings.
+/// [`DatasetLocation`]'s canonical string for equivalence across Windows
+/// and UNC spellings.
 pub fn dataset_id_for_url(canonical: &str) -> String {
     let digest = blake3_url(canonical);
     let prefix: [u8; 8] = digest[..8].try_into().expect("blake3 always >= 8 bytes");
@@ -137,80 +290,80 @@ fn blake3_url(url: &str) -> [u8; 32] {
     *blake3::hash(url.as_bytes()).as_bytes()
 }
 
-/// Match `gs://`, `s3://`, `http://`, `https://` (and only those), in any
-/// letter case — schemes are case-insensitive per RFC 3986 §3.1. `file://`
-/// is intentionally NOT a remote scheme — it's a local filesystem URI and
-/// gets stripped to a plain path by normalize.
-fn is_remote_scheme(s: &str) -> bool {
-    has_scheme(s, "gs") || has_scheme(s, "s3") || has_scheme(s, "http") || has_scheme(s, "https")
+/// Split `scheme://rest` when the head is shaped like a URI scheme (RFC 3986
+/// §3.1). A one-letter head is a drive letter, never a scheme, so `C://data`
+/// stays a Windows path.
+fn split_scheme(raw: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = raw.split_once("://")?;
+    let bytes = scheme.as_bytes();
+    let shaped = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+    shaped.then_some((scheme, rest))
 }
 
-/// `true` if `s` starts with `{scheme}://`, comparing the scheme portion
-/// ASCII-case-insensitively.
-fn has_scheme(s: &str, scheme: &str) -> bool {
-    s.get(..scheme.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
-        && s[scheme.len()..].starts_with("://")
+/// The canonical form of a filesystem path, or `None` when it is relative.
+fn local_path(path: &str) -> Option<String> {
+    if path.starts_with("\\\\") {
+        return Some(path.chars().map(swap_backslash).collect());
+    }
+    if let Some(canonical) = canonicalize_drive_letter(path) {
+        return Some(canonical);
+    }
+    // Backslashes in a Unix path are legal filename bytes, so they stay.
+    path.starts_with('/').then(|| path.to_string())
 }
 
-/// If `s` begins with a URI scheme (RFC 3986 §3.1: an ASCII letter followed
-/// by letters, digits, `+`, `-`, or `.`) and `://`, return it with the
-/// scheme portion lowercased and everything after `://` byte-for-byte
-/// intact. Anything else — including drive-letter paths like `C:\foo`,
-/// which have a colon but no `//` — is returned unchanged.
-fn lowercase_scheme(s: &str) -> std::borrow::Cow<'_, str> {
-    let Some(sep) = s.find("://") else {
-        return std::borrow::Cow::Borrowed(s);
-    };
-    let scheme = &s[..sep];
-    let shaped_like_scheme = scheme
-        .as_bytes()
-        .first()
-        .is_some_and(|b| b.is_ascii_alphabetic())
-        && scheme
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.');
-    if !shaped_like_scheme || !scheme.bytes().any(|b| b.is_ascii_uppercase()) {
-        return std::borrow::Cow::Borrowed(s);
+/// The path a `file://` URL names, given what follows `file://`, or `None`
+/// when that is no absolute path.
+fn file_url_path(rest: &str) -> Option<String> {
+    // `file:////server/share` and `file://\\server\share`: a UNC path after
+    // an empty authority.
+    if rest.starts_with("//") {
+        return local_path(&format!("\\\\{}", rest.trim_start_matches('/')));
     }
-    std::borrow::Cow::Owned(format!("{}{}", scheme.to_ascii_lowercase(), &s[sep..]))
+    if rest.starts_with("\\\\") {
+        return local_path(rest);
+    }
+    // An empty authority: the path keeps its leading slash, except before a
+    // drive letter (`file:///C:/data`), where the slash belongs to the URL.
+    if let Some(after_slash) = rest.strip_prefix('/') {
+        if is_drive_prefix(after_slash) {
+            return canonicalize_drive_letter(after_slash);
+        }
+        return Some(rest.to_string());
+    }
+    // `file://C:\data`, a hand-typed form.
+    if is_drive_prefix(rest) {
+        return canonicalize_drive_letter(rest);
+    }
+    let (host, path) = rest.split_once('/')?;
+    if host.eq_ignore_ascii_case("localhost") {
+        return file_url_path(&rest[host.len()..]);
+    }
+    // `file://server/share/a.zarr` names a UNC path. A lone name after
+    // `file://` is a relative path typed as a URL, not a server.
+    if path.is_empty() || host == "." || host == ".." {
+        return None;
+    }
+    Some(
+        format!("//{host}/{path}")
+            .chars()
+            .map(swap_backslash)
+            .collect(),
+    )
 }
 
-/// Strip a `file://` prefix and any number of trailing slashes after
-/// it. Returns a borrowed `Cow` to avoid allocating when no prefix was
-/// present (the common Linux case).
-fn strip_file_uri(raw: &str) -> std::borrow::Cow<'_, str> {
-    if !raw.starts_with("file://") {
-        return std::borrow::Cow::Borrowed(raw);
-    }
-    // After `file://`, eat any extra ASCII slashes. Browsers produce
-    // `file:///C:/foo` (three slashes); some shells produce
-    // `file:////server/share/foo` for UNC. Eating the slashes leaves
-    // the path remainder for the drive-letter / UNC / Unix branches.
-    //
-    // We need to special-case UNC: `file:////server/share/foo` has
-    // four slashes; eating all four loses the UNC marker. So if after
-    // the prefix we see `//`, we *re-add* `\\` so the UNC branch in
-    // the caller fires.
-    let after_scheme = &raw["file://".len()..];
-    // `file://\\server\…` — human-typed (rare); pass the remainder
-    // through after stripping just the scheme, leaving the UNC marker
-    // intact for the caller's UNC branch.
-    if after_scheme.starts_with("\\\\") {
-        return std::borrow::Cow::Borrowed(after_scheme);
-    }
-    // `file:////server/share/foo` — the URI form for UNC (two
-    // forward slashes after `file://`). Re-emit a backslash UNC
-    // marker so the caller's UNC branch picks it up.
-    if after_scheme.starts_with("//") {
-        let trimmed = after_scheme.trim_start_matches('/');
-        return std::borrow::Cow::Owned(format!("\\\\{trimmed}"));
-    }
-    // Browser-form `file:///C:/foo` — three slashes, the third
-    // belongs to the absolute-path remainder. Eat the leading
-    // slashes that are part of the URI scheme, not the path.
-    let trimmed = after_scheme.trim_start_matches('/');
-    std::borrow::Cow::Owned(trimmed.to_string())
+/// `true` if `s` starts with a drive letter followed by a separator or
+/// nothing, as in `C:`, `C:\`, or `c:/data`.
+fn is_drive_prefix(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes.get(2), None | Some(b'/' | b'\\'))
 }
 
 /// If `s` is `[A-Za-z]:` optionally followed by a separator and a
@@ -222,7 +375,7 @@ fn canonicalize_drive_letter(s: &str) -> Option<String> {
     if bytes.len() < 2 {
         return None;
     }
-    if !is_ascii_letter(bytes[0]) || bytes[1] != b':' {
+    if !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
         return None;
     }
 
@@ -250,27 +403,6 @@ fn canonicalize_drive_letter(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// `true` if `s` is the canonical drive-letter form: lowercase ASCII
-/// letter, colon, then either end-of-string or `/`. (Used by
-/// [`is_local_dataset_url`]; relies on input having been normalized.)
-fn is_drive_letter_canonical(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() < 2 {
-        return false;
-    }
-    let drive_ok =
-        bytes[0].is_ascii_lowercase() && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
-    if !drive_ok {
-        return false;
-    }
-    // Either `c:` (length 2) or `c:/…` (third byte is `/`).
-    bytes.len() == 2 || bytes[2] == b'/'
-}
-
-fn is_ascii_letter(b: u8) -> bool {
-    b.is_ascii_alphabetic()
-}
-
 fn swap_backslash(c: char) -> char {
     if c == '\\' { '/' } else { c }
 }
@@ -279,20 +411,38 @@ fn swap_backslash(c: char) -> char {
 mod tests {
     use super::*;
 
+    fn canonical(raw: &str) -> String {
+        DatasetLocation::parse(raw)
+            .unwrap_or_else(|e| panic!("{raw:?} must parse: {e}"))
+            .into_string()
+    }
+
     /// Each row: (input, expected_canonical). The same table is reused
     /// by the idempotence and round-trip-id tests below.
-    fn normalize_cases() -> Vec<(&'static str, &'static str)> {
+    fn parse_cases() -> Vec<(&'static str, &'static str)> {
         vec![
             // Unix passthrough.
             ("/foo/bar", "/foo/bar"),
             ("/data/scans/foo.zarr", "/data/scans/foo.zarr"),
+            ("/", "/"),
+            // file:// on Unix keeps the path's leading slash (RFC 8089).
+            ("file:///srv/x.zarr", "/srv/x.zarr"),
+            ("file:///", "/"),
+            ("file://localhost/srv/x.zarr", "/srv/x.zarr"),
+            ("FILE:///srv/X.zarr", "/srv/X.zarr"),
             // Drive-letter case variants — all collapse to `c:/foo`.
             ("C:\\foo", "c:/foo"),
             ("c:/foo", "c:/foo"),
             ("C:/foo", "c:/foo"),
-            // file:// forms (browser-produced and shell-produced).
+            ("C://foo", "c:/foo"),
+            ("C:", "c:"),
+            // file:// forms of drive-letter paths (browser-produced and
+            // hand-typed).
             ("file:///C:/foo", "c:/foo"),
             ("file://C:\\foo", "c:/foo"),
+            ("file://C:/foo", "c:/foo"),
+            ("file://localhost/C:/foo", "c:/foo"),
+            ("FILE:///C:/foo", "c:/foo"),
             // Mixed separators inside a drive-letter path.
             ("C:\\foo/bar\\baz", "c:/foo/bar/baz"),
             // Deeper drive-letter path with spaces.
@@ -306,13 +456,12 @@ mod tests {
                 "\\\\fileserver\\share\\foo.zarr",
                 "//fileserver/share/foo.zarr",
             ),
-            // file:// UNC form (rare, but `file:////host/share/…` is
-            // the URI form for UNC).
+            ("//server/share/foo", "//server/share/foo"),
+            // file:// forms of UNC paths: an empty authority before the UNC
+            // path, or the server as the authority.
             ("file:////server/share/foo", "//server/share/foo"),
-            // Edge cases.
-            ("C:", "c:"),
-            ("/", "/"),
-            ("", ""),
+            ("file://\\\\server\\share\\foo", "//server/share/foo"),
+            ("file://server/share/foo", "//server/share/foo"),
             // Remote-scheme passthrough.
             ("gs://bucket/path", "gs://bucket/path"),
             ("s3://bucket/path", "s3://bucket/path"),
@@ -324,31 +473,170 @@ mod tests {
             ("HtTpS://host/p", "https://host/p"),
             ("GS://Bucket/Key", "gs://Bucket/Key"),
             ("S3://bucket/Key", "s3://bucket/Key"),
-            ("FILE:///C:/foo", "c:/foo"),
         ]
     }
 
     #[test]
-    fn normalize_dataset_url_table() {
-        for (input, expected) in normalize_cases() {
-            let got = normalize_dataset_url(input);
+    fn parse_table() {
+        for (input, expected) in parse_cases() {
+            assert_eq!(canonical(input), expected, "parse({input:?})");
+        }
+    }
+
+    #[test]
+    fn a_canonical_string_parses_to_itself() {
+        for (input, _) in parse_cases() {
+            let once = canonical(input);
+            assert_eq!(canonical(&once), once, "not idempotent for {input:?}");
+        }
+    }
+
+    /// Dataset ids and cache directories hash the canonical string, so a
+    /// change of spelling would orphan every workspace that holds one.
+    #[test]
+    fn canonical_strings_keep_their_dataset_ids() {
+        let pinned = [
+            ("/data/scans/foo.zarr", "ds-0a35d571e03f8e57"),
+            ("C:\\foo", "ds-051f346713f4488b"),
+            ("\\\\server\\share\\foo", "ds-b1fbf89a3be65850"),
+            ("GS://bucket/a.zarr", "ds-37ef3ddca2044767"),
+        ];
+        for (input, id) in pinned {
+            let location = DatasetLocation::parse(input).unwrap();
+            assert_eq!(location.source_id(), id, "{input:?}");
+            assert_eq!(location.hash16(), dataset_url_hash16(location.as_str()));
+        }
+    }
+
+    #[test]
+    fn parse_classifies_the_scheme() {
+        let cases = [
+            ("/foo", LocationScheme::Local),
+            ("c:/foo", LocationScheme::Local),
+            ("//server/share/foo", LocationScheme::Local),
+            ("file:///srv/a.zarr", LocationScheme::Local),
+            ("gs://bucket/a", LocationScheme::Gcs),
+            ("s3://bucket/a", LocationScheme::S3),
+            ("http://host/a", LocationScheme::Http),
+            ("HTTPS://host/a", LocationScheme::Https),
+        ];
+        for (input, scheme) in cases {
             assert_eq!(
-                got, expected,
-                "normalize_dataset_url({input:?}) = {got:?}, expected {expected:?}"
+                DatasetLocation::parse(input).unwrap().scheme(),
+                scheme,
+                "{input:?}"
             );
         }
     }
 
     #[test]
-    fn normalize_dataset_url_is_idempotent() {
-        for (input, _) in normalize_cases() {
-            let once = normalize_dataset_url(input);
-            let twice = normalize_dataset_url(&once);
+    fn a_relative_path_is_refused_with_the_input_unchanged() {
+        for input in [
+            "x.zarr",
+            "./x.zarr",
+            "../data/x.zarr",
+            "data/x.zarr",
+            "~/x.zarr",
+            "data\\x.zarr",
+            "file://x.zarr",
+            "file://./x.zarr",
+        ] {
+            let err = DatasetLocation::parse(input).unwrap_err();
             assert_eq!(
-                once, twice,
-                "normalize not idempotent for {input:?}: once={once:?}, twice={twice:?}"
+                err,
+                LocationError::RelativePath {
+                    input: input.to_string()
+                },
+                "{input:?}"
+            );
+            let message = err.to_string();
+            assert!(message.contains(input), "{message}");
+            assert!(message.contains("absolute"), "{message}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_scheme_is_named() {
+        let err = DatasetLocation::parse("ftp://host/x.zarr").unwrap_err();
+        assert_eq!(
+            err,
+            LocationError::UnknownScheme {
+                scheme: "ftp".to_string()
+            }
+        );
+        assert!(err.to_string().contains("ftp://"), "{err}");
+    }
+
+    #[test]
+    fn a_url_with_nothing_after_its_scheme_is_refused() {
+        assert_eq!(
+            DatasetLocation::parse("gs://").unwrap_err(),
+            LocationError::MissingBucket { scheme: "gs" }
+        );
+        assert_eq!(
+            DatasetLocation::parse("S3:///key").unwrap_err(),
+            LocationError::MissingBucket { scheme: "s3" }
+        );
+        assert_eq!(
+            DatasetLocation::parse("https://").unwrap_err(),
+            LocationError::MissingHost { scheme: "https" }
+        );
+        assert_eq!(
+            DatasetLocation::parse("").unwrap_err(),
+            LocationError::Empty
+        );
+    }
+
+    #[test]
+    fn bucket_and_prefix() {
+        let cases = [
+            ("gs://my-bucket", Some("my-bucket"), None),
+            ("gs://my-bucket/", Some("my-bucket"), None),
+            (
+                "gs://my-bucket/path/to/store.zarr",
+                Some("my-bucket"),
+                Some("path/to/store.zarr"),
+            ),
+            ("s3://my-bucket", Some("my-bucket"), None),
+            (
+                "s3://my-bucket/path/to/store.zarr",
+                Some("my-bucket"),
+                Some("path/to/store.zarr"),
+            ),
+            ("https://host/a.zarr", None, None),
+            ("/srv/a.zarr", None, None),
+        ];
+        for (input, bucket, prefix) in cases {
+            let location = DatasetLocation::parse(input).unwrap();
+            assert_eq!(location.bucket_name(), bucket, "{input:?}");
+            assert_eq!(location.object_prefix(), prefix, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn display_name_is_the_last_path_component() {
+        let cases = [
+            ("/srv/a.zarr", "a.zarr"),
+            ("/srv/a.zarr/", "a.zarr"),
+            ("c:/data/b.zarr", "b.zarr"),
+            ("gs://bucket", "bucket"),
+            ("/", "dataset"),
+        ];
+        for (input, name) in cases {
+            assert_eq!(
+                DatasetLocation::parse(input).unwrap().display_name(),
+                name,
+                "{input:?}"
             );
         }
+    }
+
+    #[test]
+    fn normalize_falls_back_to_the_input() {
+        assert_eq!(normalize_dataset_url("C:\\foo"), "c:/foo");
+        assert_eq!(normalize_dataset_url("file:///srv/x"), "/srv/x");
+        assert_eq!(normalize_dataset_url("./x.zarr"), "./x.zarr");
+        assert_eq!(normalize_dataset_url(""), "");
     }
 
     #[test]
@@ -357,11 +645,14 @@ mod tests {
             // Unix.
             ("/foo/bar", true),
             ("/", true),
-            // Drive-letter (canonical form).
+            // Drive-letter.
             ("c:/foo", true),
             ("c:", true),
-            // UNC (canonical form).
+            ("C:\\foo", true),
+            // UNC.
             ("//server/share/foo", true),
+            // file:// URLs name local paths.
+            ("file:///srv/a.zarr", true),
             // Remote schemes, in any letter case.
             ("gs://bucket/path", false),
             ("s3://bucket/path", false),
@@ -369,8 +660,9 @@ mod tests {
             ("https://host/p", false),
             ("HTTP://host/p", false),
             ("S3://bucket/path", false),
-            // Empty.
+            // Not a location at all.
             ("", false),
+            ("x.zarr", false),
         ];
         for (input, expected) in cases {
             let got = is_local_dataset_url(input);
@@ -383,8 +675,8 @@ mod tests {
 
     #[test]
     fn dataset_id_for_url_is_stable_across_spelling_variants() {
-        // Each group is a set of input spellings that should normalize
-        // to the same canonical form, and therefore produce the same
+        // Each group is a set of input spellings that should parse to the
+        // same canonical form, and therefore produce the same
         // `dataset_id_for_url`. Checks the property at the externally
         // observable layer: the same id.
         let groups: Vec<Vec<&str>> = vec![
@@ -395,13 +687,18 @@ mod tests {
                 "file:///C:/foo",
                 "file://C:\\foo",
             ],
-            vec!["\\\\server\\share\\foo", "//server/share/foo"],
+            vec![
+                "\\\\server\\share\\foo",
+                "//server/share/foo",
+                "file://server/share/foo",
+            ],
+            vec!["/srv/x.zarr", "file:///srv/x.zarr"],
             vec!["http://host/p", "HTTP://host/p", "hTtP://host/p"],
         ];
         for group in groups {
             let ids: Vec<String> = group
                 .iter()
-                .map(|s| dataset_id_for_url(&normalize_dataset_url(s)))
+                .map(|s| DatasetLocation::parse(s).unwrap().source_id())
                 .collect();
             let first = &ids[0];
             for (i, id) in ids.iter().enumerate().skip(1) {

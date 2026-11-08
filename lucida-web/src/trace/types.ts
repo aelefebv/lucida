@@ -902,9 +902,10 @@ export interface TraceRow extends WireLabel {
 }
 
 /**
- * The five rare things worth a point in time rather than a column: a chunk
+ * The six rare things worth a point in time rather than a column: a chunk
  * left the cache, the renderer refused one, a fetch was retried, a fetch gave
- * up, a dataset's target level moved. The middle three are rare enough that
+ * up, a dataset's target level moved, the uploader stopped re-sending a chunk
+ * the renderer kept handing back. The second to fourth are rare enough that
  * they share one shape, and their diagnostic value is that they appear at
  * all.
  *
@@ -919,6 +920,7 @@ export const POINT_EVENT_KINDS = [
   "retry",
   "failure",
   "level-change",
+  "held",
 ] as const;
 export type PointEventKind = (typeof POINT_EVENT_KINDS)[number];
 
@@ -928,6 +930,7 @@ export const PointEvent = {
   Retry: 2,
   Failure: 3,
   LevelChange: 4,
+  Held: 5,
 } as const;
 export type PointEventIndex = (typeof PointEvent)[keyof typeof PointEvent];
 
@@ -966,10 +969,18 @@ const CHUNK_FEEDBACK_REASONS = [
 const LEVEL_CHANGE_REASONS = ["screen", "pin"] as const;
 export type LevelChangeReason = (typeof LEVEL_CHANGE_REASONS)[number];
 
+/**
+ * Why a `held` chunk kept coming back: any of the renderer's feedback reasons,
+ * or `not-resident` when its wanted set still listed the chunk after delivery
+ * without saying why.
+ */
+export type HeldReason = ChunkFeedbackReason | "not-resident";
+
 export const POINT_EVENT_REASONS = [
   ...FETCH_ERROR_REASONS,
   ...CHUNK_FEEDBACK_REASONS,
   ...LEVEL_CHANGE_REASONS,
+  "not-resident",
 ] as const;
 export type PointEventReason = (typeof POINT_EVENT_REASONS)[number];
 

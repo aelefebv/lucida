@@ -340,7 +340,7 @@ class Simulation {
     loop.start();
     loop.addDataset(dataset.datasetId, manifest);
 
-    scene.set_viewport(deviceW, deviceH);
+    scene.set_viewport(deviceW, deviceH, this.dpr);
     scene.fit_camera_to_dataset_bounds(dataset.datasetId);
     loop.markInteractiveDirty("auto_fit_on_open");
     if (mode === "slice") loop.setSliceParams(scene.z(), scene.t(), scene.c());

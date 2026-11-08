@@ -33,6 +33,7 @@ import {
   buildViewHotStateFromMembers,
 } from "./coldState/hotState.ts";
 import { WorkerFeedback } from "./delivery/feedback.ts";
+import { ResendGuard, type HeldChunk } from "./delivery/resendGuard.ts";
 import {
   buildManifestByImage,
   type ManifestEntry,
@@ -48,10 +49,12 @@ import { UploadTelemetry } from "./telemetry/upload.ts";
 import { ColdStateTelemetry } from "./telemetry/coldState.ts";
 import { orchTelemetryActive } from "./telemetry/active.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { CountedPhaseIndex } from "../../trace/types.ts";
+import { CountedPhaseIndex, PointEvent } from "../../trace/types.ts";
+import { debugLog } from "../../debug/logging.ts";
 
 export class Uploader {
-  private readonly workerFeedback = new WorkerFeedback();
+  private readonly resendGuard = new ResendGuard();
+  private readonly workerFeedback = new WorkerFeedback(this.resendGuard);
   private readonly workerResources = new WorkerResourceTracker();
 
   readonly uploadTelemetry = new UploadTelemetry();
@@ -103,6 +106,7 @@ export class Uploader {
     });
     args.ctx.client.coldState(msg);
     this.lastEpochs = args.epochs;
+    this.resendGuard.onRebuild();
     return msg;
   }
 
@@ -152,6 +156,7 @@ export class Uploader {
       epochs: args.epochs,
     });
     this.lastEpochs = args.epochs;
+    this.resendGuard.onRebuild();
   }
 
   /**
@@ -189,6 +194,7 @@ export class Uploader {
     });
     args.ctx.client.coldStateDelta(msg);
     this.lastEpochs = args.epochs;
+    this.resendGuard.onRebuild();
     return msg;
   }
 
@@ -295,6 +301,7 @@ export class Uploader {
     let sentAny = false;
 
     for (const delivery of deliverables) {
+      if (delivery.kind === "chunk" && this.resendGuard.isHeld(delivery)) continue;
       if (remaining <= 0) {
         budgetExhausted = true;
         break;
@@ -324,6 +331,7 @@ export class Uploader {
       if (sent === 0) continue;
 
       ctx.cpuCache.markSent(delivery);
+      if (delivery.kind === "chunk") this.resendGuard.noteSent(delivery);
       sentAny = true;
       this.currentUploadStats.bytesUploaded += sent;
       recordUpload(sent, delivery.kind);
@@ -337,8 +345,22 @@ export class Uploader {
     if (telemetryActive) {
       this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
     }
+    this.recordHeld(this.resendGuard.endTick());
 
     return sentAny || budgetExhausted;
+  }
+
+  /** One trace event per chunk the guard stopped re-sending, so the run names the loop it cut. */
+  private recordHeld(held: HeldChunk[]): void {
+    if (held.length === 0) return;
+    for (const { delivery, reason } of held) {
+      traceRecorder.recordPointEvent(
+        PointEvent.Held, reason, delivery, delivery.residencyTier === "coarse" ? 1 : 0,
+      );
+    }
+    debugLog("orch", "upload.resend_held", {
+      chunks: held.map(({ delivery, reason }) => `${delivery.imageId}/${delivery.chunkKey} (${reason})`),
+    });
   }
 
   private tryDispatchDelivery(args: {

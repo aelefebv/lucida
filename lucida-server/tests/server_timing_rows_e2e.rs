@@ -171,7 +171,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
     let (progress, _progress_rx) = mpsc::unbounded_channel();
     let opened = open_dataset(
         1,
-        data.to_str().unwrap(),
+        &data.to_str().unwrap().parse().unwrap(),
         &DatasetOpenContext {
             session: Arc::clone(&session),
             tx: tx.clone(),

@@ -11,6 +11,7 @@ import type {
 } from "../../../renderer/workerProtocol.ts";
 import { debugLog } from "../../../debug/logging.ts";
 import { proxyKeyFromMissing } from "../proxyKeys.ts";
+import type { ResendGuard } from "./resendGuard.ts";
 import {
   channelFromChunkKey,
   parseWorkerMemberId,
@@ -19,6 +20,13 @@ import {
 export class WorkerFeedback {
   private readonly datasetsWithWantedSnapshot = new Set<string>();
   private readonly missingChunksByDataset = new Map<string, Map<string, Map<number, Set<string>>>>();
+
+  private readonly guard: ResendGuard | null;
+
+  /** `guard` hears every chunk the worker hands back, so a held chunk names its reason. */
+  constructor(guard: ResendGuard | null = null) {
+    this.guard = guard;
+  }
 
   /**
    * - `evicted` chunks were displaced by closer arrivals — re-eligible
@@ -54,6 +62,10 @@ export class WorkerFeedback {
 
     for (const [c, group] of byChannel) {
       cpuCache.markChunkEvicted(parsed.imageId, c, group.evicted, group.skipped, reason);
+      if (this.guard) {
+        for (const key of group.evicted) this.guard.noteReturned(parsed.imageId, c, key, reason ?? "evicted");
+        for (const key of group.skipped) this.guard.noteReturned(parsed.imageId, c, key, "atlas-policy");
+      }
     }
 
     if (evicted.length > 0 || skipped.length > 0) {
@@ -98,6 +110,7 @@ export class WorkerFeedback {
         }
         keys.add(entry.chunkKey);
         cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier);
+        this.guard?.noteMissing(parsed.imageId, c, entry.chunkKey);
         missingChunks++;
       } else if (entry.kind === "proxy") {
         cpuCache.markProxyMissing(proxyKeyFromMissing(entry));

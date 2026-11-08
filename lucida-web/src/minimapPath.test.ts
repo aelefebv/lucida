@@ -801,7 +801,6 @@ describe("tickMinimapOverview throttle", () => {
     const ctx = {
       scene: { t: tSpy, c: () => 0 },
       datasets: new Map(),
-      cpuCache: { admissions: 0 },
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // first scan runs (never scanned before)
@@ -825,7 +824,6 @@ describe("tickMinimapOverview throttle", () => {
     const ctx = {
       scene: { t: () => 0, c: () => 0 },
       datasets: new Map(),
-      cpuCache: { admissions: 0 },
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
@@ -835,43 +833,34 @@ describe("tickMinimapOverview throttle", () => {
     expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → not pending
   });
 
-  it("keeps scheduling on a throttle-skip once a chunk arrives for a member awaiting it (no tail-chunk strand)", () => {
+  it("keeps scheduling on a throttle-skip once an awaited chunk lands (no tail-chunk strand), and not before", () => {
     // The loop is dirty-driven, so a throttle-skipped frame must signal
-    // continuation when a chunk lands inside the interval while members still
-    // await chunks, or it strands until an unrelated interaction.
+    // continuation when a chunk a member awaits has landed inside the interval,
+    // or it strands until an unrelated interaction. While nothing has landed it
+    // must not: the arrival dirties the loop itself, and asking for frames
+    // until then redraws at frame rate, forever if nothing fetches the chunk.
     const state = createMinimapState();
     state.enabled = true;
-    const cpuCache = { admissions: 0 };
+    const cache = new Map<string, { data: ArrayBuffer; dataType: string }>();
     const ctx = {
       scene: { t: () => 0, c: () => 0 },
       datasets: new Map(),
-      cpuCache,
+      cpuCache: { getCachedChunk: (memberId: string, key: string) => cache.get(`${memberId}/${key}`) ?? null },
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
     expect(state.overviewBudgetPending).toBe(false); // empty scan → budget not exhausted
 
-    state.pendingFetch.set("m0", []); // a member is now awaiting fetched chunks
-    cpuCache.admissions++; // and a chunk has arrived since the scan
-    expect(tickMinimapOverview(ctx, state, 1010)).toBe(true); // skipped but continuation kept
+    state.pendingFetch.set("m0", [{ level: 2, x: 0, y: 0, z: 0, t: 0, c: 0, key: "2/0/0/0/0/0" }]);
+    expect(tickMinimapOverview(ctx, state, 1010)).toBe(false); // awaited, not landed → idle
+
+    cache.set("m0/2/0/0/0/0/0", { data: new ArrayBuffer(0), dataType: "uint16" });
+    expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // empty data is nothing to upload
+
+    cache.set("m0/2/0/0/0/0/0", { data: new ArrayBuffer(8), dataType: "uint16" });
+    expect(tickMinimapOverview(ctx, state, 1030)).toBe(true); // landed → the next scan uploads it
 
     state.pendingFetch.clear(); // seeding complete
-    expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → loop may quiesce
-  });
-
-  it("lets the loop idle on a throttle-skip while awaited chunks have not arrived", () => {
-    // A chunk the minimap waits on that never arrives must not keep the loop
-    // ticking at frame rate.
-    const state = createMinimapState();
-    state.enabled = true;
-    const ctx = {
-      scene: { t: () => 0, c: () => 0 },
-      datasets: new Map(),
-      cpuCache: { admissions: 7 },
-    } as unknown as TickContext;
-
-    tickMinimapOverview(ctx, state, 1000);
-    state.pendingFetch.set("m0", []);
-    expect(tickMinimapOverview(ctx, state, 1010)).toBe(false);
+    expect(tickMinimapOverview(ctx, state, 1040)).toBe(false); // skipped → loop may quiesce
   });
 });
