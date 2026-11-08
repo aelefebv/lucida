@@ -174,9 +174,9 @@ describe("two mirror-image chunks and one worker slot", () => {
     atlas: { sliceAtlasBytes: CHUNK_64_BYTES },
     gpuComplete: false,
   });
-  // Two chunks in each of two tiers. Each goes at most twice: once, and again
-  // after a cold state clears the refusal of the one that did not fit.
-  const MAX_SENDS = 2 * 4;
+  // Two chunks in each of two tiers, each sent once: the one that does not fit
+  // is refused, and not asked for again until the next plan.
+  const MAX_SENDS = 2 * 2;
   for (const dpr of DEVICE_PIXEL_RATIOS) {
     it(`settles at device pixel ratio ${dpr} without the two trading the slot`, async () => {
       const run = await runScenario(scenario, { dpr });
@@ -184,6 +184,70 @@ describe("two mirror-image chunks and one worker slot", () => {
       expect(run.phases[0].chunksSent).toBeLessThanOrEqual(MAX_SENDS);
     });
   }
+});
+
+describe("a pan and zoom across a full atlas", () => {
+  // The full-atlas image and slots, with a view that moves. Each step plans a
+  // new wanted set, and the slots the planner no longer wants make room first.
+  settles(
+    describeScenario({
+      name: "pan and zoom on a full atlas",
+      dataset: singleImage({
+        id: "grid",
+        pyramid: { shape: [1, 1, 1, 512, 512], chunk: [1, 64, 64], levels: 3 },
+      }),
+      viewport: [320, 200],
+      atlas: { sliceAtlasBytes: 25 * CHUNK_64_BYTES },
+      gpuComplete: false,
+      steps: [{ pan: [150, 40] }, { pan: [-300, -80] }, { zoom: 2 }, { zoom: 0.5 }],
+    }),
+  );
+});
+
+describe("a view that moves away and back", () => {
+  // Room for everything, so every chunk the worker acknowledged stays held.
+  const scenario = describeScenario({
+    name: "pan away and back",
+    dataset: singleImage({ id: "still", pyramid: IMAGE_1024 }),
+    steps: [{ zoom: 2 }, { pan: [200, 100] }, { pan: [-200, -100] }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr}, never resending a chunk the worker holds`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) expect(phase.chunksSent, phase.label).toBe(phase.distinctChunksSent);
+      expect(run.phases[run.phases.length - 1].chunksSent).toBe(0);
+    });
+  }
+});
+
+describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
+  // 24 slots for a level of 128 chunks: every move changes which of them the
+  // view wants nearest, and the pool keeps trading slots.
+  settles(describeScenario({
+    name: "volume moves on a full atlas",
+    mode: "volume",
+    dataset: singleImage({
+      id: "block",
+      pyramid: { shape: [1, 2, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+    }),
+    atlas: { volumeAtlasBytes: 24 * 32 * 32 * 32 * 2 },
+    gpuComplete: false,
+    steps: [{ zoom: 4 }, { orbit: [0.6, 0.3] }, { pan: [120, 60] }, { orbit: [-1.2, -0.4] }],
+  }));
+});
+
+describe("a zoom and pan across a collection", () => {
+  settles(describeScenario({
+    name: "collection moves",
+    dataset: collection({
+      id: "tiles",
+      rows: 3,
+      columns: 4,
+      pyramid: { shape: [1, 2, 1, 256, 256], chunk: [1, 64, 64], levels: 3 },
+    }),
+    steps: [{ zoom: 3 }, { pan: [300, 0] }, { pan: [0, 200] }, { zoom: 0.33 }],
+  }));
 });
 
 describe("a transient source failure", () => {

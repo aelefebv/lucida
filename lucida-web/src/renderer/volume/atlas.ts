@@ -13,7 +13,8 @@ import { computeAtlasGeometry } from "../atlasSizing.ts";
 import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
-import { postPoolChunksLost } from "../chunkUploadFeedback.ts";
+import { postSlotsLost } from "../chunkUploadFeedback.ts";
+import { chunkPoolTier } from "../poolKeys.ts";
 import { shrinkAtlasBudget } from "../../deviceBudget.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
@@ -642,7 +643,7 @@ export function growVolumeAtlasWatched(ctx: WorkerCtx, poolKey: string, atlas: A
 export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: AtlasState): void {
   const atlases = ctx.state.volumeAtlases;
   if (atlases.get(poolKey) !== lost) return;
-  postPoolChunksLost(ctx, lost.slots.keys(), "out-of-memory");
+  postSlotsLost(ctx, chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
   destroyAtlas(lost);
   atlases.delete(poolKey);
   if (shrinkAtlasBudget(ctx.state.atlasBudgets, "volumeAtlasBytes")) {

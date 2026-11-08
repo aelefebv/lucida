@@ -236,18 +236,35 @@ describe("cache point events", () => {
     ]);
   });
 
-  it("carries the renderer's own reason and the chunk's level on a worker-reported eviction", async () => {
+  it("carries the chunk's level on a worker-reported eviction", async () => {
     openRun();
     const { cache } = createCache(64);
 
     cache.submit(makePlan([makeRequest({ level: 1 })], [tile("entity-1", "image-1", 1)]));
     await flush();
-    cache.markChunkEvicted("image-1", 0, ["1/0/0/0/0/0"], [], "stale");
+    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "evicted");
 
     const evictions = eventsOfKind(exportedEvents(), "eviction");
     expect(evictions.map(e => [e.reason, e.chunk?.chunkKey, e.chunk?.level])).toEqual([
-      ["stale", "1/0/0/0/0/0", 1],
+      ["evicted", "1/0/0/0/0/0", 1],
     ]);
+  });
+
+  it("records a refusal as a rejection under the renderer's reason, and a freed pool or re-cut plane not at all", async () => {
+    openRun();
+    const { cache } = createCache(64);
+
+    cache.submit(makePlan([makeRequest({ level: 1 })], [tile("entity-1", "image-1", 1)]));
+    await flush();
+    cache.markChunksRefused("image-1", 0, "detail", ["1/0/0/0/0/0"], "stale");
+    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "freed");
+    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "wrong-slice");
+
+    const events = exportedEvents();
+    expect(eventsOfKind(events, "rejection").map(e => [e.reason, e.chunk?.chunkKey])).toEqual([
+      ["stale", "1/0/0/0/0/0"],
+    ]);
+    expect(eventsOfKind(events, "eviction")).toEqual([]);
   });
 
   it("reads the residency tier off the chunk rather than assuming detail", async () => {
@@ -258,7 +275,7 @@ describe("cache point events", () => {
     // event has to say so — a chunk key is not unique across the two.
     cache.submit(makePlan([makeRequest({ lane: "coarse" })]));
     await flush();
-    cache.markChunkEvicted("image-1", 0, ["0/0/0/0/0/0"], [], "evicted");
+    cache.markChunksLost("image-1", 0, "coarse", ["0/0/0/0/0/0"], "evicted");
 
     const evictions = eventsOfKind(exportedEvents(), "eviction");
     expect(evictions[0].chunk?.residencyTier).toBe("coarse");
