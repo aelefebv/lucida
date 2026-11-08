@@ -4081,7 +4081,10 @@ async fn run_trace(
 ) -> Result<TraceRunOutcome, CliError> {
     // Read first, so a script that cannot run fails before a server is
     // reached or a dataset opened on its behalf.
-    let script = args.script.resolve()?;
+    let mut script = args.script.resolve()?;
+    for url in script.dataset_urls_mut() {
+        *url = absolute_dataset_source(url)?;
+    }
     let sidecar = |path: &Path| match sidecar_suffix {
         Some(suffix) => trace::suffixed(path, suffix),
         None => path.to_path_buf(),
@@ -4109,6 +4112,17 @@ async fn run_trace(
         dataset_id = Some(lucida_core::DatasetId(opened.workspace_dataset_id));
         warmth.note_driver_open();
     }
+    prepare_script_datasets(
+        &script,
+        &dataset_url,
+        &[],
+        workspace,
+        target,
+        token,
+        &health,
+        wait,
+    )
+    .await?;
 
     let pin_contrast_for = if args.pin_contrast {
         dataset_id.as_ref()
@@ -4276,6 +4290,17 @@ async fn run_replay(
             .await?;
         warmth.note_driver_open();
     }
+    prepare_script_datasets(
+        &plan.script,
+        &plan.dataset_url,
+        &plan.other_dataset_urls,
+        workspace,
+        target,
+        token,
+        &health,
+        wait,
+    )
+    .await?;
 
     let url = match &plan.view_fragment {
         Some(fragment) => trace_replay::rehost_view(&target.web_url, fragment),
@@ -4305,6 +4330,55 @@ async fn run_replay(
     };
     let viewport = Viewport::new(plan.width, plan.height, plan.device_pixel_ratio);
     drive_and_persist(&url, token, viewport, wait, &facts, sidecars, trace_dir).await
+}
+
+/// Put the workspace in the state a script's adds and removes need before
+/// the page loads: a dataset the script adds is not there yet, and one it
+/// removes is. `health` is the snapshot read before the run, and `opened`
+/// the datasets the caller has put in the workspace since, beside the one
+/// the run opens. That one has to be there, so a script that adds it is
+/// refused.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_script_datasets(
+    script: &trace_script::Script,
+    run_dataset: &str,
+    opened: &[String],
+    workspace: &WorkspaceRecord,
+    target: &WorkspaceTarget,
+    token: Option<&EffectiveToken>,
+    health: &[DatasetSourceHealth],
+    wait: Duration,
+) -> Result<(), CliError> {
+    let needs = script.dataset_preconditions();
+    let run_dataset = normalize_dataset_url(run_dataset);
+    if needs.absent.contains(&run_dataset) {
+        return Err(CliError::config(format!(
+            "the script adds {run_dataset}, which is the dataset the run opens; add another \
+             dataset, or remove this one first"
+        )));
+    }
+    for url in &needs.absent {
+        if let Some(id) = trace::dataset_id_for_source(url, health) {
+            DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned())
+                .remove(&id.0, workspace, wait)
+                .await?;
+        }
+    }
+    let opened: Vec<String> = opened
+        .iter()
+        .map(|url| normalize_dataset_url(url))
+        .collect();
+    for url in &needs.present {
+        if *url != run_dataset
+            && !opened.contains(url)
+            && trace::dataset_id_for_source(url, health).is_none()
+        {
+            DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+                .open(url, &workspace.id, wait)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// A dataset argument is a URL in canonical form, or the id of a dataset the
@@ -6382,7 +6456,20 @@ mod tests {
         // The steps ride the bundle's own script section, which a replay runs
         // again, rather than a header field the replay list names.
         let carried_by_script = [
-            "script", "wait", "hold", "pan", "zoom_by", "orbit", "scrub", "select",
+            "script",
+            "wait",
+            "hold",
+            "pan",
+            "zoom_by",
+            "orbit",
+            "scrub",
+            "select",
+            "mode",
+            "fit",
+            "resize",
+            "set_contrast",
+            "add",
+            "remove",
         ];
 
         let command = Cli::command();
@@ -6470,7 +6557,8 @@ mod tests {
                     run.script.steps,
                     vec![ScriptStep::Orbit {
                         theta: 30.0,
-                        phi: 0.0
+                        phi: 0.0,
+                        duration_ms: None,
                     }]
                 );
             }
@@ -6557,11 +6645,13 @@ mod tests {
                         ScriptStep::Wait,
                         ScriptStep::Orbit {
                             theta: 30.0,
-                            phi: 15.0
+                            phi: 15.0,
+                            duration_ms: None,
                         },
                         ScriptStep::Scrub {
                             axis: ScrubAxis::T,
-                            count: 1
+                            count: 1,
+                            interval_ms: None,
                         },
                         ScriptStep::Select {
                             channel: Some(0),
@@ -6570,11 +6660,13 @@ mod tests {
                         },
                         ScriptStep::Zoom {
                             factor: 2.0,
-                            at: None
+                            at: None,
+                            duration_ms: None,
                         },
                         ScriptStep::Pan {
                             dx: -100.0,
-                            dy: 40.0
+                            dy: 40.0,
+                            duration_ms: None,
                         },
                         ScriptStep::Hold { ms: 250 },
                     ]

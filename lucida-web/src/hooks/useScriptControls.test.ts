@@ -4,11 +4,14 @@
  * select reach the same handlers the controls call, and what the controls
  * would refuse is refused with a reason rather than applied.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import initWasm, { normalize_dataset_url } from "lucida-core";
 
 import { resolvedLayer, resolvedLayers } from "../resolvedLayerFixtures.ts";
-import { scriptControls } from "../trace/steps.ts";
+import { noteDatasetOpened, noteDatasetOpenFailed, scriptControls } from "../trace/steps.ts";
 import type { DatasetState } from "../types.ts";
 import { useScriptControls, type ScriptControlInputs } from "./useScriptControls.ts";
 
@@ -31,12 +34,21 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
     setSolo: vi.fn(),
     setChannelVisible: vi.fn(),
     setLayerVisible: vi.fn(),
+    setChannelContrast: vi.fn(),
+    openDataset: vi.fn(),
+    removeDataset: vi.fn(),
+    datasetHealth: () => Promise.resolve([]),
     captureView: () => null,
     selectedDatasetId: null,
     datasetsRef: { current: datasets },
     ...overrides,
   };
 }
+
+beforeAll(async () => {
+  const bytes = readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm"));
+  await initWasm({ module_or_path: bytes });
+});
 
 describe("useScriptControls", () => {
   afterEach(() => {
@@ -122,6 +134,68 @@ describe("useScriptControls", () => {
     rerender({ ...given, selectedDatasetId: "ds-2" });
     expect(scriptControls()!.select({ channel: 0 }, true)).toEqual({ applied: true, reason: null });
     expect(given.setChannelVisible).toHaveBeenCalledWith("ds-2", 0, true);
+    unmount();
+  });
+
+  it("sets a channel's contrast through the panel's handler, and refuses a channel it lacks", () => {
+    const given = inputs();
+    const { unmount } = renderHook(() => useScriptControls(given));
+    expect(scriptControls()!.contrast(1, 10, 300)).toEqual({ applied: true, reason: null });
+    expect(given.setChannelContrast).toHaveBeenCalledWith("ds-1", 1, 10, 300);
+    expect(scriptControls()!.contrast(2, 10, 300)).toEqual({
+      applied: false,
+      reason: "ds-1 has 2 channel(s), so there is no channel 2",
+    });
+    unmount();
+  });
+
+  it("adds a dataset through the dialog's handler and answers once it opens or fails", async () => {
+    const given = inputs();
+    const { unmount } = renderHook(() => useScriptControls(given));
+    const url = normalize_dataset_url("/data/b.zarr");
+    const added = scriptControls()!.addDataset("/data/b.zarr", 5000);
+    await vi.waitFor(() => expect(given.openDataset).toHaveBeenCalledWith(url));
+    noteDatasetOpened("wds-b");
+    await expect(added).resolves.toEqual({ applied: true, reason: null });
+
+    const failed = scriptControls()!.addDataset("/data/c.zarr", 5000);
+    await vi.waitFor(() => expect(given.openDataset).toHaveBeenCalledTimes(2));
+    noteDatasetOpenFailed(normalize_dataset_url("/data/c.zarr"), "not found");
+    await expect(failed).resolves.toMatchObject({ applied: false });
+    unmount();
+  });
+
+  it("refuses to add a dataset that is open, and removes one by the URL it was opened from", async () => {
+    const url = normalize_dataset_url("/data/b.zarr");
+    const datasets = new Map<string, DatasetState>();
+    datasets.set("wds-b", dataset("wds-b"));
+    const given = inputs({
+      datasetsRef: { current: datasets },
+      datasetHealth: () => Promise.resolve([{ workspace_dataset_id: "wds-b", source_url: url }]),
+    });
+    const { unmount } = renderHook(() => useScriptControls(given));
+    await expect(scriptControls()!.addDataset("/data/b.zarr", 5000)).resolves.toEqual({
+      applied: false,
+      reason: `${url} is already open as wds-b`,
+    });
+    expect(given.openDataset).not.toHaveBeenCalled();
+    await expect(scriptControls()!.removeDataset("/data/b.zarr")).resolves.toEqual({ applied: true, reason: null });
+    expect(given.removeDataset).toHaveBeenCalledWith("wds-b");
+    await expect(scriptControls()!.removeDataset("/data/c.zarr")).resolves.toEqual({
+      applied: false,
+      reason: `no dataset opened from ${normalize_dataset_url("/data/c.zarr")} is open`,
+    });
+    unmount();
+  });
+
+  it("says so when it cannot read which dataset a remove names", async () => {
+    const given = inputs({ datasetHealth: () => Promise.reject(new Error("the session socket is not connected")) });
+    const { unmount } = renderHook(() => useScriptControls(given));
+    await expect(scriptControls()!.removeDataset("/data/b.zarr")).resolves.toEqual({
+      applied: false,
+      reason: `the page could not read which dataset ${normalize_dataset_url("/data/b.zarr")} is: the session socket is not connected`,
+    });
+    expect(given.removeDataset).not.toHaveBeenCalled();
     unmount();
   });
 

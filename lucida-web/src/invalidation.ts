@@ -78,7 +78,7 @@ export function invalidateDisplaySettings(
 /**
  * A channel, a dataset, or a label was shown or hidden. For the planner this
  * is a display-settings change like {@link invalidateDisplaySettings}. For
- * the trace recorder it is a select, one of the five inputs that open an
+ * the trace recorder it is a select, one of the inputs that open an
  * interaction run, so the loop hears it under that name.
  */
 export function invalidateSelection(loop: InvalidationSink | null | undefined): void {

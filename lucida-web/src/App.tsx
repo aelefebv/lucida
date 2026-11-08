@@ -71,6 +71,7 @@ import { setBundleServices } from "./trace/bundle.ts";
 import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
+import { noteDatasetOpened, noteDatasetOpenFailed } from "./trace/steps.ts";
 import { AddDataDialog, AddDataPrompt, noteSourceOpenFailed } from "./addData/index.ts";
 import { Banner } from "./shell/Banner.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
@@ -358,10 +359,14 @@ function Viewer({
   // empty for the first effect pass.
   // eslint-disable-next-line react-hooks/refs
   savedViewHooksRef.current = {
-    onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
+    onDatasetOpened: (id) => {
+      savedViewSync.applier.notifyDatasetOpened(id);
+      noteDatasetOpened(id);
+    },
     onOpenDatasetFailed: (url, err) => {
       savedViewSync.applier.notifyOpenFailed(url, err);
       noteSourceOpenFailed(url);
+      noteDatasetOpenFailed(url, err);
     },
   };
 
@@ -554,6 +559,12 @@ function Viewer({
     };
   }, [liveBridge, render.canvasRef, render.clientRef, render.loopRef]);
 
+  const requestDatasetHealth = useCallback(
+    () => liveBridge
+      ? liveBridge.requestDatasetHealth()
+      : Promise.reject(new Error("the session socket is not connected")),
+    [liveBridge],
+  );
   useScriptControls({
     selectors: {
       z: dims.z, t: dims.t,
@@ -566,6 +577,10 @@ function Viewer({
     setSolo: layers.handleChannelSetSolo,
     setChannelVisible: layers.handleChannelSetVisible,
     setLayerVisible: layers.handleLayerSetVisible,
+    setChannelContrast: layers.handleChannelSetContrast,
+    openDataset: datasets.handleUrlSubmit,
+    removeDataset: layers.removeLayer,
+    datasetHealth: requestDatasetHealth,
     captureView: savedViewSync.captureBuilder,
     selectedDatasetId,
     datasetsRef,
@@ -631,6 +646,9 @@ function Viewer({
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // CanvasStage keeps the latest handler in a ref, so this needs no memo.
   const handleCanvasResize = (size: CanvasSize) => {
+    // A new size changes what the view wants, so the recorder hears it as an
+    // input. Before a dataset opens the loop opens no run for it.
+    render.loopRef.current?.markInput("resize");
     requestRender(render.loopRef.current, "canvas_resize");
     if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
     settleTimerRef.current = setTimeout(() => {

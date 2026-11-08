@@ -741,7 +741,7 @@ export class TraceRecorder {
   }
 
   /**
-   * An input landed, one of the five that open an interaction run. One
+   * An input landed, one of those that open an interaction run. One
    * gesture is one run: with no run open the input opens one under a cause
    * that names it, and while a run is open (a dataset-open run included,
    * which keeps its cause) the input extends that run.

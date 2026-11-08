@@ -2212,8 +2212,11 @@ async fn drive_and_export(
             let closed = read_run_state(&mut page, wait).await?;
             pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
         }
+        // A resize step leaves the page at another size, and the frame is
+        // taken at the size the page is left at.
+        let mut viewport = viewport;
         if let Some(script) = request.script {
-            run_script(&mut page, script, wait).await?;
+            viewport = run_script(&mut page, script, viewport, wait).await?;
         }
         let mut fallback_frame = None;
         if screenshot.is_some() || bundle.is_some() {

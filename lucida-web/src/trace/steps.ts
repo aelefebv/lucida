@@ -1,12 +1,14 @@
 /**
  * The page's side of the trace driver's scripted steps.
  *
- * Pan, zoom, and orbit arrive as synthesized pointer and wheel events and need
- * nothing here. Scrub and select have nothing to click on the capture surface,
- * so the viewer registers the handlers those controls call and the driver
- * reaches them through the trace seam. The recorder still hears the input at
- * the control. `view` is read before and after each step, so a step that did
- * not land is a fact in the run rather than a silence.
+ * Pan, zoom, orbit, a mode switch, a fit, and a resize arrive as synthesized
+ * pointer, wheel, key, and touch events or a new window size, and need
+ * nothing here. Scrub, select, contrast, and adding or removing a dataset
+ * have nothing to click on the capture surface, so the viewer registers the
+ * handlers those controls call and the driver reaches them through the trace
+ * seam. The recorder still hears the input at the control. `view` is read
+ * before and after each step, so a step that did not land is a fact in the
+ * run rather than a silence.
  */
 
 import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";
@@ -33,6 +35,16 @@ export interface ScriptControls {
   scrub(axis: ScrubAxis, count: number): StepOutcome;
   /** Show or hide a channel or a layer through the handler the layer panel calls. */
   select(target: SelectTarget, visible: boolean): StepOutcome;
+  /** Set a channel's contrast window through the handler the layer panel's limits call. */
+  contrast(channel: number, min: number, max: number): StepOutcome;
+  /**
+   * Add a dataset by source URL through the handler the add-data dialog
+   * calls. Answers once the dataset has opened or failed to, or when
+   * `timeoutMs` passes first.
+   */
+  addDataset(url: string, timeoutMs: number): Promise<StepOutcome>;
+  /** Remove the dataset opened from a source URL through the handler the layer panel calls. */
+  removeDataset(url: string): Promise<StepOutcome>;
 }
 
 let registered: ScriptControls | null = null;
@@ -47,6 +59,69 @@ export function setScriptControls(controls: ScriptControls | null): void {
 
 export function scriptControls(): ScriptControls | null {
   return registered;
+}
+
+interface PendingOpen {
+  url: string;
+  openBefore: ReadonlySet<string>;
+  settle(outcome: StepOutcome): void;
+}
+
+const pendingOpens: PendingOpen[] = [];
+
+/**
+ * What a scripted add of `url` answers: applied once a dataset not in
+ * `openBefore` opens, refused with the server's error when the open of
+ * `url` fails, and refused when neither happens within `timeoutMs`. The
+ * server mints a workspace dataset's id and the open names only its
+ * manifest, so the new dataset is the one that was not open before. The
+ * app reports both from the session's open callbacks, which a person's add
+ * goes through too.
+ */
+export function awaitDatasetOpen(url: string, openBefore: ReadonlySet<string>, timeoutMs: number): Promise<StepOutcome> {
+  return new Promise((resolve) => {
+    const pending: PendingOpen = {
+      url,
+      openBefore,
+      settle: (outcome) => {
+        clearTimeout(timer);
+        const index = pendingOpens.indexOf(pending);
+        if (index >= 0) pendingOpens.splice(index, 1);
+        resolve(outcome);
+      },
+    };
+    const timer = setTimeout(() => {
+      pending.settle({ applied: false, reason: `${url} did not open within ${Math.round(timeoutMs / 1000)} s` });
+    }, timeoutMs);
+    pendingOpens.push(pending);
+  });
+}
+
+/** A dataset opened: the oldest scripted add it is new to has landed. */
+export function noteDatasetOpened(id: string): void {
+  pendingOpens.find((pending) => !pending.openBefore.has(id))?.settle({ applied: true, reason: null });
+}
+
+/** The open of `url` failed: a scripted add waiting on it says why. */
+export function noteDatasetOpenFailed(url: string, error: string): void {
+  for (const pending of pendingOpens.filter((candidate) => candidate.url === url)) {
+    pending.settle({ applied: false, reason: `${url} did not open: ${error}` });
+  }
+}
+
+/**
+ * The workspace's id for the dataset opened from `url`, out of the server's
+ * dataset health, the one record that pairs a source URL with an id. Both
+ * sides are compared in canonical form.
+ */
+export function datasetIdForSource(
+  url: string,
+  health: readonly { workspace_dataset_id: string; source_url?: string | null }[],
+  canonical: (url: string) => string,
+): string | null {
+  const wanted = canonical(url);
+  const entry = health.find((candidate) => candidate.source_url && canonical(candidate.source_url) === wanted);
+  return entry?.workspace_dataset_id ?? null;
 }
 
 /** The selectors as the dimension controls see them. */
@@ -119,11 +194,11 @@ function invalidCount(count: number): string | null {
 /**
  * The part of a view a scripted step is judged by: the camera less its
  * viewport, the selectors, whether each dataset, channel, and label is
- * shown, and each layer's solo. Contrast is left out because auto-contrast
- * refits it as data arrives, which would make a hold look like a change of
- * view. The driver
- * reads this before and after each step and compares the two; the rule
- * lives here so the page, not the driver, says what counts as the view.
+ * shown, each layer's solo, and the contrast windows a hand set. Contrast
+ * under auto-contrast is left out because it refits as data arrives, which
+ * would make a hold look like a change of view. The driver reads this before
+ * and after each step and compares the two; the rule lives here so the page,
+ * not the driver, says what counts as the view.
  */
 export interface ViewSignature {
   camera: Record<string, unknown> | null;
@@ -134,6 +209,8 @@ export interface ViewSignature {
     solo: number | null;
     labels: boolean[] | null;
   }>;
+  /** Each channel's `[min, max]`, for the datasets whose contrast a hand set. */
+  contrast: Record<DatasetId, [number, number][]>;
 }
 
 export function viewSignature(view: SavedView | null): ViewSignature | null {
@@ -141,6 +218,7 @@ export function viewSignature(view: SavedView | null): ViewSignature | null {
   const { viewport: _viewport, ...camera } = view.camera ?? {};
   void _viewport;
   const visibility: ViewSignature["visibility"] = {};
+  const contrast: ViewSignature["contrast"] = {};
   for (const [id, settings] of Object.entries(view.dataset_settings ?? {})) {
     visibility[id] = {
       visible: settings.visible,
@@ -148,8 +226,16 @@ export function viewSignature(view: SavedView | null): ViewSignature | null {
       solo: settings.solo ?? null,
       labels: settings.label_settings?.map((label) => label.visible) ?? null,
     };
+    if (view.auto_contrast?.[id] === false) {
+      contrast[id] = settings.channel_settings?.map((channel) => [channel.contrast_min, channel.contrast_max]) ?? [];
+    }
   }
-  return { camera: Object.keys(camera).length > 0 ? camera : null, view: view.view ?? null, visibility };
+  return {
+    camera: Object.keys(camera).length > 0 ? camera : null,
+    view: view.view ?? null,
+    visibility,
+    contrast,
+  };
 }
 
 /**

@@ -173,16 +173,21 @@ export interface RunCause {
  * The inputs that open an interaction run. A closed set, so a run's label is
  * comparable across runs and across machines. Two orbits are two orbits.
  *
- * Pan, zoom and orbit move the camera and so bump the `view` epoch. Scrub
- * moves a selector along an axis, and select shows or hides a channel, a
- * dataset, or a label; both bump the `selection` epoch.
+ * Pan, zoom and orbit move the camera, and resize changes the viewport it
+ * frames, so they bump the `view` epoch. Scrub moves a selector along an
+ * axis; select shows or hides a channel, a dataset, or a label; contrast
+ * sets a channel's window; and remove takes a dataset away. They change
+ * what is drawn rather than where the camera is, so they bump the
+ * `selection` epoch.
  */
-export const INPUT_KINDS = ["pan", "zoom", "orbit", "scrub", "select"] as const;
+export const INPUT_KINDS = ["pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove"] as const;
 export type InputKind = (typeof INPUT_KINDS)[number];
+
+const VIEW_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "resize"];
 
 export function interactionCause(input: InputKind): RunCause {
   return {
-    epoch: input === "scrub" || input === "select" ? "selection" : "view",
+    epoch: VIEW_INPUTS.includes(input) ? "view" : "selection",
     dirtyKind: "interactive",
     source: input,
   };
@@ -190,7 +195,7 @@ export function interactionCause(input: InputKind): RunCause {
 
 /**
  * Whether a cause is one {@link interactionCause} produced: an epoch an
- * input moves, an interactive dirty, and one of the five inputs as its
+ * input moves, an interactive dirty, and one of the inputs as its
  * source. All three, so a synthetic view-epoch cause with a residency dirty
  * kind is not judged as a gesture. The ruleset's frame-time ceiling reads
  * this.
