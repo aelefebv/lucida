@@ -229,7 +229,7 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
       await act(async () => {
         outRef.current?.handle.notifyChange();
       });
-      // Past debounce + encode latency.
+      // Past the debounce.
       await act(async () => {
         await new Promise((r) => setTimeout(r, 80));
       });
@@ -401,7 +401,6 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
   let written: SavedView["camera"][];
   let originalReplace: History["replaceState"];
 
-  // Real timers: the URL write waits on an encode the fake clock can't drive.
   // The URL writes are read from `replaceState` rather than the hash, since a
   // flush another test left in flight can land on the hash at any time.
   beforeEach(() => {
@@ -427,9 +426,9 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     store.sync();
   }
 
-  const writtenCameras = () => Promise.all(written);
+  const writtenCameras = () => written;
 
-  /** Past both debounces and the encode. */
+  /** Past both debounces. */
   const settle = () => act(async () => {
     await new Promise((r) => setTimeout(r, 80));
   });
@@ -455,14 +454,14 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     });
     await settle();
     expect(persisted).toHaveLength(0);
-    expect((await writtenCameras()).filter((c) => c.framing === "unframed")).toHaveLength(0);
+    expect(writtenCameras().filter((c) => c.framing === "unframed")).toHaveLength(0);
 
     await act(async () => {
       setCamera({ mode: "slice", center: [64, 64], zoom: 2, viewport: [800, 600], framing: "framed" });
     });
     await vi.waitFor(async () => {
       expect(persisted).toHaveLength(1);
-      expect((await writtenCameras()).some((c) => c.framing === "framed")).toBe(true);
+      expect(writtenCameras().some((c) => c.framing === "framed")).toBe(true);
     });
   });
 
@@ -481,7 +480,7 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
       setCamera({ mode: "slice", center: [64, 64], zoom: 0.5, viewport: [400, 600], framing: "framed" });
     });
     await vi.waitFor(async () => {
-      const viewports = (await writtenCameras()).map((c) => c.viewport.join("x"));
+      const viewports = writtenCameras().map((c) => c.viewport.join("x"));
       expect(viewports).toContain("400x600");
     });
   });
@@ -568,7 +567,7 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     // stripping dropped `c: 0`.
     const recorded = emptyView();
     recorded.v = 1;
-    const restored = await decode(await encode(recorded));
+    const restored = decode(encode(recorded));
 
     await act(async () => {
       await outRef.current!.handle.applier.apply(restored);
@@ -583,7 +582,7 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
       render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
 
-    const restored = await decode(await encode(emptyView()));
+    const restored = decode(encode(emptyView()));
     await act(async () => {
       await outRef.current!.handle.applier.apply(restored);
     });
