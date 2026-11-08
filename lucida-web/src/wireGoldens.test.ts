@@ -839,6 +839,7 @@ const expectedSourceHealth: DatasetSourceHealth = {
   ],
   import_warnings: [
     {
+      kind: "mismatched_tile_geometry",
       target: "wds-0f3a",
       message: "tiles differ in shape, and smaller tiles are padded with fill",
       degrades: true,

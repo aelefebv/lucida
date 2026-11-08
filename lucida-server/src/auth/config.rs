@@ -1004,26 +1004,26 @@ mod tests {
 
     #[test]
     fn allowed_hosted_domains_single_value() {
-        let set = parse_allowed_hosted_domains(Some("calicolabs.com"));
+        let set = parse_allowed_hosted_domains(Some("example.com"));
         assert_eq!(set.len(), 1);
-        assert!(set.contains("calicolabs.com"));
+        assert!(set.contains("example.com"));
     }
 
     #[test]
     fn allowed_hosted_domains_multi_value_with_whitespace() {
-        let set = parse_allowed_hosted_domains(Some("calicolabs.com, othercorp.com ,third.org"));
+        let set = parse_allowed_hosted_domains(Some("example.com, example.org ,example.net"));
         assert_eq!(set.len(), 3);
-        assert!(set.contains("calicolabs.com"));
-        assert!(set.contains("othercorp.com"));
-        assert!(set.contains("third.org"));
+        assert!(set.contains("example.com"));
+        assert!(set.contains("example.org"));
+        assert!(set.contains("example.net"));
     }
 
     #[test]
     fn allowed_hosted_domains_lowercased_for_case_insensitive_match() {
-        let set = parse_allowed_hosted_domains(Some("Calicolabs.COM,OtherCorp.com"));
-        assert!(set.contains("calicolabs.com"));
-        assert!(set.contains("othercorp.com"));
-        assert!(!set.contains("Calicolabs.COM"), "values are normalized");
+        let set = parse_allowed_hosted_domains(Some("Example.COM,Example.org"));
+        assert!(set.contains("example.com"));
+        assert!(set.contains("example.org"));
+        assert!(!set.contains("Example.COM"), "values are normalized");
     }
 
     // -- LUCIDA_ADMIN_EMAILS parsing ------------------------------------
@@ -1046,31 +1046,28 @@ mod tests {
 
     #[test]
     fn admin_emails_single_value() {
-        let set = parse_admin_emails(Some("austin@calicolabs.com"));
+        let set = parse_admin_emails(Some("admin@example.com"));
         assert_eq!(set.len(), 1);
-        assert!(set.contains("austin@calicolabs.com"));
+        assert!(set.contains("admin@example.com"));
     }
 
     #[test]
     fn admin_emails_multi_value_with_whitespace() {
-        let set = parse_admin_emails(Some("a@x.com, b@x.com ,c@y.org"));
+        let set = parse_admin_emails(Some("a@example.com, b@example.com ,c@example.org"));
         assert_eq!(set.len(), 3);
-        assert!(set.contains("a@x.com"));
-        assert!(set.contains("b@x.com"));
-        assert!(set.contains("c@y.org"));
+        assert!(set.contains("a@example.com"));
+        assert!(set.contains("b@example.com"));
+        assert!(set.contains("c@example.org"));
     }
 
     #[test]
     fn admin_emails_lowercased_for_case_insensitive_match() {
-        // Operator authoring `AuStin@CalicoLabs.com` in the env var must
-        // still match a JWT-derived `austin@calicolabs.com` principal.
-        let set = parse_admin_emails(Some("AuStin@CalicoLabs.com,Other@x.COM"));
-        assert!(set.contains("austin@calicolabs.com"));
-        assert!(set.contains("other@x.com"));
-        assert!(
-            !set.contains("AuStin@CalicoLabs.com"),
-            "values are normalized"
-        );
+        // Operator authoring `AdMin@Example.com` in the env var must
+        // still match a JWT-derived `admin@example.com` principal.
+        let set = parse_admin_emails(Some("AdMin@Example.com,Other@Example.ORG"));
+        assert!(set.contains("admin@example.com"));
+        assert!(set.contains("other@example.org"));
+        assert!(!set.contains("AdMin@Example.com"), "values are normalized");
     }
 
     #[test]

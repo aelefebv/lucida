@@ -33,7 +33,7 @@
  * the other. Clearing the brush restores the whole-run report and clears the
  * set, and so does reading another run, showing a file, or closing the dock.
  *
- * The dock is also a drop target (#1066). A saved run, the trace driver's
+ * The dock is also a drop target. A saved run, the trace driver's
  * run file, or a bundle dropped anywhere on it is read with the checks the
  * CLI's reader makes and shown in place of this page's report, at every
  * depth a live run is read, with a bundle's settled frame beside it.

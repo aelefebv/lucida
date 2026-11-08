@@ -1,5 +1,5 @@
 /**
- * A dropped file's report (#1066): the closed-run report the dock renders
+ * A dropped file's report: the closed-run report the dock renders
  * for a live run, from the same view model and at the same depths, with a
  * bundle's settled frame beside it.
  *

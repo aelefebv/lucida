@@ -4,7 +4,7 @@ The trace recorder's cost is a set of ceilings asserted in CI, because
 recording is unconditional and has no toggle. Three of its four gates
 run in `pnpm test` from `lucida-web/src/trace/recorderCost.perf.test.ts`. That
 file's header and constants carry the ceilings, the 16× slack and why, and the
-derivation of the floor the recorder is compared against (#962).
+derivation of the floor the recorder is compared against.
 
 The fourth gate is a frame throughput A/B of the real sink against a no-op
 sink at device pixel ratio 2. It needs a hardware adapter, a release server and
@@ -21,7 +21,7 @@ cd lucida-web && npx vitest run src/trace/recorderCost.perf.test.ts --reporter=v
 ```
 
 The gates assert loose absolute bounds and log the real figures. Read the
-`[#928]` and `[#962]` lines in the output for the numbers.
+`[recorder cost]` and `[recorder floor]` lines in the output for the numbers.
 
 ## Run the A/B
 
@@ -93,13 +93,13 @@ server, system Chrome with WebGPU, M-series laptop.
 | no-op sink | 1,144 | 114.2 | 207 ms |
 
 The arms are 1.0% apart, inside the 5% band, and both sit within 1.3% of the
-1,148 frames #888 measured on the same shape. The recorder does not show in
-frame throughput.
+1,148 frames measured with the debug panel on the same shape. The recorder
+does not show in frame throughput.
 
-Live heap, 2026-08-11, across the debug panel teardown (#919), with
+Live heap, 2026-08-11, across the debug panel teardown, with
 `AB_MODE=heap` and the same drive. This settled the memory half of the
 recorder's net obligation: total observability cost no higher than the
-floor #888 measured.
+floor measured with the debug panel.
 
 | Arm | Live heap, post-GC | Frames in 10 s |
 | --- | --- | --- |
@@ -110,22 +110,22 @@ floor #888 measured.
 
 The panel cost 1.04 MB live while open, about 85 times the 12 kB spread
 between repeat runs, and the teardown returned it. The per-tick half of the
-obligation is the `[#962] matched-shape tick` gate in CI.
+obligation is the `[recorder floor] matched-shape tick` gate in CI.
 
 ### Not yet re-measured
 
 These changes landed after the last run. Each passed its CI gate, but none has
 had the A/B on a hardware adapter.
 
-- #949 removed two calls and two handle lookups per chunk from the write path.
-  It can only have moved the real arm toward the no-op arm, so the 1.0% stands
-  as an upper bound.
-- #1074 added send-side accounting: four integer increments per message the
-  bridge sends, and a tick sample 64 bytes wider. No timed gate includes a
-  send, so only the A/B would see it.
-- #1056 and #1062 widened a lifecycle row from 76 to 92 bytes and added one
-  hash probe per row birth. The floor check's live state grew from 663 kB to
-  about 822 kB, still under the 1.05 MB floor.
-- The dock's live charts (#1064) and the volume overlay (#1063) each gate their
-  pure work. The browser's cost of drawing them, shown against hidden, has not
-  been measured.
+- Two calls and two handle lookups per chunk left the write path. That can
+  only have moved the real arm toward the no-op arm, so the 1.0% stands as an
+  upper bound.
+- Send-side accounting added four integer increments per message the bridge
+  sends, and a tick sample 64 bytes wider. No timed gate includes a send, so
+  only the A/B would see it.
+- A lifecycle row widened from 76 to 92 bytes and gained one hash probe per
+  row birth. The floor check's live state grew from 663 kB to about 822 kB,
+  still under the 1.05 MB floor.
+- The dock's live charts and the volume overlay each gate their pure work.
+  The browser's cost of drawing them, shown against hidden, has not been
+  measured.

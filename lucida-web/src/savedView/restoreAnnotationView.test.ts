@@ -294,7 +294,7 @@ describe("restoreAnnotationView (light tier)", () => {
 // inbox), the caller passes `datasetId: undefined` and restore must pass the
 // captured z/t/c through, not clamp them against the `[1,1,1]` sentinel that
 // `dataset_volume_shape("")` returns.
-describe("restoreAnnotationView — null-selection / inbox path (no clamp-collapse, #814 class)", () => {
+describe("restoreAnnotationView — null-selection / inbox path (no clamp-collapse)", () => {
   it("avc-empty-z: a deep single-plane capture passes through (no datasetId, no collapse)", () => {
     // A deep dataset is loaded, but the pin's dataset is unresolved.
     const { scene, calls } = makeScene({

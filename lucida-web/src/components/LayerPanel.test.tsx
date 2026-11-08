@@ -472,27 +472,35 @@ describe("LayerPanel labels", () => {
 describe("LayerPanel data problems", () => {
   const shape = "tiles differ in shape, and smaller tiles are padded with fill";
   const sampled = "label discovery was sampled";
+  const unwritten = "img: level 0 has no chunks written";
 
   it("marks a layer degraded and spells out what is shown wrong, collapsed or not", () => {
     const importWarnings = new Map([
       [
         "wds-1",
         [
-          { target: "wds-1", message: shape, degrades: true },
-          { target: "wds-1", message: sampled, degrades: false },
-        ],
+          { kind: "mismatched_tile_geometry", target: "wds-1", message: shape, degrades: true },
+          { kind: "unwritten_level", target: "img", message: unwritten, degrades: true },
+          { kind: "sampled_label_discovery", target: "wds-1", message: sampled, degrades: false },
+        ] as const,
       ],
     ]);
     render(<LayerPanel {...baseProps({ importWarnings })} />);
 
     expect(screen.getByTestId("layer-degraded-wds-1").textContent).toBe("Degraded");
     const list = screen.getByRole("list", { name: "original.zarr data problems" });
-    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([shape]);
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "Tiles differ in shape, and smaller tiles are padded with fill",
+      "Some resolution levels were never written, so they draw all zero. Coarser levels do have data.",
+    ]);
     expect(screen.queryByText(sampled)).toBeNull();
+    expect(screen.queryByText(unwritten)).toBeNull();
   });
 
   it("leaves a layer whose warnings are only informational unmarked", () => {
-    const importWarnings = new Map([["wds-1", [{ target: "wds-1", message: sampled, degrades: false }]]]);
+    const importWarnings = new Map([
+      ["wds-1", [{ kind: "sampled_label_discovery", target: "wds-1", message: sampled, degrades: false }] as const],
+    ]);
     render(<LayerPanel {...baseProps({ importWarnings })} />);
 
     expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
