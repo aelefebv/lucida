@@ -154,6 +154,7 @@ export function renderDiagnostic(
       `${document.run.gpu} · ${document.run.adapterKind.label} · build ${document.run.build}`,
   );
   push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
+  push(IDENTITY, `gpu mem   ${gpuMemoryOf(document, p)}`);
 
   // The identity line names only the types that sent anything. The SENT table
   // at DETAIL lists the whole closed set, zeros included.
@@ -658,6 +659,23 @@ function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {
       `(n=${p("renderTiming.gpuPass.samples", gpuPass.samples)})`
     : `GPU pass not recorded: ${gpuPass.statement}`;
   return `${main} · ${gpu}`;
+}
+
+function gpuMemoryOf(document: DiagnosticDocument, p: PrintNumber): string {
+  const gpu = document.gpuMemory;
+  // Older documents predate the field.
+  if (!gpu) return "not reported by the render worker";
+  const halved = gpu.lastBudgetBytes < gpu.peakBudgetBytes
+    ? ` · budget halved to ${p("gpuMemory.lastBudgetBytes", gpu.lastBudgetBytes.toLocaleString())} B`
+    : "";
+  return (
+    `peak ${p("gpuMemory.peakBytes", gpu.peakBytes.toLocaleString())} B of ` +
+    `${p("gpuMemory.peakBudgetBytes", gpu.peakBudgetBytes.toLocaleString())} B budget` +
+    (gpu.overBudget ? " (over budget)" : "") +
+    ` · last ${p("gpuMemory.lastBytes", gpu.lastBytes.toLocaleString())} B${halved} · ` +
+    `chunk slots ${p("gpuMemory.slotsHeld", gpu.slotsHeld.toLocaleString())} of ` +
+    `${p("gpuMemory.slots", gpu.slots.toLocaleString())} held`
+  );
 }
 
 /** Held chunks named on the finding's line; the document carries every one. */

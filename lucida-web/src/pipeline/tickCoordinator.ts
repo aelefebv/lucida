@@ -35,7 +35,8 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
-import { admitRequests, chunkBytesFor, sliceSlotsFor, type GpuSlot } from "./planning/admission.ts";
+import { admitRequests, chunkBytesFor, type GpuSlot } from "./planning/admission.ts";
+import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
 import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
   ActiveSetEntry,
@@ -297,13 +298,22 @@ function displayStatesEqual(
 }
 
 /**
- * The GPU slot pools admission counts against: a slice view's fixed-size
- * pools. A volume view's pools grow as chunks arrive, so it is admitted
- * against the CPU budgets alone.
+ * The GPU chunk pools admission counts against, as the render worker last
+ * reported them, in either view mode.
  */
-function gpuSlotsFor(ctx: TickContext, datasetId: string): (req: ChunkRequest) => GpuSlot | null {
-  if (ctx.mode !== "slice") return () => null;
-  return sliceSlotsFor(ctx.datasets.get(datasetId)!.manifest, pageDeviceBudgets().sliceAtlasBytes);
+function gpuSlotsOf(ctx: TickContext, datasetId: string): (req: ChunkRequest) => GpuSlot | null {
+  return gpuSlotsFor(
+    ctx.datasets.get(datasetId)!.manifest,
+    ctx.mode,
+    ctx.scene.multi_channel(),
+    ctx.client.gpuCapacity(),
+    pageDeviceBudgets().gpuTotalBytes,
+  );
+}
+
+/** The GPU bytes every dataset's chunk pools may hold between them, from the same report. */
+function gpuRoomOf(ctx: TickContext): number {
+  return gpuChunkRoomBytes(ctx.client.gpuCapacity(), pageDeviceBudgets().gpuTotalBytes);
 }
 
 function emitViewerInterestHint(
@@ -807,18 +817,22 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
-    // Admit each dataset's plan against what the CPU budgets have left, in
-    // layer order, so the wanted set the cache drives toward fits it.
+    // Admit each dataset's plan against what the CPU budgets and the GPU
+    // pools have left, in layer order, so the wanted set the cache drives
+    // toward fits both.
     let capacity = ctx.cpuCache.tierCapacity();
+    let gpuRoom = gpuRoomOf(ctx);
     for (const planned of plannedDatasets) {
       const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
       const admission = admitRequests(
         planned.result.requests,
         capacity,
         chunkBytesFor(ctx.datasets.get(dsId)!.manifest),
-        gpuSlotsFor(ctx, dsId),
+        gpuSlotsOf(ctx, dsId),
+        gpuRoom,
       );
       capacity = admission.remaining;
+      gpuRoom = admission.gpuRoomLeft;
       const result: RequestPlan = {
         ...planned.result,
         requests: admission.admitted,
@@ -1364,14 +1378,17 @@ export class TickCoordinator {
     // so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
     let capacity = ctx.cpuCache.tierCapacity();
+    let gpuRoom = gpuRoomOf(ctx);
     for (const scrubbed of planned) {
       const admission = admitRequests(
         scrubbed.requests,
         capacity,
         chunkBytesFor(ctx.datasets.get(scrubbed.dsId)!.manifest),
-        gpuSlotsFor(ctx, scrubbed.dsId),
+        gpuSlotsOf(ctx, scrubbed.dsId),
+        gpuRoom,
       );
       capacity = admission.remaining;
+      gpuRoom = admission.gpuRoomLeft;
       const p = { ...scrubbed, requests: admission.admitted };
       this.requestEpoch = scrubRequestEpoch;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
