@@ -6,22 +6,24 @@
 //! then be served byte for byte as its twin serves it, whatever the format,
 //! codec chain, byte order, or memory order on disk.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use common::workspace_rig::WorkspaceRig;
 use lucida_content::{ChunkKey, DatasetManifest, ImageId};
 use lucida_protocol::DatasetOpenFailureKind;
+use lucida_server::ProxyConfig;
 use lucida_server::binding::ChunkResolver;
 use lucida_server::chunk_read::{ChunkRead, read_chunk};
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
-use lucida_server::session::Session;
-use lucida_server::{BroadcastItem, ProxyConfig};
 use lucida_store::cache::{CachedStore, DEFAULT_SOURCE_CACHE_BYTES};
 use lucida_store::import::import_dataset;
 use lucida_store::import_types::ImportResult;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::mpsc;
 
 fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -170,22 +172,21 @@ async fn open(
         "{}-caches",
         dir.file_name().unwrap().to_string_lossy()
     ));
-    let (tx, _rx) = broadcast::channel::<BroadcastItem>(64);
+    let proxy_config = ProxyConfig {
+        cache_dir: root.join("proxies"),
+        generated_enabled: false,
+        generated_cache_dir: root.join("generated"),
+        ..ProxyConfig::defaults()
+    };
+    let rig = WorkspaceRig::start(proxy_config.clone()).await;
     let (progress, _progress_rx) = mpsc::unbounded_channel();
     open_dataset(
         1,
         &dir.to_str().unwrap().parse().unwrap(),
         &DatasetOpenContext {
-            session: Arc::new(Mutex::new(Session::new())),
-            tx,
-            proxy_config: ProxyConfig {
-                cache_dir: root.join("proxies"),
-                generated_enabled: false,
-                generated_cache_dir: root.join("generated"),
-                ..ProxyConfig::defaults()
-            },
+            proxy_config,
             source_policy: Arc::default(),
-            workspace: None,
+            workspace: rig.scope(),
         },
         &progress,
     )
