@@ -35,6 +35,8 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
+import { admitRequests, chunkBytesFor, sliceSlotsFor, type GpuSlot } from "./planning/admission.ts";
+import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -292,6 +294,16 @@ function displayStatesEqual(
     }
   }
   return true;
+}
+
+/**
+ * The GPU slot pools admission counts against: a slice view's fixed-size
+ * pools. A volume view's pools grow as chunks arrive, so it is admitted
+ * against the CPU budgets alone.
+ */
+function gpuSlotsFor(ctx: TickContext, datasetId: string): (req: ChunkRequest) => GpuSlot | null {
+  if (ctx.mode !== "slice") return () => null;
+  return sliceSlotsFor(ctx.datasets.get(datasetId)!.manifest, pageDeviceBudgets().sliceAtlasBytes);
 }
 
 function emitViewerInterestHint(
@@ -795,9 +807,24 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
+    // Admit each dataset's plan against what the CPU budgets have left, in
+    // layer order, so the wanted set the cache drives toward fits it.
+    let capacity = ctx.cpuCache.tierCapacity();
     for (const planned of plannedDatasets) {
       const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
-      const result = planned.result;
+      const admission = admitRequests(
+        planned.result.requests,
+        capacity,
+        chunkBytesFor(ctx.datasets.get(dsId)!.manifest),
+        gpuSlotsFor(ctx, dsId),
+      );
+      capacity = admission.remaining;
+      const result: RequestPlan = {
+        ...planned.result,
+        requests: admission.admitted,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
+      };
       const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
       const budgetedResult: RequestPlan = {
         ...result,
@@ -935,6 +962,8 @@ export class TickCoordinator {
         // `nextState` is required on RequestPlan but unused by submit();
         // forward the planner's pointer so the shape stays honest.
         nextState: result.nextState,
+        shortfall: result.shortfall,
+        coarseLoanBytes: result.coarseLoanBytes,
       });
 
 
@@ -1334,7 +1363,16 @@ export class TickCoordinator {
     // reports any slot the new T/Z leaves stale. The active set is unchanged,
     // so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
-    for (const p of planned) {
+    let capacity = ctx.cpuCache.tierCapacity();
+    for (const scrubbed of planned) {
+      const admission = admitRequests(
+        scrubbed.requests,
+        capacity,
+        chunkBytesFor(ctx.datasets.get(scrubbed.dsId)!.manifest),
+        gpuSlotsFor(ctx, scrubbed.dsId),
+      );
+      capacity = admission.remaining;
+      const p = { ...scrubbed, requests: admission.admitted };
       this.requestEpoch = scrubRequestEpoch;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
 
@@ -1373,6 +1411,8 @@ export class TickCoordinator {
         epochs: scrubEpochs,
         stats: p.stats,
         nextState: p.planningState,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
       });
 
       this.uploader.sendColdStateSelection({

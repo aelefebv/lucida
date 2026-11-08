@@ -217,13 +217,17 @@ export function isDatasetOpenCause(cause: RunCause | null): boolean {
  * Why a run closed. Required on every run: a run that never settled is still
  * a run.
  *
+ * `quiescent` covers a view that settled covering less than it wanted.
+ * `stalled` is a view that stopped making progress without settling, and
+ * the header's `stallReason` says what it waited on.
+ *
  * The last two belong to the unlabelled steady-state interval alone.
  * `run-opened` means a labelled run began, which is not a settling event.
  * `rotated` means the interval reached the per-run cap: steady state has no
  * privileged start, so it hands over to a fresh interval rather than
  * truncating and losing the most recent work.
  */
-export type EndReason = "quiescent" | "timeout" | "explicit" | "run-opened" | "rotated";
+export type EndReason = "quiescent" | "stalled" | "timeout" | "explicit" | "run-opened" | "rotated";
 
 export interface Viewport {
   cssWidth: number;
@@ -399,6 +403,11 @@ export interface RunHeader extends RunConditions {
    */
   cause: RunCause | null;
   endReason: EndReason;
+  /**
+   * What a stalled run waited on, such as `server_pending`; null or absent
+   * for every other end reason.
+   */
+  stallReason?: string | null;
   /** Null on a run that recorded everything it saw. */
   truncation: TruncationRecord | null;
   build: BuildIdentity;

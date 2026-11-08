@@ -37,6 +37,10 @@ function steadyFindings(document: DiagnosticDocument): Finding[] {
   return document.findings.filter((finding) => finding.severity === "steady-state");
 }
 
+function budgetFindings(document: DiagnosticDocument): Finding[] {
+  return document.findings.filter((finding) => finding.rule === RULES.budgetBound.id);
+}
+
 function firedRules(document: DiagnosticDocument): string[] {
   return steadyFindings(document).map((finding) => finding.rule);
 }
@@ -122,19 +126,19 @@ describe("refetch", () => {
 });
 
 describe("a budget-bound tier", () => {
-  it("reports a coverage loss rather than the timeout it caused", () => {
+  it("reports the coverage a settled view went without, as a note on a clear verdict", () => {
     const document = diagnoseRun(budgetBoundCoarseRun());
-    const [finding] = steadyFindings(document);
+    const [finding] = budgetFindings(document);
 
-    expect(document.run.endReason).toBe("timeout");
-    expect(finding.rule).toBe(RULES.budgetBound.id);
+    expect(document.run.endReason).toBe("quiescent");
+    expect(finding.severity).toBe("note");
     expect(finding.subject).toBe("coarse tier");
     expect(finding.observed.lossChunks).toBe(440);
     expect(finding.observed.lossPct).toBe(35);
     expect(finding.observed.fillPct).toBe(93);
-    expect(document.verdict.kind).toBe("steady-state");
-    expect(document.verdict.text).toContain("coverage loss of 35%, not a timeout");
-    expect(document.verdict.text).not.toContain("never settled");
+    expect(steadyFindings(document)).toEqual([]);
+    expect(document.verdict.kind).toBe("clear");
+    expect(document.verdict.text).toContain("the view settles covering less, a coverage loss of 35%");
   });
 
   it("fires without an interval after the run, because the settle block is the evidence", () => {
@@ -151,7 +155,7 @@ describe("a budget-bound tier", () => {
       },
     };
 
-    expect(firedRules(diagnoseRun(filling))).toEqual([]);
+    expect(budgetFindings(diagnoseRun(filling))).toEqual([]);
     expect(diagnoseRun(filling).steadyState.tiers[1].budgetBound).toBe(false);
   });
 });

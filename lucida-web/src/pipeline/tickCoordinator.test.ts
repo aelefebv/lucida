@@ -48,6 +48,7 @@ function createMockCpuCache(): CpuCache {
   return {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
+    tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
     getDeliverable: vi.fn(function* () {}),
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
@@ -1929,9 +1930,9 @@ describe("incremental delta fold", () => {
     }
   });
 
-  it("keeps the target level under memory pressure: a cache evicting past its budget never lowers it", async () => {
-    // A real CPU cache with a 1.5-chunk budget, so delivering the four
-    // level-1 chunks evicts. Pressure changes coverage, never the level.
+  it("keeps the target level under memory pressure: a budget that holds less never lowers it", async () => {
+    // A real CPU cache with a 1.5-chunk budget, smaller than the four
+    // level-1 chunks. Pressure changes coverage, never the level.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const chunkBytes = 100;
@@ -1980,21 +1981,24 @@ describe("incremental delta fold", () => {
       };
       const detailLevels = (p: RequestPlan) =>
         p.requests.filter((r) => r.lane === "detail").map((r) => r.level);
+      // What the plan asked for at level 1: what admission let through, and
+      // the shortfall it declared for the rest.
+      const asked = (p: RequestPlan) => detailLevels(p).length + (p.shortfall?.detail ?? 0);
 
       tick(1);
-      expect(detailLevels(submit.mock.calls[0][0])).toEqual([1, 1, 1, 1]);
+      const first = submit.mock.calls[0][0];
+      expect(asked(first)).toBe(4);
+      expect(first.shortfall?.detail).toBeGreaterThan(0);
+      expect(detailLevels(first).every((level) => level === 1)).toBe(true);
       await flush();
-
-      // Guard against a vacuous test: eviction happened.
-      expect(cache.telemetry().mainBytes).toBeLessThanOrEqual(chunkBytes + chunkBytes / 2);
-      expect(cache.snapshot().cached.get("tile-0")?.size ?? 0).toBeLessThan(4);
 
       submit.mockClear();
       vi.advanceTimersByTime(500);
       tick(2);
 
       const next = submit.mock.calls[0][0];
-      expect(detailLevels(next)).toEqual([1, 1, 1, 1]);
+      expect(asked(next)).toBe(4);
+      expect(detailLevels(next).every((level) => level === 1)).toBe(true);
       const entry = next.activeSet.find((e) => e.entityId === "tile-0");
       expect(entry?.kind === "tile" ? entry.detailLevels : null).toEqual([1]);
     } finally {

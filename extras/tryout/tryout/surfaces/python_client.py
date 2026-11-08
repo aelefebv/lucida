@@ -11,9 +11,8 @@ Why ``uv run --no-project --with websockets`` + ``PYTHONPATH`` to the
 working-tree ``lucida-py/python`` source, rather than ``uv run --project
 lucida-py``: ``LucidaClient`` is pure Python over HTTP/WS — only ``websockets``
 is needed for dataset open. Building the project would compile the maturin
-native extension (``PyScene``/``PyStore``), which the client does not use, is
-slow, and fails outright from a git *worktree* (the worktree's ``lucida-py``
-Cargo manifest isn't a member of the worktree's Cargo workspace). Pointing
+native extension (``PyScene``/``PyStore``), which the client does not use and
+which is slow to build. Pointing
 ``PYTHONPATH`` at the source is both faster and *more* faithful to "reflect my
 working tree" — it imports this tree's client code directly. If a caller has a
 fully built ``lucida-py`` env they prefer, ``LUCIDA_TRYOUT_PY`` overrides the

@@ -267,8 +267,8 @@ describe("volume pool growth", () => {
     expect(textureSizes(ctx)).toEqual([[640, 640, 32]]);
   });
 
-  it("holds float samples as r32uint bits and reports their range in data units", () => {
-    const { ctx, posts } = makeGrowthCtx();
+  it("holds float samples as r32uint bits", () => {
+    const { ctx } = makeGrowthCtx();
     // Four bytes a texel: half the u16 pool's slots under the same budget.
     const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "f32");
     expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([16, 16, 16]);
@@ -290,9 +290,6 @@ describe("volume pool growth", () => {
     const [, texels, layout] = write.mock.calls.at(-1)! as [unknown, ArrayBuffer, GPUTexelCopyBufferLayout];
     expect(Array.from(new Float32Array(texels, 0, 2))).toEqual([-5, 500.25]);
     expect(layout.bytesPerRow).toBe(32 * 4);
-    expect(posts.filter((m) => m.type === "intensityRange")).toEqual([
-      { type: "intensityRange", datasetId: "imgA", min: -5, max: 500.25 },
-    ]);
   });
 
   it("doubles its layers once full, copying the resident chunks in place", () => {

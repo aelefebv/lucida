@@ -18,11 +18,7 @@ export function channelDisplayName(
   return override?.trim() || label?.trim() || positionLabel("Channel", index);
 }
 
-/**
- * The key a channel's loaded data range is recorded under. It has the shape
- * of the render worker's per-channel member ids, which is how a reported
- * range names its channel.
- */
+/** The key a channel's auto-contrast fit is recorded under. */
 export function channelRangeKey(datasetId: string, channel: number): string {
   return `${datasetId}:ch${channel}`;
 }
