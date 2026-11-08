@@ -27,6 +27,7 @@ use lucida_server::storage;
 use lucida_server::{
     AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler, workspace,
 };
+use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 
 // CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
 // treated as `serve`) alongside explicit `serve` / `clear-proxy-cache`
@@ -49,19 +50,15 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Run the WebSocket server (default if no subcommand is given).
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// Clear the on-disk proxy cache for one dataset URL or all datasets.
     ClearProxyCache(ClearArgs),
 }
 
 #[derive(Args, Debug, Default)]
 struct ServeArgs {
-    /// Constrain `/api/browse` to this root directory.
-    ///
-    /// Also readable from `LUCIDA_DATA_DIR`. CLI flag wins over env
-    /// var when both are set (clap's default behavior).
-    #[arg(long, env = "LUCIDA_DATA_DIR")]
-    data_dir: Option<PathBuf>,
+    #[command(flatten)]
+    sources: SourceArgs,
     /// Override the proxy cache root (default: platform user cache dir).
     ///
     /// Also readable from `LUCIDA_PROXY_CACHE_DIR`. CLI flag wins.
@@ -99,6 +96,48 @@ struct ServeArgs {
     /// How often the server checks for idle live workspaces.
     #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_SWEEP_SECS", default_value_t = 60)]
     workspace_idle_sweep_secs: u64,
+}
+
+/// Where datasets may be opened from.
+#[derive(Args, Debug, Default)]
+struct SourceArgs {
+    /// A directory `/api/browse` may list and, when auth is enabled, the
+    /// only place local datasets open from. Repeat for several.
+    ///
+    /// Also readable from `LUCIDA_DATA_DIR`, several separated as in
+    /// `PATH`. CLI flags win over the env var when both are set (clap's
+    /// default behavior).
+    #[arg(long, env = "LUCIDA_DATA_DIR", value_delimiter = PATH_LIST_SEPARATOR)]
+    data_dir: Vec<PathBuf>,
+    /// A host, IP address, or CIDR range an `http(s)` dataset may reach
+    /// when auth is enabled, although it is not a public address. Repeat
+    /// for several.
+    ///
+    /// Also readable from `LUCIDA_SOURCE_ALLOW_HOSTS`, comma-separated.
+    #[arg(long, env = "LUCIDA_SOURCE_ALLOW_HOSTS", value_delimiter = ',')]
+    source_allow_host: Vec<String>,
+    /// A `gs://bucket` or `s3://bucket` datasets may be opened from when
+    /// auth is enabled. Once one is set, other buckets are refused. Repeat
+    /// for several.
+    ///
+    /// Also readable from `LUCIDA_SOURCE_ALLOW_BUCKETS`, comma-separated.
+    #[arg(long, env = "LUCIDA_SOURCE_ALLOW_BUCKETS", value_delimiter = ',')]
+    source_allow_bucket: Vec<String>,
+}
+
+/// What separates several directories in `LUCIDA_DATA_DIR`, as in `PATH`.
+const PATH_LIST_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+/// Where datasets may be opened from. Auth disabled means one person on
+/// their own machine, or a network the operator declared trusted with
+/// `LUCIDA_INSECURE`, so only an enabled auth mode restricts sources.
+fn source_policy_config(mode: auth::AuthMode, args: &SourceArgs) -> SourcePolicyConfig {
+    SourcePolicyConfig {
+        restricted: mode != auth::AuthMode::Disabled,
+        data_roots: args.data_dir.clone(),
+        allowed_hosts: args.source_allow_host.clone(),
+        allowed_buckets: args.source_allow_bucket.clone(),
+    }
 }
 
 #[derive(Args, Debug)]
@@ -182,16 +221,17 @@ async fn main() -> std::io::Result<()> {
 
     let cli = Cli::parse();
     // Treat "no subcommand" as `serve` with the top-level flags.
-    let command = cli.command.unwrap_or(Commands::Serve(cli.serve_args));
+    let command = cli
+        .command
+        .unwrap_or(Commands::Serve(Box::new(cli.serve_args)));
 
     match command {
-        Commands::Serve(args) => run_serve(args).await,
+        Commands::Serve(args) => run_serve(*args).await,
         Commands::ClearProxyCache(args) => run_clear(args),
     }
 }
 
 async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
-    let data_dir = args.data_dir;
     let proxy_cache_dir = args
         .proxy_cache_dir
         .unwrap_or_else(ProxyConfig::default_cache_dir);
@@ -244,15 +284,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let (tx, _) = broadcast::channel::<BroadcastItem>(256);
     let next_id = Arc::new(AtomicU64::new(0));
     let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
-
-    let state = AppState {
-        session,
-        tx,
-        next_id,
-        unicast_routes,
-        data_dir,
-        proxy_config: proxy_config.clone(),
-    };
 
     // Env-var validation lives in `AuthConfig::from_env`: `LUCIDA_BIND`,
     // the auto-detect-by-bind auth-mode default, and the
@@ -369,6 +400,30 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             "auth.iap.configured",
         );
     }
+    let source_policy =
+        match SourcePolicy::new(source_policy_config(auth_config.mode, &args.sources)) {
+            Ok(policy) => Arc::new(policy),
+            Err(e) => {
+                tracing::error!(error = %e, "source_policy.startup.config_error");
+                return Err(std::io::Error::other(e.to_string()));
+            }
+        };
+    tracing::info!(
+        restricted = source_policy.is_restricted(),
+        data_roots = ?source_policy.data_roots().collect::<Vec<_>>(),
+        allowed_hosts = args.sources.source_allow_host.len(),
+        allowed_buckets = args.sources.source_allow_bucket.len(),
+        "source_policy.config",
+    );
+    let state = AppState {
+        session,
+        tx,
+        next_id,
+        unicast_routes,
+        source_policy: Arc::clone(&source_policy),
+        proxy_config: proxy_config.clone(),
+    };
+
     // The only place the server picks a database. Nothing downstream
     // knows which one it got.
     let storage = match storage::open(&auth_config.db_url).await {
@@ -464,7 +519,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         )
         // A **Send report** arrives on a workspace socket, so the
         // manager behind that socket is what holds the inbox.
-        .with_inbox(Arc::clone(&inbox_store)),
+        .with_inbox(Arc::clone(&inbox_store))
+        .with_source_policy(Arc::clone(&source_policy)),
     );
     let _workspace_idle_eviction_handle = workspace_manager.spawn_idle_eviction_loop();
     // The inbox's own read routes, on the protected half beside the
@@ -669,7 +725,7 @@ mod cli_tests {
     fn no_args_defaults_to_serve_with_no_data_dir() {
         let cli = parse(&[]);
         assert!(cli.command.is_none(), "bare invocation has no subcommand");
-        assert!(cli.serve_args.data_dir.is_none());
+        assert!(cli.serve_args.sources.data_dir.is_empty());
         assert!(cli.serve_args.proxy_cache_dir.is_none());
         assert!(!cli.serve_args.legacy_proxy_enabled);
     }
@@ -679,8 +735,8 @@ mod cli_tests {
         let cli = parse(&["--data-dir", "/tmp/foo"]);
         assert!(cli.command.is_none(), "no explicit subcommand");
         assert_eq!(
-            cli.serve_args.data_dir.as_deref(),
-            Some(std::path::Path::new("/tmp/foo"))
+            cli.serve_args.sources.data_dir,
+            vec![PathBuf::from("/tmp/foo")]
         );
     }
 
@@ -689,12 +745,56 @@ mod cli_tests {
         let cli = parse(&["serve", "--data-dir", "/tmp/foo"]);
         match cli.command.expect("serve subcommand") {
             Commands::Serve(args) => {
-                assert_eq!(
-                    args.data_dir.as_deref(),
-                    Some(std::path::Path::new("/tmp/foo"))
-                );
+                assert_eq!(args.sources.data_dir, vec![PathBuf::from("/tmp/foo")]);
             }
             _ => panic!("expected Serve"),
+        }
+    }
+
+    #[test]
+    fn data_dir_and_source_allowlists_repeat() {
+        let cli = parse(&[
+            "serve",
+            "--data-dir",
+            "/srv/a",
+            "--data-dir",
+            "/srv/b",
+            "--source-allow-host",
+            "10.0.0.0/8,files.internal",
+            "--source-allow-bucket",
+            "gs://team-data",
+        ]);
+        match cli.command.expect("serve subcommand") {
+            Commands::Serve(args) => {
+                assert_eq!(
+                    args.sources.data_dir,
+                    vec![PathBuf::from("/srv/a"), PathBuf::from("/srv/b")]
+                );
+                assert_eq!(
+                    args.sources.source_allow_host,
+                    ["10.0.0.0/8", "files.internal"]
+                );
+                assert_eq!(args.sources.source_allow_bucket, ["gs://team-data"]);
+            }
+            _ => panic!("expected Serve"),
+        }
+    }
+
+    /// An enabled auth mode, as behind an authenticating perimeter, is
+    /// what restricts sources; auth disabled leaves them open.
+    #[test]
+    fn only_an_enabled_auth_mode_restricts_sources() {
+        let args = SourceArgs::default();
+        for (mode, restricted) in [
+            (auth::AuthMode::Iap, true),
+            (auth::AuthMode::Google, true),
+            (auth::AuthMode::Disabled, false),
+        ] {
+            assert_eq!(
+                source_policy_config(mode, &args).restricted,
+                restricted,
+                "{mode:?}"
+            );
         }
     }
 

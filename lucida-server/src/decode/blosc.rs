@@ -12,6 +12,8 @@ use std::borrow::Cow;
 
 use lucida_store::codec::{BloscConfig, BloscShuffle};
 
+use super::{BoundedError, decode_zstd_bounded};
+
 /// Errors decoding a Blosc-compressed buffer.
 #[derive(thiserror::Error, Debug)]
 pub enum BloscError {
@@ -41,6 +43,10 @@ pub enum BloscError {
     },
     #[error("blosc: nbytes {nbytes} is not a multiple of typesize {typesize}")]
     NotElementAligned { nbytes: usize, typesize: usize },
+    #[error("blosc: header nbytes {nbytes} exceeds the {limit} bytes the stored chunk shape holds")]
+    TooLarge { nbytes: usize, limit: usize },
+    #[error("blosc: block {block} decodes to more than its {expected} bytes")]
+    BlockTooLarge { block: usize, expected: usize },
 }
 
 const FLAG_BYTE_SHUFFLE: u8 = 0x01;
@@ -52,8 +58,13 @@ const COMPRESSOR_CODE_ZSTD: u8 = 4;
 ///
 /// `config` is the codec-chain-validated description from the dataset's
 /// metadata; the function cross-checks the on-disk header against it and
-/// errors on any mismatch.
-pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, BloscError> {
+/// errors on any mismatch. A header that claims more than `max_len` bytes
+/// is refused before anything is allocated for it.
+pub fn decode_blosc(
+    input: &[u8],
+    config: &BloscConfig,
+    max_len: usize,
+) -> Result<Vec<u8>, BloscError> {
     if input.len() < 16 {
         return Err(BloscError::HeaderTruncated(input.len()));
     }
@@ -68,6 +79,13 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
     let nbytes = u32::from_le_bytes([input[4], input[5], input[6], input[7]]) as usize;
     let blocksize = u32::from_le_bytes([input[8], input[9], input[10], input[11]]) as usize;
     let _cbytes = u32::from_le_bytes([input[12], input[13], input[14], input[15]]) as usize;
+
+    if nbytes > max_len {
+        return Err(BloscError::TooLarge {
+            nbytes,
+            limit: max_len,
+        });
+    }
 
     if typesize != config.typesize {
         return Err(BloscError::TypesizeMismatch {
@@ -178,10 +196,16 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
         let block_bytes = if compressed_len == block_uncompressed_size {
             input[payload_start..payload_end].to_vec()
         } else {
-            zstd::stream::decode_all(std::io::Cursor::new(&input[payload_start..payload_end]))
-                .map_err(|e| BloscError::ZstdDecode {
-                    block: b,
-                    msg: e.to_string(),
+            decode_zstd_bounded(&input[payload_start..payload_end], block_uncompressed_size)
+                .map_err(|e| match e {
+                    BoundedError::TooLarge => BloscError::BlockTooLarge {
+                        block: b,
+                        expected: block_uncompressed_size,
+                    },
+                    BoundedError::Io(e) => BloscError::ZstdDecode {
+                        block: b,
+                        msg: e.to_string(),
+                    },
                 })?
         };
         if block_bytes.len() != block_uncompressed_size {
@@ -309,6 +333,8 @@ fn bit_unshuffle(input: &[u8], typesize: usize) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NO_LIMIT: usize = usize::MAX;
 
     fn cfg(typesize: u8, shuffle: BloscShuffle) -> BloscConfig {
         BloscConfig {
@@ -452,7 +478,7 @@ mod tests {
         ($name:ident, $vec:ident, $shuffle:expr, $ts:expr) => {
             #[test]
             fn $name() {
-                let out = decode_blosc($vec, &cfg($ts, $shuffle)).unwrap();
+                let out = decode_blosc($vec, &cfg($ts, $shuffle), NO_LIMIT).unwrap();
                 assert_eq!(out, PLAINTEXT, "decoded bytes did not match plaintext");
             }
         };
@@ -470,13 +496,13 @@ mod tests {
 
     #[test]
     fn decode_memcpyed_passes_through() {
-        let out = decode_blosc(ENC_MEMCPY, &cfg(2, BloscShuffle::Bit)).unwrap();
+        let out = decode_blosc(ENC_MEMCPY, &cfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap();
         assert_eq!(out, PLAINTEXT_MEMCPY);
     }
 
     #[test]
     fn rejects_short_header() {
-        let err = decode_blosc(&[0u8; 8], &cfg(2, BloscShuffle::Bit)).unwrap_err();
+        let err = decode_blosc(&[0u8; 8], &cfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap_err();
         assert!(matches!(err, BloscError::HeaderTruncated(8)));
     }
 
@@ -484,13 +510,13 @@ mod tests {
     fn rejects_unsupported_version() {
         let mut bad = ENC_BIT_TS2.to_vec();
         bad[0] = 99;
-        let err = decode_blosc(&bad, &cfg(2, BloscShuffle::Bit)).unwrap_err();
+        let err = decode_blosc(&bad, &cfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap_err();
         assert!(matches!(err, BloscError::UnsupportedVersion(99)));
     }
 
     #[test]
     fn rejects_typesize_mismatch() {
-        let err = decode_blosc(ENC_BIT_TS2, &cfg(4, BloscShuffle::Bit)).unwrap_err();
+        let err = decode_blosc(ENC_BIT_TS2, &cfg(4, BloscShuffle::Bit), NO_LIMIT).unwrap_err();
         match err {
             BloscError::TypesizeMismatch { header, config } => {
                 assert_eq!(header, 2);
@@ -502,7 +528,7 @@ mod tests {
 
     #[test]
     fn rejects_shuffle_mismatch() {
-        let err = decode_blosc(ENC_BIT_TS2, &cfg(2, BloscShuffle::Byte)).unwrap_err();
+        let err = decode_blosc(ENC_BIT_TS2, &cfg(2, BloscShuffle::Byte), NO_LIMIT).unwrap_err();
         assert!(matches!(err, BloscError::ShuffleMismatch { .. }));
     }
 
@@ -511,15 +537,54 @@ mod tests {
         let mut bad = ENC_BIT_TS2.to_vec();
         // Wipe the compressor bits (bits 5-7) to encode lz4 (=1)
         bad[2] = (bad[2] & 0x1F) | (1 << 5);
-        let err = decode_blosc(&bad, &cfg(2, BloscShuffle::Bit)).unwrap_err();
+        let err = decode_blosc(&bad, &cfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap_err();
         assert!(matches!(err, BloscError::UnsupportedCompressor { code: 1 }));
     }
 
     #[test]
     fn rejects_truncated_payload() {
         let truncated = &ENC_BIT_TS2[..ENC_BIT_TS2.len() - 4];
-        let err = decode_blosc(truncated, &cfg(2, BloscShuffle::Bit)).unwrap_err();
+        let err = decode_blosc(truncated, &cfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap_err();
         assert!(matches!(err, BloscError::InputTruncated { .. }));
+    }
+
+    /// One zstd block, unshuffled, of typesize 1, whose header claims
+    /// `nbytes` and whose payload is `payload` compressed.
+    fn one_block(nbytes: u32, payload: &[u8]) -> Vec<u8> {
+        let compressed = zstd::encode_all(std::io::Cursor::new(payload), 19).unwrap();
+        let mut out = vec![2, 1, COMPRESSOR_CODE_ZSTD << 5, 1];
+        out.extend_from_slice(&nbytes.to_le_bytes());
+        out.extend_from_slice(&nbytes.to_le_bytes());
+        let cbytes = 16 + 4 + 4 + compressed.len() as u32;
+        out.extend_from_slice(&cbytes.to_le_bytes());
+        out.extend_from_slice(&20u32.to_le_bytes());
+        out.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        out.extend_from_slice(&compressed);
+        out
+    }
+
+    #[test]
+    fn a_header_claiming_more_than_the_chunk_holds_is_refused() {
+        let input = one_block(u32::MAX, &[0u8; 64]);
+        let err = decode_blosc(&input, &cfg(1, BloscShuffle::None), 4096).unwrap_err();
+        assert!(matches!(err, BloscError::TooLarge { limit: 4096, .. }));
+    }
+
+    #[test]
+    fn a_block_that_decodes_past_its_size_is_refused() {
+        let input = one_block(8, &vec![0u8; 16 * 1024 * 1024]);
+        let err = decode_blosc(&input, &cfg(1, BloscShuffle::None), 4096).unwrap_err();
+        assert!(matches!(
+            err,
+            BloscError::BlockTooLarge {
+                block: 0,
+                expected: 8
+            }
+        ));
+        assert_eq!(
+            decode_blosc(&one_block(8, &[3u8; 8]), &cfg(1, BloscShuffle::None), 8).unwrap(),
+            [3u8; 8]
+        );
     }
 
     #[test]
@@ -544,6 +609,7 @@ mod tests {
 #[cfg(test)]
 mod partial_block_oracle {
     use super::decode_blosc;
+    const NO_LIMIT: usize = usize::MAX;
     use lucida_store::codec::{BloscCompressor, BloscConfig, BloscShuffle};
     fn ocfg(ts: u8, s: BloscShuffle) -> BloscConfig {
         BloscConfig {
@@ -909,7 +975,7 @@ mod partial_block_oracle {
     ];
     #[test]
     fn oracle_bit_ts2_partial() {
-        let got = decode_blosc(ENC_BIT_TS2_PARTIAL, &ocfg(2, BloscShuffle::Bit)).unwrap();
+        let got = decode_blosc(ENC_BIT_TS2_PARTIAL, &ocfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap();
         assert_eq!(
             got,
             pat(5003, 2),
@@ -918,7 +984,7 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_bit_ts1_partial() {
-        let got = decode_blosc(ENC_BIT_TS1_PARTIAL, &ocfg(1, BloscShuffle::Bit)).unwrap();
+        let got = decode_blosc(ENC_BIT_TS1_PARTIAL, &ocfg(1, BloscShuffle::Bit), NO_LIMIT).unwrap();
         assert_eq!(
             got,
             pat(9001, 1),
@@ -927,7 +993,7 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_bit_ts4_partial() {
-        let got = decode_blosc(ENC_BIT_TS4_PARTIAL, &ocfg(4, BloscShuffle::Bit)).unwrap();
+        let got = decode_blosc(ENC_BIT_TS4_PARTIAL, &ocfg(4, BloscShuffle::Bit), NO_LIMIT).unwrap();
         assert_eq!(
             got,
             pat(3003, 4),
@@ -936,7 +1002,8 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_byte_ts2_partial() {
-        let got = decode_blosc(ENC_BYTE_TS2_PARTIAL, &ocfg(2, BloscShuffle::Byte)).unwrap();
+        let got =
+            decode_blosc(ENC_BYTE_TS2_PARTIAL, &ocfg(2, BloscShuffle::Byte), NO_LIMIT).unwrap();
         assert_eq!(
             got,
             pat(5003, 2),
@@ -945,7 +1012,8 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_byte_ts4_partial() {
-        let got = decode_blosc(ENC_BYTE_TS4_PARTIAL, &ocfg(4, BloscShuffle::Byte)).unwrap();
+        let got =
+            decode_blosc(ENC_BYTE_TS4_PARTIAL, &ocfg(4, BloscShuffle::Byte), NO_LIMIT).unwrap();
         assert_eq!(
             got,
             pat(3003, 4),
@@ -954,7 +1022,8 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_none_ts2_partial() {
-        let got = decode_blosc(ENC_NONE_TS2_PARTIAL, &ocfg(2, BloscShuffle::None)).unwrap();
+        let got =
+            decode_blosc(ENC_NONE_TS2_PARTIAL, &ocfg(2, BloscShuffle::None), NO_LIMIT).unwrap();
         assert_eq!(
             got,
             pat(5003, 2),
@@ -963,8 +1032,12 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_bit_ts2_aligned_multiblock() {
-        let got =
-            decode_blosc(ENC_BIT_TS2_ALIGNED_MULTIBLOCK, &ocfg(2, BloscShuffle::Bit)).unwrap();
+        let got = decode_blosc(
+            ENC_BIT_TS2_ALIGNED_MULTIBLOCK,
+            &ocfg(2, BloscShuffle::Bit),
+            NO_LIMIT,
+        )
+        .unwrap();
         assert_eq!(
             got,
             pat(4096, 2),
@@ -973,7 +1046,12 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_bit_ts2_memcpy_random() {
-        let got = decode_blosc(ENC_BIT_TS2_MEMCPY_RANDOM, &ocfg(2, BloscShuffle::Bit)).unwrap();
+        let got = decode_blosc(
+            ENC_BIT_TS2_MEMCPY_RANDOM,
+            &ocfg(2, BloscShuffle::Bit),
+            NO_LIMIT,
+        )
+        .unwrap();
         assert_eq!(
             got,
             PLAIN_BIT_TS2_MEMCPY_RANDOM.to_vec(),
@@ -982,7 +1060,12 @@ mod partial_block_oracle {
     }
     #[test]
     fn oracle_bit_ts2_singleblock_small() {
-        let got = decode_blosc(ENC_BIT_TS2_SINGLEBLOCK_SMALL, &ocfg(2, BloscShuffle::Bit)).unwrap();
+        let got = decode_blosc(
+            ENC_BIT_TS2_SINGLEBLOCK_SMALL,
+            &ocfg(2, BloscShuffle::Bit),
+            NO_LIMIT,
+        )
+        .unwrap();
         assert_eq!(
             got,
             pat(100, 2),
@@ -995,6 +1078,7 @@ mod partial_block_oracle {
 #[cfg(test)]
 mod raw_block_oracle {
     use super::decode_blosc;
+    const NO_LIMIT: usize = usize::MAX;
     use lucida_store::codec::{BloscCompressor, BloscConfig, BloscShuffle};
     fn ocfg(ts: u8) -> BloscConfig {
         BloscConfig {
@@ -3784,7 +3868,7 @@ mod raw_block_oracle {
     ];
     #[test]
     fn oracle_rawblk_bit_ts2_interior() {
-        let got = decode_blosc(ENC_RAWBLK_BIT_TS2_INTERIOR, &ocfg(2)).unwrap();
+        let got = decode_blosc(ENC_RAWBLK_BIT_TS2_INTERIOR, &ocfg(2), NO_LIMIT).unwrap();
         assert_eq!(
             got, PLAIN_RAWBLK_BIT_TS2_INTERIOR,
             "rawblk_bit_ts2_interior: raw-stored block must match upstream blosc"
@@ -3792,7 +3876,7 @@ mod raw_block_oracle {
     }
     #[test]
     fn oracle_rawblk_bit_ts4_interior() {
-        let got = decode_blosc(ENC_RAWBLK_BIT_TS4_INTERIOR, &ocfg(4)).unwrap();
+        let got = decode_blosc(ENC_RAWBLK_BIT_TS4_INTERIOR, &ocfg(4), NO_LIMIT).unwrap();
         assert_eq!(
             got, PLAIN_RAWBLK_BIT_TS4_INTERIOR,
             "rawblk_bit_ts4_interior: raw-stored block must match upstream blosc"
@@ -3800,7 +3884,7 @@ mod raw_block_oracle {
     }
     #[test]
     fn oracle_rawblk_bit_ts2_plus_partial() {
-        let got = decode_blosc(ENC_RAWBLK_BIT_TS2_PLUS_PARTIAL, &ocfg(2)).unwrap();
+        let got = decode_blosc(ENC_RAWBLK_BIT_TS2_PLUS_PARTIAL, &ocfg(2), NO_LIMIT).unwrap();
         assert_eq!(
             got, PLAIN_RAWBLK_BIT_TS2_PLUS_PARTIAL,
             "rawblk_bit_ts2_plus_partial: raw-stored block must match upstream blosc"

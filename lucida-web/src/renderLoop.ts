@@ -531,6 +531,8 @@ export class RenderLoop implements TraceEnvironment {
     if (enabled) this.setDirty("residency", "thumbnail_overview");
   }
 
+  // Its own frame request, not the frame clock's: the loop runs only while
+  // dirty, so it idles by itself, and each dirty also wakes the clock.
   private scheduleIfNeeded(): void {
     if ((this.interactiveDirty || this.residencyDirty) && this.rafId === null) {
       this.rafId = requestAnimationFrame(this.tick);

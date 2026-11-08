@@ -1466,6 +1466,7 @@ pub(crate) fn apply_overview_to_scene(
         &ViewportCommand::SetViewport {
             width: viewport[0],
             height: viewport[1],
+            pixel_ratio: None,
         },
     );
     apply_viewport_command(

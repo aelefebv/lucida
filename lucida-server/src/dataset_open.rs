@@ -1,4 +1,4 @@
-//! Headless dataset-open orchestration: normalize the URL, authorize,
+//! Headless dataset-open orchestration: authorize a parsed location,
 //! dedupe concurrent opens, probe storage, import metadata, build the
 //! binding, apply the document, persist, and broadcast.
 //!
@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use lucida_content::DatasetId;
-use lucida_content::url::{dataset_id_for_url, dataset_url_hash16, normalize_dataset_url};
+use lucida_content::url::DatasetLocation;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, ServerMessage};
@@ -21,6 +21,7 @@ use lucida_protocol::{
 };
 use lucida_proxy::ProxySpec;
 use lucida_store::cache::CachedStore;
+use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, ServerBinding};
@@ -29,8 +30,8 @@ use crate::generated::{
     plan_generated_coarse_for_manifest,
 };
 use crate::open_diagnostics::{
-    MetadataReadCost, backend_kind_for_url, backend_open_failure, import_failure, open_failure,
-    open_progress, open_success, open_warning,
+    MetadataReadCost, backend_open_failure, import_failure, open_failure, open_progress,
+    open_success, open_warning,
 };
 use crate::proxy::{
     PROXY_TARGET_LONG_AXIS, ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest,
@@ -38,10 +39,6 @@ use crate::proxy::{
 use crate::session::Session;
 use crate::workspace::{LiveWorkspace, WorkspaceManager};
 use crate::{BroadcastItem, ProxyConfig};
-
-// `dataset_id_for_url` and `dataset_url_hash16` live in
-// `lucida_content::url` so the SPA (via the `lucida-core` wasm shim),
-// the storage layer, and this orchestration share one implementation.
 
 /// The workspace scope a connection acts under: the live runtime handles,
 /// the [`WorkspaceManager`] that owns authorization and persistence, and
@@ -57,13 +54,14 @@ pub struct WorkspaceScope {
 
 /// Everything a dataset open runs against: the shared session + broadcast
 /// hub it mutates, the proxy/generated configuration for the binding it
-/// builds, and the (optional) workspace scope that authorizes and
-/// persists the open.
+/// builds, the source policy the location must pass, and the (optional)
+/// workspace scope that authorizes and persists the open.
 #[derive(Clone)]
 pub struct DatasetOpenContext {
     pub session: Arc<Mutex<Session>>,
     pub tx: broadcast::Sender<BroadcastItem>,
     pub proxy_config: ProxyConfig,
+    pub source_policy: Arc<SourcePolicy>,
     pub workspace: Option<WorkspaceScope>,
 }
 
@@ -98,10 +96,10 @@ fn emit(progress: &ProgressSink, diagnostic: DatasetOpenProgressDiagnostic) {
 /// the OME-Zarr metadata, build the server binding, apply and broadcast
 /// `DatasetOpened`, and (in a workspace) persist the membership.
 ///
-/// The `url` is normalized once at entry and every derivation after that
-/// uses the canonical form, so spelling variants of one path dedupe to one
-/// source. Workspace clients get an opaque workspace-local `DatasetId`;
-/// the source-derived id only dedupes membership and routes shared caches.
+/// Every derivation uses the location's canonical form, so spelling
+/// variants of one path dedupe to one source. Workspace clients get an
+/// opaque workspace-local `DatasetId`; the source-derived id only dedupes
+/// membership and routes shared caches.
 ///
 /// Concurrent opens of the same URL are safe: the apply step re-checks
 /// under the session lock, so a lost race drops its duplicate binding and
@@ -109,26 +107,22 @@ fn emit(progress: &ProgressSink, diagnostic: DatasetOpenProgressDiagnostic) {
 #[tracing::instrument(
     name = "dataset_open",
     skip(ctx, progress),
-    fields(url = %url, client_id = %opener)
+    fields(url = %location, client_id = %opener)
 )]
 pub async fn open_dataset(
     opener: ClientId,
-    url: &str,
+    location: &DatasetLocation,
     ctx: &DatasetOpenContext,
     progress: &ProgressSink,
 ) -> Result<DatasetOpenOutcome, DatasetOpenFailureDiagnostic> {
-    // Normalize at the input boundary (drive-letter case, slash direction,
-    // `file://`, UNC backslashes). `backend::open` normalizes too, but
-    // `dataset_id_for_url` and `dataset_url_hash16` must hash the canonical
-    // form here for the dedup short-circuit to match spelling variants.
-    let canonical_url = normalize_dataset_url(url);
+    let canonical_url = location.as_str();
 
     // Stable, content-derived source ID. This is intentionally not the
     // client-facing dataset ID inside a workspace: workspace document
     // state uses an opaque workspace-local ID so the same source can be
     // opened independently in different workspaces while sharing the
     // source/cache identity below.
-    let dataset_source_id = dataset_id_for_url(&canonical_url);
+    let dataset_source_id = location.source_id();
     emit(
         progress,
         open_progress(
@@ -277,7 +271,7 @@ pub async fn open_dataset(
     {
         let sess = ctx.session.lock().await;
         if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
+            find_loaded_binding(&sess, &dataset_id_key, canonical_url, workspace_scoped)
         {
             // Re-broadcast the current document manifest, not the stale
             // import-time one cached on the binding: a `DatasetOpened` apply
@@ -333,7 +327,7 @@ pub async fn open_dataset(
                 url = %canonical_url,
                 "open_remote_dataset.dedup_reuse"
             );
-            let diagnostic = open_success(&canonical_url, &opened, Some(dataset_source_id.clone()));
+            let diagnostic = open_success(canonical_url, &opened, Some(dataset_source_id.clone()));
             return Ok(DatasetOpenOutcome::Opened {
                 seq,
                 opened: Box::new(opened),
@@ -342,8 +336,6 @@ pub async fn open_dataset(
         }
     }
 
-    // Open storage backend. `backend::open` re-normalizes (idempotent)
-    // and dispatches via `is_local_dataset_url`.
     emit(
         progress,
         open_progress(
@@ -351,10 +343,10 @@ pub async fn open_dataset(
             "opening dataset storage backend",
             Some(dataset_id_key.clone()),
             Some(dataset_source_id.clone()),
-            Some(format!("backend: {}", backend_kind_for_url(&canonical_url))),
+            Some(format!("backend: {}", location.scheme().as_str())),
         ),
     );
-    let store = match lucida_store::backend::open(&canonical_url) {
+    let store = match lucida_store::backend::open_permitted(location, &ctx.source_policy).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.backend_open_failed");
@@ -362,19 +354,10 @@ pub async fn open_dataset(
         }
     };
 
-    // Extract dataset name from URL (last path component). Canonical
-    // form is always forward-slash, so a single `rsplit('/')` works for
-    // every platform.
     let name = existing_workspace_source
         .as_ref()
         .map(|source| source.display_name.clone())
-        .unwrap_or_else(|| {
-            canonical_url
-                .rsplit('/')
-                .find(|s| !s.is_empty())
-                .unwrap_or("dataset")
-                .to_string()
-        });
+        .unwrap_or_else(|| location.display_name().to_string());
 
     // Import dataset via the new pipeline.
     emit(
@@ -559,7 +542,7 @@ pub async fn open_dataset(
     // 16-byte URL hash so a single shared `cache_dir` can host many
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
-    let url_hash16 = dataset_url_hash16(&canonical_url);
+    let url_hash16 = location.hash16();
     let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
         proxy_config.generated_cache_dir.clone(),
         url_hash16,
@@ -619,7 +602,7 @@ pub async fn open_dataset(
     let prefetch_live = ctx.workspace.as_ref().map(|scope| scope.live.clone());
 
     let binding = ServerBinding {
-        source_url: canonical_url.clone(),
+        source_url: canonical_url.to_string(),
         store: store.clone(),
         resolver,
         cache: cached,
@@ -640,7 +623,7 @@ pub async fn open_dataset(
     let (seq, document) = {
         let mut sess = ctx.session.lock().await;
         if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
+            find_loaded_binding(&sess, &dataset_id_key, canonical_url, workspace_scoped)
         {
             // Lost the race: another open completed the import. Drop our
             // duplicate binding/command and rebroadcast the canonical one.
@@ -693,7 +676,7 @@ pub async fn open_dataset(
                 dataset_source_id = %dataset_source_id,
                 "open_remote_dataset.lost_race"
             );
-            let diagnostic = open_success(&canonical_url, &opened, Some(dataset_source_id.clone()));
+            let diagnostic = open_success(canonical_url, &opened, Some(dataset_source_id.clone()));
             return Ok(DatasetOpenOutcome::Opened {
                 seq,
                 opened: Box::new(opened),
@@ -709,7 +692,7 @@ pub async fn open_dataset(
         }
         sess.record_binding_source(
             dataset_id_key.clone(),
-            canonical_url.clone(),
+            canonical_url.to_string(),
             Some(dataset_source_id.clone()),
             name.clone(),
         );
@@ -739,7 +722,7 @@ pub async fn open_dataset(
                 &scope.live,
                 &dataset_id_key,
                 &dataset_source_id,
-                &canonical_url,
+                canonical_url,
                 &name,
                 &scope.principal,
                 seq,
@@ -870,7 +853,7 @@ pub async fn open_dataset(
         });
     }
 
-    let diagnostic = open_success(&canonical_url, &opened, Some(dataset_source_id));
+    let diagnostic = open_success(canonical_url, &opened, Some(dataset_source_id));
     Ok(DatasetOpenOutcome::Opened {
         seq,
         opened: Box::new(opened),
@@ -1155,8 +1138,13 @@ mod tests {
                 generated_max_chunk_bytes: 1024 * 1024,
                 generated_disk_budget_bytes: None,
             },
+            source_policy: Arc::default(),
             workspace: None,
         }
+    }
+
+    fn location(path: &Path) -> DatasetLocation {
+        path.to_str().unwrap().parse().unwrap()
     }
 
     fn stages_of(
@@ -1170,17 +1158,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_scheme_fails_at_backend_open_with_staged_progress() {
+    async fn missing_local_path_fails_at_backend_open_with_staged_progress() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_context(tmp.path());
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let missing = location(&tmp.path().join("missing.zarr"));
 
-        let err = open_dataset(7, "ftp://example.com/data.zarr", &ctx, &progress_tx)
+        let err = open_dataset(7, &missing, &ctx, &progress_tx)
             .await
-            .expect_err("unsupported scheme must fail");
+            .expect_err("a missing local path must fail");
 
         assert_eq!(err.stage, DatasetOpenStage::BackendOpen);
-        assert_eq!(err.kind, DatasetOpenFailureKind::UnsupportedScheme);
+        assert_eq!(err.kind, DatasetOpenFailureKind::LocalPath);
         assert!(!err.retryable);
 
         drop(progress_tx);
@@ -1210,7 +1199,7 @@ mod tests {
         let ctx = test_context(tmp.path());
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
 
-        let err = open_dataset(7, data_dir.to_str().unwrap(), &ctx, &progress_tx)
+        let err = open_dataset(7, &location(&data_dir), &ctx, &progress_tx)
             .await
             .expect_err("a directory with no zarr metadata must fail import");
 
@@ -1241,7 +1230,7 @@ mod tests {
         let data_dir = tmp.path().join("tiny.zarr");
         fs::create_dir_all(&data_dir).unwrap();
         write_minimal_zarr(&data_dir);
-        let url = data_dir.to_str().unwrap().to_string();
+        let url = location(&data_dir);
 
         let ctx = test_context(tmp.path());
         let mut broadcast_rx = ctx.tx.subscribe();
@@ -1313,7 +1302,7 @@ mod tests {
         let data_dir = tmp.path().join("tiny.zarr");
         fs::create_dir_all(&data_dir).unwrap();
         write_minimal_zarr(&data_dir);
-        let url = data_dir.to_str().unwrap().to_string();
+        let url = location(&data_dir);
 
         let ctx = test_context(tmp.path());
         let (p1, _r1) = mpsc::unbounded_channel();
@@ -1353,7 +1342,7 @@ mod tests {
         let data_dir = tmp.path().join("tiny.zarr");
         fs::create_dir_all(&data_dir).unwrap();
         write_minimal_zarr(&data_dir);
-        let url = data_dir.to_str().unwrap().to_string();
+        let url = location(&data_dir);
 
         let ctx = test_context(tmp.path());
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
@@ -1374,14 +1363,11 @@ mod tests {
         assert_eq!(diagnostic.workspace_dataset_id, opened.manifest.dataset_id);
         assert_eq!(
             diagnostic.source_url,
-            normalize_dataset_url(&url),
+            url.as_str(),
             "the diagnostic reports the canonical source URL"
         );
         // Non-workspace opens use the URL-derived source id as dataset id.
-        assert_eq!(
-            opened.manifest.dataset_id.0,
-            dataset_id_for_url(&normalize_dataset_url(&url))
-        );
+        assert_eq!(opened.manifest.dataset_id.0, url.source_id());
         assert_eq!(opened.opener_client_id, Some(9));
 
         drop(progress_tx);
@@ -1487,7 +1473,7 @@ mod tests {
         let data_dir = tmp.path().join("partial.zarr");
         fs::create_dir_all(&data_dir).unwrap();
         write_partially_written_zarr(&data_dir);
-        let url = data_dir.to_str().unwrap().to_string();
+        let url = location(&data_dir);
 
         let ctx = test_context(tmp.path());
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
@@ -1514,7 +1500,7 @@ mod tests {
     /// durable health surface says about it.
     async fn health_after_open(
         opener: ClientId,
-        url: &str,
+        url: &DatasetLocation,
         tmp: &Path,
     ) -> lucida_protocol::DatasetSourceHealth {
         let ctx = test_context(tmp);
@@ -1555,7 +1541,7 @@ mod tests {
         let data_dir = tmp.path().join("partial-health.zarr");
         fs::create_dir_all(&data_dir).unwrap();
         write_partially_written_zarr(&data_dir);
-        let url = data_dir.to_str().unwrap().to_string();
+        let url = location(&data_dir);
 
         let health = health_after_open(12, &url, tmp.path()).await;
 
@@ -1573,7 +1559,7 @@ mod tests {
             .join("../fixtures/ome-zarr/sparse-sharded.ome.zarr")
             .canonicalize()
             .unwrap();
-        let url = fixture.to_str().unwrap().to_string();
+        let url = location(&fixture);
 
         let health = health_after_open(14, &url, tmp.path()).await;
 
@@ -1588,7 +1574,7 @@ mod tests {
         let data_dir = tmp.path().join("whole.zarr");
         fs::create_dir_all(&data_dir).unwrap();
         write_minimal_zarr(&data_dir);
-        let url = data_dir.to_str().unwrap().to_string();
+        let url = location(&data_dir);
 
         let health = health_after_open(13, &url, tmp.path()).await;
 
@@ -1605,7 +1591,7 @@ mod tests {
             .join("../fixtures/ome-zarr/collection-mixed.ome.zarr")
             .canonicalize()
             .unwrap();
-        let url = fixture.to_str().unwrap().to_string();
+        let url = location(&fixture);
 
         let health = health_after_open(15, &url, tmp.path()).await;
 

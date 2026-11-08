@@ -189,15 +189,25 @@ pub fn normalize_dataset_url(raw: &str) -> String {
     lucida_content::url::normalize_dataset_url(raw)
 }
 
-/// `true` if `canonical` (already normalized) refers to a local
-/// filesystem path. Thin `#[wasm_bindgen]` shim over
+/// `true` if `url` parses as a local filesystem path. Thin
+/// `#[wasm_bindgen]` shim over
 /// [`lucida_content::url::is_local_dataset_url`]. Exposed here so the
 /// SPA's share-warning classifier (`captureBuilder.ts`) can call into
 /// the same Rust implementation the server uses, eliminating
 /// classifier-drift bugs.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
-pub fn is_local_dataset_url(canonical: &str) -> bool {
-    lucida_content::url::is_local_dataset_url(canonical)
+pub fn is_local_dataset_url(url: &str) -> bool {
+    lucida_content::url::is_local_dataset_url(url)
+}
+
+/// Why `raw` is not a dataset location, as a
+/// [`lucida_content::url::LocationError::kind`], or `None` when it parses.
+/// Exposed so the SPA words a rejection from the parse the server runs.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn dataset_location_error(raw: &str) -> Option<String> {
+    lucida_content::url::DatasetLocation::parse(raw)
+        .err()
+        .map(|error| error.kind().to_string())
 }
 
 #[cfg(test)]

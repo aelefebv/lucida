@@ -2048,6 +2048,8 @@ describe("wire goldens: enum vocabulary", () => {
         "session_closed",
         "workspace_lookup",
         "unsupported_scheme",
+        "invalid_location",
+        "source_not_allowed",
         "local_path",
         "missing_object",
         "permission",
@@ -2111,12 +2113,16 @@ describe("wire goldens: watch stream", () => {
       }),
     ) as { type: string; item: WatchAggregateItem };
 
-  it("watch_subscribe: the bare tag the CLI subscribes with", () => {
-    // No web sender: the page publishes and the CLI subscribes. The fixture
-    // locks the tag the Rust client sends and the tag the Rust server routes
+  it("watch_subscribe: the bare tag is live, and history is the one key", () => {
+    // No web sender: the page publishes and the CLI subscribes. The fixtures
+    // lock the tag the Rust client sends and the tag the Rust server routes
     // on to one spelling.
     expect(coveredFixture("session/client_watch_subscribe.json")).toStrictEqual({
       type: "watch_subscribe",
+    });
+    expect(coveredFixture("session/client_watch_subscribe_history.json")).toStrictEqual({
+      type: "watch_subscribe",
+      history: true,
     });
   });
 
@@ -2187,6 +2193,14 @@ describe("wire goldens: watch stream", () => {
     expect(golden.item).toStrictEqual(
       (fixture("session/client_watch_publish_aggregate.json") as { item: WatchAggregateItem }).item,
     );
+  });
+
+  it("watch_history_end: where a replay stops, outside the item sequence", () => {
+    expect(coveredFixture("session/server_watch_history_end.json")).toStrictEqual({
+      type: "watch_history_end",
+      through_seq: 42,
+      replayed: 40,
+    });
   });
 });
 

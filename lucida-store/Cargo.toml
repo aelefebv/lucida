@@ -14,7 +14,12 @@ memmap2 = "0.9"
 lz4_flex = "0.11"
 crc32c = "0.6"
 object_store = { version = "0.12", features = ["gcp", "aws", "http"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# The HTTP client of a restricted source policy, built to resolve names
+# through the policy. The features match object_store's own client.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2"] }
+ipnet = "2"
+url = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "fs"] }
 futures-util = "0.3"
 bytes = "1"
 lru = "0.16"
@@ -24,6 +29,8 @@ lucida-content = { path = "../lucida-content" }
 lucida-protocol = { path = "../lucida-protocol" }
 
 [dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["io-util"] }
 async-trait = "0.1"
 
 [profile.dev.package."*"]

@@ -105,11 +105,28 @@ describe("pending generated chunks that become available later", () => {
         generatedCoarse: { readyAtMs: 1_000 },
       }),
     }),
-    {
-      stallsAt: [1, 2],
-      because: "a chunk answered pending is not asked for again on a static view",
-    },
   );
+});
+
+describe("a generated level published after the open", () => {
+  // The level's geometry reaches the page half a second in, as a replaced
+  // manifest with no scene epoch behind it. The view settles without a coarse
+  // tier before then, so settling alone would not show the level was used.
+  const scenario = describeScenario({
+    name: "generated level published later",
+    dataset: singleImage({
+      id: "late",
+      pyramid: { shape: [1, 1, 1, 1024, 1024], chunk: [1, 64, 64], levels: 2 },
+      generatedCoarse: { publishedAtMs: 500, readyAtMs: 0 },
+    }),
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`requests the new level and settles at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      expect(run.phases[0].coarse).toEqual({ resident: 16, desired: 16 });
+    });
+  }
 });
 
 describe("a Z and T scrub", () => {
@@ -244,10 +261,21 @@ describe("a transient source failure", () => {
         answer: (req) => (req.chunkKey === "3/0/0/0/0/0" && req.attempt <= 2 ? "transient" : "ready"),
       },
     }),
-    {
-      stallsAt: [1, 2],
-      because: "a failed chunk's backoff is checked only when the view plans again, and a static view does not",
-    },
+  );
+});
+
+describe("a source failure that outlasts its first backoff", () => {
+  // The detail chunk in the view's corner fails its first four requests:
+  // two fetches, each with its in-fetch retry. The view waits out one
+  // backoff, fails again, and waits out a longer one before it lands.
+  settles(
+    describeScenario({
+      name: "repeated source failure",
+      dataset: singleImage({ id: "stubborn", pyramid: IMAGE_1024 }),
+      source: {
+        answer: (req) => (/^[0-2]\/0\/0\/0\/0\/0$/.test(req.chunkKey) && req.attempt <= 4 ? "transient" : "ready"),
+      },
+    }),
   );
 });
 
