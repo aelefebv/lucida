@@ -19,7 +19,7 @@ use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use serde_json::json;
 use thiserror::Error;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, MutexGuard, broadcast};
 
 use crate::connection::{CLOSE_ACCESS_REVOKED, ClientSender};
 use crate::inbox::InboxStore;
@@ -44,6 +44,13 @@ pub struct LiveWorkspace {
     pub session: Arc<Mutex<Session>>,
     pub tx: broadcast::Sender<BroadcastItem>,
     pub unicast_routes: UnicastRoutes,
+    /// One document write at a time, held from reading the seq through
+    /// persisting, applying, and broadcasting. Persisting first keeps memory
+    /// from holding a command the database refused, and holding the turn
+    /// through the broadcast sends seqs to peers in order. Separate from the
+    /// session lock so a database write never stalls chunk serving or
+    /// presence.
+    document_turn: Mutex<()>,
     next_id: AtomicU64,
     empty_since: Mutex<Option<Instant>>,
     background_cancelled: AtomicBool,
@@ -60,11 +67,29 @@ impl LiveWorkspace {
             session: Arc::new(Mutex::new(session)),
             tx,
             unicast_routes: Arc::new(Mutex::new(HashMap::new())),
+            document_turn: Mutex::new(()),
             next_id: AtomicU64::new(0),
             empty_since: Mutex::new(Some(Instant::now())),
             background_cancelled: AtomicBool::new(false),
             connections: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Wait for the workspace's document turn. Every change to the document
+    /// takes it first; see the field.
+    pub async fn document_turn(&self) -> MutexGuard<'_, ()> {
+        self.document_turn.lock().await
+    }
+
+    /// Send an applied command to every peer, and its ack to `sender`.
+    pub fn broadcast_command(&self, sender: ClientId, seq: u64, command: DocumentCommand) {
+        let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
+        let ack_msg = ServerMessage::Ack { seq };
+        let _ = self.tx.send(BroadcastItem::CommandBroadcast {
+            sender,
+            broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+            ack_json: serde_json::to_string(&ack_msg).unwrap(),
+        });
     }
 
     /// Forget a socket that ended.
@@ -1373,8 +1398,8 @@ impl WorkspaceManager {
     /// it broadcasts to peers and survives reopen, and keep the DB
     /// `display_name` in sync so listings and restored bindings agree.
     ///
-    /// Returns the applied `(seq, RenameDataset)` for the WS handler to
-    /// broadcast like any other document command.
+    /// Persists, applies, and broadcasts the rename like any other document
+    /// command, acking `sender`, and returns its seq.
     /// [`Store::persist_dataset_renamed`] writes the row and `document_json`
     /// in one transaction. `require_editor` runs before anything is read; a
     /// bad name is `BadRequest`, and a missing id is `NotFound`, so the
@@ -1383,9 +1408,10 @@ impl WorkspaceManager {
         &self,
         live: &LiveWorkspace,
         principal: &AuthPrincipal,
+        sender: ClientId,
         workspace_dataset_id: &DatasetId,
         name: &str,
-    ) -> Result<(u64, DocumentCommand), WorkspaceError> {
+    ) -> Result<u64, WorkspaceError> {
         // 1. Authority first — never read the document for a non-editor.
         self.require_editor(&live.workspace_id, principal).await?;
 
@@ -1397,16 +1423,16 @@ impl WorkspaceManager {
             name: name.clone(),
         };
 
-        // 3. Apply to the live session, but only if the dataset actually
-        //    exists in the document. A missing id is NotFound (never-leak),
-        //    not a silent no-op that would still bump seq and persist.
+        // 3. Only a dataset the document holds can be renamed. A missing id
+        //    is NotFound (never-leak), not a silent no-op that would still
+        //    bump seq and persist.
+        let turn = live.document_turn().await;
         let (seq, document) = {
-            let mut sess = live.session.lock().await;
+            let sess = live.session.lock().await;
             if !sess.document.manifests.contains_key(workspace_dataset_id) {
                 return Err(WorkspaceError::NotFound);
             }
-            let seq = sess.apply(command.clone());
-            (seq, sess.document.clone())
+            sess.next(&command)
         };
 
         // 4. Persist: workspace_datasets.display_name + document_json together.
@@ -1421,38 +1447,48 @@ impl WorkspaceManager {
             .await
             .map_err(WorkspaceError::Store)?;
 
-        Ok((seq, command))
+        live.session
+            .lock()
+            .await
+            .commit(seq, command.clone(), document);
+        live.broadcast_command(sender, seq, command);
+        drop(turn);
+        Ok(seq)
     }
 
     /// Apply a client-issued document command to the live workspace: editor
-    /// gate, apply, persist. With [`Self::rename_dataset`] this is the only
-    /// authorization and persistence path for workspace document commands;
-    /// the WS handler holds no policy.
+    /// gate, persist, apply, then broadcast it and ack `sender`. With
+    /// [`Self::rename_dataset`] this is the only authorization and
+    /// persistence path for workspace document commands; the WS handler
+    /// holds no policy.
     ///
-    /// A denying role is `Forbidden`, and a role lookup that errors is
-    /// `GateUnavailable`, not a verdict. `PersistFailed` means the command
-    /// was already applied in memory, so the caller must not broadcast it and
-    /// peers converge from the next snapshot.
+    /// Every failure leaves the document as it was. A denying role is
+    /// `Forbidden`, and a role lookup that errors is `GateUnavailable`, not a
+    /// verdict.
     pub async fn apply_document_command(
         &self,
         live: &LiveWorkspace,
         principal: &AuthPrincipal,
+        sender: ClientId,
         command: DocumentCommand,
-    ) -> Result<(u64, DocumentCommand), CommandApplyError> {
+    ) -> Result<u64, CommandApplyError> {
         match self.require_editor(&live.workspace_id, principal).await {
             Ok(_) => {}
             Err(WorkspaceError::Store(e)) => return Err(CommandApplyError::GateUnavailable(e)),
             Err(_) => return Err(CommandApplyError::Forbidden),
         }
-        let (seq, document) = {
-            let mut sess = live.session.lock().await;
-            let seq = sess.apply(command.clone());
-            (seq, sess.document.clone())
-        };
+        let turn = live.document_turn().await;
+        let (seq, document) = live.session.lock().await.next(&command);
         self.persist_applied_command(live, &command, seq, &document)
             .await
             .map_err(CommandApplyError::PersistFailed)?;
-        Ok((seq, command))
+        live.session
+            .lock()
+            .await
+            .commit(seq, command.clone(), document);
+        live.broadcast_command(sender, seq, command);
+        drop(turn);
+        Ok(seq)
     }
 
     /// Resolve the persisted source for a dataset-retry request: editor
@@ -1674,9 +1710,8 @@ pub enum CommandApplyError {
     /// infrastructure trouble, never as a permissions verdict.
     #[error("workspace role lookup failed: {0}")]
     GateUnavailable(StoreError),
-    /// The command was applied to the in-memory session (the seq advanced)
-    /// but persistence failed. The caller must not broadcast it, so peers
-    /// converge again from the next snapshot.
+    /// The database refused or failed the write. Nothing was applied: the
+    /// seq did not advance, and no peer heard of the command.
     #[error("{0}")]
     PersistFailed(WorkspaceError),
 }

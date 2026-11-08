@@ -703,6 +703,29 @@ pub enum ServerMessage {
         seq: u64,
         item: WatchItem,
     },
+    /// Sent only to a [`ClientMessage::Command`]'s sender when the server
+    /// refused the command: nothing was applied and no peer heard of it.
+    /// Each command gets one `Ack` or one `CommandRejected`, in the order
+    /// the commands were sent. A client that applied the command
+    /// optimistically takes a snapshot to undo it.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    CommandRejected { reason: CommandRejection },
+}
+
+/// Why the server refused a document command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandRejection {
+    /// The sender's role does not allow the change.
+    Forbidden,
+    /// The command names something the document does not hold, or carries
+    /// a value the server does not accept. Sending it again fails again.
+    Invalid,
+    /// The server could not check the sender's role or store the change.
+    /// Sending it again may work.
+    Unavailable,
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is

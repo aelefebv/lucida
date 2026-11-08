@@ -16,8 +16,8 @@ use super::instant;
 use crate::storage::StorageBackend;
 use crate::storage::test_support::{postgres_backend, sqlite_backend};
 use crate::workspace::{
-    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceLinkAccess, WorkspaceRecord,
-    WorkspaceRole, WorkspaceSavedView, WorkspaceStore, WorkspaceSummary,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, StoreError, WorkspaceLinkAccess,
+    WorkspaceRecord, WorkspaceRole, WorkspaceSavedView, WorkspaceStore, WorkspaceSummary,
 };
 
 conformance_suite! {
@@ -38,6 +38,8 @@ conformance_suite! {
         archiving_twice_is_none_and_restoring_brings_it_back,
         a_persisted_document_reads_back_with_its_sequence,
         a_sequence_past_a_32_bit_integer_reads_back_whole,
+        an_older_document_cannot_overwrite_a_newer_one,
+        a_stale_membership_write_changes_nothing,
         opening_a_dataset_persists_membership_and_document_together,
         reopening_the_same_source_keeps_the_first_workspace_local_id,
         reopening_a_source_refreshes_where_it_points,
@@ -637,6 +639,92 @@ async fn a_sequence_past_a_32_bit_integer_reads_back_whole(store: Arc<dyn Worksp
             .unwrap()[0]
             .seq,
         BEYOND_32_BITS,
+    );
+}
+
+/// Two writes can reach the store in either order, so the store keeps
+/// whichever carries the higher seq rather than whichever came last.
+async fn an_older_document_cannot_overwrite_a_newer_one(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let created = workspace_named(&store, &owner, "Demo").await;
+    let dataset_id = DatasetId("wds-a".to_string());
+    store
+        .persist_document(&created.id, 5, &document_over(&[(&dataset_id, "Newer")]))
+        .await
+        .unwrap();
+
+    for seq in [4, 5] {
+        let refused = store
+            .persist_document(&created.id, seq, &document_over(&[(&dataset_id, "Older")]))
+            .await;
+        assert!(
+            matches!(refused, Err(StoreError::StaleDocument(s)) if s == seq),
+            "a write at seq {seq} must not replace the document at seq 5, got {refused:?}",
+        );
+    }
+
+    let reread = store.get_workspace(&created.id).await.unwrap().unwrap();
+    assert_eq!(reread.seq, 5);
+    assert_eq!(reread.document.manifests[&dataset_id].name, "Newer");
+}
+
+/// The membership writes carry the document with them, so a stale one
+/// rolls its membership change back along with the document.
+async fn a_stale_membership_write_changes_nothing(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let created = workspace_named(&store, &owner, "Demo").await;
+    let kept = open_dataset(
+        &store,
+        &created.id,
+        &owner,
+        "source-a",
+        "file:///data/a.zarr",
+        "Alpha",
+        3,
+    )
+    .await;
+
+    let late_id = DatasetId("wds-late".to_string());
+    let opened = store
+        .persist_dataset_opened(
+            &created.id,
+            &late_id,
+            "source-late",
+            "file:///data/late.zarr",
+            "Late",
+            &owner.email,
+            2,
+            &document_over(&[(&kept, "Alpha"), (&late_id, "Late")]),
+        )
+        .await;
+    assert!(matches!(opened, Err(StoreError::StaleDocument(2))));
+
+    let renamed = store
+        .persist_dataset_renamed(
+            &created.id,
+            &kept,
+            "Renamed late",
+            3,
+            &document_over(&[(&kept, "Renamed late")]),
+        )
+        .await;
+    assert!(matches!(renamed, Err(StoreError::StaleDocument(3))));
+
+    let removed = store
+        .persist_dataset_removed(&created.id, &kept, 1, &DocumentState::default())
+        .await;
+    assert!(matches!(removed, Err(StoreError::StaleDocument(1))));
+
+    let reread = store.get_workspace(&created.id).await.unwrap().unwrap();
+    assert_eq!(reread.seq, 3);
+    assert_eq!(reread.document.manifests.len(), 1);
+    assert_eq!(reread.document.manifests[&kept].name, "Alpha");
+    let attached = store.list_dataset_sources(&created.id).await.unwrap();
+    assert_eq!(attached.len(), 1, "the late open left no membership row");
+    assert_eq!(attached[0].workspace_dataset_id, kept);
+    assert_eq!(
+        attached[0].display_name, "Alpha",
+        "the late rename left the name alone"
     );
 }
 

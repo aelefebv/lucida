@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
-import type { Bridge, ClientId, DatasetImportWarning, PresenceState } from "../bridge.ts";
+import type {
+  Bridge,
+  ClientId,
+  CommandRejection,
+  DatasetImportWarning,
+  PresenceState,
+} from "../bridge.ts";
 export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -9,6 +15,17 @@ import { SessionController } from "../sessionController.ts";
 export type { SavedViewBridgeHooks } from "../sessionController.ts";
 import type { SavedViewBridgeHooks, ViewportSize } from "../sessionController.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
+import { toast } from "../ui/toastQueue.ts";
+
+const COMMAND_REJECTION_TEXT: Record<CommandRejection, string> = {
+  forbidden: "Your role in this workspace can't make this change.",
+  invalid: "It refers to something the workspace no longer has.",
+  unavailable: "The server couldn't save it. Try again.",
+};
+
+/** One toast covers a run of refusals, such as every step of a drag while
+ *  the server can't save. Matches the toast's own minimum timeout. */
+const COMMAND_REJECTION_TOAST_INTERVAL_MS = 5000;
 
 interface Params {
   workspaceId: string;
@@ -91,6 +108,7 @@ export function useBridge(params: Params) {
   useEffect(() => {
     if (!wasmReady || controllerRef.current) return;
 
+    let lastRejectionToastAt = -Infinity;
     const controller = new SessionController({
       workspaceId,
       ensureScene: () => portsRef.current.ensureScene(),
@@ -133,6 +151,16 @@ export function useBridge(params: Params) {
         onDatasetsChanged: () => portsRef.current.bumpDatasetsVersion(),
         onRemoteDocumentChanged: () => portsRef.current.bumpRemoteDocumentVersion(),
         onWorkspaceArchived: () => portsRef.current.onWorkspaceArchived?.(),
+        onCommandRejected: (reason) => {
+          const now = Date.now();
+          if (now - lastRejectionToastAt < COMMAND_REJECTION_TOAST_INTERVAL_MS) return;
+          lastRejectionToastAt = now;
+          toast({
+            title: "Change not saved",
+            description: COMMAND_REJECTION_TEXT[reason],
+            tone: "warning",
+          });
+        },
         onDatasetImportWarnings: setDatasetImportWarnings,
       },
     });

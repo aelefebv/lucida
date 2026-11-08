@@ -51,6 +51,10 @@ pub enum BroadcastItem {
         broadcast_json: String,
         ack_json: String,
     },
+    /// A refused document command, for its sender only. It rides this
+    /// channel rather than the sender's unicast queue so it arrives in order
+    /// with the acks of the sender's other commands.
+    CommandRejected { sender: ClientId, json: String },
     /// Presence update from a client (ephemeral).
     PresenceUpdate { sender: ClientId, json: String },
     /// Cursor update from a client.
