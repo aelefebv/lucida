@@ -16,7 +16,8 @@
  *   opens `wire` itself. Separate admission and wire-start events would put
  *   the tick over a ceiling derived from one third of its events. Keeping
  *   {@link BURST_CALLS_PER_CHUNK} at 1 is what keeps the two counting the
- *   same thing.
+ *   same thing. The burst's rows share the one clock reading the dispatching
+ *   drain takes, because a reading per row would cost most of the ceiling.
  * - **Flat in events-per-tick, not merely small at one event.** This is the
  *   gate most worth having: `UploadTelemetry.publish` in this repo went from
  *   1.4 µs to 1.13 ms between 1 and 128 events per tick because it pruned with
@@ -35,7 +36,8 @@
  * the typical figure, timed against a reference so it holds on any host (see
  * `perfBudget.ts`): a write path three times slower trips it on every host,
  * and a slow or busy runner does not. A figure over its ceiling is logged as
- * over rather than failed, and its budget keeps it from getting worse.
+ * over rather than failed, and its budget keeps it from getting worse. The
+ * worst tick is held to its ceiling directly as well, on the Linux runner.
  *
  * ## The floor comparison is pinned to a tick shape
  *
@@ -378,11 +380,12 @@ function makeRig(chunks: number, calls?: { count: number }) {
     }
     const enqueuedAtMs = performance.now();
     recorder.notePlanEnqueue(enqueuedAtMs);
+    const dispatchedAtMs = performance.now();
 
     for (let i = 0; i < chunks; i++) {
       const src = sources[i];
       const tier = src.lane === "coarse" ? 1 : 0;
-      const handle = recorder.beginChunkRow(src, tier, enqueuedAtMs);
+      const handle = recorder.beginChunkRow(src, tier, enqueuedAtMs, dispatchedAtMs);
       handles[i] = handle;
       label.rid = i;
       recorder.labelRow(handle, label);
@@ -403,7 +406,8 @@ function makeRig(chunks: number, calls?: { count: number }) {
   /**
    * The worst-case tick the ceiling is sized for: one `cpuCache.submit()`
    * admitting the whole burst, with nothing downstream of dispatch on this
-   * tick.
+   * tick. The scheduler's drain reads the clock once for every request it
+   * starts, so the drive does too.
    */
   function burstTick(): void {
     recorder.markPlanStart();
@@ -415,9 +419,10 @@ function makeRig(chunks: number, calls?: { count: number }) {
     }
     const enqueuedAtMs = performance.now();
     recorder.notePlanEnqueue(enqueuedAtMs);
+    const dispatchedAtMs = performance.now();
     for (let i = 0; i < chunks; i++) {
       const src = sources[i];
-      recorder.beginChunkRow(src, src.lane === "coarse" ? 1 : 0, enqueuedAtMs);
+      recorder.beginChunkRow(src, src.lane === "coarse" ? 1 : 0, enqueuedAtMs, dispatchedAtMs);
     }
     recorder.commitTick();
   }
@@ -462,10 +467,11 @@ function makeRig(chunks: number, calls?: { count: number }) {
     }
     const enqueuedAtMs = performance.now();
     recorder.notePlanEnqueue(enqueuedAtMs);
+    const dispatchedAtMs = performance.now();
 
     for (let i = 0; i < MATCHED_TICK.rowsBorn; i++) {
       const src = sources[born++ % sources.length];
-      push(0, recorder.beginChunkRow(src, src.lane === "coarse" ? 1 : 0, enqueuedAtMs));
+      push(0, recorder.beginChunkRow(src, src.lane === "coarse" ? 1 : 0, enqueuedAtMs, dispatchedAtMs));
     }
     for (let i = 0; i < MATCHED_TICK.wiresClosed; i++) {
       const handle = take(0);
@@ -670,7 +676,7 @@ describe("recorder cost contract", () => {
     );
   });
 
-  it("holds a row birth and the largest measured burst inside their budgets, logged against the ceilings", () => {
+  it("holds a row birth and the largest measured burst inside their budgets, and the burst under its ceiling", () => {
     // This ceiling comes from one number: the largest burst measured is
     // 2,943 chunk requests inside one `cpuCache.submit()`, and at
     // 100 ns an event that is 294 µs. So the tick being measured is the
@@ -707,6 +713,13 @@ describe("recorder cost contract", () => {
     );
 
     expectWithinBudget("worst-case tick", burst.timing, WORST_TICK_BUDGET_US);
+    // Linux is the gating host; the Windows runner reads this tick about 1.5x slower, so there the budget gates alone.
+    if (process.platform === "linux") {
+      expect(
+        burst.timing.nominalUs,
+        `the worst tick, ${burst.timing.nominalUs.toFixed(1)} nominal µs against the ${WORST_TICK_CEILING_US} µs ceiling`,
+      ).toBeLessThan(WORST_TICK_CEILING_US);
+    }
   });
 
   it("holds one run inside the observability floor the teardown must not raise", () => {

@@ -41,6 +41,7 @@ interface StartCall {
   estimatedBytes: number;
   key: string;
   admittedAtMs: number | undefined;
+  startedAtMs: number;
 }
 
 function makeScheduler(opts?: {
@@ -56,8 +57,9 @@ function makeScheduler(opts?: {
     estimatedBytes: number,
     key: string,
     admittedAtMs: number | undefined,
+    startedAtMs: number,
   ) => {
-    startCalls.push({ req: r, controller, estimatedBytes, key, admittedAtMs });
+    startCalls.push({ req: r, controller, estimatedBytes, key, admittedAtMs, startedAtMs });
   };
   const scheduler = new Scheduler<TestRequest>(
     {
@@ -144,6 +146,13 @@ describe("Scheduler.enqueue + drain", () => {
     scheduler.enqueue([req({ chunkKey: "a" })], 1_000);
     scheduler.drain(() => 0, 1_050);
     expect(startCalls[0].admittedAtMs).toBe(1_000);
+  });
+
+  it("hands every request one drain starts the drain's one clock reading", () => {
+    const { scheduler, startCalls } = makeScheduler();
+    scheduler.enqueue([req({ chunkKey: "a" }), req({ chunkKey: "b" }), req({ chunkKey: "c" })], 1_000);
+    scheduler.drain(() => 0, 1_050);
+    expect(startCalls.map((call) => call.startedAtMs)).toEqual([1_050, 1_050, 1_050]);
   });
 
   it("dates a backlog entry from its promotion into the window", () => {

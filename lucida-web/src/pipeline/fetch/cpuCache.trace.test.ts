@@ -426,3 +426,32 @@ describe("per-level residency", () => {
     expect(cache.levelResidency().inFlight[3]).toBe(1);
   });
 });
+
+describe("lifecycle rows", () => {
+  beforeEach(() => {
+    traceRecorder.reset();
+    traceRecorder.setEnvironment(null);
+  });
+
+  it("dates the rows one drain dispatches by the drain's one clock reading", async () => {
+    // Every read moves the clock, so rows that each read it would differ.
+    let clock = 1_000;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 1));
+    try {
+      openRun();
+      // Two slots: the first drain starts two rows, and the third goes out
+      // with the drain a completion runs.
+      const { cache } = createCache(64, { maxConcurrentFetches: 2 });
+      cache.submit(makePlan([0, 1, 2].map((x) => makeRequest({ x }))));
+      await flush();
+
+      const rows = traceRecorder.exportDocument().runs[0].rows;
+      const dispatched = rows.map((row) => row.phases.queue!.endUs);
+      expect(dispatched).toHaveLength(3);
+      expect(dispatched[1]).toBe(dispatched[0]);
+      expect(dispatched[2]).toBeGreaterThan(dispatched[0]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+});

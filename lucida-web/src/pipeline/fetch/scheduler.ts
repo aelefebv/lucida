@@ -69,6 +69,10 @@ export interface SchedulerDump<Req extends SchedulableRequest> {
  * admission window, or `undefined` when it went straight from the backlog to
  * in-flight — the queue wait a caller can attribute, rather than one it has
  * to reconstruct from a map the scheduler deliberately does not keep.
+ *
+ * `startedAtMs` is the drain's one clock reading, the same for every request
+ * that drain starts. A drain starts its requests in one synchronous loop, so
+ * a reading per request would only measure the loop.
  */
 export type StartFn<Req extends SchedulableRequest> = (
   req: Req,
@@ -76,6 +80,7 @@ export type StartFn<Req extends SchedulableRequest> = (
   estimatedBytes: number,
   key: string,
   admittedAtMs: number | undefined,
+  startedAtMs: number,
 ) => void;
 
 export class Scheduler<Req extends SchedulableRequest> {
@@ -256,7 +261,7 @@ export class Scheduler<Req extends SchedulableRequest> {
       const admittedAtMs = this.enqueuedAt.get(key);
       this.enqueuedAt.delete(key);
       const estimate = estimateBytes(req);
-      this.startInFlight(req, key, estimate, admittedAtMs);
+      this.startInFlight(req, key, estimate, admittedAtMs, now);
       this.promoteIntoWindow(now);
     }
 
@@ -312,7 +317,8 @@ export class Scheduler<Req extends SchedulableRequest> {
     req: Req,
     key: string,
     estimate: number,
-    admittedAtMs?: number,
+    admittedAtMs: number | undefined,
+    startedAtMs: number,
   ): void {
     const controller = new AbortController();
     const entry: InFlightEntry<Req> = {
@@ -322,7 +328,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     };
     this.inFlightBytesCounter += estimate;
     this.inFlight.set(key, entry);
-    this.startFn(req, controller, estimate, key, admittedAtMs);
+    this.startFn(req, controller, estimate, key, admittedAtMs, startedAtMs);
   }
 
   /** No-op if the key was cancelled between fetch start and response. */

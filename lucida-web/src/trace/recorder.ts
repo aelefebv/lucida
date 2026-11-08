@@ -841,19 +841,30 @@ export class TraceRecorder {
    * queue from the newest, so queue time is a floor, not a total. With no
    * pass in the ring the plan slot stays unset, which reads as "not
    * measured" rather than as zero.
+   *
+   * `dispatchedAtMs` is the one clock reading of the loop that dispatched the
+   * row, shared by every row of its burst. A burst is dispatched in one
+   * synchronous loop, so readings per row would differ only by the loop's
+   * own work, and at thousands of rows the clock reads alone would take
+   * most of the tick's ceiling. Without it the row reads the clock itself.
    */
-  beginChunkRow(src: ChunkRowSource, tier: 0 | 1, admittedAtMs?: number): number {
+  beginChunkRow(
+    src: ChunkRowSource,
+    tier: 0 | 1,
+    admittedAtMs?: number,
+    dispatchedAtMs?: number,
+  ): number {
     const run = this.intervalForRecording();
     if (!run) {
       this.countRefusedRow();
       return -1;
     }
 
-    // One clock read for both boundaries: the moment the request goes out is
-    // the moment the queue ends, so reading the clock twice would open a gap
-    // between two halves of the same boundary.
-    const dispatchedAtMs = this.now();
-    const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedAtMs;
+    // One reading for both boundaries: the moment the request goes out is
+    // the moment the queue ends, so two readings would open a gap between
+    // two halves of the same boundary.
+    const dispatchedMs = dispatchedAtMs ?? this.now();
+    const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedMs;
     const admission = this.admission;
     if (
       admission.atMs !== admittedMs ||
@@ -867,7 +878,7 @@ export class TraceRecorder {
       tier,
       admission.planStartUs,
       admission.queueStartUs,
-      this.offsetUs(run, dispatchedAtMs),
+      this.offsetUs(run, dispatchedMs),
     );
     if (index < 0) return -1;
     return run.generation * GENERATION_STRIDE + index;
@@ -955,12 +966,16 @@ export class TraceRecorder {
    * the previous frame has been drawn.
    */
   noteFrameDispatched(): void {
-    this.noteFramesDrawn();
-    const drawn = this.awaitingDrawn;
-
     const resident = this.awaitingResident;
-    for (let i = 0; i < resident.length; i++) {
-      this.stamp(resident[i], PRESENT_START);
+    const drawn = this.awaitingDrawn;
+    // One reading for every row on both lists: they all change state at this
+    // one dispatch, and a reading per row would only time this loop.
+    if (resident.length > 0 || drawn.length > 0) {
+      const atMs = this.now();
+      this.closeDrawn(atMs);
+      for (let i = 0; i < resident.length; i++) {
+        this.stampAt(resident[i], PRESENT_START, atMs);
+      }
     }
     // Swap rather than reallocate: the drained list becomes the next
     // frame's pending list.
@@ -975,9 +990,14 @@ export class TraceRecorder {
    * nothing more.
    */
   noteFramesDrawn(): void {
+    if (this.awaitingDrawn.length > 0) this.closeDrawn(this.now());
+  }
+
+  /** Close `present` on every row the previous frame drew, at one reading. */
+  private closeDrawn(atMs: number): void {
     const drawn = this.awaitingDrawn;
     for (let i = 0; i < drawn.length; i++) {
-      this.stamp(drawn[i], PRESENT_END);
+      this.stampAt(drawn[i], PRESENT_END, atMs);
       this.finishRow(drawn[i], COMPLETE);
     }
     drawn.length = 0;
@@ -1185,6 +1205,13 @@ export class TraceRecorder {
     const run = this.resolve(handle);
     if (!run) return;
     run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run, this.now()));
+  }
+
+  /** {@link stamp} at a reading the caller took, for rows that share one. */
+  private stampAt(handle: number, boundary: number, atMs: number): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run, atMs));
   }
 
   /**

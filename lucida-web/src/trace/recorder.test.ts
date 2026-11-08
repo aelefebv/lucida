@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 
+import { lookupChunk } from "./diagnose/chunkLookup.ts";
 import { diagnoseRun } from "./diagnose/diagnose.ts";
 import { TraceRecorder } from "./recorder.ts";
 import { noopSinkFactory } from "./sink.ts";
@@ -570,6 +571,36 @@ describe("TraceRecorder plan and queue", () => {
     expect(second.phases.plan).toEqual({ startUs: 0, endUs: 20_000, durationUs: 20_000 });
   });
 
+  it("dates every row of a burst by the one reading it was dispatched at", () => {
+    let clock = 1_000;
+    let reads = 0;
+    const { recorder } = makeRecorder({
+      now: () => {
+        reads += 1;
+        return clock;
+      },
+    });
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();          // t = 1_000
+    clock = 1_010;
+    recorder.notePlanEnqueue(1_010);
+
+    reads = 0;
+    for (let x = 0; x < 3; x++) {
+      clock += 1;                      // the loop's own work, which no row sees
+      recorder.beginChunkRow({ ...CHUNK, x }, 0, 1_010, 1_011);
+    }
+    expect(reads).toBe(0);
+    recorder.closeRun("explicit");
+
+    const rows = recorder.exportDocument().runs[0].rows;
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.phases.plan).toEqual({ startUs: 0, endUs: 10_000, durationUs: 10_000 });
+      expect(row.phases.queue).toEqual({ startUs: 10_000, endUs: 11_000, durationUs: 1_000 });
+    }
+  });
+
   it("falls back to the last enqueue for a row admitted straight off the backlog", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
@@ -629,6 +660,39 @@ describe("TraceRecorder upload and present", () => {
     expect(serialised.outcome).toBe("complete");
   });
 
+  it("stamps every row a frame covers at one reading", () => {
+    // Every read moves the clock, so rows stamped at separate reads differ.
+    let clock = 1_000;
+    const { recorder } = makeRecorder({ now: () => (clock += 1) });
+    recorder.openRun(OPEN_CAUSE);
+    const handOff = (xs: number[]) =>
+      xs.map((x) => {
+        const row = recorder.beginChunkRow({ ...CHUNK, x }, 0);
+        recorder.stamp(row, Boundary.UploadStart);
+        recorder.noteHandedToRenderer(row);
+        return row;
+      });
+
+    handOff([0, 1, 2]);
+    recorder.noteFrameDispatched();    // the first three resident
+    handOff([3, 4, 5]);
+    recorder.noteFrameDispatched();    // the first three drawn, the next three resident
+    recorder.noteFramesDrawn();        // the next three drawn
+    recorder.closeRun("explicit");
+
+    const rows = recorder.exportDocument().runs[0].rows;
+    const first = rows.slice(0, 3).map((row) => row.phases.present!);
+    const second = rows.slice(3).map((row) => row.phases.present!);
+    expect(new Set(first.map((present) => present.startUs)).size).toBe(1);
+    expect(new Set(first.map((present) => present.endUs)).size).toBe(1);
+    expect(new Set(second.map((present) => present.startUs)).size).toBe(1);
+    expect(new Set(second.map((present) => present.endUs)).size).toBe(1);
+    // One dispatch drew the first frame's rows and made the next ones resident.
+    expect(second[0].startUs).toBe(first[0].endUs);
+    expect(second[0].endUs).toBeGreaterThan(second[0].startUs);
+    expect(rows.every((row) => row.outcome === "complete")).toBe(true);
+  });
+
   it("leaves a chunk that never reached a frame in flight rather than complete", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
@@ -642,6 +706,76 @@ describe("TraceRecorder upload and present", () => {
     expect(serialised.phases.upload).toBeUndefined();
     expect(serialised.phases.present).toBeUndefined();
     expect(serialised.outcome).toBe("in-flight");
+  });
+});
+
+describe("a burst whose rows share one dispatch reading", () => {
+  /**
+   * Plan ends and four rows are admitted at 10 ms. A drain at 12 ms dispatches
+   * them at its one reading. A fifth, admitted with them, waits for a slot and
+   * goes out with the next drain at 50 ms. The fetches land and draw at
+   * separate times.
+   */
+  function burstRun() {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();          // t = 1_000
+    advance(10);
+    recorder.notePlanEnqueue(1_010);
+    advance(2);
+    const rows = [0, 1, 2, 3].map((x) => recorder.beginChunkRow({ ...CHUNK, x }, 0, 1_010, 1_012));
+    advance(38);
+    rows.push(recorder.beginChunkRow({ ...CHUNK, x: 4 }, 0, 1_010, 1_050));
+    for (const row of rows) {
+      advance(7);
+      recorder.noteBytesReceived(row, 4_096);
+      advance(1);
+      recorder.stamp(row, Boundary.UploadStart);
+      recorder.noteHandedToRenderer(row);
+      recorder.noteFrameDispatched();
+    }
+    advance(16);
+    recorder.noteFramesDrawn();
+    return recorder;
+  }
+
+  it("ranks the burst's rows as dispatched together, and the row that waited as overtaken by them", () => {
+    const recorder = burstRun();
+    const live = recorder.lookupChunkLive({ ...CHUNK, x: 1 })!;
+    recorder.closeRun("explicit");
+    const run = recorder.exportDocument().runs[0];
+
+    expect(new Set(run.rows.slice(0, 4).map((row) => row.phases.wire!.startUs))).toEqual(new Set([12_000]));
+    for (let x = 0; x < 4; x++) {
+      const [row] = lookupChunk(run, `member-1/1/0/0/0/2/${x}`, "test").rows;
+      expect(row.queue).toEqual({ aheadAtAdmission: 0, overtaken: 0, waitedMs: 2, dispatched: true });
+    }
+    const [waited] = lookupChunk(run, "member-1/1/0/0/0/2/4", "test").rows;
+    expect(waited.queue).toEqual({ aheadAtAdmission: 0, overtaken: 4, waitedMs: 40, dispatched: true });
+    // The hover inspector reads the open interval through the same function.
+    expect(live.rows[0].queue).toEqual({ aheadAtAdmission: 0, overtaken: 0, waitedMs: 2, dispatched: true });
+  });
+
+  it("diagnoses to a chain on the last row drawn, with every figure finite", () => {
+    const recorder = burstRun();
+    recorder.closeRun("quiescent");
+    const run = recorder.exportDocument().runs[0];
+    const document = diagnoseRun(run);
+
+    expect(document.criticalPath.kind).toBe("chain");
+    expect(document.criticalPath.segments.find((segment) => segment.label === "browser.wire")?.chunkKey)
+      .toBe("1/0/0/0/2/4");
+    // A division by a zero spread prints as a word in the text, and as null
+    // or a non-finite number in a field, so both are checked.
+    expect(JSON.stringify(document)).not.toMatch(/NaN|Infinity/);
+    for (const chart of document.timeline.charts) {
+      for (const series of chart.series) {
+        if (!series.recorded) continue;
+        for (const value of series.values) {
+          if (value !== null) expect(Number.isFinite(value)).toBe(true);
+        }
+      }
+    }
   });
 });
 
