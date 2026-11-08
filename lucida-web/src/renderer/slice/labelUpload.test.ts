@@ -146,10 +146,11 @@ describe("handleLabelSliceChunkData", () => {
     expect(writes).toHaveLength(0);
     // Refused, so the page does not count the plane as resident.
     expect(ctx.post).toHaveBeenCalledWith({
-      type: "chunksEvicted",
+      type: "chunkResidency",
       memberId: "img-0:label:region-b",
-      keys: [],
-      skipped: ["0/0/0/0/0/0"],
+      tier: "detail",
+      change: "refused",
+      keys: ["0/0/0/0/0/0"],
       reason: "atlas-policy",
     });
   });
@@ -172,7 +173,7 @@ describe("handleLabelSliceChunkData", () => {
     const allocations = (ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect((ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(allocations);
-    expect(ctx.post).toHaveBeenLastCalledWith(expect.objectContaining({ skipped: ["0/0/0/0/0/0"] }));
+    expect(ctx.post).toHaveBeenLastCalledWith(expect.objectContaining({ change: "refused", keys: ["0/0/0/0/0/0"] }));
     clearGpuErrorReports(ctx);
   });
 

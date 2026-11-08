@@ -3,11 +3,11 @@
  * methods (`volumeRenderMultiPass`, `minimap*`, etc.) are left out on purpose.
  */
 import type {
-  ChunkFeedbackReason,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
+  ChunkResidencyMessage,
   ViewHotStateMessage,
   MissingChunk,
   MissingProxy,
@@ -15,16 +15,8 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
-/**
- * Worker `chunksEvicted` callback. `memberId` is the worker-side member
- * id: single-channel `imageId` or multi-channel `imageId:chN`.
- */
-export type ChunksEvictedHandler = (
-  memberId: string,
-  evicted: string[],
-  skipped: string[],
-  reason?: ChunkFeedbackReason,
-) => void;
+/** Worker `chunkResidency` callback. */
+export type ChunkResidencyHandler = (msg: ChunkResidencyMessage) => void;
 
 export type WantedSetHandler = (
   datasetId: string,
@@ -191,6 +183,6 @@ export interface UploadClient {
 
   removeLayerResources(datasetId: string): void;
 
-  onChunksEvicted: ChunksEvictedHandler | null;
+  onChunkResidency: ChunkResidencyHandler | null;
   onWantedSetDelta: WantedSetHandler | null;
 }

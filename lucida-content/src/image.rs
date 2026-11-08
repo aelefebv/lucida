@@ -160,8 +160,23 @@ pub enum DataType {
     Uint8,
     Uint16,
     Uint32,
+    Int8,
+    Int16,
+    Int32,
     Float32,
     Float64,
+}
+
+impl DataType {
+    /// Bytes one sample takes in a decoded chunk.
+    pub fn size_bytes(self) -> usize {
+        match self {
+            DataType::Uint8 | DataType::Int8 => 1,
+            DataType::Uint16 | DataType::Int16 => 2,
+            DataType::Uint32 | DataType::Int32 | DataType::Float32 => 4,
+            DataType::Float64 => 8,
+        }
+    }
 }
 
 #[cfg(test)]

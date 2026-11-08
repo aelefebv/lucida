@@ -25,6 +25,7 @@ export function applyColdStateSelection(
   cold.currentZ = msg.currentZ;
   cold.visibleRegion = msg.visibleRegion;
   cold.desiredProxyKeys = msg.desiredProxyKeys;
+  cold.wantedChunks = msg.wantedChunks;
   cold.epochs = msg.epochs;
 
   ctx.state.currentColdState = cold;

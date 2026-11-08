@@ -76,8 +76,8 @@ export interface LayerInfo {
   channels: LayerChannel[];
   /** Continuous auto-contrast: every channel keeps fitting its loaded data. */
   autoContrast: boolean;
-  /** The data type's largest value. */
-  fullRangeMax: number;
+  /** Every value the data type holds, or `null` for a float type. */
+  valueRange: readonly [number, number] | null;
   /** Whether values are whole numbers. */
   integerData: boolean;
   blendMode: string;
@@ -407,7 +407,7 @@ function SingleChannel({ layer, ...props }: LayerRowProps) {
         contrastMax={channel.contrastMax}
         gamma={channel.gamma}
         dataRange={channel.dataRange}
-        fullRangeMax={layer.fullRangeMax}
+        valueRange={layer.valueRange}
         integer={layer.integerData}
         fullRange={fullRange}
         onFullRangeChange={setFullRange}
@@ -547,7 +547,7 @@ function ChannelRow(props: LayerRowProps & { channel: LayerChannel; channelIndex
             contrastMax={channel.contrastMax}
             gamma={channel.gamma}
             dataRange={channel.dataRange}
-            fullRangeMax={layer.fullRangeMax}
+            valueRange={layer.valueRange}
             integer={layer.integerData}
             fullRange={fullRange}
             onFullRangeChange={setFullRange}

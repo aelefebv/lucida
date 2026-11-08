@@ -36,6 +36,7 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
   return {
     datasetId: "ds-0",
     texture: {} as GPUTexture,
+    format: "u16",
     indirectionBuf: {} as GPUBuffer,
     indirectionData: new Uint32Array([0]),
     slots: new Map(),

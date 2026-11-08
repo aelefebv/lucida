@@ -43,7 +43,9 @@ export interface HudBox {
 
 /**
  * What the strip paints with, as CSS colors. The strip is a floating card,
- * so it follows the UI theme, not the canvas background.
+ * so it follows the UI theme, not the canvas background, and its series
+ * take the theme's chart slots, not the overlay's canvas variants: they are
+ * drawn on the card.
  */
 export interface HudColors {
   background: string;
