@@ -350,7 +350,11 @@ import { Bridge, type BridgeHandlers, type PresenceState } from "./bridge.ts";
 import { WasmScene } from "lucida-core";
 import { SessionController } from "./sessionController.ts";
 import { getSceneSettings } from "./tickCommon.ts";
-import { getWorkspaceUserState, updateWorkspaceLastView } from "./workspaceApi.ts";
+import {
+  getWorkspaceUserState,
+  listWorkspaceSavedViews,
+  updateWorkspaceLastView,
+} from "./workspaceApi.ts";
 import {
   __resetPreferencesForTesting,
   developerToolsPreference,
@@ -924,6 +928,101 @@ describe("App wiring: following after a restore", () => {
     expect(followerScene.view.z).toBe(2);
     expect(followerScene.order).toEqual(["wds-2", "wds-1"]);
     expect(followerScene.opacity["wds-2"]).toBe(0.25);
+  });
+});
+
+describe("App wiring: a navigation ends a follow", () => {
+  const leader = {
+    client_id: 7,
+    camera: { mode: "slice", center: [0, 0], zoom: 1 },
+    view: { z_range: { start: 3, end: 4 }, t: 0, c: 0 },
+    display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+    following: null,
+    cursor: null,
+    dataset_order: [],
+    dataset_settings: {},
+    identity: { display_name: "Ada Lovelace" },
+  };
+  const savedView = {
+    v: 1,
+    datasets: [],
+    active_layouts: {},
+    camera: { mode: "slice", center: [6, 2], zoom: 3, viewport: [800, 600] },
+    view: { z_range: { start: 1, end: 2 }, t: 0 },
+    display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+    dataset_order: ["wds-1"],
+    dataset_settings: {
+      "wds-1": {
+        visible: true,
+        opacity: 1,
+        contrast_min: 0,
+        contrast_max: 65535,
+        gamma: 1,
+        blend_mode: "alpha",
+      },
+    },
+  };
+
+  async function following() {
+    const { bridge, scene } = await mountWithSnapshot(documentJson(["wds-1"]), [leader]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Follow Ada Lovelace" }));
+    });
+    expect(scene.view.z).toBe(3);
+    return { bridge, scene };
+  }
+
+  /** The leader moves on: the view this client chose must stay. */
+  async function leaderMoves(bridge: { handlers: BridgeHandlers }) {
+    await act(async () => {
+      bridge.handlers.onPresenceUpdate?.(7, leader.camera, { z_range: { start: 2, end: 3 }, t: 0 }, leader.display);
+    });
+  }
+
+  it("opening a saved view stops following", async () => {
+    vi.mocked(listWorkspaceSavedViews).mockResolvedValue([{
+      id: "sv-1",
+      workspace_id: "ws-1",
+      name: "Second plane",
+      created_by: "me@example.com",
+      created_by_name: "Me",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      visibility: "shared",
+      view: savedView,
+    }] as never);
+    const { bridge, scene } = await following();
+
+    fireEvent.click(screen.getByRole("button", { name: "Saved views" }));
+    await act(async () => {
+      fireEvent.click(await screen.findByText("Second plane"));
+    });
+
+    await waitFor(() => expect(scene.view.z).toBe(1));
+    expect(bridge.sendFollow).toHaveBeenLastCalledWith(null);
+    expect(screen.getByRole("button", { name: "Follow Ada Lovelace" })).toBeTruthy();
+    await leaderMoves(bridge);
+    expect(scene.view.z).toBe(1);
+  });
+
+  it("going Home in Explore stops following", async () => {
+    const { bridge, scene } = await following();
+    const home = { ...savedView, view: { z_range: { start: 0, end: 1 }, t: 0 } };
+    (scene as unknown as { explore: () => string }).explore = () => JSON.stringify({
+      v: 1,
+      current: { handle: "here", view: savedView },
+      cells: [{ handle: "home", transform: "home", label: "Home", view: home }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Explore" }));
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId("explore-home"));
+    });
+
+    await waitFor(() => expect(scene.view.z).toBe(0));
+    expect(bridge.sendFollow).toHaveBeenLastCalledWith(null);
+    await leaderMoves(bridge);
+    expect(scene.view.z).toBe(0);
   });
 });
 
