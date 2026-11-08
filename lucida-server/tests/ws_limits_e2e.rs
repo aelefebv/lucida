@@ -224,7 +224,11 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let rig = start_server().await;
     let mut client = connect(rig.addr).await;
     next_message(&mut client).await;
-    send(&mut client, &ClientMessage::WatchSubscribe).await;
+    send(
+        &mut client,
+        &ClientMessage::WatchSubscribe { history: false },
+    )
+    .await;
 
     // Publish to ourselves without reading: each item comes back on this
     // client's own queue. Twice the budget is far past what the socket
