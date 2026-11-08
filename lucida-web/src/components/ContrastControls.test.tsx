@@ -13,7 +13,7 @@ function renderControls(overrides: Partial<Parameters<typeof ContrastControls>[0
     contrastMax: 3000,
     gamma: 1,
     dataRange: { min: 50, max: 4000 } as { min: number; max: number } | null,
-    fullRangeMax: 65535,
+    valueRange: [0, 65535] as readonly [number, number] | null,
     integer: true,
     fullRange: false,
     onFullRangeChange: vi.fn(),
@@ -95,10 +95,15 @@ describe("ContrastControls auto", () => {
 
 describe("contrast bounds", () => {
   it("spans the loaded data, or the whole range, and always holds the limits", () => {
-    expect(contrastBounds(100, 3000, { min: 50, max: 4000 }, 65535, false)).toEqual([50, 4000]);
-    expect(contrastBounds(100, 3000, { min: 50, max: 4000 }, 65535, true)).toEqual([0, 65535]);
-    expect(contrastBounds(0, 65535, { min: 50, max: 4000 }, 65535, false)).toEqual([0, 65535]);
-    expect(contrastBounds(10, 20, null, 255, false)).toEqual([0, 255]);
+    expect(contrastBounds(100, 3000, { min: 50, max: 4000 }, [0, 65535], false)).toEqual([50, 4000]);
+    expect(contrastBounds(100, 3000, { min: 50, max: 4000 }, [0, 65535], true)).toEqual([0, 65535]);
+    expect(contrastBounds(0, 65535, { min: 50, max: 4000 }, [0, 65535], false)).toEqual([0, 65535]);
+    expect(contrastBounds(10, 20, null, [0, 255], false)).toEqual([0, 255]);
+    expect(contrastBounds(-5, 20, null, [-32768, 32767], true)).toEqual([-32768, 32767]);
+    // A float type spans its loaded data, or its limits before any loads.
+    expect(contrastBounds(0, 100, { min: -5, max: 500 }, null, false)).toEqual([-5, 500]);
+    expect(contrastBounds(0, 100, { min: -5, max: 500 }, null, true)).toEqual([-5, 500]);
+    expect(contrastBounds(-2, 7.5, null, null, false)).toEqual([-2, 7.5]);
   });
 
   it("moves whichever limit the user did not set", () => {

@@ -36,10 +36,10 @@ use lucida_content::{
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
-    BookmarkAction, ChunkMessage, ClientMessage, PeerIdentity, PresenceState, ServerMessage,
-    ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
-    ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem, WatchLevelRange,
-    WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
+    BookmarkAction, ChunkMessage, ClientMessage, CommandRejection, PeerIdentity, PresenceState,
+    ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint,
+    ViewerInterestLane, ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem,
+    WatchLevelRange, WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
 };
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
@@ -239,6 +239,7 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::WatchHistoryEnd { .. } => &["session/server_watch_history_end.json"],
         ServerMessage::ReportSent { .. } => &["session/server_report_sent.json"],
         ServerMessage::ReportFailed { .. } => &["session/server_report_failed.json"],
+        ServerMessage::CommandRejected { .. } => &["session/server_command_rejected.json"],
     }
 }
 
@@ -389,7 +390,7 @@ fn enum_vocabulary() -> EnumVocabulary {
         annotation_kinds: vocab!(AnnotationKind::{ Point, Line, Box }),
         axis_kinds: vocab!(AxisKind::{ Time, Channel, Space }),
         entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
-        data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Float32, Float64 }),
+        data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Int8, Int16, Int32, Float32, Float64 }),
         positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
         proxy_kinds: vocab!(ProxyKind::{ GroupProxy3D, TileProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
@@ -401,8 +402,8 @@ fn enum_vocabulary() -> EnumVocabulary {
             SourceNotAllowed,
             LocalPath,
             MissingObject, Permission, CloudConfiguration, Http, StorageBackend,
-            UnsupportedCodec, UnsupportedLayout, MalformedMetadata, MissingMetadata, Import,
-            Persistence, Internal,
+            UnsupportedCodec, UnsupportedLayout, UnsupportedDataType, MalformedMetadata,
+            MissingMetadata, Import, Persistence, Internal,
         }),
         dataset_health_statuses: vocab!(DatasetHealthStatus::{ Healthy, Degraded, Unavailable }),
         generated_chunk_statuses: vocab!(GeneratedChunkStatus::{
@@ -1864,6 +1865,13 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 error: "the bundle carries no header".into(),
             },
             req("", &["/type", "/request_id", "/error"]),
+        ),
+        (
+            "session/server_command_rejected.json",
+            ServerMessage::CommandRejected {
+                reason: CommandRejection::Unavailable,
+            },
+            req("", &["/type", "/reason"]),
         ),
     ]
 }

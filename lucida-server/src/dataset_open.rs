@@ -590,7 +590,6 @@ pub async fn open_dataset(
             ..GeneratedSchedulingConfig::default()
         },
     ));
-    generated_service.start();
     let proxy_generator = Arc::new(ProxyGenerator::new(
         proxy_cache.clone(),
         cached.clone(),
@@ -621,91 +620,81 @@ pub async fn open_dataset(
     // Build DatasetOpened command (manifest + fetch, no server-private state).
     let command = DocumentCommand::DatasetOpened(dataset_opened);
 
-    // Apply command and register server binding. Re-check the binding
-    // presence under the lock in case a concurrent open raced ahead.
-    let (seq, document) = {
-        let mut sess = ctx.session.lock().await;
-        if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, canonical_url, workspace_scoped)
-        {
-            // Lost the race: another open completed the import. Drop our
-            // duplicate binding/command and rebroadcast the canonical one.
-            // Re-stamp the opener with the current requester: the binding's
-            // stored copy holds whoever first opened it (or None for a
-            // server-side restore), but the client that just requested this
-            // open is the one whose camera should auto-fit when the
-            // rebroadcast reaches it.
-            existing.opener_client_id = Some(opener);
-            let seq = sess.seq;
-            drop(sess);
-            let broadcast_msg = ServerMessage::CommandBroadcast {
-                seq,
-                command: DocumentCommand::DatasetOpened(existing),
-            };
-            let opened = match &broadcast_msg {
-                ServerMessage::CommandBroadcast {
-                    command: DocumentCommand::DatasetOpened(opened),
-                    ..
-                } => opened.clone(),
-                _ => unreachable!("constructed above"),
-            };
-            emit(
-                progress,
-                open_progress(
-                    DatasetOpenStage::BindingBuild,
-                    "reusing binding from concurrent dataset open",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    None,
-                ),
-            );
-            emit(
-                progress,
-                open_progress(
-                    DatasetOpenStage::Broadcast,
-                    "broadcasting existing dataset to workspace clients",
-                    Some(existing_dataset_id.clone()),
-                    Some(dataset_source_id.clone()),
-                    Some(format!("seq: {seq}")),
-                ),
-            );
-            let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
-                sender: u64::MAX,
-                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-                ack_json: String::new(),
-            });
-            tracing::info!(
-                dataset_id = %existing_dataset_id,
-                dataset_source_id = %dataset_source_id,
-                "open_remote_dataset.lost_race"
-            );
-            let diagnostic = open_success(canonical_url, &opened, Some(dataset_source_id.clone()));
-            return Ok(DatasetOpenOutcome::Opened {
-                seq,
-                opened: Box::new(opened),
-                diagnostic,
-            });
-        }
-        let seq = sess.apply(command.clone());
-        if !generated_initial_delta.levels.is_empty() {
-            sess.apply_generated_availability_delta(
-                dataset_id_key.clone(),
-                generated_initial_delta.clone(),
-            );
-        }
-        sess.record_binding_source(
-            dataset_id_key.clone(),
-            canonical_url.to_string(),
-            Some(dataset_source_id.clone()),
-            name.clone(),
-        );
-        sess.clear_binding_restore_failure(&dataset_id_key);
-        sess.server_bindings.insert(dataset_id_key.clone(), binding);
-        let document = sess.document.clone();
-        (seq, document)
+    // Re-check the binding in case a concurrent open raced ahead, then
+    // apply the command and register the binding. In a workspace the
+    // document turn holds from that check through the broadcast, and the
+    // command is persisted before it is applied, so a refused write leaves
+    // the session as it was. The legacy session persists nothing and does
+    // it all under the session lock.
+    let turn = match ctx.workspace.as_ref() {
+        Some(scope) => Some(scope.live.document_turn().await),
+        None => None,
     };
-
-    if ctx.workspace.is_some() {
+    let mut sess = ctx.session.lock().await;
+    if let Some((existing_dataset_id, mut existing)) =
+        find_loaded_binding(&sess, &dataset_id_key, canonical_url, workspace_scoped)
+    {
+        // Lost the race: another open completed the import. Drop our
+        // duplicate binding/command and rebroadcast the canonical one.
+        // Re-stamp the opener with the current requester: the binding's
+        // stored copy holds whoever first opened it (or None for a
+        // server-side restore), but the client that just requested this
+        // open is the one whose camera should auto-fit when the
+        // rebroadcast reaches it.
+        existing.opener_client_id = Some(opener);
+        let seq = sess.seq;
+        drop(sess);
+        let broadcast_msg = ServerMessage::CommandBroadcast {
+            seq,
+            command: DocumentCommand::DatasetOpened(existing),
+        };
+        let opened = match &broadcast_msg {
+            ServerMessage::CommandBroadcast {
+                command: DocumentCommand::DatasetOpened(opened),
+                ..
+            } => opened.clone(),
+            _ => unreachable!("constructed above"),
+        };
+        emit(
+            progress,
+            open_progress(
+                DatasetOpenStage::BindingBuild,
+                "reusing binding from concurrent dataset open",
+                Some(existing_dataset_id.clone()),
+                Some(dataset_source_id.clone()),
+                None,
+            ),
+        );
+        emit(
+            progress,
+            open_progress(
+                DatasetOpenStage::Broadcast,
+                "broadcasting existing dataset to workspace clients",
+                Some(existing_dataset_id.clone()),
+                Some(dataset_source_id.clone()),
+                Some(format!("seq: {seq}")),
+            ),
+        );
+        let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
+            sender: u64::MAX,
+            broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+            ack_json: String::new(),
+        });
+        tracing::info!(
+            dataset_id = %existing_dataset_id,
+            dataset_source_id = %dataset_source_id,
+            "open_remote_dataset.lost_race"
+        );
+        let diagnostic = open_success(canonical_url, &opened, Some(dataset_source_id.clone()));
+        return Ok(DatasetOpenOutcome::Opened {
+            seq,
+            opened: Box::new(opened),
+            diagnostic,
+        });
+    }
+    let seq = if let Some(scope) = ctx.workspace.as_ref() {
+        let (seq, document) = sess.next(&command);
+        drop(sess);
         emit(
             progress,
             open_progress(
@@ -716,10 +705,7 @@ pub async fn open_dataset(
                 Some(format!("seq: {seq}")),
             ),
         );
-    }
-
-    if let Some(scope) = ctx.workspace.as_ref()
-        && let Err(e) = scope
+        if let Err(e) = scope
             .manager
             .persist_dataset_opened(
                 &scope.live,
@@ -732,25 +718,23 @@ pub async fn open_dataset(
                 &document,
             )
             .await
-    {
-        tracing::error!(
-            client_id = %opener,
-            workspace_id = %scope.live.workspace_id,
-            dataset_id = %dataset_id,
-            dataset_source_id = %dataset_source_id,
-            error = %e,
-            "open_remote_dataset.persist_failed"
-        );
-        return Err(open_failure(
-            DatasetOpenStage::WorkspacePersist,
-            DatasetOpenFailureKind::Persistence,
-            true,
-            "workspace persistence failed",
-            Some(e.to_string()),
-        ));
-    }
-
-    if ctx.workspace.is_some() {
+        {
+            tracing::error!(
+                client_id = %opener,
+                workspace_id = %scope.live.workspace_id,
+                dataset_id = %dataset_id,
+                dataset_source_id = %dataset_source_id,
+                error = %e,
+                "open_remote_dataset.persist_failed"
+            );
+            return Err(open_failure(
+                DatasetOpenStage::WorkspacePersist,
+                DatasetOpenFailureKind::Persistence,
+                true,
+                "workspace persistence failed",
+                Some(e.to_string()),
+            ));
+        }
         emit(
             progress,
             open_progress(
@@ -761,7 +745,28 @@ pub async fn open_dataset(
                 Some(format!("seq: {seq}")),
             ),
         );
+        sess = ctx.session.lock().await;
+        sess.commit(seq, command.clone(), document);
+        seq
+    } else {
+        sess.apply(command.clone())
+    };
+    if !generated_initial_delta.levels.is_empty() {
+        sess.apply_generated_availability_delta(
+            dataset_id_key.clone(),
+            generated_initial_delta.clone(),
+        );
     }
+    sess.record_binding_source(
+        dataset_id_key.clone(),
+        canonical_url.to_string(),
+        Some(dataset_source_id.clone()),
+        name.clone(),
+    );
+    sess.clear_binding_restore_failure(&dataset_id_key);
+    sess.server_bindings.insert(dataset_id_key.clone(), binding);
+    drop(sess);
+    generated_service.start();
 
     // Broadcast to ALL clients including the requester.
     // Use u64::MAX as sender so no client matches — everyone gets the
@@ -799,6 +804,7 @@ pub async fn open_dataset(
             json: serde_json::to_string(&msg).unwrap(),
         });
     }
+    drop(turn);
 
     tracing::info!(
         dataset_id = %dataset_id,
@@ -1334,6 +1340,128 @@ mod tests {
         assert_eq!(sess.server_bindings.len(), 1, "no duplicate binding");
         assert_eq!(sess.document.manifests.len(), 1, "no duplicate manifest");
         assert_eq!(sess.seq, 1, "exactly one DatasetOpened was applied");
+    }
+
+    /// An open context inside a fresh workspace, opened by its owner, and
+    /// the pool behind its store so a test can make writes fail.
+    async fn workspace_context(root: &Path) -> (DatasetOpenContext, sqlx::SqlitePool) {
+        use crate::workspace::{SqliteWorkspaceStore, WorkspaceStore};
+
+        let pool = crate::storage::test_support::sqlite_pool().await;
+        let store = Arc::new(SqliteWorkspaceStore::new(pool.clone()));
+        let owner = AuthPrincipal {
+            email: "owner@example.com".into(),
+            display_name: "Owner".into(),
+            picture_url: None,
+            is_admin: false,
+        };
+        let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
+        let base = test_context(root);
+        let manager = Arc::new(WorkspaceManager::new(store, base.proxy_config.clone()));
+        let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+        let ctx = DatasetOpenContext {
+            session: live.session.clone(),
+            tx: live.tx.clone(),
+            proxy_config: base.proxy_config,
+            source_policy: base.source_policy,
+            workspace: Some(WorkspaceScope {
+                live,
+                manager,
+                principal: owner,
+            }),
+        };
+        (ctx, pool)
+    }
+
+    async fn stored_seq(ctx: &DatasetOpenContext) -> u64 {
+        let scope = ctx.workspace.as_ref().unwrap();
+        let store = scope.manager.store();
+        let stored = store.get_workspace(&scope.live.workspace_id).await;
+        stored.unwrap().unwrap().seq
+    }
+
+    #[tokio::test]
+    async fn a_refused_workspace_open_leaves_the_session_as_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("tiny.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = location(&data_dir);
+        let (ctx, pool) = workspace_context(tmp.path()).await;
+        let mut peer = ctx.tx.subscribe();
+        let (progress, _progress_rx) = mpsc::unbounded_channel();
+
+        sqlx::query(
+            "CREATE TRIGGER refuse_document_writes BEFORE UPDATE OF document_json \
+             ON workspaces BEGIN SELECT RAISE(ABORT, 'document writes refused'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let err = open_dataset(1, &url, &ctx, &progress)
+            .await
+            .expect_err("a refused write fails the open");
+        assert_eq!(err.stage, DatasetOpenStage::WorkspacePersist);
+        {
+            let sess = ctx.session.lock().await;
+            assert_eq!(sess.seq, 0);
+            assert!(sess.document.manifests.is_empty());
+            assert!(sess.server_bindings.is_empty());
+        }
+        assert_eq!(stored_seq(&ctx).await, 0);
+        assert!(peer.try_recv().is_err(), "no peer heard of the dataset");
+
+        sqlx::query("DROP TRIGGER refuse_document_writes")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let DatasetOpenOutcome::Opened { seq, .. } = open_dataset(1, &url, &ctx, &progress)
+            .await
+            .expect("the open succeeds once writes do")
+        else {
+            panic!("the open must complete");
+        };
+        assert_eq!(seq, 1);
+        assert_eq!(stored_seq(&ctx).await, 1);
+        assert_eq!(ctx.session.lock().await.server_bindings.len(), 1);
+    }
+
+    /// The document turn holds from the lost-race check through the
+    /// broadcast, so the second of two concurrent workspace opens finds the
+    /// first one's binding instead of storing a second dataset.
+    #[tokio::test]
+    async fn concurrent_workspace_opens_of_one_url_store_one_dataset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("tiny.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = location(&data_dir);
+        let (ctx, _pool) = workspace_context(tmp.path()).await;
+        let (p1, _r1) = mpsc::unbounded_channel();
+        let (p2, _r2) = mpsc::unbounded_channel();
+
+        let (a, b) = tokio::join!(
+            open_dataset(1, &url, &ctx, &p1),
+            open_dataset(2, &url, &ctx, &p2),
+        );
+        a.expect("open a");
+        b.expect("open b");
+
+        {
+            let sess = ctx.session.lock().await;
+            assert_eq!(sess.seq, 1);
+            assert_eq!(sess.document.manifests.len(), 1);
+            assert_eq!(sess.server_bindings.len(), 1);
+        }
+        assert_eq!(stored_seq(&ctx).await, 1);
+        let scope = ctx.workspace.as_ref().unwrap();
+        let sources = scope
+            .manager
+            .store()
+            .list_dataset_sources(&scope.live.workspace_id)
+            .await
+            .unwrap();
+        assert_eq!(sources.len(), 1);
     }
 
     /// The import step reads only metadata, so a metadata-only fixture is

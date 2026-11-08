@@ -180,6 +180,7 @@ function makeCold(
     desiredProxyKeys: opts?.desiredProxyKeys,
     activeSet,
     viewMode: opts?.viewMode ?? "volume",
+    sampleFormat: "u16",
   };
 }
 

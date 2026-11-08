@@ -1,4 +1,6 @@
-// Decompress (Raw / LZ4 / Zstd), then normalize to GPU-ready u16.
+// Decompress (Raw / LZ4 / Zstd), then lay samples out for upload: uint8,
+// uint16 and uint32 as they are, every other numeric type as float32 values
+// (see `dataTypeUtil.ts`).
 
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 
@@ -87,10 +89,41 @@ function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | P
   return bytes; // Raw
 }
 
+/** The float32 NaN every decoded NaN becomes. */
+const CANONICAL_NAN_BITS = 0x7fc00000;
+
+/**
+ * Rewrite every NaN as one bit pattern. A float texel holds the value's bits,
+ * and one NaN pattern, all ones, is the shader's sentinel for "nothing
+ * resident", which would hand the sample to a coarser level.
+ */
+function canonicalizeNaN(values: Float32Array): void {
+  const bits = new Uint32Array(values.buffer, values.byteOffset, values.length);
+  for (let i = 0; i < bits.length; i++) {
+    if ((bits[i] & 0x7fffffff) > 0x7f800000) bits[i] = CANONICAL_NAN_BITS;
+  }
+}
+
+function asFloat32(
+  buf: ArrayBuffer,
+  dataType: string,
+  Source: Float64ArrayConstructor | Int8ArrayConstructor | Int16ArrayConstructor | Int32ArrayConstructor,
+): ArrayBuffer {
+  const width = Source.BYTES_PER_ELEMENT;
+  if (buf.byteLength % width !== 0) {
+    throw new Error(`${dataType} buffer byteLength ${buf.byteLength} is not a multiple of ${width}`);
+  }
+  const values = Float32Array.from(new Source(buf));
+  canonicalizeNaN(values);
+  return values.buffer;
+}
+
 function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
   switch (dataType.toLowerCase()) {
     case "uint8":
       // Conversion to u16 happens at GPU upload to avoid doubling memory here.
+      return buf;
+    case "uint16":
       return buf;
     case "uint32":
       // Label ids are kept at full 32-bit width and uploaded to an
@@ -107,19 +140,21 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
       if (buf.byteLength % 4 !== 0) {
         throw new Error(`float32 buffer byteLength ${buf.byteLength} is not a multiple of 4`);
       }
-      const src = new Float32Array(buf);
-      const dst = new Uint16Array(src.length);
-      for (let i = 0; i < src.length; i++) {
-        const value = src[i];
-        dst[i] = Number.isFinite(value)
-          ? Math.round(Math.min(1, Math.max(0, value)) * 65535)
-          : 0;
-      }
-      return dst.buffer;
-    }
-    case "uint16":
-    default:
+      canonicalizeNaN(new Float32Array(buf));
       return buf;
+    }
+    // Float32 holds every int8 and int16 exactly; float64 and int32 round
+    // to the nearest float32, the precision the viewer draws them at.
+    case "float64":
+      return asFloat32(buf, dataType, Float64Array);
+    case "int8":
+      return asFloat32(buf, dataType, Int8Array);
+    case "int16":
+      return asFloat32(buf, dataType, Int16Array);
+    case "int32":
+      return asFloat32(buf, dataType, Int32Array);
+    default:
+      throw new Error(`unsupported data type: ${dataType}`);
   }
 }
 

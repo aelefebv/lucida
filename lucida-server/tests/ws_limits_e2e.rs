@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
-use lucida_core::protocol::{ClientMessage, ServerMessage, WatchItem};
+use lucida_core::protocol::{ClientMessage, CommandRejection, ServerMessage, WatchItem};
 use lucida_protocol::DatasetOpenFailureKind;
 use lucida_server::connection::{
     CLOSE_TOO_FAR_BEHIND, MAX_INBOUND_MESSAGE_BYTES, OUTBOUND_BUDGET_BYTES, limit_inbound,
@@ -302,17 +302,28 @@ async fn the_legacy_session_refuses_document_commands_and_dataset_opens() {
     )
     .await;
 
-    match next_message(&mut client).await {
-        ServerMessage::OpenDatasetFailed {
-            request_id,
-            diagnostic: Some(diagnostic),
-            ..
-        } => {
-            assert_eq!(request_id, "open-1");
-            assert_eq!(diagnostic.kind, DatasetOpenFailureKind::Authorization);
+    // The refusal of the command and of the open travel on different
+    // queues, so either may arrive first.
+    let (mut command_refused, mut open_refused) = (false, false);
+    for _ in 0..2 {
+        match next_message(&mut client).await {
+            ServerMessage::CommandRejected { reason } => {
+                assert_eq!(reason, CommandRejection::Forbidden);
+                command_refused = true;
+            }
+            ServerMessage::OpenDatasetFailed {
+                request_id,
+                diagnostic: Some(diagnostic),
+                ..
+            } => {
+                assert_eq!(request_id, "open-1");
+                assert_eq!(diagnostic.kind, DatasetOpenFailureKind::Authorization);
+                open_refused = true;
+            }
+            other => panic!("expected both to be refused, got {other:?}"),
         }
-        other => panic!("expected the open to be refused, got {other:?}"),
     }
+    assert!(command_refused && open_refused);
     assert!(
         next_message_within(&mut client, Duration::from_millis(300))
             .await

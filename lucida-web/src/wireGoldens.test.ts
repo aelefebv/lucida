@@ -39,7 +39,7 @@ import {
   type FetchSourceWire,
   type LayoutSpec,
 } from "./manifestTypes.ts";
-import { dtypeMax } from "./types.ts";
+import { dtypeRange } from "./types.ts";
 import { makeTick } from "./trace/diagnose/fixtures.ts";
 import {
   CLIENT_MESSAGE_TYPES,
@@ -974,6 +974,18 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(handlers.onAck).toHaveBeenCalledWith(44);
   });
 
+  it("command_rejected names the reason and asks for a snapshot", () => {
+    const raw = fixtureRaw("session/server_command_rejected.json");
+    COVERED_FIXTURES.add("session/server_command_rejected.json");
+    expect(JSON.parse(raw)).toStrictEqual({ type: "command_rejected", reason: "unavailable" });
+
+    const onCommandRejected = vi.fn();
+    const { ws } = openBridge({ onCommandRejected });
+    deliver(ws, raw);
+    expect(onCommandRejected).toHaveBeenCalledWith("unavailable");
+    expect(lastSent(ws)).toStrictEqual({ type: "request_snapshot" });
+  });
+
   it("peer_joined carries a presence with nothing reported", () => {
     const raw = fixtureRaw("session/server_peer_joined.json");
     COVERED_FIXTURES.add("session/server_peer_joined.json");
@@ -1820,7 +1832,7 @@ describe("wire goldens: dataset-open payloads", () => {
     const proxied = "Proxied" in opened.fetch ? opened.fetch.Proxied : null;
     expect(proxied).not.toBeNull();
     expect(extractDataType(proxied!.images[0].wire_format)).toBe("Uint16");
-    expect(dtypeMax(extractDataType(proxied!.images[0].wire_format))).toBe(65535);
+    expect(dtypeRange(extractDataType(proxied!.images[0].wire_format))).toEqual([0, 65535]);
     expect(extractDataType(proxied!.images[1].wire_format)).toBe("Uint32");
   });
 
@@ -2044,7 +2056,7 @@ describe("wire goldens: enum vocabulary", () => {
       annotation_kinds: annotationKinds,
       axis_kinds: ["Time", "Channel", "Space"],
       entity_kinds: entityKinds,
-      data_types: ["Uint8", "Uint16", "Uint32", "Float32", "Float64"],
+      data_types: ["Uint8", "Uint16", "Uint32", "Int8", "Int16", "Int32", "Float32", "Float64"],
       positioning_modes: ["Explicit", "Derived"],
       proxy_kinds: proxyKinds,
       dataset_open_stages: openStages,
@@ -2064,6 +2076,7 @@ describe("wire goldens: enum vocabulary", () => {
         "storage_backend",
         "unsupported_codec",
         "unsupported_layout",
+        "unsupported_data_type",
         "malformed_metadata",
         "missing_metadata",
         "import",

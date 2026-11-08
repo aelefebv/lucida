@@ -150,6 +150,7 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
     },
     activeSet: [tile(`${datasetId}-img`, 2)],
     viewMode: "volume",
+    sampleFormat: "u16",
     ...opts,
   };
 }

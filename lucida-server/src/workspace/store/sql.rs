@@ -65,7 +65,11 @@ pub(crate) const TOUCH_WORKSPACE: &str = r#"
     WHERE id = $2
 "#;
 
-/// The document and its sequence number, written together.
+/// The document and its sequence number, written together, and only over
+/// an older one. Without the guard, two writes that reach the database out
+/// of order would leave the older document standing. No row changed means
+/// the write was refused; the caller turns that into
+/// `StoreError::StaleDocument`.
 ///
 /// `seq` is `BIGINT` in both baselines and the trait takes a `u64`, so a
 /// sequence past the range of a 32-bit integer is an ordinary value here
@@ -73,7 +77,7 @@ pub(crate) const TOUCH_WORKSPACE: &str = r#"
 pub(crate) const PERSIST_DOCUMENT: &str = r#"
     UPDATE workspaces
     SET seq = $1, document_json = $2, updated_at = $3
-    WHERE id = $4
+    WHERE id = $4 AND seq < $5
 "#;
 
 pub(crate) const SET_DEFAULT_SAVED_VIEW: &str = r#"

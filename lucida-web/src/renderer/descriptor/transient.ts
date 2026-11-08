@@ -28,6 +28,7 @@ import {
   OFFSET_GROUP_PROXY_DIMS,
   OFFSET_GROUP_PROXY_POOL_INDEX,
   OFFSET_GROUP_PROXY_SLOT_INDEX,
+  OFFSET_SAMPLE_FORMAT,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
   SOURCE_OFFSET_INDIRECTION_OFFSET,
@@ -37,6 +38,7 @@ import {
   SOURCE_OFFSET_VALID,
   levelSourceOffset,
 } from "./layout.ts";
+import { sampleFormatCode, type SampleFormat } from "../dataTypeUtil.ts";
 
 export interface TransientDescriptorParams {
   modelMatrix: Float32Array;
@@ -53,6 +55,8 @@ export interface TransientDescriptorParams {
   colormapMode?: number;
   /** Overlay opacity used in categorical mode (default `1`). */
   labelOpacity?: number;
+  /** How the bound texture holds samples (default `u16`). */
+  sampleFormat?: SampleFormat;
   /**
    * The level's chunk grid, `[X, Y, Z]` like `volumeDims`, so the shader
    * walks a slot-grid atlas via its indirection buffer. When absent the level
@@ -102,6 +106,7 @@ export function serializeTransientDescriptor(
   f32[OFFSET_OPACITY / 4]      = params.opacity;
   u32[OFFSET_COLORMAP_MODE / 4] = (params.colormapMode ?? 0) >>> 0;
   f32[OFFSET_LABEL_OPACITY / 4] = params.labelOpacity ?? 1;
+  u32[OFFSET_SAMPLE_FORMAT / 4] = sampleFormatCode(params.sampleFormat ?? "u16");
 
   u32[OFFSET_LEVEL_SOURCE_COUNT / 4] = 1;
 

@@ -49,7 +49,7 @@ fn source_level_fits(
         return false;
     }
 
-    let bytes_per_voxel = data_type_size(data_type);
+    let bytes_per_voxel = data_type.size_bytes() as u64;
     if checked_product(&[z, y, x, bytes_per_voxel])
         .is_none_or(|bytes| bytes > config.max_decoded_bytes_per_tc)
     {
@@ -75,15 +75,6 @@ fn checked_product(values: &[u64]) -> Option<u64> {
     values
         .iter()
         .try_fold(1_u64, |acc, value| acc.checked_mul(*value))
-}
-
-fn data_type_size(data_type: DataType) -> u64 {
-    match data_type {
-        DataType::Uint8 => 1,
-        DataType::Uint16 => 2,
-        DataType::Uint32 | DataType::Float32 => 4,
-        DataType::Float64 => 8,
-    }
 }
 
 #[cfg(test)]
