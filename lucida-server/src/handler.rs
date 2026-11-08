@@ -840,7 +840,7 @@ async fn handle_client_inner(
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
                                     tokio::spawn(async move {
                                         generated_service
-                                            .enqueue_chunk_request(&image_id, level, &key)
+                                            .enqueue_chunk_request(id, &image_id, level, &key)
                                             .await;
                                         serve_generated_chunk_request(
                                             id,
