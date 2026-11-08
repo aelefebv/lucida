@@ -44,12 +44,6 @@ interface Params {
   // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
   initLayerMaps: (id: string) => void;
-  // From useDimensions (called before)
-  setZ: React.Dispatch<React.SetStateAction<number>>;
-  setC: React.Dispatch<React.SetStateAction<number>>;
-  setT: React.Dispatch<React.SetStateAction<number>>;
-  setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
-  setMultiChannel: React.Dispatch<React.SetStateAction<boolean>>;
   // Lifted state (from App)
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
   bumpDatasetsVersion: () => void;
@@ -124,13 +118,6 @@ export function useBridge(params: Params) {
       bumpLayerSettingsVersion: () => portsRef.current.bumpLayerSettingsVersion(),
       initLayerMaps: (id) => portsRef.current.initLayerMaps(id),
       setSelectedDatasetId: (id) => portsRef.current.setSelectedDatasetId(id),
-      viewState: {
-        setZ: (v) => portsRef.current.setZ(v),
-        setC: (v) => portsRef.current.setC(v),
-        setT: (v) => portsRef.current.setT(v),
-        setViewMode: (mode) => portsRef.current.setViewMode(mode),
-        setMultiChannel: (multi) => portsRef.current.setMultiChannel(multi),
-      },
       events: {
         onConnectedChanged: setConnected,
         onSessionReadyChanged: setSessionReady,

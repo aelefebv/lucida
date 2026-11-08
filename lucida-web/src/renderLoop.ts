@@ -118,11 +118,6 @@ export class RenderLoop implements TraceEnvironment {
   /** Track previous multi_channel state to detect transitions and clean up. */
   private prevMultiChannel = false;
 
-  // Slice-specific params
-  private sliceZ = 0;
-  private sliceT = 0;
-  private sliceC = 0;
-
   constructor(opts: RenderLoopOptions) {
     this.session = opts.session;
     this.datasets = new Map();
@@ -521,15 +516,6 @@ export class RenderLoop implements TraceEnvironment {
     resetVolumeState(this.volumeState);
   }
 
-  setSliceParams(z: number, t: number, c: number): void {
-    if (z !== this.sliceZ || t !== this.sliceT || c !== this.sliceC) {
-      this.sliceZ = z;
-      this.sliceT = t;
-      this.sliceC = c;
-      this.setDirty("interactive", "slice_params");
-    }
-  }
-
   setRenderScale(s: number): void {
     this._renderScale = s;
     this.setDirty("interactive", "render_scale");
@@ -685,7 +671,7 @@ export class RenderLoop implements TraceEnvironment {
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.tickCoordinator, this.uploader, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickSlice(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender)) {
         this.setDirty("residency", "tick_slice_continuation");
       }
     } else {
@@ -710,7 +696,7 @@ export class RenderLoop implements TraceEnvironment {
     }
 
     if (tickMinimapOverview(ctx, this.minimapState, now)) this.setDirty("residency", "minimap_overview_continuation");
-    if (shouldRender) tickMinimap(ctx, this.minimapState, this.sliceZ);
+    if (shouldRender) tickMinimap(ctx, this.minimapState, ctx.scene.z());
 
     // If work remains (budget exhausted or chunks pending), schedule another frame
     this.scheduleIfNeeded();
