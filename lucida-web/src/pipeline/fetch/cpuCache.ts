@@ -460,13 +460,15 @@ export class CpuCache {
         burstLogger: burstBackpressure,
       },
       (req) => this.inFlightKey(req),
-      (req, controller, _estimate, key, admittedAtMs) => {
+      (req, controller, _estimate, key, admittedAtMs, startedAtMs) => {
         const startedEpochs = { ...this.currentEpochs };
         this.rememberInFlightChunk(key, req, startedEpochs);
         // `fetchAndDecode` handles fetch and decode failures itself (retry,
         // failure records, streak); anything escaping here is an unexpected
         // pipeline error, so log it.
-        this.fetchAndDecode(req, controller, key, 0, startedEpochs, false, admittedAtMs).catch((err: unknown) => {
+        this.fetchAndDecode(
+          req, controller, key, 0, startedEpochs, false, admittedAtMs, startedAtMs,
+        ).catch((err: unknown) => {
           console.warn("[CpuCache] unexpected chunk pipeline error:", err);
         });
       },
@@ -1507,6 +1509,7 @@ export class CpuCache {
     startedEpochs: SceneEpochs = { ...this.currentEpochs },
     fedStreak = false,
     admittedAtMs?: number,
+    dispatchedAtMs?: number,
   ): Promise<void> {
     // One row per fetch attempt, so an in-fetch retry retires its row and the
     // next attempt opens a fresh one rather than overwriting its timings.
@@ -1515,8 +1518,13 @@ export class CpuCache {
     // one call closes both and starts `wire`. This runs thousands of times in
     // one submit, and three calls would triple the event count the
     // recorder's tick budget allows.
+    //
+    // It is dated by the drain's one clock reading: the drain starts its
+    // whole burst in one synchronous loop, so a reading per row would measure
+    // only that loop, at a clock read per row. A retry starts outside any
+    // drain and passes none, so its row reads the clock itself.
     const rowTier = req.tier === "coarse" ? 1 : 0;
-    const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs);
+    const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs, dispatchedAtMs);
 
     let result: FetchResult;
     try {
