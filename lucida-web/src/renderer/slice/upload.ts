@@ -19,12 +19,12 @@ import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint16Slice, asUint32Slice } from "../dataTypeUtil.ts";
 import { makeCompositeKey } from "../chunkKeys.ts";
-import { postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
+import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
 import { mayEvict } from "../eviction.ts";
 import { sliceLevelZ } from "../slicePlane.ts";
 import { wantedChunksFor } from "../wantedChunks.ts";
 import { cameraUVForMember, chunkDistSq2D, findEvictionSlot2D } from "./eviction.ts";
-import { getOrCreateLabelSlicePool } from "./atlas.ts";
+import { getOrCreateLabelSlicePool, type SliceAtlasState } from "./atlas.ts";
 
 /**
  * Write pre-sliced uint32 label planes into the member's r32uint label pool.
@@ -42,7 +42,11 @@ export function handleLabelSliceChunkData(
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
   const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
-  if (!pool) return;
+  if (!pool) {
+    // Nothing of the batch is resident, so the page must not count it as sent.
+    postChunkResidency(ctx, memberId, LABEL_TIER, "refused", msg.chunks.map(c => c.key), "atlas-policy");
+    return;
+  }
 
   for (const chunk of msg.chunks) {
     const xOff = chunk.x * chunkX;
@@ -126,80 +130,92 @@ export function handleSliceChunkData(
   let intensityChanged = false;
   const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
   const batch = new ResidencyBatch();
+  let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
-    const compositeKey = makeCompositeKey(memberId, chunk.key);
+    let claimed = -1;
+    try {
+      const compositeKey = makeCompositeKey(memberId, chunk.key);
 
-    const existingSlot = atlas.slots.get(compositeKey);
-    if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) {
-      batch.held.push(chunk.key);
-      continue;
-    }
-    if (!wanted?.has(chunk.key)) {
-      batch.refuse(chunk.key, "unwanted");
-      continue;
-    }
-    // The planner's keys and this cut map Z through one function, so a wanted
-    // chunk holds the plane unless the sender's Z is not the cold state's.
-    if (chunk.z !== targetChunkZ) {
-      batch.refuse(chunk.key, "wrong-slice");
-      continue;
-    }
-
-    const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
-    if (!isU8 && chunk.data.byteLength % 2 !== 0) {
-      throw new Error(
-        `slice chunk ${chunk.key}: byteLength ${chunk.data.byteLength} is not a multiple of 2 ` +
-        `(server likely returned a compressed or wrong-shape chunk)`,
-      );
-    }
-    const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
-    const r = sampleIntensityRange(rawView, perChunkSamples);
-    if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
-    if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
-
-    let slotIndex: number;
-    if (existingSlot !== undefined) {
-      slotIndex = existingSlot;
-    } else if (atlas.freeSlots.length > 0) {
-      slotIndex = atlas.freeSlots.pop()!;
-    } else {
-      const victim = findEvictionSlot2D(ctx.state, atlas, tier);
-      const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cameraUVForMember(ctx.state, memberId));
-      if (!victim || !mayEvict(victim, incomingDist)) {
-        batch.refuse(chunk.key, "atlas-policy");
+      const existingSlot = atlas.slots.get(compositeKey);
+      if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) {
+        batch.held.push(chunk.key);
         continue;
       }
-      slotIndex = atlas.slots.get(victim.key)!;
-      atlas.slots.delete(victim.key);
-      batch.evicted.push(victim.key);
-      const oldGridIdx = atlas.slotGridIdx[slotIndex];
-      if (oldGridIdx >= 0) {
-        atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+      if (!wanted?.has(chunk.key)) {
+        batch.refuse(chunk.key, "unwanted");
+        continue;
       }
+      // The planner's keys and this cut map Z through one function, so a wanted
+      // chunk holds the plane unless the sender's Z is not the cold state's.
+      if (chunk.z !== targetChunkZ) {
+        batch.refuse(chunk.key, "wrong-slice");
+        continue;
+      }
+
+      const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
+      if (!isU8 && chunk.data.byteLength % 2 !== 0) {
+        throw new Error(
+          `slice chunk ${chunk.key}: byteLength ${chunk.data.byteLength} is not a multiple of 2 ` +
+          `(server likely returned a compressed or wrong-shape chunk)`,
+        );
+      }
+      const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
+      const r = sampleIntensityRange(rawView, perChunkSamples);
+      if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
+      if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
+
+      let slotIndex: number;
+      if (existingSlot !== undefined) {
+        slotIndex = existingSlot;
+      } else if (atlas.freeSlots.length > 0) {
+        slotIndex = atlas.freeSlots.pop()!;
+      } else {
+        const victim = findEvictionSlot2D(ctx.state, atlas, tier);
+        const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cameraUVForMember(ctx.state, memberId));
+        if (!victim || !mayEvict(victim, incomingDist)) {
+          batch.refuse(chunk.key, "atlas-policy");
+          continue;
+        }
+        slotIndex = atlas.slots.get(victim.key)!;
+        atlas.slots.delete(victim.key);
+        batch.evicted.push(victim.key);
+        const oldGridIdx = atlas.slotGridIdx[slotIndex];
+        if (oldGridIdx >= 0) {
+          atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+        }
+      }
+      if (existingSlot === undefined) claimed = slotIndex;
+
+      const sx = slotIndex % atlas.slotsX;
+      const sy = Math.floor(slotIndex / atlas.slotsX);
+      const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
+      const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
+      const sliceOffset = localZ * chunkY * chunkX;
+      const sliceData = asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
+
+      const xOff = sx * chunkX;
+      const yOff = sy * chunkY;
+      writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
+
+      const [, , lodGridX] = lodMeta.gridDims;
+      const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;
+      if (globalIdx < atlas.indirectionData.length) {
+        atlas.indirectionData[globalIdx] = slotIndex;
+        atlas.slotGridIdx[slotIndex] = globalIdx;
+      }
+      atlas.slots.set(compositeKey, slotIndex);
+      atlas.slotLevelZ[slotIndex] = levelZ;
+      atlas.indirectionDirty = true;
+      batch.held.push(chunk.key);
+    } catch (err) {
+      // A chunk that throws goes back to the page to be sent again, and the
+      // rest of the batch still lands.
+      failure ??= err;
+      batch.refuse(chunk.key, "upload-failed");
+      // A slot taken for a chunk that never landed would hold nothing for good.
+      if (claimed >= 0) releaseSlot(atlas, claimed);
     }
-
-    const sx = slotIndex % atlas.slotsX;
-    const sy = Math.floor(slotIndex / atlas.slotsX);
-    const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
-    const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
-    const sliceOffset = localZ * chunkY * chunkX;
-    const sliceData = asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
-
-    const xOff = sx * chunkX;
-    const yOff = sy * chunkY;
-    writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
-
-    const [, , lodGridX] = lodMeta.gridDims;
-    const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;
-    if (globalIdx < atlas.indirectionData.length) {
-      atlas.indirectionData[globalIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = globalIdx;
-    }
-    atlas.slots.set(compositeKey, slotIndex);
-    atlas.slotLevelZ[slotIndex] = levelZ;
-    atlas.indirectionDirty = true;
-    batch.held.push(chunk.key);
   }
 
   batch.post(ctx, memberId, tier);
@@ -208,4 +224,11 @@ export function handleSliceChunkData(
   if (intensityChanged) {
     ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
   }
+  if (failure !== null) throw failure;
+}
+
+function releaseSlot(atlas: SliceAtlasState, slot: number): void {
+  atlas.slotGridIdx[slot] = -1;
+  atlas.slotLevelZ[slot] = -1;
+  atlas.freeSlots.push(slot);
 }

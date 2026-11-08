@@ -74,6 +74,8 @@ function makeMockDevice(): GPUDevice {
   return {
     createTexture,
     createBuffer,
+    pushErrorScope: vi.fn(),
+    popErrorScope: vi.fn(() => Promise.resolve(null)),
     queue: { writeBuffer, writeTexture } as unknown as GPUQueue,
   } as unknown as GPUDevice;
 }

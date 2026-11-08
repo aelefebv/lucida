@@ -40,6 +40,8 @@ function makeCtx(
       return { destroy: vi.fn(), createView: vi.fn(() => ({})) };
     }),
     createBuffer: vi.fn(() => ({ destroy: vi.fn() })),
+    pushErrorScope: vi.fn(),
+    popErrorScope: vi.fn(() => Promise.resolve(null)),
     queue: {
       writeBuffer: vi.fn((buffer: unknown, _offset: number, data: ArrayBufferView) => {
         bufferWrites.push({ buffer, data: new Uint32Array((data as Uint32Array).slice()) });
@@ -63,7 +65,7 @@ function makeCtx(
       submit: vi.fn(),
     },
   } as unknown as GPUDevice;
-  return { device, state: createInitialState() } as unknown as WorkerCtx;
+  return { device, state: createInitialState(), post: vi.fn() } as unknown as WorkerCtx;
 }
 
 interface Dims {
@@ -266,6 +268,8 @@ describe("handleLabelVolumeChunkData", () => {
     expect(() => handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2))).not.toThrow();
     expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
     expect(writes).toHaveLength(0);
+    // Refused, so the page does not count the chunk as resident.
+    expect(ctx.post).toHaveBeenCalledWith(expect.objectContaining({ type: "chunkResidency", change: "refused", reason: "atlas-policy" }));
   });
 });
 

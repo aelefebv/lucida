@@ -11,6 +11,10 @@ import type { WorkerCtx } from "../workerContext.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
+import { allocateWatched } from "../worker/gpuErrors.ts";
+import { postSlotsLost } from "../chunkUploadFeedback.ts";
+import { chunkPoolTier } from "../poolKeys.ts";
+import { shrinkAtlasBudget } from "../../deviceBudget.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
@@ -256,7 +260,8 @@ export function computeLabelVolumeSizing(
  * unchanged, so a T scrub overwrites slots and the overlay never blanks.
  *
  * Returns `null` (and warns once) when the atlas can't be sized or allocated,
- * so the caller skips the label instead of throwing through the upload path.
+ * so the caller skips the label instead of throwing through the upload path,
+ * and for a size the device ran out of memory on.
  */
 export function getOrCreateLabelVolumePool(
   ctx: WorkerCtx,
@@ -291,6 +296,8 @@ export function getOrCreateLabelVolumePool(
   }
   if (existing) destroyLabelVolumePool(existing);
 
+  const sizeKey = `${memberId}|${w}x${h}x${d}`;
+  if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
   const limit = getDeviceLimits(ctx.device).maxTextureDimension3D;
 
   let sizing: LabelVolumeSizing;
@@ -298,7 +305,16 @@ export function getOrCreateLabelVolumePool(
   try {
     sizing = computeLabelVolumeSizing(w, h, d, cx, cy, cz, limit);
     const [texW, texH, texD] = sizing.textureSize;
-    texture = createEmptyVolumeTexture(ctx.device, texW, texH, texD, "r32uint");
+    texture = allocateWatched(
+      ctx,
+      () => createEmptyVolumeTexture(ctx.device, texW, texH, texD, "r32uint"),
+      (lost) => {
+        // A size that ran out of memory once would again on every delivery.
+        ctx.state.labelSizesOutOfMemory.add(sizeKey);
+        const pool = ctx.state.labelVolumePools.get(memberId);
+        if (pool?.texture === lost) removeLabelVolumePool(ctx, memberId);
+      },
+    );
   } catch (err) {
     if (!warnedLabelVolumeAlloc.has(memberId)) {
       warnedLabelVolumeAlloc.add(memberId);
@@ -577,9 +593,57 @@ export function getOrCreateVolumePool(
     return existing;
   }
   if (existing) destroyAtlas(existing);
-  const newAtlas = createVolumeAtlas(ctx.device, datasetId, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c);
+  const newAtlas = createWatchedVolumeAtlas(ctx, poolKey, datasetId, chunkX, chunkY, chunkZ, t, c);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
+}
+
+function createWatchedVolumeAtlas(
+  ctx: WorkerCtx,
+  poolKey: string,
+  datasetId: string,
+  chunkX: number, chunkY: number, chunkZ: number,
+  t: number, c: number,
+): AtlasState {
+  return allocateWatched(
+    ctx,
+    () => createVolumeAtlas(ctx.device, datasetId, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c),
+    (lost) => replaceLostVolumeAtlas(ctx, poolKey, lost),
+  );
+}
+
+/** {@link growVolumeAtlas}, where a grow the device can't allocate loses the pool. */
+export function growVolumeAtlasWatched(ctx: WorkerCtx, poolKey: string, atlas: AtlasState): boolean {
+  return allocateWatched(
+    ctx,
+    () => growVolumeAtlas(ctx.device, atlas),
+    () => replaceLostVolumeAtlas(ctx, poolKey, atlas),
+  );
+}
+
+/**
+ * A pool whose texture the device could not allocate holds nothing and can't
+ * be bound. Its chunks go back to the page, and a pool with the same sections
+ * takes its place under half the budget. At the floor budget the pool is
+ * dropped, and the next cold state tries again.
+ */
+export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: AtlasState): void {
+  const atlases = ctx.state.volumeAtlases;
+  if (atlases.get(poolKey) !== lost) return;
+  postSlotsLost(ctx, chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
+  destroyAtlas(lost);
+  atlases.delete(poolKey);
+  if (shrinkAtlasBudget(ctx.state.atlasBudgets, "volumeAtlasBytes")) {
+    const atlas = createWatchedVolumeAtlas(
+      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.chunkZ, lost.t, lost.c,
+    );
+    atlas.entityMetas = lost.entityMetas;
+    resizeIndirection(ctx, atlas, lost.indirectionData.length);
+    atlas.indirectionData.fill(0xFFFFFFFF);
+    atlas.indirectionDirty = true;
+    atlases.set(poolKey, atlas);
+  }
+  ctx.postWantedSet(lost.datasetId);
 }
 
 /** Resize the indirection buffer to the sum of all entity LOD sections. */

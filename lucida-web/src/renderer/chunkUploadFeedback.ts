@@ -9,6 +9,9 @@ import type { ChunkFeedbackReason, ChunkResidencyChange } from "./workerProtocol
 import { parseCompositeKey } from "./chunkKeys.ts";
 import { chunkPoolTier } from "./poolKeys.ts";
 
+/** The tier label chunks are delivered under (`pipeline/planning/labelRequests.ts`); label messages carry none. */
+export const LABEL_TIER: ResidencyTier = "detail";
+
 export function postChunkResidency(
   ctx: WorkerCtx,
   memberId: string,

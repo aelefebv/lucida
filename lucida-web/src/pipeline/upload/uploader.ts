@@ -481,6 +481,12 @@ export class Uploader {
     return this.workerFeedback.handleWantedSetDelta(datasetId, missing, cpuCache);
   }
 
+  /** The worker rebuilt its pools empty on a new GPU device: send everything again, held chunks too. */
+  handleDeviceRestored(cpuCache: CpuCache): void {
+    cpuCache.forgetDelivered();
+    this.resendGuard.onRebuild();
+  }
+
   // Lifecycle (dataset removal, multi-channel transitions)
 
   clearMember(workerMemberId: string): void {

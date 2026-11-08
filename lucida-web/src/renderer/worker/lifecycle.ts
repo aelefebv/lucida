@@ -1,6 +1,6 @@
 /**
- * Worker teardown: one dataset's resources on `removeLayerResources`, and
- * every renderer-owned resource on `destroy`.
+ * Worker teardown: one dataset's resources on `removeLayerResources`, every
+ * GPU resource when the device is lost, and everything on `destroy`.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -8,9 +8,14 @@ import { destroyProxyAtlas } from "../proxyAtlas.ts";
 import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
 import { destroyAllSliceResources, removeSliceResources } from "../slice/index.ts";
 import { destroyAllVolumeResources, removeVolumeResources } from "../volume/index.ts";
-import { destroyAllMinimapResources, removeMinimapResources } from "../minimapHandlers.ts";
+import {
+  destroyAllMinimapResources,
+  releaseMinimapDeviceResources,
+  removeMinimapResources,
+} from "../minimapHandlers.ts";
 import { destroyAllResources } from "./resources.ts";
 import { clearFrameCaptures } from "./captureFrame.ts";
+import { clearGpuErrorReports } from "./gpuErrors.ts";
 
 /**
  * Free everything the worker holds for a removed dataset, or for one member
@@ -75,29 +80,42 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
  */
 export function handleDestroy(ctx: WorkerCtx): void {
   const state = ctx.state;
+  state.closing = true;
   state.currentEpochs = null;
   state.currentColdState = null;
   clearFrameCaptures(state);
+  clearGpuErrorReports(ctx);
   state.memberToDataset.clear();
   state.memberSourcePools.clear();
   state.targetLevelByMember.clear();
   state.currentSourcesByDataset.clear();
   state.wantedByDataset.clear();
+  state.groupToTiles.clear();
+  state.groupsByDataset.clear();
+  releaseDeviceResources(ctx);
+  destroyAllMinimapResources();
+  self.close();
+}
+
+/**
+ * Free every GPU resource the worker built on its device. What says where
+ * chunks go, the cold states and the routing maps, is kept, so a replacement
+ * device rebuilds the same pools empty.
+ */
+export function releaseDeviceResources(ctx: WorkerCtx): void {
+  const state = ctx.state;
   for (const dsPools of state.proxyPoolsByDataset.values()) {
     for (const pool of dsPools.values()) destroyProxyAtlas(pool);
   }
   state.proxyPoolsByDataset.clear();
   state.proxyDescriptorsByEntity.clear();
-  state.groupToTiles.clear();
-  state.groupsByDataset.clear();
   for (const desc of state.descriptorBuffersByDataset.values()) {
     destroyDescriptorBuffer(desc);
   }
   state.descriptorBuffersByDataset.clear();
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
-  destroyAllMinimapResources();
+  releaseMinimapDeviceResources();
   ctx.passTimer.destroy();
   destroyAllResources();
-  self.close();
 }
