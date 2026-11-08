@@ -689,7 +689,7 @@ describe("App wiring: the pipeline HUD", () => {
     // The HUD is code-split, so it mounts after the import resolves.
     expect(await screen.findByTestId("hud")).toBeTruthy();
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByLabelText("chunkGrid")).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "chunk grid" })).toBeTruthy();
 
     await act(async () => {
       fireEvent.keyDown(window, { key: "h" });

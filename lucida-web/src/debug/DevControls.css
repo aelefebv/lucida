@@ -82,39 +82,12 @@
 }
 
 .dev-controls-input {
-  box-sizing: border-box;
   width: 72px;
-  height: var(--lc-control-h-sm);
-  padding: 0 6px;
-  background: var(--lc-field-bg);
-  border: 1px solid var(--lc-border-strong);
-  border-radius: var(--lc-radius-sm);
-  color: var(--lc-text);
-  font-family: var(--lc-font-mono);
-  font-size: var(--lc-text-xs);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
 }
 
-.dev-controls-input:focus-visible {
-  outline: none;
-  border-color: var(--lc-focus-ring);
-  box-shadow: 0 0 0 1px var(--lc-focus-ring);
-}
-
-.dev-controls-input:disabled {
-  color: var(--lc-text-subtle);
-}
-
-/* Per-tunable row (label + slider + number + reset arrow). */
+/* Per-tunable row (slider + reset arrow). */
 .dev-controls-tunable-row {
   margin: var(--lc-space-1) 0 var(--lc-space-2);
-}
-
-.dev-controls-tunable-label {
-  display: block;
-  color: var(--lc-text);
-  margin-bottom: 2px;
 }
 
 .dev-controls-tunable-controls {
@@ -126,8 +99,6 @@
 .dev-controls-tunable-slider {
   flex: 1;
   min-width: 0;
-  margin: 0;
-  accent-color: var(--lc-accent);
 }
 
 /* Holds the reset arrow's width while it is hidden, so rows don't reflow

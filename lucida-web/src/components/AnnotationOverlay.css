@@ -89,16 +89,19 @@
   width: 16px;
   height: 16px;
   margin: -8px 0 0 -8px;
+  padding: 0;
   border: 2px solid var(--lc-annotation-ring);
   border-radius: var(--lc-radius-full);
   background: var(--annotation-color);
   box-shadow: var(--lc-annotation-shadow);
+  font: inherit;
   pointer-events: auto;
   /* A finger's drag on a pin goes to the canvas, never to the page. */
   touch-action: none;
 }
 
-.lc-annotation-pin[data-selected] {
+.lc-annotation-pin[data-selected],
+.lc-annotation-pin:focus-visible {
   outline: 2px solid var(--lc-focus-ring);
   outline-offset: 2px;
 }

@@ -11,6 +11,7 @@ export {
   type IconButtonProps,
 } from "./Button.tsx";
 export { Card, type CardProps } from "./Card.tsx";
+export { Checkbox, type CheckboxProps } from "./Checkbox.tsx";
 export { CommandPalette, type CommandPaletteProps } from "./CommandPalette.tsx";
 export {
   listCommands,
@@ -38,6 +39,7 @@ export {
   type ContextMenuProps,
   type MenuItemProps,
   type MenuProps,
+  type MenuSectionProps,
 } from "./Menu.tsx";
 export { NumberField, type NumberFieldProps } from "./NumberField.tsx";
 export { PanelHeader, type PanelHeaderProps } from "./PanelHeader.tsx";
@@ -76,3 +78,4 @@ export {
 export { dismissToast, toast, type ToastOptions, type ToastTone } from "./toastQueue.ts";
 export { Toolbar, ToolbarSeparator, type ToolbarProps } from "./Toolbar.tsx";
 export { Tooltip, type TooltipPlacement, type TooltipProps } from "./Tooltip.tsx";
+export { UnstyledButton, type UnstyledButtonProps } from "./UnstyledButton.tsx";

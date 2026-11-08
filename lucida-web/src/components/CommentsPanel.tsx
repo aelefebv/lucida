@@ -19,6 +19,7 @@ import { usePointerCoarse } from "../theme/viewport.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import type { Annotation } from "./annotationDocument.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 import { countUnread, type MentionHit } from "./mentionsOfMe.ts";
@@ -152,13 +153,12 @@ export function CommentsPanel({
                 const hasUnread = unreadByPin.has(pin.id);
                 return (
                   <li key={pin.id} className="lc-rail-row">
-                    <button
-                      type="button"
+                    <UnstyledButton
                       className="lc-rail-row-open"
                       data-testid={`comment-thread-${pin.id}`}
                       data-unread={hasUnread || undefined}
                       title={first?.text}
-                      onClick={() => openThread(pin.id)}
+                      onPress={() => openThread(pin.id)}
                     >
                       <KindIcon className="lc-comments-kind" size={16} aria-label={kind.label} />
                       <span className="lc-rail-row-text">
@@ -173,7 +173,7 @@ export function CommentsPanel({
                       {hasUnread && (
                         <span className="lc-comments-dot" role="img" aria-label="Unread mention" />
                       )}
-                    </button>
+                    </UnstyledButton>
                   </li>
                 );
               })}
@@ -249,16 +249,15 @@ function MentionsList({
             const isViewed = viewed.has(hit.commentId);
             return (
               <li key={hit.commentId} className="lc-rail-row">
-                <button
-                  type="button"
+                <UnstyledButton
                   className="lc-rail-row-open lc-comments-mention"
                   data-testid={`mention-of-me-item-${hit.commentId}`}
                   data-viewed={isViewed ? "true" : "false"}
                   title={hit.text}
-                  onClick={() => onPick(hit)}
+                  onPress={() => onPick(hit)}
                 >
                   <span className="lc-rail-row-name">{snippet(hit.text)}</span>
-                </button>
+                </UnstyledButton>
               </li>
             );
           })}

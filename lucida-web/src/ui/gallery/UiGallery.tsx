@@ -49,6 +49,7 @@ import { Avatar } from "../Avatar.tsx";
 import { Badge } from "../Badge.tsx";
 import { Button, IconButton } from "../Button.tsx";
 import { Card } from "../Card.tsx";
+import { Checkbox } from "../Checkbox.tsx";
 import { Dialog } from "../Dialog.tsx";
 import { Kbd } from "../Kbd.tsx";
 import { Menu, MenuItem, MenuSection, MenuSeparator } from "../Menu.tsx";
@@ -441,6 +442,7 @@ function ChoiceSection() {
   const [layout, setLayout] = useState<"grid" | "row" | "stack">("grid");
   const [developerTools, setDeveloperTools] = usePreference(developerToolsPreference);
   const [restore, setRestore] = useState(true);
+  const [grid, setGrid] = useState(true);
   return (
     <Section title="Choice">
       <Row label="SegmentedControl">
@@ -474,6 +476,17 @@ function ChoiceSection() {
           value={mode}
           onChange={setMode}
         />
+      </Row>
+      <Row label="Checkbox">
+        <Checkbox isSelected={grid} onChange={setGrid}>
+          chunk grid
+        </Checkbox>
+        <Checkbox isSelected={!grid} onChange={(on) => setGrid(!on)}>
+          tier
+        </Checkbox>
+        <Checkbox isSelected={false} onChange={() => {}} isDisabled>
+          unavailable
+        </Checkbox>
       </Row>
       <div className="gallery-settings">
         <SegmentedControl

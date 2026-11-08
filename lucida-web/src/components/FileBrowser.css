@@ -1,4 +1,0 @@
-/* A fixed height, so the dialog keeps its size from folder to folder. */
-.lc-file-browser-pane {
-  height: min(440px, calc(85vh - 96px));
-}
