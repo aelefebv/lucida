@@ -5,7 +5,6 @@ import type {
   ClientId,
   CommandRejection,
   DatasetImportWarning,
-  PresenceState,
 } from "../bridge.ts";
 export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
@@ -16,6 +15,7 @@ export type { SavedViewBridgeHooks } from "../sessionController.ts";
 import type { SavedViewBridgeHooks, ViewportSize } from "../sessionController.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 import { toast } from "../ui/toastQueue.ts";
+import { PeerStore } from "../peerStore.ts";
 
 const COMMAND_REJECTION_TEXT: Record<CommandRejection, string> = {
   forbidden: "Your role in this workspace can't make this change.",
@@ -88,12 +88,9 @@ export function useBridge(params: Params) {
   // disconnect so a reconnect re-arms them.
   const [connected, setConnected] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
-  const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
-  const [myId, setMyId] = useState<ClientId>(0);
-  const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
-  // For readers outside render, such as RAF loops. Written from the controller
-  // event, never during render.
-  const followTargetRef = useRef<ClientId | null>(null);
+  // Peer messages write this store and not React state, so they re-render
+  // only the components that subscribe to it.
+  const [peerStore] = useState(() => new PeerStore());
   const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
   const [remoteDatasetProgress, setRemoteDatasetProgress] = useState<string | null>(null);
@@ -125,12 +122,9 @@ export function useBridge(params: Params) {
       events: {
         onConnectedChanged: setConnected,
         onSessionReadyChanged: setSessionReady,
-        onSelfIdChanged: setMyId,
-        onPeersChanged: setPeers,
-        onFollowTargetChanged: (target) => {
-          followTargetRef.current = target;
-          setFollowTarget(target);
-        },
+        onSelfIdChanged: (id) => peerStore.setMyId(id),
+        onPeersChanged: (peers) => peerStore.setPeers(peers),
+        onFollowTargetChanged: (target) => peerStore.setFollowTarget(target),
         onRemoteDatasetActivity: (activity) => {
           setRemoteDatasetLoading(activity.loading);
           setRemoteDatasetError(activity.error);
@@ -175,10 +169,7 @@ export function useBridge(params: Params) {
       setBridge(null);
       setConnected(false);
       setSessionReady(false);
-      setPeers(new Map());
-      setMyId(0);
-      setFollowTarget(null);
-      followTargetRef.current = null;
+      peerStore.reset();
       setRemoteDatasetLoading(false);
       setRemoteDatasetError(null);
       setRemoteDatasetProgress(null);
@@ -187,7 +178,7 @@ export function useBridge(params: Params) {
       setDatasetImportWarnings(new Map());
       portsRef.current.bumpDatasetsVersion();
     };
-  }, [wasmReady, workspaceId]);
+  }, [wasmReady, workspaceId, peerStore]);
 
   // Each callback reads the live controller at call time, so identity survives
   // renders and reconnects. All no-op before wasm is ready.
@@ -223,11 +214,6 @@ export function useBridge(params: Params) {
     controllerRef.current?.dismissOpenWarnings();
   }, []);
 
-  const followablePeers = useMemo(
-    () => Array.from(peers.entries()).filter(([, p]) => p.following === null || p.following === undefined),
-    [peers],
-  );
-
   // One object per change of the state in it, so a consumer keyed on it
   // re-runs only when that state moved. The callbacks never change.
   return useMemo(() => ({
@@ -240,10 +226,8 @@ export function useBridge(params: Params) {
     /** True once the first snapshot is applied, so an open reliably reaches
      *  the server. Gate one-shot sends on this. Resets on disconnect. */
     sessionReady,
-    peers,
-    myId,
-    followTarget,
-    followTargetRef,
+    /** The peers, this connection's id, and whom it follows. */
+    peerStore,
     sendCommand,
     sendCursor,
     emitPresence,
@@ -265,13 +249,12 @@ export function useBridge(params: Params) {
     datasetImportWarnings,
     breakFollow,
     handleFollow,
-    followablePeers,
   }), [
-    bridge, connected, sessionReady, peers, myId, followTarget,
+    bridge, connected, sessionReady, peerStore,
     sendCommand, sendCursor, emitPresence, emitDatasetPresence, sendOpenRemoteDataset,
     remoteDatasetLoading, remoteDatasetError, remoteDatasetProgress,
     remoteDatasetWarnings, remoteDatasetWarningsOverflow, dismissRemoteDatasetWarnings,
-    datasetImportWarnings, breakFollow, handleFollow, followablePeers,
+    datasetImportWarnings, breakFollow, handleFollow,
   ]);
 }
 

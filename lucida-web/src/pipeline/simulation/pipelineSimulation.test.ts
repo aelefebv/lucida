@@ -337,9 +337,9 @@ describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
 
 describe("a two-timepoint volume whose detail budget holds the view but not its prefetch", () => {
   // The view wants level 0 of the first timepoint, 128 chunks, and prefetch
-  // asks for the same 128 of the second. Prefetch chunks near the center rank
-  // above view chunks at the corners, but only what the view leaves is
-  // prefetch's, and an evicted prefetch chunk is no reason to wait.
+  // asks for the same 128 of the second. Only what the view leaves is
+  // prefetch's, even at the center, and an evicted prefetch chunk is no
+  // reason to wait.
   const block = singleImage({
     id: "block",
     pyramid: { shape: [2, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
@@ -620,6 +620,36 @@ describe("auto-contrast limits", () => {
         }
       });
     }
+  }
+
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`keeps a generated coarse level's limits through pans and zooms at device pixel ratio ${dpr}`, async () => {
+      // The zoom and the pans at it bring in chunks the view did not read
+      // before; the generated level arrives after the first of them.
+      const run = await runScenario(
+        describeScenario({
+          name: "pans and zooms over a generated coarse level",
+          dataset: singleImage({
+            id: "roam",
+            pyramid: { shape: [1, 1, 1, 2048, 2048], chunk: [1, 64, 64], levels: 3 },
+            generatedCoarse: { readyAtMs: 300 },
+          }),
+          source: { latencyMs: scatteredLatency(false) },
+          steps: [{ zoom: 3 }, { pan: [400, 200] }, { pan: [-700, -350] }, { zoom: 0.25 }],
+        }),
+        { dpr },
+      );
+      expectSettled(run);
+      const fitted = lastFits(run.phases[0]);
+      expect(fitted.size).toBe(1);
+      for (const fit of fitted.values()) expect(fit.provisional).toBe(false);
+      for (const phase of run.phases.slice(1, 4)) {
+        expect(phase.distinctChunksSent, `${phase.label} brings in chunks`).toBeGreaterThan(0);
+      }
+      for (const phase of run.phases.slice(1)) {
+        expect(phase.fits, `${phase.label} keeps the limits`).toEqual([]);
+      }
+    });
   }
 
   for (const dpr of DEVICE_PIXEL_RATIOS) {

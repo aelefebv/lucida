@@ -28,10 +28,10 @@ export const MINIMAP_SEED_FAST_MAX_CHUNKS = 128;
 
 /**
  * Priority floor for minimap seeding above
- * {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. Lane offsets are not bands: the
- * importance and distance terms are unbounded, so the planner emits bulk
- * seeds at `max(this, highest priority already in the plan + 1)`, behind
- * everything the view asked for.
+ * {@link MINIMAP_SEED_FAST_MAX_CHUNKS}. The other lane offsets are knobs
+ * and may be set past it, so the planner emits bulk seeds at
+ * `max(this, highest band already in the plan + 1)`, behind everything the
+ * view asked for.
  */
 export const MINIMAP_SEED_BULK_LANE_OFFSET = 2600;
 
@@ -81,19 +81,24 @@ export const DISTANCE_WEIGHT = 10;
  * plane, `0` keeps it centered.
  *
  * The default must stay exactly `0` so it adds no offset to the focal Z
- * in `chunkDistanceFromCenter` and ordering matches the unbiased
- * formula byte for byte. `planning.test.ts` pins this.
+ * the core scores chunks from (`ChunkView` in `lucida-core/src/chunk.rs`)
+ * and ordering matches the unbiased formula byte for byte.
+ * `planning.test.ts` pins this.
  */
 export const DEPTH_BIAS_VIEW = 0;
 
-/** Per-tick planning tunables threaded through {@link plan}. */
+/**
+ * Per-tick planning tunables threaded through {@link plan}. Lane offsets
+ * are whole numbers: a lane's requests take priorities less than one above
+ * its offset, so lanes at different offsets never interleave.
+ */
 export interface PlanningConfig {
   /** See {@link PREFETCH_DEPTH}. */
   prefetchDepth: number;
 
-  /** Coefficient on `(1 - importance)` in the priority formula. */
+  /** Coefficient on `(1 - importance)` in a request's place within its lane. */
   importanceWeight: number;
-  /** Coefficient on chunk distance from the view center. */
+  /** Coefficient on chunk distance from the view's focus, within a lane. */
   distanceWeight: number;
   /**
    * Clamped to `[-1, 1]`; the resulting focal Z is clamped to the

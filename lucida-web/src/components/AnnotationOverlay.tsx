@@ -49,7 +49,7 @@ import {
   type LineHandle,
   type ScreenPoint,
 } from "./annotationGeometry.ts";
-import { isOffContext, type ViewContext } from "./annotationContext.ts";
+import { isOffContext, pinLabel, type ViewContext } from "./annotationContext.ts";
 import type { Tool } from "./annotationTool.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { MentionCandidate } from "./annotationMentions.ts";
@@ -68,7 +68,7 @@ interface Props {
    * dimmed, with a locator naming where it lives. */
   viewContext: ViewContext;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
-   * per-connection `bridge.myId`, so a pin authored here stays mine across
+   * per-connection `myId`, so a pin authored here stays mine across
    * rejoin. Gates move, reshape, and delete. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */
@@ -985,9 +985,14 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             {/* Every pin's dot opens its thread on click, and selects one's own.
                 For the author it also drives the gestures: a selected pin or a
                 Shift+drag moves it. Delete lives in the thread behind a
-                confirm, and in the context menu. */}
-            <div
+                confirm, and in the context menu. A native button, so Tab
+                reaches it and Enter opens the thread, without React Aria's
+                press handling claiming the pointer the gestures need. */}
+            {/* eslint-disable-next-line no-restricted-syntax -- see above */}
+            <button
+              type="button"
               className="lc-annotation-pin"
+              aria-label={pinLabel(pin, mine, offCtx)}
               data-testid={`annot-pin-${pin.id}`}
               data-author={mine ? "own" : "peer"}
               data-off-context={offCtx || undefined}

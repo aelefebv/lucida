@@ -1093,8 +1093,8 @@ impl Arcball {
         // Clamp Z to volume bounds (members don't have Z offsets).
         // XY bounds are not clamped to [0, shape] — for collections, the camera
         // may be looking at a group at a large XY offset. The per-member AABB
-        // test in chunk_plan_for handles member-level visibility, and the
-        // chunk grid iteration in visible_chunks clamps to valid grid indices.
+        // test in chunk_plan_for handles member-level visibility, and chunk
+        // enumeration clamps to valid grid indices.
         voxel_min[2] = voxel_min[2].max(0.0);
         voxel_max[2] = voxel_max[2].min(shape_z);
 

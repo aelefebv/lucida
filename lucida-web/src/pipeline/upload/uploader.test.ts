@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetEntry, TickContext } from "../../renderLoopTypes.ts";
 import { resolvedLayersJson } from "../../resolvedLayerFixtures.ts";
@@ -14,6 +14,9 @@ import { PointEvent } from "../../trace/types.ts";
 import { TickCoordinator } from "../tickCoordinator.ts";
 import { RESEND_GUARD_TICKS } from "./delivery/resendGuard.ts";
 import { Uploader } from "./uploader.ts";
+import { loadWasm } from "../../viewProperties.ts";
+
+beforeAll(loadWasm);
 
 interface MockSceneConfig {
   epochs: { content: number; layout: number; view: number; selection: number };

@@ -33,9 +33,10 @@ import {
   type WireGeneratedAvailabilityDelta,
 } from "../generatedAvailability.ts";
 import { CpuCache, type CpuCacheConfig } from "../fetch/index.ts";
-import type { DatasetFixture } from "./fixtures.ts";
+import { generatedHistograms, type DatasetFixture } from "./fixtures.ts";
 import {
   passThroughDecodePool,
+  rampSamples,
   SimulatedSource,
   type SourceAnswer,
   type SourceRequest,
@@ -420,7 +421,9 @@ class Simulation {
           status: "ready" as const,
         })),
       );
-      setTimeout(() => this.applyAvailability({ chunks }), generated.readyAtMs);
+      // The server sends a histogram with the last chunk of its timepoint and channel.
+      const histograms = generatedHistograms(generated, this.scenario.source.samples ?? rampSamples);
+      setTimeout(() => this.applyAvailability({ chunks, histograms }), generated.readyAtMs);
     }
   }
 

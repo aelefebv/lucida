@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use lucida_content::*;
 
 use crate::camera::{Camera, Framing};
-use crate::chunk::{self, ChunkRequestPlan};
+use crate::chunk::{self, ChunkCoord, ChunkQuery, ChunkView, CullCounts};
 use crate::epoch::SceneEpochs;
 use crate::framing::{FitBounds, VoxBox, WorldBox};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
@@ -758,35 +758,16 @@ impl Scene {
         }
     }
 
-    /// Compute the chunk request plan for all visible layers across all datasets.
-    /// Returns a flat `ChunkRequestPlan` (union of all members of the first dataset).
-    pub fn chunk_plan(&self) -> ChunkRequestPlan {
-        let ds_id = match self.document.manifests.keys().next() {
-            Some(id) => id.clone(),
-            None => {
-                return ChunkRequestPlan {
-                    needed: Vec::new(),
-                    prefetch: Vec::new(),
-                };
-            }
+    /// The chunks the first dataset's view needs, every member's in turn.
+    pub fn chunk_plan(&self) -> Vec<ChunkCoord> {
+        let Some(ds_id) = self.document.manifests.keys().next() else {
+            return Vec::new();
         };
-        let members = match self.chunk_plan_for(&ds_id) {
-            Some(m) => m,
-            None => {
-                return ChunkRequestPlan {
-                    needed: Vec::new(),
-                    prefetch: Vec::new(),
-                };
-            }
-        };
-        // Flatten all members into a single ChunkRequestPlan for backward compat.
-        let mut needed = Vec::new();
-        let mut prefetch = Vec::new();
-        for m in members {
-            needed.extend(m.needed);
-            prefetch.extend(m.prefetch);
-        }
-        ChunkRequestPlan { needed, prefetch }
+        self.chunk_plan_for(ds_id)
+            .into_iter()
+            .flatten()
+            .flat_map(|member| member.needed)
+            .collect()
     }
 
     /// Compute the chunk request plan for a specific dataset by ID.
@@ -808,7 +789,6 @@ impl Scene {
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
 
-        let is_2d = matches!(self.camera, Camera::Slice(_));
         let last_query = self.last_query_entries(dataset_id);
         let pin = self.level_pin(dataset_id);
         let multiscale_by_image = multiscale_by_image(manifest);
@@ -882,36 +862,35 @@ impl Scene {
             );
             let level_geo = &member.levels[level as usize];
 
-            let mut needed = Vec::new();
-            let mut prefetch = Vec::new();
-            for &c in &channels {
-                if is_2d {
-                    let (n, p) = chunk::visible_and_prefetch_chunks(
-                        &local_region,
-                        level_geo,
-                        layer.t,
+            let query =
+                ChunkQuery::new(level_geo, level0, [0.0, 0.0], chunk::RENDER_RADIUS_DISABLED);
+            let mut cells = Vec::new();
+            chunk::enumerate_chunks(
+                &ChunkView::new(&local_region, 0.0),
+                &query,
+                &mut CullCounts::default(),
+                &mut cells,
+            );
+            cells.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+            let needed = channels
+                .iter()
+                .flat_map(|&c| {
+                    cells.iter().map(move |cell| ChunkCoord {
+                        level,
+                        x: cell.x,
+                        y: cell.y,
+                        z: cell.z,
+                        t: layer.t,
                         c,
-                        level0,
-                    );
-                    needed.extend(n);
-                    prefetch.extend(p);
-                } else {
-                    needed.extend(chunk::visible_chunks(
-                        &local_region,
-                        level_geo,
-                        layer.t,
-                        c,
-                        level0,
-                    ));
-                }
-            }
+                    })
+                })
+                .collect();
 
             plans.push(MemberChunkPlan {
                 image_id: member.image_id.clone(),
                 position: member.position,
                 target_level: level,
                 needed,
-                prefetch,
             });
         }
 
@@ -2942,8 +2921,7 @@ mod tests {
     #[test]
     fn empty_scene_produces_empty_plan() {
         let scene = Scene::new([800, 600]);
-        let plan = scene.chunk_plan();
-        assert!(plan.needed.is_empty());
+        assert!(scene.chunk_plan().is_empty());
     }
 
     #[test]
@@ -3010,8 +2988,7 @@ mod tests {
             5,
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let plan = scene.chunk_plan();
-        assert!(!plan.needed.is_empty());
+        assert!(!scene.chunk_plan().is_empty());
     }
 
     #[test]
@@ -3031,8 +3008,8 @@ mod tests {
         scene.view.set_slice("z", 100).unwrap();
         let plan_z100 = scene.chunk_plan();
 
-        assert_eq!(plan_z0.needed[0].z, 0);
-        assert_eq!(plan_z100.needed[0].z, 1);
+        assert_eq!(plan_z0[0].z, 0);
+        assert_eq!(plan_z100[0].z, 1);
     }
 
     #[test]
@@ -3049,7 +3026,7 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         scene.view.set_z_range(0..128);
         let plan = scene.chunk_plan();
-        let z_values: Vec<u32> = plan.needed.iter().map(|c| c.z).collect();
+        let z_values: Vec<u32> = plan.iter().map(|c| c.z).collect();
         assert!(z_values.contains(&0));
         assert!(z_values.contains(&1));
     }
@@ -3241,9 +3218,8 @@ mod tests {
         let ds_id = DatasetId("ds1".into());
         let member_plans = scene.chunk_plan_for(&ds_id).unwrap();
         assert_eq!(member_plans.len(), 1);
-        assert_eq!(flat.needed.len(), member_plans[0].needed.len());
-        assert_eq!(flat.prefetch.len(), member_plans[0].prefetch.len());
-        for (a, b) in flat.needed.iter().zip(member_plans[0].needed.iter()) {
+        assert_eq!(flat.len(), member_plans[0].needed.len());
+        for (a, b) in flat.iter().zip(member_plans[0].needed.iter()) {
             assert_eq!(a.key(), b.key());
         }
     }
@@ -3267,14 +3243,14 @@ mod tests {
         }
     }
 
-    /// The distinct levels across every planned chunk of `ds`, needed and
-    /// prefetch alike, in ascending order.
+    /// The distinct levels across every planned chunk of `ds`, in ascending
+    /// order.
     fn planned_levels(scene: &Scene, ds: &DatasetId) -> Vec<u32> {
         let mut levels: Vec<u32> = scene
             .chunk_plan_for(ds)
             .unwrap()
             .iter()
-            .flat_map(|plan| plan.needed.iter().chain(&plan.prefetch))
+            .flat_map(|plan| &plan.needed)
             .map(|chunk| chunk.level)
             .collect();
         levels.sort_unstable();

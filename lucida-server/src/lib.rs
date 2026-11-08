@@ -20,6 +20,7 @@ pub mod health;
 pub mod inbox;
 pub mod open_diagnostics;
 pub mod origin;
+mod sample_histogram;
 pub mod session;
 mod source_region;
 pub mod static_serve;

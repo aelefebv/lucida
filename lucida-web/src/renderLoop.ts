@@ -732,6 +732,7 @@ export class RenderLoop implements TraceEnvironment {
         this.tickCoordinator.getLastPlans(),
         this.datasets,
         this.session.cpuCache,
+        this.session.generatedAvailability,
         this.autoContrastListener,
       );
     }

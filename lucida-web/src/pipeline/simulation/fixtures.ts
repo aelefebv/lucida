@@ -14,9 +14,12 @@ import {
   type MultiscaleInfo,
 } from "../../manifestTypes.ts";
 import type {
+  HistogramBin,
   WireGeneratedAvailabilitySnapshot,
   WireGeneratedLevelAvailability,
+  WireGeneratedLevelHistogram,
 } from "../generatedAvailability.ts";
+import type { SourceChunk } from "./source.ts";
 
 /** Level-0 shape as `[t, c, z, y, x]`. */
 export type Shape5 = readonly [number, number, number, number, number];
@@ -39,7 +42,7 @@ export interface PyramidSpec {
 /**
  * A coarse level the server generates after the open. Each chunk answers
  * `pending` until `readyAtMs` of the simulation clock, when one availability
- * update names them all ready.
+ * update names them all ready and carries the level's histograms.
  */
 export interface GeneratedCoarseSpec {
   readyAtMs: number;
@@ -61,6 +64,8 @@ export interface GeneratedCoarseLevel {
   snapshot: WireGeneratedAvailabilitySnapshot;
   /** Image id → every chunk key of the generated level. */
   chunkKeys: Map<string, string[]>;
+  /** The source level the server pools the generated one from. */
+  sourceLevel: LevelGeometry;
 }
 
 export interface DatasetFixture {
@@ -172,8 +177,40 @@ function fixture(
       levels,
       snapshot: { levels: publishedAtMs > 0 ? [] : levels, chunks: [] },
       chunkKeys: new Map(resolved.images.map((image) => [image.image_id, levelChunkKeys(level)])),
+      sourceLevel: levelGeometry(generated.pyramid, levelIndex - 1),
     },
   };
+}
+
+/**
+ * The histograms the server sends with a generated level: per image,
+ * timepoint and channel, every sample of the source level it pools from,
+ * one bin per value. `samples` is what the simulated source serves.
+ */
+export function generatedHistograms(
+  generated: GeneratedCoarseLevel,
+  samples: (chunk: SourceChunk, count: number) => ArrayLike<number>,
+): WireGeneratedLevelHistogram[] {
+  const level = generated.sourceLevel;
+  const count = level.chunk_shape.reduce((a, b) => a * b, 1);
+  const out: WireGeneratedLevelHistogram[] = [];
+  for (const imageId of generated.chunkKeys.keys()) {
+    const byTc = new Map<string, Map<number, number>>();
+    for (const chunkKey of levelChunkKeys(level)) {
+      const [, t, c] = chunkKey.split("/");
+      const tc = `${t}/${c}`;
+      let counts = byTc.get(tc);
+      if (!counts) byTc.set(tc, (counts = new Map()));
+      const values = samples({ imageId, chunkKey }, count);
+      for (let i = 0; i < values.length; i++) counts.set(values[i], (counts.get(values[i]) ?? 0) + 1);
+    }
+    for (const [tc, counts] of byTc) {
+      const [t, c] = tc.split("/").map(Number);
+      const bins: HistogramBin[] = [...counts].sort((a, b) => a[0] - b[0]).map(([v, n]) => [v, v, n]);
+      out.push({ image_id: imageId, level_index: generated.levelIndex, t, c, bins });
+    }
+  }
+  return out;
 }
 
 /**

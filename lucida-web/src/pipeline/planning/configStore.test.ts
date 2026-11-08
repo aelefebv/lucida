@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { configStore, depthBiasPreference, PLANNING_KNOB_PREFERENCES } from "./configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
@@ -10,6 +10,7 @@ import {
   plan,
 } from "./index.ts";
 import type { LevelGeometry } from "../../manifestTypes.ts";
+import { loadWasm } from "../../viewProperties.ts";
 import {
   PREFERENCE_SEED_GLOBAL,
   PREFERENCES_STORAGE_KEY,
@@ -18,6 +19,8 @@ import {
   getPreference,
   setPreference,
 } from "../../theme/preferences.ts";
+
+beforeAll(loadWasm);
 
 const LEGACY_KEY = "lucida.planning.config";
 

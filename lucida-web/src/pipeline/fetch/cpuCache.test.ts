@@ -1110,9 +1110,9 @@ describe("CpuCache", () => {
       const { cache, source } = createTestCache({ mainBudgetBytes: budget, overviewBudgetBytes: 0 });
       source.autoResolveBytes = 100;
 
-      // Insert a detail chunk and a prefetch chunk
-      const detail = makeRequest({ x: 0, lane: "detail", chunkKey: "0/0/0/0/0/0" });
-      const prefetch = makeRequest({ x: 1, lane: "prefetch", chunkKey: "0/0/0/0/0/1" });
+      // Insert a detail chunk and a prefetch chunk, at their lanes' priorities
+      const detail = makeRequest({ x: 0, lane: "detail", priority: 500, chunkKey: "0/0/0/0/0/0" });
+      const prefetch = makeRequest({ x: 1, lane: "prefetch", priority: 1600, chunkKey: "0/0/0/0/0/1" });
       cache.submit(makePlan([detail, prefetch]));
       await flush();
 
@@ -1121,7 +1121,7 @@ describe("CpuCache", () => {
       expect(snap.cached.get("entity-1")?.size).toBe(2);
 
       // Insert another chunk that forces eviction (300 > 256)
-      const extra = makeRequest({ x: 2, lane: "detail", chunkKey: "0/0/0/0/0/2" });
+      const extra = makeRequest({ x: 2, lane: "detail", priority: 500, chunkKey: "0/0/0/0/0/2" });
       cache.submit(makePlan([detail, prefetch, extra]));
       await flush();
 
@@ -2967,15 +2967,15 @@ describe("CpuCache", () => {
       expect(source.fetchCount).toBe(requestsBefore);
     });
 
-    it("lets a view chunk displace prefetch that ranks above it, and keeps a view chunk from prefetch", async () => {
+    it("lets a view chunk at the edge displace prefetch at the center, and keeps a view chunk from prefetch", async () => {
       const { cache, source } = createTestCache({ mainBudgetBytes: 2 * 64, overviewBudgetBytes: 0 });
       source.autoResolveBytes = 64;
-      // Priorities mix in distance: the prefetch chunk at the center ranks
-      // above the view chunk at the edge.
+      // Lane-strict priorities: the view's edge chunk still ranks above
+      // prefetch at the center.
       const viewNear = makeRequest({ x: 0, priority: 500, lane: "detail", chunkKey: "0/0/0/0/0/0" });
       const prefetchNear = makeRequest({ t: 1, x: 0, priority: 1600, lane: "prefetch", chunkKey: "0/1/0/0/0/0" });
-      const viewFar = makeRequest({ x: 3, priority: 3500, lane: "detail", chunkKey: "0/0/0/0/0/3" });
-      const prefetchFar = makeRequest({ t: 1, x: 3, priority: 4600, lane: "prefetch", chunkKey: "0/1/0/0/0/3" });
+      const viewFar = makeRequest({ x: 3, priority: 500.5, lane: "detail", chunkKey: "0/0/0/0/0/3" });
+      const prefetchFar = makeRequest({ t: 1, x: 3, priority: 1600.5, lane: "prefetch", chunkKey: "0/1/0/0/0/3" });
       cache.onPlanRebuildStart();
       cache.submit(makePlan([viewNear, prefetchNear]));
       await flush();
