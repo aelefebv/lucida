@@ -16,11 +16,11 @@ docker run --rm -p 127.0.0.1:9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Visit <http://localhost:9876>. The image binds `0.0.0.0` inside the container, so running with auth off needs `LUCIDA_INSECURE=1`. The `127.0.0.1:` prefix keeps the host side on loopback. You are `dev@local`, with no admin rights. The identity switcher that grants them appears only when the server itself binds loopback, which never happens in a container. Run from source (see [Develop](#develop)) if you need it.
+Visit <http://localhost:9876>. The image binds `0.0.0.0` inside the container, so running with auth off needs `LUCIDA_INSECURE=1`. The `127.0.0.1:` prefix keeps the host side on loopback, but the server still sees a shared bind: your browser gets an anonymous identity of its own, with a generated name and no admin rights, while the CLI and the Python client act as `dev@local`. A workspace one of them made reaches a browser through its link (`lucida workspace share link editor`). Run from source on loopback (see [Develop](#develop)) and the browser is `dev@local` too, the same person as the CLI, with an identity switcher for trying other users.
 
 ### Share with your LAN
 
-Drop the prefix (`-p 9876:9876`) and anyone on your network can reach <http://your-machine:9876>. Everyone shares the one `dev@local` identity and edits the same state, and admin routes answer 403. For per-user sign-in, use one of the next two setups.
+Drop the prefix (`-p 9876:9876`) and anyone on your network can reach <http://your-machine:9876>. Each browser is a different anonymous person, so presence, comments, and saved views tell people apart, and a workspace is shared through its link. Over plain http, add `-e LUCIDA_COOKIE_SECURE=never`, or browsers drop the cookie that holds the identity. Clearing cookies makes a new person, and admin routes answer 403. For per-user sign-in, use one of the next two setups.
 
 ### Sign in with Google
 
@@ -121,7 +121,7 @@ Prerequisites: Rust, Node, pnpm, and wasm-pack.
 ./scripts/dev.sh
 ```
 
-Then visit <http://localhost:5173>. The script rebuilds the `lucida-core` wasm package when Rust source content changed (`--wasm` forces it), installs web dependencies, starts `lucida-server` on `127.0.0.1:9876` with auth off, and starts Vite, which proxies `/auth`, `/api`, `/admin`, and `/ws` to it. Ctrl-C stops both.
+Then visit <http://localhost:5173>. The script rebuilds the `lucida-core` wasm package when Rust source content changed (`--wasm` forces it), installs web dependencies, starts `lucida-server` on `127.0.0.1:9876` with auth off (every caller is `dev@local`, and the account menu can switch to another user), and starts Vite, which proxies `/auth`, `/api`, `/admin`, and `/ws` to it. Ctrl-C stops both.
 
 By hand:
 
