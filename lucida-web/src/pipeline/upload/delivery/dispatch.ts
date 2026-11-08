@@ -49,6 +49,14 @@ export interface Dispatched {
 }
 
 /**
+ * Why a dispatch posted nothing. `other-plane`: the slice view's plane is in
+ * another chunk along Z, which the plan has moved on to. `no-meta`: the
+ * geometry to place the chunk is missing, or the chunk is shorter than it
+ * says, which should not happen.
+ */
+export type DispatchSkip = "other-plane" | "no-meta";
+
+/**
  * One Z plane of a decoded chunk, copied out of the cache's buffer, which the
  * cache keeps for later deliveries. `null` when the chunk is too short to
  * hold it. Posting transfers the copy and empties it, so its size is read
@@ -65,8 +73,8 @@ function cutPlane(data: ArrayBuffer, dataType: string, localZ: number, planeLen:
  * Post one chunk to the worker. The slice view draws one plane of a chunk,
  * so it is sent only the plane `sliceZ` maps to, a chunk-depth fraction of
  * the bytes, and a Z move to another plane of the same chunk sends that
- * plane. Returns `null`, posting nothing, when the chunk does not hold the
- * plane: the plan has moved on to the chunk that does.
+ * plane. Posts nothing, and says why, when it cannot place the chunk or the
+ * chunk does not hold the plane.
  */
 export function dispatchChunkDelivery(
   client: UploadClient,
@@ -75,9 +83,9 @@ export function dispatchChunkDelivery(
   viewMode: "slice" | "volume",
   sliceZ: number | null,
   epochs: SceneEpochs,
-): Dispatched | null {
+): Dispatched | DispatchSkip {
   const levelMeta = meta.levels[delivery.level];
-  if (!levelMeta) return null;
+  if (!levelMeta) return "no-meta";
   const memberId = workerMemberIdForChunk(delivery);
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
@@ -109,13 +117,13 @@ export function dispatchChunkDelivery(
     return { memberId, bytes: delivery.data.byteLength };
   }
 
-  if (sliceZ === null) return null;
+  if (sliceZ === null) return "no-meta";
   const fullResDepth = meta.image.multiscale.levels[0].shape[Axis.Z];
   const levelZ = sliceLevelZ(sliceZ, fullResDepth, levelDepth);
   const cz = Math.max(chunkZ, 1);
-  if (delivery.z !== Math.floor(levelZ / cz)) return null;
+  if (delivery.z !== Math.floor(levelZ / cz)) return "other-plane";
   const plane = cutPlane(delivery.data, delivery.dataType, levelZ - delivery.z * cz, chunkY * chunkX);
-  if (!plane) return null;
+  if (!plane) return "no-meta";
   const bytes = plane.byteLength;
   client.sliceChunkData(
     memberId,
@@ -144,8 +152,8 @@ export function dispatchChunkDelivery(
  * draws one ~64 KB plane, and labels sort after intensity, so sending the
  * whole chunk would starve them of upload budget.
  *
- * Returns `null` when geometry is missing or the chunk covers a different
- * Z-chunk than the current view.
+ * Posts nothing, and says why, when geometry is missing or the chunk covers
+ * a different Z-chunk than the current view.
  */
 export function dispatchLabelChunkDelivery(
   client: UploadClient,
@@ -153,10 +161,10 @@ export function dispatchLabelChunkDelivery(
   meta: ManifestEntry,
   sliceZ: number | null,
   epochs: SceneEpochs,
-): Dispatched | null {
+): Dispatched | DispatchSkip {
   const levelMeta = meta.levels[delivery.level];
   if (!levelMeta || sliceZ === null || !meta.labelLevel0 || !meta.labelSourceLevel0) {
-    return null;
+    return "no-meta";
   }
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
@@ -164,9 +172,9 @@ export function dispatchLabelChunkDelivery(
   const cz = Math.max(chunkZ, 1);
   // This chunk covers a different Z-chunk than the current view — the right
   // one is requested separately; drop this stale plane.
-  if (delivery.z !== Math.floor(levelZ / cz)) return null;
+  if (delivery.z !== Math.floor(levelZ / cz)) return "other-plane";
   const plane = cutPlane(delivery.data, delivery.dataType, levelZ - delivery.z * cz, chunkY * chunkX);
-  if (!plane) return null;
+  if (!plane) return "no-meta";
   const memberId = delivery.imageId;
   const bytes = plane.byteLength;
 
@@ -198,16 +206,16 @@ export function dispatchLabelChunkDelivery(
  * Deliver a whole uint32 label chunk to the r32uint label volume pool. The
  * first-hit surface needs the full depth, since each ray stops at the first
  * non-zero voxel anywhere along it. Returns the member id and bytes sent,
- * or `null` when the level geometry is unavailable.
+ * or `no-meta` when the level geometry is unavailable.
  */
 export function dispatchLabelVolumeChunkDelivery(
   client: UploadClient,
   delivery: ReadyChunkDelivery,
   meta: ManifestEntry,
   epochs: SceneEpochs,
-): Dispatched | null {
+): Dispatched | DispatchSkip {
   const levelMeta = meta.levels[delivery.level];
-  if (!levelMeta) return null;
+  if (!levelMeta) return "no-meta";
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
   const memberId = delivery.imageId;
