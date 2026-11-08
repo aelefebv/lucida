@@ -6,12 +6,14 @@
  * its cores with the rest of the suite. So every step is timed interleaved
  * with a fixed reference workload, sample by sample, and its median is
  * divided by how much slower than nominal the reference ran alongside it.
- * Whatever slows the host, a slower CPU, other test files on the same cores,
- * a collection, slows both and cancels out of the ratio.
+ * Whatever slows the host evenly, a slower CPU, a busy machine, a collection,
+ * slows both and cancels out of the ratio. Other test files contending for a
+ * few shared cores do not slow everything evenly, so the perf tests also run
+ * in a phase of their own (`vite.config.ts`).
  *
  * What is left is the step's cost on the nominal host, and budgets are stated
  * in those microseconds at about twice the typical figure. A step that gets
- * three times slower fails on every host; a slow or busy host does not.
+ * three times slower fails; a slow or busy host does not.
  *
  * The reference cancels the host, not the JavaScript engine. A Node major
  * with a different V8 can move a single figure several times over, so the
