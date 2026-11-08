@@ -24,7 +24,8 @@ use serde_json::{Map, Number, Value};
 use wasm_bindgen::prelude::*;
 
 use super::gzip::{self, GunzipError};
-use super::{SAVED_VIEW_VERSION, SavedView};
+use super::{SAVED_VIEW_VERSION, SavedView, reframe_sample_unit_camera};
+use crate::camera::Camera;
 
 /// Why a payload could not be encoded or decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +178,7 @@ pub fn decode_payload(payload: &str) -> Result<Value, PayloadError> {
         .as_object_mut()
         .ok_or_else(|| PayloadError("payload must be an object".into()))?;
     restore(object, wire_defaults(version(object)?));
+    reframe_camera(object);
     canonicalize_numbers(&mut view);
     Ok(view)
 }
@@ -205,6 +207,20 @@ fn version(object: &Map<String, Value>) -> Result<f64, PayloadError> {
                 .get("v")
                 .map_or("nothing".to_string(), Value::to_string)
         ))),
+    }
+}
+
+/// [`reframe_sample_unit_camera`] on the view's camera. The camera's JSON is
+/// left as it came unless it converts.
+fn reframe_camera(view: &mut Map<String, Value>) {
+    let Some(slot) = view.get_mut("camera") else {
+        return;
+    };
+    let Ok(mut camera) = serde_json::from_value::<Camera>(slot.clone()) else {
+        return;
+    };
+    if reframe_sample_unit_camera(&mut camera) {
+        *slot = serde_json::to_value(&camera).expect("a camera serializes");
     }
 }
 
@@ -626,6 +642,68 @@ mod tests {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gzip::compress(&json));
         let error = decode_payload(&payload).unwrap_err();
         assert!(error.to_string().contains("inflates"), "{error}");
+    }
+
+    /// A rotate cell of `dataset explore` on a 128 × 512 × 512 volume, as a
+    /// CLI that framed Home on level-0 samples wrote it.
+    const SAMPLE_UNIT_PAYLOAD: &str = "H4sIAAAAAAAA_51S226kMAz9Fz9nERDuv1JVyCRmJlIIKAS6sxX_vs5M6UV9qfqQyDqxz_Fx_Ao7dJkAjQFXCit0T88CUAWzU2_xNm8Rez0EKJzII8cwzZqgA_RqQGtBQEB_ocCleVklqXjcVZGkTBWuFLgqS_KmlG2TVVK2dVE0UsByNdClScPqZg3oFLNmKRfXrUzbps7KWla1gHHeY179jWA39LLMPirLPBV8WNAReuiqpk2yIkubVspapnnLNBHPirZMqoqJZdE2Td3m7Myapf9oIeXmH9ib0cWiIzgeenEA_3qP7kIx5KKoXxUCyGkOSs5jIFLc72mzwfTqis6RhW5Eu9Jxd8y0t0ihZhc8rqGfjDvV3yH8GzlLWUb4gtN0n2V6vP9YP3tNbOwJXvT6RxaEdUalwob9aRoKTSrPx3ykQY-5hOePQj7BuEv83p_Vct5uVjNYdh78RgLmBZUJt3tL4ldGBDCd0-eo0S5X5I3yjJE_UaZwq90UucBvb7P81H9cWYvDN-zM_CqhtYnbDQcPEbcw92eTPx9EdH8c_wFKPbi8PAMAAA";
+
+    #[test]
+    fn an_arcball_in_sample_units_decodes_as_a_fit_at_its_angles() {
+        use crate::camera::{Arcball, Camera, Framing};
+
+        let recorded = inflate(SAMPLE_UNIT_PAYLOAD);
+        assert_eq!(recorded["camera"]["target"], json!([256.0, 256.0, 64.0]));
+
+        // Both readers convert it: the payload codec for a `#view=` link, and
+        // the typed decode for a view the server stored.
+        let from_link = decode_payload(SAMPLE_UNIT_PAYLOAD).unwrap();
+        assert_eq!(from_link["camera"]["framing"], json!("framed"));
+        let typed: SavedView = serde_json::from_value(recorded.clone()).unwrap();
+        for view in [
+            serde_json::from_value::<SavedView>(from_link).unwrap(),
+            typed,
+        ] {
+            let Camera::Arcball(arcball) = &view.camera else {
+                panic!("expected an arcball camera");
+            };
+            let stand_in = Arcball::new([320, 320]);
+            assert_eq!(arcball.framing, Framing::Framed);
+            assert_eq!(arcball.theta, 1.2853981633974483);
+            assert_eq!(arcball.phi, 0.8);
+            assert_eq!(arcball.viewport, [320, 320]);
+            assert_eq!(
+                (arcball.target, arcball.distance, arcball.near, arcball.far),
+                (
+                    stand_in.target,
+                    stand_in.distance,
+                    stand_in.near,
+                    stand_in.far
+                )
+            );
+            // The rest of the view reads as it always did.
+            assert_eq!(view.view.z_range, 64..65);
+        }
+    }
+
+    #[test]
+    fn a_camera_in_its_own_units_is_left_alone() {
+        let views = [
+            // A volume's fit, and a collection's, whose members spread down.
+            json!({"mode": "arcball", "target": [0.5, 0.5, 0.125], "theta": 0.5, "phi": 0.8, "distance": 2.4, "fov": 0.785, "viewport": [800, 600], "near": 1.5, "far": 3.3}),
+            json!({"mode": "arcball", "target": [3.25, -1.75, 0.5], "theta": 0.5, "phi": 0.8, "distance": 9.1, "fov": 0.785, "viewport": [800, 600], "near": 4.0, "far": 14.0}),
+            // One panned well off the data.
+            json!({"mode": "arcball", "target": [1.0, 2.0, 3.0], "theta": 0.5, "phi": 0.3, "distance": 100.0, "fov": 0.785, "viewport": [800, 600], "near": 0.1, "far": 1000.0}),
+            // A slice camera works in samples, so a center far out is its own.
+            json!({"mode": "slice", "center": [256.0, 256.0], "zoom": 1.5, "viewport": [800, 600]}),
+        ];
+        for camera in views {
+            let payload = gzip_base64(&json!({"v": 2, "camera": camera}).to_string());
+            let mut decoded = decode_payload(&payload).unwrap();
+            let mut expected = camera.clone();
+            canonicalize_numbers(&mut expected);
+            assert_eq!(decoded["camera"].take(), expected);
+        }
     }
 
     #[test]

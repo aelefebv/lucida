@@ -326,7 +326,7 @@ fn half_angles(viewport: [u32; 2], fov: f64) -> (f64, f64) {
 
 /// Depth clip around the box's bounding sphere seen from `distance`: near
 /// clears the front and stays > 0, far clears the back with a little slack.
-fn depth_bracket(distance: f64, radius: f64) -> (f64, f64) {
+pub(crate) fn depth_bracket(distance: f64, radius: f64) -> (f64, f64) {
     let near = (distance - radius)
         .max(distance * 1e-3)
         .max(1e-4)
