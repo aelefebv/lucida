@@ -167,10 +167,10 @@ pub(crate) fn describe_mismatches(
             .collect();
         if !smaller.is_empty() {
             sentences.push(format!(
-                "tiles differ in shape, and smaller tiles are padded with fill to {} ({}), \
-                 the largest on each axis. Smaller ({} of {total}): {}",
+                "tiles differ in size, so smaller tiles are padded with empty space to the \
+                 largest size on each axis, {} ({}). Smaller ({} of {total}): {}",
                 dims(declared_shape),
-                axes_names.join("×"),
+                axis_words(axes_names.iter().map(String::as_str)),
                 smaller.len(),
                 examples(&smaller),
             ));
@@ -186,9 +186,10 @@ pub(crate) fn describe_mismatches(
             .filter(|(_, tile)| tile.levels.shapes.len() < most)
             .map(|(prefix, tile)| format!("{prefix:?} has {}", tile.levels.shapes.len()))
             .collect();
+        let levels = if fewest == 1 { "level" } else { "levels" };
         sentences.push(format!(
-            "tiles differ in level count, and every tile shows only the levels all of them \
-             have ({fewest}). Fewer than {most} ({} of {total}): {}",
+            "tiles have different numbers of resolution levels, so every tile shows only \
+             the {fewest} {levels} they all have. Fewer than {most} levels ({} of {total}): {}",
             short.len(),
             examples(&short),
         ));
@@ -221,20 +222,31 @@ pub(crate) fn describe_mismatches(
         .collect();
     if !resized.is_empty() {
         sentences.push(format!(
-            "tiles differ in pixel size, and every tile is shown at {representative_prefix:?}'s \
-             {} ({}). Different ({} of {total}): {}",
+            "tiles have different pixel sizes, so every tile is shown at the pixel size of \
+             {representative_prefix:?}, {} ({}). Different ({} of {total}): {}",
             pixel_size(&representative_tile.scale),
-            spatial
-                .iter()
-                .map(|(_, name)| *name)
-                .collect::<Vec<_>>()
-                .join("×"),
+            axis_words(spatial.iter().map(|(_, name)| *name)),
             resized.len(),
             examples(&resized),
         ));
     }
 
     sentences
+}
+
+/// What each axis of a size measures, in words a person reads, such as
+/// `channels × height × width` for `c`, `y`, `x`.
+fn axis_words<'a>(axes: impl Iterator<Item = &'a str>) -> String {
+    axes.map(|axis| match axis.to_ascii_lowercase().as_str() {
+        "t" => "timepoints".to_string(),
+        "c" => "channels".to_string(),
+        "z" => "depth".to_string(),
+        "y" => "height".to_string(),
+        "x" => "width".to_string(),
+        _ => axis.to_string(),
+    })
+    .collect::<Vec<_>>()
+    .join(" × ")
 }
 
 fn dims(shape: &[u64]) -> String {
@@ -417,12 +429,13 @@ mod tests {
         assert_eq!(
             sentences,
             [
-                "tiles differ in shape, and smaller tiles are padded with fill to 1×16×16 \
-                 (c×y×x), the largest on each axis. Smaller (1 of 4): \"A/2/0\" is 1×12×10",
-                "tiles differ in level count, and every tile shows only the levels all of \
-                 them have (1). Fewer than 2 (1 of 4): \"B/1/0\" has 1",
-                "tiles differ in pixel size, and every tile is shown at \"A/1/0\"'s 0.5×0.5 \
-                 (y×x). Different (1 of 4): \"B/2/0\" is 1×1",
+                "tiles differ in size, so smaller tiles are padded with empty space to the \
+                 largest size on each axis, 1×16×16 (channels × height × width). Smaller \
+                 (1 of 4): \"A/2/0\" is 1×12×10",
+                "tiles have different numbers of resolution levels, so every tile shows only \
+                 the 1 level they all have. Fewer than 2 levels (1 of 4): \"B/1/0\" has 1",
+                "tiles have different pixel sizes, so every tile is shown at the pixel size of \
+                 \"A/1/0\", 0.5×0.5 (height × width). Different (1 of 4): \"B/2/0\" is 1×1",
             ]
         );
     }

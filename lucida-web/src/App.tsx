@@ -745,12 +745,12 @@ function Viewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.layerInfos, selectedDatasetId, datasetsVersion]);
 
-  // The manifest has no source location; the server's dataset health does.
-  const getDatasetSource = useCallback(
+  // The manifest has no source location or health; the server's dataset health has both.
+  const getDatasetHealth = useCallback(
     async (datasetId: string) => {
       if (!liveBridge) return null;
       const health = await liveBridge.requestDatasetHealth(datasetId);
-      return health.find((h) => h.workspace_dataset_id === datasetId)?.source_url ?? null;
+      return health.find((h) => h.workspace_dataset_id === datasetId) ?? null;
     },
     [liveBridge],
   );
@@ -1022,7 +1022,7 @@ function Viewer({
           visible={active}
           workspaceId={workspaceId}
           dataset={infoDataset}
-          getSource={getDatasetSource}
+          getHealth={getDatasetHealth}
         />
       ),
     },

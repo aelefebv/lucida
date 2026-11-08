@@ -472,11 +472,12 @@ fn declared_scale(node: &serde_json::Value, axes_names: &[String]) -> [f64; 5] {
 /// Generic and safe on untrusted input: the block is optional and often
 /// wrong, so this never panics, errors, or mislabels.
 ///
-/// - A missing or non-array `channels` → empty `Vec` (caller falls back to `Ch N`).
+/// - A missing or non-array `channels` → empty `Vec` (caller falls back to `Channel n`).
 /// - A usable label is a non-blank string.
 /// - Results stay aligned to channel index: a label-less channel in the
-///   middle gets the `Ch {i}` fallback so later labels still line up, and a
-///   label-less trailing run is dropped. No usable label at all → empty.
+///   middle gets the `Channel n` fallback, counted from 1 like every other
+///   channel name, so later labels still line up, and a label-less trailing
+///   run is dropped. No usable label at all → empty.
 /// - A non-string `color` becomes `None`; the raw hex is carried verbatim.
 ///
 /// Not reconciled against the C-axis size: parse stays a pure function of
@@ -526,7 +527,7 @@ pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<Channel
         .enumerate()
         .map(|(i, slot)| {
             slot.unwrap_or(ChannelInfo {
-                label: format!("Ch {i}"),
+                label: format!("Channel {}", i + 1),
                 color: None,
             })
         })
@@ -1267,7 +1268,7 @@ mod tests {
         }));
         assert!(
             parse_omero_channels(&root).is_empty(),
-            "no usable label anywhere must fully fall back to Ch N (empty list)",
+            "no usable label anywhere must fully fall back to Channel n (empty list)",
         );
     }
 
@@ -1289,21 +1290,21 @@ mod tests {
 
     #[test]
     fn omero_channels_interior_gaps_keep_positions_aligned() {
-        // Channel 1 has no usable label but channel 2 does: index 1 must be
-        // filled with the positional fallback so "Marker" still maps to ch 2.
+        // Index 1 has no usable label but index 2 does: index 1 must be
+        // filled with the positional fallback so "Third" still maps to index 2.
         let root = root_with_omero(serde_json::json!({
             "channels": [
-                {"label": "Channel 0"},
+                {"label": "First"},
                 {"label": "   "},
-                {"label": "Marker"}
+                {"label": "Third"}
             ]
         }));
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 3);
-        assert_eq!(infos[0].label, "Channel 0");
-        assert_eq!(infos[1].label, "Ch 1"); // positional fallback, alignment preserved
+        assert_eq!(infos[0].label, "First");
+        assert_eq!(infos[1].label, "Channel 2"); // counted from 1, alignment preserved
         assert_eq!(infos[1].color, None);
-        assert_eq!(infos[2].label, "Marker");
+        assert_eq!(infos[2].label, "Third");
     }
 
     #[test]
