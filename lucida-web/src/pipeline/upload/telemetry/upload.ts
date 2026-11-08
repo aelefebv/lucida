@@ -47,6 +47,8 @@ export interface UploadTickStats {
   skippedWrongLod: number;
   /** Chunk already in CpuCache delivery sent state for the worker memberId. */
   skippedAlreadySent: number;
+  /** The slice view's plane is in another chunk along Z. Stale plan, as a wrong level is. */
+  skippedOtherPlane: number;
   /** Couldn't resolve dataset/imageSpec/level meta — should be ~0; bug indicator. */
   skippedNoMeta: number;
 }
@@ -62,7 +64,7 @@ export interface UploadRollingStats {
   uploadsPerSec: number;
   /**
    * Ratio of *upload-bound* considered chunks that were filtered out:
-   * `(skippedWrongLod + skippedAlreadySent + skippedNoMeta) /
+   * `(skippedWrongLod + skippedAlreadySent + skippedOtherPlane + skippedNoMeta) /
    *  (drainedChunks − skippedPrefetch − skippedOverview)`.
    *
    * Excludes prefetch (cache-only by design) and overview (minimap path).
@@ -87,7 +89,7 @@ export function emptyUploadTickStats(): UploadTickStats {
     bytesUploaded: 0, bytesBudget: 0,
     budgetExhausted: false,
     skippedPrefetch: 0, skippedOverview: 0, skippedWrongLod: 0,
-    skippedAlreadySent: 0, skippedNoMeta: 0,
+    skippedAlreadySent: 0, skippedOtherPlane: 0, skippedNoMeta: 0,
   };
 }
 
@@ -101,6 +103,7 @@ interface TickWindowEntry {
   skippedOverview: number;
   skippedWrongLod: number;
   skippedAlreadySent: number;
+  skippedOtherPlane: number;
   skippedNoMeta: number;
   budgetExhausted: boolean;
 }
@@ -153,6 +156,7 @@ export class UploadTelemetry {
       stats.skippedOverview +
       stats.skippedWrongLod +
       stats.skippedAlreadySent +
+      stats.skippedOtherPlane +
       stats.skippedNoMeta;
     this.uploadTickWindow.push({
       at: now,
@@ -163,6 +167,7 @@ export class UploadTelemetry {
       skippedOverview: stats.skippedOverview,
       skippedWrongLod: stats.skippedWrongLod,
       skippedAlreadySent: stats.skippedAlreadySent,
+      skippedOtherPlane: stats.skippedOtherPlane,
       skippedNoMeta: stats.skippedNoMeta,
       budgetExhausted: stats.budgetExhausted,
     });
@@ -186,6 +191,7 @@ export class UploadTelemetry {
     let winSkippedOverview = 0;
     let winSkippedWrongLod = 0;
     let winSkippedAlreadySent = 0;
+    let winSkippedOtherPlane = 0;
     let winSkippedNoMeta = 0;
     this.uploadTickWindow.forEach((t) => {
       drainedInWindow += t.drained;
@@ -194,6 +200,7 @@ export class UploadTelemetry {
       winSkippedOverview += t.skippedOverview;
       winSkippedWrongLod += t.skippedWrongLod;
       winSkippedAlreadySent += t.skippedAlreadySent;
+      winSkippedOtherPlane += t.skippedOtherPlane;
       winSkippedNoMeta += t.skippedNoMeta;
       if (t.budgetExhausted) exhaustedTicks += 1;
     });
@@ -202,6 +209,7 @@ export class UploadTelemetry {
       skippedOverview: winSkippedOverview,
       skippedWrongLod: winSkippedWrongLod,
       skippedAlreadySent: winSkippedAlreadySent,
+      skippedOtherPlane: winSkippedOtherPlane,
       skippedNoMeta: winSkippedNoMeta,
     };
     // Upload-bound = chunks meant for the main GPU atlas. Excludes
@@ -209,7 +217,7 @@ export class UploadTelemetry {
     const drainedUploadBoundInWindow =
       drainedInWindow - winSkippedPrefetch - winSkippedOverview;
     const skippedUploadBoundInWindow =
-      winSkippedWrongLod + winSkippedAlreadySent + winSkippedNoMeta;
+      winSkippedWrongLod + winSkippedAlreadySent + winSkippedOtherPlane + winSkippedNoMeta;
 
     let p50: number | null = null;
     let p95: number | null = null;
@@ -267,6 +275,7 @@ export class UploadTelemetry {
         skippedOverview: number;
         skippedWrongLod: number;
         skippedAlreadySent: number;
+        skippedOtherPlane: number;
         skippedNoMeta: number;
       };
     },
@@ -290,6 +299,7 @@ export class UploadTelemetry {
       skippedUploadBoundInWindow: window.skippedUploadBoundInWindow,
       skippedWrongLod: window.byCause.skippedWrongLod,
       skippedAlreadySent: window.byCause.skippedAlreadySent,
+      skippedOtherPlane: window.byCause.skippedOtherPlane,
       skippedNoMeta: window.byCause.skippedNoMeta,
       // Informational — prefetch/overview don't count toward the ratio
       // but are useful "was the decode pool busy?" context.

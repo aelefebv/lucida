@@ -49,6 +49,7 @@ import {
   dispatchLabelChunkDelivery,
   dispatchLabelVolumeChunkDelivery,
   type Dispatched,
+  type DispatchSkip,
 } from "./delivery/dispatch.ts";
 import { WorkerResourceTracker } from "./delivery/resources.ts";
 import { UploadTelemetry } from "./telemetry/upload.ts";
@@ -443,7 +444,7 @@ export class Uploader {
     // Z-plane of each chunk and the volume view the whole chunk. Every
     // dispatch reports the real bytes sent so the frame budget throttles
     // uploads, and at least one always goes so labels never starve.
-    let sent: Dispatched | null;
+    let sent: Dispatched | DispatchSkip;
     if (meta.isLabel) {
       sent = ctx.mode === "slice"
         ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, sliceZ, epochs)
@@ -451,7 +452,11 @@ export class Uploader {
     } else {
       sent = dispatchChunkDelivery(ctx.client, delivery, meta, ctx.mode, sliceZ, epochs);
     }
-    if (!sent) {
+    if (sent === "other-plane") {
+      this.currentUploadStats.skippedOtherPlane++;
+      return 0;
+    }
+    if (sent === "no-meta") {
       this.currentUploadStats.skippedNoMeta++;
       return 0;
     }
