@@ -11,6 +11,12 @@
       "datasets": "all",
       "scenarios": "all",
       "ratios": [1, 2]
+    },
+    "gate": {
+      "description": "what CI's trace gate opens cold under a software rasterizer, judged on whether each run settles",
+      "datasets": ["image", "volume", "collection", "single-level"],
+      "scenarios": ["cold-open", "volume-open-small"],
+      "ratios": [1, 2]
     }
   }
 }
