@@ -54,7 +54,7 @@ function arcballView(): SavedView {
       near: 0.1,
       far: 1000,
     },
-    view: { z_range: { start: 20, end: 21 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 20, end: 21 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
     dataset_order: ["ds-1"],
     dataset_settings: {},
@@ -307,6 +307,22 @@ describe("ExplorationPanel — you-are-here readout reveals the axes", () => {
     expect(here).toMatch(/Z \d+\/340/);
     expect(here).toMatch(/T 1\/40/);
     expect(here).toMatch(/composite/);
+  });
+
+  it("reads the channel of the dataset in hand, not another layer's solo", async () => {
+    const layer = {
+      visible: true, opacity: 1, contrast_min: 0, contrast_max: 65535, gamma: 1, blend_mode: "alpha",
+    };
+    const view = {
+      ...arcballView(),
+      dataset_order: ["ds-1", "ds-2"],
+      dataset_settings: { "ds-1": layer, "ds-2": { ...layer, solo: 1 } },
+    } as unknown as SavedView;
+    await renderPanel({ dims: [1, 3, 340, 512, 512], captureBuilder: () => view });
+    expect(screen.getByTestId("explore-here").textContent).toMatch(/composite/);
+    // From the composite, the next channel solos this layer's first.
+    expect(cellByLabel("Next channel")).toBeTruthy();
+    expect(screen.queryAllByTestId("explore-cell").some((el) => within(el).queryByText("Previous channel"))).toBe(false);
   });
 
   it("omits T and C when the dataset is single-timepoint, single-channel", async () => {

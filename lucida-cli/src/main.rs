@@ -2547,7 +2547,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 })?;
                 let ds_id = info.summary.workspace_dataset_id.clone();
 
-                let extent = ViewExtent::from_dims(dims);
+                let extent = ViewExtent::from_dims(dims).for_dataset(&ds_id);
                 let viewport = [*cell_px, *cell_px];
 
                 // Current view: parse the caller's `--view` (the "descend" path,
@@ -5445,7 +5445,7 @@ mod tests {
         // the printed JSON has all of: extent, per-cell z/t/c, dataset, url.
         let dims = [5, 3, 40, 80, 100]; // [T, C, Z, Y, X], rich on every axis
         let ds_id = "wds-explore";
-        let extent = ViewExtent::from_dims(dims);
+        let extent = ViewExtent::from_dims(dims).for_dataset(ds_id);
         let mut current = default_view(ds_id, dims, [320, 320]);
         // Sit in the interior so steps in both directions are offered.
         current.view.t = 2;

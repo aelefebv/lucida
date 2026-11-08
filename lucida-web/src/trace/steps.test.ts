@@ -82,7 +82,7 @@ function view(theta: number, t: number, channelVisible: boolean, contrastMax: nu
     datasets: ["ds-1"],
     active_layouts: {},
     camera: { mode: "arcball", theta, phi: 0.2, distance: 900, fov: 45, viewport, near: 1, far: 1000, target: [0, 0, 0] },
-    view: { z_range: { start: 0, end: 1 }, t, c: 0 },
+    view: { z_range: { start: 0, end: 1 }, t },
     display: { contrast_min: 0, contrast_max: contrastMax, gamma: 1 },
     dataset_order: ["ds-1"],
     dataset_settings: {
@@ -111,6 +111,12 @@ describe("what a step is judged by", () => {
     expect(changed(view(0.9, 0, true, 100, [1440, 900]))).toBe(true);
     expect(changed(view(0.5, 1, true, 100, [1440, 900]))).toBe(true);
     expect(changed(view(0.5, 0, false, 100, [1440, 900]))).toBe(true);
+  });
+
+  it("changes with a layer's solo, which leaves the visibility flags alone", () => {
+    const soloed = view(0.5, 0, true, 100, [1440, 900]);
+    soloed.dataset_settings["ds-1"].solo = 1;
+    expect(changed(soloed)).toBe(true);
   });
 
   it("ignores a contrast refit and the viewport", () => {

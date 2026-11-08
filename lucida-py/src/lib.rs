@@ -322,7 +322,7 @@ fn explore(
 ) -> PyResult<String> {
     let dims = [dims.0, dims.1, dims.2, dims.3, dims.4];
     let vp = [viewport.0, viewport.1];
-    let extent = ViewExtent::from_dims(dims);
+    let extent = ViewExtent::from_dims(dims).for_dataset(ds_id);
     let current = match view_json {
         Some(j) => serde_json::from_str::<SavedView>(j)
             .map_err(|e| PyValueError::new_err(e.to_string()))?,

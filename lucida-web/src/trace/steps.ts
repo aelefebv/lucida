@@ -118,16 +118,22 @@ function invalidCount(count: number): string | null {
 
 /**
  * The part of a view a scripted step is judged by: the camera less its
- * viewport, the selectors, and whether each dataset, channel, and label is
- * shown. Contrast is left out because auto-contrast refits it as data
- * arrives, which would make a hold look like a change of view. The driver
+ * viewport, the selectors, whether each dataset, channel, and label is
+ * shown, and each layer's solo. Contrast is left out because auto-contrast
+ * refits it as data arrives, which would make a hold look like a change of
+ * view. The driver
  * reads this before and after each step and compares the two; the rule
  * lives here so the page, not the driver, says what counts as the view.
  */
 export interface ViewSignature {
   camera: Record<string, unknown> | null;
   view: ViewState | null;
-  visibility: Record<DatasetId, { visible: boolean; channels: boolean[] | null; labels: boolean[] | null }>;
+  visibility: Record<DatasetId, {
+    visible: boolean;
+    channels: boolean[] | null;
+    solo: number | null;
+    labels: boolean[] | null;
+  }>;
 }
 
 export function viewSignature(view: SavedView | null): ViewSignature | null {
@@ -139,6 +145,7 @@ export function viewSignature(view: SavedView | null): ViewSignature | null {
     visibility[id] = {
       visible: settings.visible,
       channels: settings.channel_settings?.map((channel) => channel.visible) ?? null,
+      solo: settings.solo ?? null,
       labels: settings.label_settings?.map((label) => label.visible) ?? null,
     };
   }

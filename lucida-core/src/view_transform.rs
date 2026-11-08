@@ -36,9 +36,29 @@ pub struct ViewExtent {
     pub t_count: u32,
     /// Number of channels.
     pub c_count: u32,
+    /// The dataset in hand. Channels are shown per layer, so the channel
+    /// moves step this layer's solo and leave the others as they are; without
+    /// it they step every layer together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_id: Option<DatasetId>,
 }
 
 impl ViewExtent {
+    /// This extent with `dataset_id` as the dataset in hand.
+    pub fn for_dataset(mut self, dataset_id: &str) -> Self {
+        self.dataset_id = Some(DatasetId(dataset_id.to_string()));
+        self
+    }
+
+    /// The soloed channel of the dataset in hand, or of the first soloed
+    /// layer when the extent names none.
+    pub fn solo_in(&self, view: &SavedView) -> Option<u32> {
+        match &self.dataset_id {
+            Some(id) => view.dataset_settings.get(id).and_then(|s| s.solo),
+            None => view.dataset_settings.values().find_map(|s| s.solo),
+        }
+    }
+
     /// Build a [`ViewExtent`] from a dataset shape `dims = [T, C, Z, Y, X]`.
     ///
     /// The world-space box spans the full image in X/Y and the Z stack in depth
@@ -54,6 +74,7 @@ impl ViewExtent {
             z_count: z as u32,
             t_count: t as u32,
             c_count: c as u32,
+            dataset_id: None,
         }
     }
 }
@@ -134,7 +155,7 @@ pub fn explore_view(
     bounds: Option<Vec<f64>>,
 ) -> String {
     let dims = [t as u64, c as u64, z as u64, y as u64, x as u64];
-    let mut extent = ViewExtent::from_dims(dims);
+    let mut extent = ViewExtent::from_dims(dims).for_dataset(ds_id);
     let current = match view_json {
         Some(j) if !j.is_empty() => match serde_json::from_str::<SavedView>(&j) {
             Ok(v) => {
@@ -428,17 +449,21 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
             // The composite sits one step before the first channel, so a step
             // forward from it solos channel 0 and a step back from channel 0
             // returns to it.
-            let current = view
-                .dataset_settings
-                .values()
-                .find_map(|s| s.solo)
-                .map_or(-1, i64::from);
+            let current = extent.solo_in(view).map_or(-1, i64::from);
             let next = current + *d as i64;
             if next < -1 || next >= extent.c_count as i64 {
                 return None;
             }
+            if let Some(id) = &extent.dataset_id
+                && !child.dataset_settings.contains_key(id)
+            {
+                return None;
+            }
             let solo = u32::try_from(next).ok();
-            for settings in child.dataset_settings.values_mut() {
+            for (id, settings) in child.dataset_settings.iter_mut() {
+                if extent.dataset_id.as_ref().is_some_and(|hand| hand != id) {
+                    continue;
+                }
                 // Home's entry lists no channels; the extent counts them.
                 let count = match settings.channel_settings.len() {
                     0 => extent.c_count,
@@ -685,7 +710,7 @@ impl ExplorationSidecar {
                 // gets the same orientation without re-deriving it.
                 z: c.view.view.z_range.start,
                 t: c.view.view.t,
-                c: c.view.dataset_settings.values().find_map(|s| s.solo),
+                c: extent.solo_in(&c.view),
                 view: c.view,
                 url: None,
                 stat: None,
@@ -751,6 +776,7 @@ mod tests {
             z_count: 40,
             t_count: 5,
             c_count: 2,
+            dataset_id: None,
         }
     }
 
@@ -1141,6 +1167,30 @@ mod tests {
     }
 
     #[test]
+    fn apply_stepc_steps_only_the_dataset_in_hand() {
+        let mut v = soloed(slice_view(), None);
+        v.dataset_settings.insert(
+            DatasetId("other".into()),
+            DatasetDisplaySettings {
+                solo: Some(1),
+                ..Default::default()
+            },
+        );
+        let extent = extent_3d().for_dataset("ds");
+        let solo_of_other = |v: &SavedView| v.dataset_settings[&DatasetId("other".into())].solo;
+
+        // The other layer's solo is not the dataset in hand's position.
+        assert!(apply(&v, &ViewTransform::StepC(-1), &extent).is_none());
+        let child = apply(&v, &ViewTransform::StepC(1), &extent).unwrap();
+        assert_eq!(solo_of(&child), Some(0));
+        assert_eq!(solo_of_other(&child), Some(1));
+
+        let cells = ExplorationSidecar::build(&v, &extent, 0, Vec::new()).cells;
+        let step = cells.iter().find(|c| c.transform == "stepc:+1").unwrap();
+        assert_eq!(step.c, Some(0));
+    }
+
+    #[test]
     fn apply_stepc_back() {
         let v = soloed(slice_view(), Some(1));
         let child = apply(&v, &ViewTransform::StepC(-1), &extent_3d()).unwrap();
@@ -1262,6 +1312,7 @@ mod tests {
             z_count: 40,
             t_count: 5,
             c_count: 3,
+            dataset_id: None,
         }
     }
 
@@ -1604,6 +1655,7 @@ mod tests {
             z_count: 0,
             t_count: 0,
             c_count: 0,
+            dataset_id: None,
         };
         let v = slice_view();
         let _ = children(&v, &point);
