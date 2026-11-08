@@ -3,7 +3,8 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::framing::{
-    Aabb, FitBounds, VoxBox, WorldBox, arcball_containment, arcball_view_containment, slice_framing,
+    Aabb, FitBounds, VoxBox, WorldBox, arcball_containment, arcball_view_containment,
+    depth_bracket, slice_framing,
 };
 use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
@@ -772,13 +773,17 @@ fn pixels_per_sample_from_eye(
     let dy = hit_world[1] - eye[1];
     let dz = hit_world[2] - eye[2];
     let distance = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+    pixels_per_world_at_unit_distance / distance / densest_samples_per_world(model, shape)
+}
+
+/// Level-0 samples per world unit along the volume's densest axis.
+fn densest_samples_per_world(model: &[f64; 16], shape: [u32; 3]) -> f64 {
     let samples_per_world = [
         shape[2] as f64 / model[0].abs().max(1e-12),
         shape[1] as f64 / model[5].abs().max(1e-12),
         shape[0] as f64 / model[10].abs().max(1e-12),
     ];
-    let densest = samples_per_world.into_iter().fold(0.0, f64::max).max(1e-12);
-    pixels_per_world_at_unit_distance / distance / densest
+    samples_per_world.into_iter().fold(0.0, f64::max).max(1e-12)
 }
 
 impl Arcball {
@@ -1010,6 +1015,81 @@ impl Arcball {
             &model,
             shape,
         )
+    }
+
+    /// Move the eye along the view axis, keeping the target and the angles,
+    /// until [`Self::pixels_per_sample_at_hit`] measures `pixels_per_sample`,
+    /// and bracket the depth around `bounds`, the box the camera must not
+    /// clip.
+    ///
+    /// The center ray meets the volume where the view axis enters it on the
+    /// eye's side, a point that stays put as the eye slides along the axis.
+    /// The measure is the perspective scale over the eye's distance to that
+    /// point, so one distance gives it exactly.
+    ///
+    /// Returns `false`, changing nothing, when the view axis misses the
+    /// volume or the distance it needs is out of range.
+    pub fn set_pixels_per_sample(
+        &mut self,
+        volume_transform: &VolumeTransform,
+        shape: [u32; 3],
+        pixels_per_sample: f64,
+        bounds: WorldBox,
+    ) -> bool {
+        if !(pixels_per_sample.is_finite() && pixels_per_sample > 0.0) {
+            return false;
+        }
+        let (model, inv_model) = model_matrices_f64(Some(volume_transform));
+        let back = self.screen_axes()[2];
+        let origin = transform_point(self.target, &inv_model);
+        let ahead = transform_point(
+            std::array::from_fn(|i| self.target[i] + back[i]),
+            &inv_model,
+        );
+        // The axis in the unit cube is `origin + s · direction`, `s` counting
+        // world units from the target toward the eye.
+        let direction: [f64; 3] = std::array::from_fn(|i| ahead[i] - origin[i]);
+        let (mut s_min, mut s_max) = (f64::NEG_INFINITY, f64::INFINITY);
+        for i in 0..3 {
+            if direction[i].abs() < 1e-12 {
+                if !(0.0..=1.0).contains(&origin[i]) {
+                    return false;
+                }
+                continue;
+            }
+            let (a, b) = (-origin[i] / direction[i], (1.0 - origin[i]) / direction[i]);
+            s_min = s_min.max(a.min(b));
+            s_max = s_max.min(a.max(b));
+        }
+        if s_min > s_max || !s_max.is_finite() {
+            return false;
+        }
+        let depth = self.pixels_per_world_at_unit_distance()
+            / (densest_samples_per_world(&model, shape) * pixels_per_sample);
+        let distance = s_max + depth;
+        if !(distance.is_finite() && distance > 0.0 && distance <= ARCBALL_DISTANCE_MAX) {
+            return false;
+        }
+        let farthest_corner = (0..8)
+            .map(|corner| {
+                (0..3)
+                    .map(|axis| {
+                        let end = if corner & (1 << axis) == 0 {
+                            bounds.min[axis]
+                        } else {
+                            bounds.max[axis]
+                        };
+                        (end - self.target[axis]).powi(2)
+                    })
+                    .sum::<f64>()
+                    .sqrt()
+            })
+            .fold(0.0, f64::max);
+        let (near, far) = depth_bracket(distance, farthest_corner);
+        self.distance = distance;
+        self.near = near;
+        self.far = far;
+        true
     }
 
     /// Inverse view-projection matrix as f32 for the GPU.

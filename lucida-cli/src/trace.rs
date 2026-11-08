@@ -14,10 +14,8 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use lucida_core::DatasetId;
 use lucida_core::camera::{Camera, Framing};
-use lucida_core::framing::WorldBox;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{Colormap, DatasetDisplaySettings, DocumentState, RenderMode, Scene};
-use lucida_core::transform::VolumeTransform;
 use lucida_protocol::{DatasetSourceCacheStats, DatasetSourceHealth};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1330,17 +1328,19 @@ pub fn compose_camera(
             ),
         ));
     }
-    if let Some(zoom) = request.zoom {
-        match &mut scene.camera {
-            Camera::Slice(slice) => slice.set_zoom(zoom),
-            _ => realize_volume_zoom(&mut scene, dataset_id, zoom)?,
-        }
+    if let Some(zoom) = request.zoom
+        && !scene.zoom_to_pixels_per_sample(dataset_id, zoom)
+    {
+        return Err(CliError::config(format!(
+            "cannot place the camera at {zoom} device pixels per level-0 sample of dataset {}",
+            dataset_id.0
+        )));
     }
     // The driver records the level this exact camera targets, so the page
     // must keep it rather than fit its own.
     scene.camera.set_framing(Framing::Placed);
 
-    let zoom = measure_zoom(&scene, dataset_id).ok_or_else(|| {
+    let zoom = scene.pixels_per_sample(dataset_id).ok_or_else(|| {
         CliError::new(
             ErrorKind::MissingResource,
             format!("dataset {} has no image to measure", dataset_id.0),
@@ -1372,98 +1372,6 @@ pub fn compose_camera(
             target_level: LevelRange { min, max },
         },
     })
-}
-
-/// Device pixels per level-0 sample of the dataset's first image under the
-/// scene's camera: the measure the view query hands the level rule.
-fn measure_zoom(scene: &Scene, dataset_id: &DatasetId) -> Option<f64> {
-    let member = scene
-        .derived
-        .get(dataset_id)?
-        .members
-        .iter()
-        .find(|member| !member.levels.is_empty())?;
-    let level0 = &member.levels[0];
-    let (forward, inverse) = scene.rendering_transform(member);
-    let placed = VolumeTransform {
-        model: forward.model,
-        inv_model: inverse.inv_model,
-        max_physical_extent: forward.max_physical_extent,
-    };
-    Some(scene.camera.pixels_per_sample(
-        &placed,
-        [
-            level0.shape[2] as u32,
-            level0.shape[3] as u32,
-            level0.shape[4] as u32,
-        ],
-    ))
-}
-
-/// Move the arcball camera until the center ray meets the volume at `zoom`
-/// device pixels per level-0 sample.
-///
-/// The measure falls off as `k / (distance − t)`: the center ray enters the
-/// volume `t` world units in front of the orbit target whatever the distance,
-/// and `k` is the camera's perspective scale over the volume's sample
-/// density. Two measures pin `k` and `t`, and the third solves for the
-/// distance that gives the asked zoom. The clip planes are rebuilt around
-/// the new distance so the volume is neither clipped nor starved of depth.
-fn realize_volume_zoom(
-    scene: &mut Scene,
-    dataset_id: &DatasetId,
-    zoom: f64,
-) -> Result<(), CliError> {
-    let cannot = |why: String| {
-        CliError::config(format!(
-            "cannot place the volume camera at {zoom} device pixels per level-0 sample: {why}"
-        ))
-    };
-    let Camera::Arcball(arcball) = &scene.camera else {
-        return Err(cannot("the camera is not an arcball".to_string()));
-    };
-    let d1 = arcball.distance;
-    let d2 = d1 * 2.0;
-    let p1 = measure_zoom(scene, dataset_id)
-        .ok_or_else(|| cannot("the dataset has no image".to_string()))?;
-    if let Camera::Arcball(arcball) = &mut scene.camera {
-        arcball.distance = d2;
-    }
-    let p2 = measure_zoom(scene, dataset_id)
-        .ok_or_else(|| cannot("the dataset has no image".to_string()))?;
-    if !(p1.is_finite() && p2.is_finite() && p1 > p2 && p2 > 0.0) {
-        return Err(cannot(
-            "the center ray does not meet the volume".to_string(),
-        ));
-    }
-
-    let t = (p1 * d1 - p2 * d2) / (p1 - p2);
-    let k = p1 * (d1 - t);
-    let distance = t + k / zoom;
-    if !(distance.is_finite() && distance > t && distance > 0.0) {
-        return Err(cannot("no orbit distance reaches it".to_string()));
-    }
-    let radius = scene
-        .dataset_world_bounds(&dataset_id.0)
-        .map(|WorldBox { min, max }| {
-            0.5 * ((max[0] - min[0]).powi(2)
-                + (max[1] - min[1]).powi(2)
-                + (max[2] - min[2]).powi(2))
-            .sqrt()
-        })
-        .unwrap_or(1.0);
-    if let Camera::Arcball(arcball) = &mut scene.camera {
-        arcball.distance = distance;
-        arcball.near = (distance - radius).max(distance * 1e-3).max(1e-4);
-        arcball.far = (distance + radius) * 1.05;
-    }
-
-    let realized = measure_zoom(scene, dataset_id)
-        .ok_or_else(|| cannot("the dataset has no image".to_string()))?;
-    if (realized - zoom).abs() > zoom * 1e-6 {
-        return Err(cannot(format!("the camera measures {realized} there")));
-    }
-    Ok(())
 }
 
 fn health_entry_for<'a>(
