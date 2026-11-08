@@ -55,9 +55,10 @@ use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store
 use crate::dataset::{
     DatasetBrowseOutput, DatasetHealthOutput, DatasetHttpClient, DatasetInfoOutput,
     DatasetListOutput, DatasetOpenClient, DatasetOpenOutput, DatasetRemoveOutput,
-    DatasetRetryOutput, DatasetWorkspaceClient, format_dataset_browse_human,
-    format_dataset_health_human, format_dataset_info_human, format_dataset_list_human,
-    format_dataset_open_human, format_dataset_remove_human, format_dataset_retry_human,
+    DatasetRetryOutput, DatasetWorkspaceClient, absolute_dataset_source,
+    format_dataset_browse_human, format_dataset_health_human, format_dataset_info_human,
+    format_dataset_list_human, format_dataset_open_human, format_dataset_remove_human,
+    format_dataset_retry_human,
 };
 
 use crate::error::{CliError, ErrorKind};
@@ -728,6 +729,7 @@ impl ViewCommand {
                 ViewportCommand::SetViewport {
                     width: *width,
                     height: *height,
+                    pixel_ratio: None,
                 }
             }
         })
@@ -1292,10 +1294,10 @@ enum TraceCommand {
     /// Somebody in the workspace turns the watch toggle on in their monitor;
     /// this prints what their page publishes — one JSON object per line, a
     /// per-tick aggregate, a run boundary, or a provisional reading. No
-    /// per-chunk record ever rides the stream. Subscribing hands over the
-    /// server's small ring first, so a watch that starts mid-stall still sees
-    /// the recent past. Runs until the socket closes unless --seconds says
-    /// otherwise
+    /// per-chunk record ever rides the stream. The stream starts when the
+    /// watch does; --history first prints the server's small ring, so a watch
+    /// that starts mid-stall still sees the recent past. Runs until the socket
+    /// closes unless --seconds says otherwise
     Watch {
         /// Follow one page by the client id its items carry. Every publishing
         /// page in the workspace when absent
@@ -1305,6 +1307,11 @@ enum TraceCommand {
         /// closes
         #[arg(long, value_name = "SECONDS")]
         seconds: Option<u64>,
+        /// Print what the server's ring still holds before the live items,
+        /// then one `watch_history_end` line where the history stops. The
+        /// ring outlives page reloads, so it can hold earlier sessions' runs
+        #[arg(long)]
+        history: bool,
     },
     /// List and fetch the reports people sent to this workspace's inbox
     Inbox {
@@ -2194,9 +2201,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 )
                 .await?;
                 let target = target_for(&server.url, &workspace)?;
+                let source = absolute_dataset_source(source)?;
                 let dataset_client = DatasetOpenClient::new(target.ws_url.clone(), token);
                 let dataset = dataset_client
-                    .open(source, &workspace.id, Duration::from_secs(*timeout_seconds))
+                    .open(
+                        &source,
+                        &workspace.id,
+                        Duration::from_secs(*timeout_seconds),
+                    )
                     .await?;
                 let output_payload = DatasetOpenOutput {
                     server,
@@ -3950,7 +3962,14 @@ async fn emit_trace_command(
                 trace::format_chrome_trace_human(output_path, &capture)
             })?;
         }
-        (None, Some(TraceCommand::Watch { client_id, seconds })) => {
+        (
+            None,
+            Some(TraceCommand::Watch {
+                client_id,
+                seconds,
+                history,
+            }),
+        ) => {
             // No trailing summary: the command's whole output is the stream it
             // already printed, and a closing object would be a line a reader
             // has to learn not to parse as an item.
@@ -3961,6 +3980,7 @@ async fn emit_trace_command(
                 watch::WatchOptions {
                     client_id: *client_id,
                     duration: seconds.map(Duration::from_secs),
+                    history: *history,
                 },
             )
             .await?;
@@ -4332,7 +4352,7 @@ fn dataset_source_url(dataset: &str, health: &[DatasetSourceHealth]) -> Result<S
         .collect();
     match by_name.as_slice() {
         [only] => Ok(only.source_url.clone().unwrap_or_default()),
-        [] => Ok(dataset.to_string()),
+        [] => absolute_dataset_source(dataset),
         many => Err(CliError::new(
             ErrorKind::AmbiguousName,
             format!(
@@ -6773,30 +6793,52 @@ mod tests {
         );
     }
 
-    /// Both flags are optional, because the shape the command exists for is a
+    /// Every flag is optional, because the shape the command exists for is a
     /// person's session on another machine that nobody can put a duration on.
+    /// History is opt-in: by default the watch starts at the subscribe.
     #[test]
-    fn trace_watch_follows_the_workspace_until_asked_otherwise() {
+    fn trace_watch_follows_the_workspace_live_until_asked_otherwise() {
         match parse(&["trace", "watch"]).command {
             Command::Trace {
                 dataset,
-                command: Some(TraceCommand::Watch { client_id, seconds }),
+                command:
+                    Some(TraceCommand::Watch {
+                        client_id,
+                        seconds,
+                        history,
+                    }),
                 ..
             } => {
                 assert_eq!(dataset, None);
                 assert_eq!(client_id, None);
                 assert_eq!(seconds, None);
+                assert!(!history);
             }
             _ => panic!("expected trace watch"),
         }
 
-        match parse(&["trace", "watch", "--client-id", "3", "--seconds", "30"]).command {
+        let args = [
+            "trace",
+            "watch",
+            "--client-id",
+            "3",
+            "--seconds",
+            "30",
+            "--history",
+        ];
+        match parse(&args).command {
             Command::Trace {
-                command: Some(TraceCommand::Watch { client_id, seconds }),
+                command:
+                    Some(TraceCommand::Watch {
+                        client_id,
+                        seconds,
+                        history,
+                    }),
                 ..
             } => {
                 assert_eq!(client_id, Some(3));
                 assert_eq!(seconds, Some(30));
+                assert!(history);
             }
             _ => panic!("expected trace watch"),
         }

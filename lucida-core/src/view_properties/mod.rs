@@ -6,9 +6,10 @@
 //! - the chunk plan is not empty for anything the view query reports visible.
 //!
 //! A producer is anything that sets the camera without the user steering it:
-//! open, join, restore, the 2D/3D switch, guided exploration, montage cells,
-//! the CLI overview. The checks measure the scene a producer leaves behind,
-//! never the mechanism, so a producer is free to change how it gets there.
+//! open, join, restore, the 2D/3D switch, a pixel ratio change, guided
+//! exploration, montage cells, the CLI overview. The checks measure the scene
+//! a producer leaves behind, never the mechanism, so a producer is free to
+//! change how it gets there.
 //!
 //! Compiled for this crate's tests and, through the `test-support` feature,
 //! for other crates' tests, since the CLI's producers live in the CLI.
@@ -79,6 +80,8 @@ pub enum Expect {
     Framed(f64),
     /// Zoomed in past the whole dataset, which then covers the screen.
     Covers,
+    /// The whole dataset in view, at any size.
+    Inside,
 }
 
 /// One view a producer left, labelled so the same view at the other pixel
@@ -149,6 +152,7 @@ pub fn assert_on_screen(property: &str, ratios: &[u32], produce: impl Produce) {
                     let outcome = match p.expect {
                         Expect::Framed(floor) => framed(&p.shown, &f.id(), floor),
                         Expect::Covers => covers(&p.shown, &f.id()),
+                        Expect::Inside => framed(&p.shown, &f.id(), 0.0),
                     };
                     report.check(case(&f, vp, dpr, &p.label), outcome);
                 }

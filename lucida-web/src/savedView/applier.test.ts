@@ -675,9 +675,7 @@ describe("SavedViewApplier restores a view at the size it was saved", () => {
     await restoreAtTheOtherRatio("arcball");
   });
 
-  // Fails while a restored slice view keeps its zoom in device pixels, which
-  // shows it at half or double size at the other pixel ratio.
-  it.fails("keeps a slice view framed and at its CSS size", async () => {
+  it("keeps a slice view framed and at its CSS size", async () => {
     await restoreAtTheOtherRatio("slice");
   });
 });

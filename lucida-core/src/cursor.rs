@@ -158,9 +158,8 @@ fn transform_dir_f64(d: [f64; 3], m: &[f64; 16]) -> [f64; 3] {
     ]
 }
 
-/// Project a world-space point to screen coords through a view-projection matrix.
-/// Uses `screen_size` (CSS pixels) instead of `view.viewport` (device pixels)
-/// so coordinates match the HTML overlay positioning.
+/// Project a world-space point to screen coords through a view-projection
+/// matrix, onto a canvas `screen_w` by `screen_h` device pixels.
 fn project_to_screen_vp(
     point: [f64; 3],
     vp: [f64; 16],
@@ -214,6 +213,9 @@ fn voxel_to_world(x: f64, y: f64, z: f64, shape: [u32; 3], model: &[f64; 16]) ->
 /// Compute peer cursor geometry for the GPU and screen positions for labels.
 ///
 /// Each GPU cursor is 16 floats: `[position(4), color(4), end_point(4), marker(4)]`
+///
+/// Label positions are in device pixels, the unit of the camera's viewport,
+/// so `screen_w` and `screen_h` are the canvas in device pixels too.
 pub fn compute_peer_cursors(
     scene: &Scene,
     peers: &[PeerInput],

@@ -653,7 +653,7 @@ mod tests {
 
     fn cached_store(name: &str) -> Arc<CachedStore> {
         Arc::new(CachedStore::new(
-            crate::backend::open(&committed_fixture(name)).unwrap(),
+            crate::backend::open(&committed_fixture(name).parse().unwrap()).unwrap(),
             1024 * 1024,
         ))
     }
