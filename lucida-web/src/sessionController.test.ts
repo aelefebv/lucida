@@ -466,7 +466,7 @@ describe("SessionController reconnect", () => {
   /** Drop the connection and join again, as the bridge reports a reconnect.
    *  The server hands out a new id, and the snapshot carries `peers`. */
   function reconnect(handlers: BridgeHandlers, peers: PresenceState[]) {
-    handlers.onDisconnect?.();
+    handlers.onDisconnect?.({ code: 1006, reason: "" });
     handlers.onConnected?.(2);
     handlers.onSnapshot(5, snapshotJson(["wds-1"]), peers, 9, {});
   }
@@ -1174,7 +1174,7 @@ describe("SessionController durable import warnings", () => {
       message: sampledLabelNotice,
       warning: true,
     });
-    handlers.onDisconnect?.();
+    handlers.onDisconnect?.({ code: 1006, reason: "" });
     expect(lastActivity(events).warnings).toStrictEqual([]);
   });
 
@@ -1514,7 +1514,7 @@ describe("SessionController transport lifecycle", () => {
     const disconnected = vi.spyOn(traceRecorder, "noteDisconnected");
 
     handlers.onConnected?.(4);
-    handlers.onDisconnect?.();
+    handlers.onDisconnect?.({ code: 1013, reason: "client fell too far behind" });
     handlers.onConnected?.(5);
 
     // The generation goes with it: a run spanning two sockets holds two
@@ -1522,5 +1522,6 @@ describe("SessionController transport lifecycle", () => {
     // apart.
     expect(connected.mock.calls.map(call => call[0])).toEqual([4, 5]);
     expect(disconnected).toHaveBeenCalledTimes(1);
+    expect(disconnected).toHaveBeenCalledWith({ code: 1013, reason: "client fell too far behind" });
   });
 });
