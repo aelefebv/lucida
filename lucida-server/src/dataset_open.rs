@@ -24,7 +24,7 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, ServerBinding};
 use crate::generated::{
-    DerivedChunkCache, GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
+    DerivedChunkCache, GeneratedCoarseService, GeneratedSchedulingConfig,
     plan_generated_coarse_for_manifest,
 };
 use crate::open_diagnostics::{
@@ -469,11 +469,6 @@ pub async fn open_dataset(
     );
     let generated_config = &ctx.generated_config;
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
-    let plan_config = GeneratedCoarseConfig {
-        target_long_axis: generated_config.generated_target_long_axis,
-        chunk_long_axis: generated_config.generated_chunk_long_axis,
-        max_chunk_bytes: generated_config.generated_max_chunk_bytes,
-    };
     emit(
         progress,
         open_progress(
@@ -489,7 +484,11 @@ pub async fn open_dataset(
         ),
     );
     let generated_plans = if generated_config.generated_enabled {
-        plan_generated_coarse_for_manifest(&result.manifest, plan_config)
+        plan_generated_coarse_for_manifest(
+            &result.manifest,
+            &resolver,
+            generated_config.coarse_config(),
+        )
     } else {
         vec![]
     };
