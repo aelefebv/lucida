@@ -16,6 +16,16 @@ import type { ChunkRequest } from "./types.ts";
 /** Bytes, or chunk counts, per residency tier. */
 export type PerTier = Record<ResidencyTier, number>;
 
+/** One dataset's plan, and what its chunks cost. */
+export interface PlanToAdmit {
+  /** The plan's requests, in priority order. */
+  requests: readonly ChunkRequest[];
+  /** What one resident chunk of a request costs. */
+  bytesOf: (req: ChunkRequest) => number;
+  /** The GPU slot pool a request's chunk lands in, or null for a lane that never uploads. */
+  slotOf?: (req: ChunkRequest) => GpuSlot | null;
+}
+
 export interface Admission {
   /** The admitted requests, in the order they arrived. */
   admitted: ChunkRequest[];
@@ -25,62 +35,70 @@ export interface Admission {
    * without counting against the view's coverage.
    */
   shortfall: PerTier;
-  /** What each tier has left for the next dataset's plan. */
-  remaining: PerTier;
   /** Bytes the coarse tier took beyond its own capacity, from detail's room. */
   borrowed: number;
-  /** GPU bytes the chunk pools have left for the next dataset's plan. */
-  gpuRoomLeft: number;
 }
 
 /**
- * Admit `requests` into `capacity`, in order. The detail tier is admitted
- * first, so that the coarse tier, which is a fallback, takes only the room
- * detail leaves: the coarse floor grows with the layout instead of stopping
- * at a fixed size while detail room sits empty. `bytesOf` is what one
- * resident chunk of a request costs, and `slotOf` the GPU slot pool it lands
- * in. `gpuRoom` is the bytes the render worker's chunk pools may hold between
- * them, which every slot admitted into any pool takes from.
+ * Admit every dataset's plan into one `capacity`, and into `gpuRoom`, the
+ * bytes the render worker's chunk pools may hold between them. Returns one
+ * admission per plan, in the order given.
+ *
+ * The view's detail requests go first, across every plan. The coarse tier
+ * goes next: it is a fallback and takes only the room detail leaves, so the
+ * coarse floor grows with the layout instead of stopping at a fixed size
+ * while detail room sits empty. Prefetch goes last, into what the view
+ * leaves. Priority alone cannot keep that order, because its distance term
+ * outweighs the gaps between lane offsets: a prefetch chunk near the center
+ * ranks above a view chunk at the edge.
  *
  * Two requests for one chunk of one tier, such as the coarse and minimap
  * lanes asking for the same chunk, are admitted or refused together and
  * charged once.
  */
-export function admitRequests(
-  requests: readonly ChunkRequest[],
+export function admitPlans(
+  plans: readonly PlanToAdmit[],
   capacity: Readonly<PerTier>,
-  bytesOf: (req: ChunkRequest) => number,
-  slotOf: (req: ChunkRequest) => GpuSlot | null = () => null,
   gpuRoom: number = Infinity,
-): Admission {
-  const admitted = new Set<ChunkRequest>();
-  // Chunks charged to a tier, and chunks its room refused. A chunk is held
-  // once in the CPU cache however many lanes ask for it.
-  const charged = new Set<string>();
-  const noRoom = new Set<string>();
-  const shortfall: PerTier = { detail: 0, coarse: 0 };
+): Admission[] {
   const used: PerTier = { detail: 0, coarse: 0 };
   const slotsUsed = new Map<string, number>();
   let gpuUsed = 0;
-  const short = (req: ChunkRequest): void => {
-    if (req.lane !== "prefetch") shortfall[req.tier]++;
-  };
+  const states = plans.map((plan) => ({
+    plan,
+    admitted: new Set<ChunkRequest>(),
+    // Chunks charged to a tier, and chunks its room refused. A chunk is held
+    // once in the CPU cache however many lanes ask for it.
+    charged: new Set<string>(),
+    noRoom: new Set<string>(),
+    shortfall: { detail: 0, coarse: 0 } as PerTier,
+    borrowed: 0,
+  }));
 
-  const admitTier = (tier: ResidencyTier, room: number): void => {
-    for (const req of requests) {
-      if (req.tier !== tier) continue;
+  const admit = (
+    state: (typeof states)[number],
+    tier: ResidencyTier,
+    room: number,
+    take: (req: ChunkRequest) => boolean,
+  ): void => {
+    const { plan, admitted, charged, noRoom, shortfall } = state;
+    const short = (req: ChunkRequest): void => {
+      if (req.lane !== "prefetch") shortfall[req.tier]++;
+    };
+    for (const req of plan.requests) {
+      if (req.tier !== tier || !take(req)) continue;
       // The tiers hold their own copies, so one key is charged once per tier.
       const key = `${tier}/${req.entityId}/${req.chunkKey}`;
       if (noRoom.has(key)) continue;
       // A full slot pool refuses this lane's upload, not the chunk: a lane
       // that never uploads, such as the minimap, can still hold it.
-      const slot = slotOf(req);
+      const slot = plan.slotOf?.(req) ?? null;
       if (slot && ((slotsUsed.get(slot.pool) ?? 0) >= slot.slots || gpuUsed + slot.slotBytes > gpuRoom)) {
         short(req);
         continue;
       }
       if (!charged.has(key)) {
-        const bytes = bytesOf(req);
+        const bytes = plan.bytesOf(req);
         if (used[tier] + bytes > room) {
           noRoom.add(key);
           short(req);
@@ -97,21 +115,22 @@ export function admitRequests(
     }
   };
 
-  admitTier("detail", capacity.detail);
-  const detailLeft = Math.max(0, capacity.detail - used.detail);
-  admitTier("coarse", capacity.coarse + detailLeft);
+  const speculative = (req: ChunkRequest): boolean => req.lane === "prefetch";
+  for (const state of states) admit(state, "detail", capacity.detail, (req) => !speculative(req));
+  const coarseRoom = capacity.coarse + Math.max(0, capacity.detail - used.detail);
+  for (const state of states) {
+    const loanBefore = Math.max(0, used.coarse - capacity.coarse);
+    admit(state, "coarse", coarseRoom, () => true);
+    state.borrowed = Math.max(0, used.coarse - capacity.coarse) - loanBefore;
+  }
   const borrowed = Math.max(0, used.coarse - capacity.coarse);
+  for (const state of states) admit(state, "detail", capacity.detail - borrowed, speculative);
 
-  return {
-    admitted: requests.filter((req) => admitted.has(req)),
-    shortfall,
-    remaining: {
-      detail: detailLeft - borrowed,
-      coarse: Math.max(0, capacity.coarse - used.coarse),
-    },
-    borrowed,
-    gpuRoomLeft: gpuRoom - gpuUsed,
-  };
+  return states.map((state) => ({
+    admitted: state.plan.requests.filter((req) => state.admitted.has(req)),
+    shortfall: state.shortfall,
+    borrowed: state.borrowed,
+  }));
 }
 
 /**
