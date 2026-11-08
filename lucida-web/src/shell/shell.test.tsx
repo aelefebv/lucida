@@ -138,6 +138,48 @@ describe("CanvasStage", () => {
     );
     expect(container.querySelector(".lc-canvas-stage")?.hasAttribute("data-bare")).toBe(true);
   });
+
+  it("reports a pixel ratio change at the same CSS size, and re-arms for the next one", () => {
+    const ratio = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    // One fake query per call, holding its listeners, so the test can fire
+    // the change a display switch or a browser zoom would.
+    const queries: { media: string; listeners: Set<() => void> }[] = [];
+    vi.spyOn(window, "matchMedia").mockImplementation((media: string) => {
+      const query = { media, listeners: new Set<() => void>() };
+      queries.push(query);
+      return {
+        media,
+        matches: true,
+        addEventListener: (_: string, listener: () => void) => query.listeners.add(listener),
+        removeEventListener: (_: string, listener: () => void) => query.listeners.delete(listener),
+      } as unknown as MediaQueryList;
+    });
+    const armed = () => queries.filter((query) => query.listeners.size > 0);
+    const changeRatio = (value: number) => {
+      Object.defineProperty(window, "devicePixelRatio", { value, configurable: true });
+      for (const query of armed()) for (const listener of [...query.listeners]) listener();
+    };
+    try {
+      Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+      const onResize = vi.fn();
+      render(
+        <CanvasStage canvasRef={createRef<HTMLCanvasElement>()} canvasKey={0} pixelated onResize={onResize} label="2D view of sample" />,
+      );
+      expect(armed().map((query) => query.media)).toEqual(["(resolution: 1dppx)"]);
+      const before = onResize.mock.calls.length;
+
+      changeRatio(2);
+      expect(onResize).toHaveBeenCalledTimes(before + 1);
+      expect(armed().map((query) => query.media)).toEqual(["(resolution: 2dppx)"]);
+
+      changeRatio(1);
+      expect(onResize).toHaveBeenCalledTimes(before + 2);
+      expect(armed().map((query) => query.media)).toEqual(["(resolution: 1dppx)"]);
+    } finally {
+      if (ratio) Object.defineProperty(window, "devicePixelRatio", ratio);
+      vi.restoreAllMocks();
+    }
+  });
 });
 
 function peer(id: number, following: ClientId | null = null): PresenceState {
