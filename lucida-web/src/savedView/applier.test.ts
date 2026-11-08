@@ -298,6 +298,33 @@ describe("SavedViewApplier", () => {
     });
   });
 
+  it.each(["refuse", "broadcast", "local"] as const)(
+    "leaves the layout alone when the view asks for the one shown (%s)",
+    async (layoutMutation) => {
+      const { scene, calls } = createScene(["wds-a"], { layouts: ["wds-a"] });
+      const applier = new SavedViewApplier(
+        bridge,
+        () => scene,
+        fakeIdForUrl,
+        30_000,
+        "workspace-dataset-id",
+        layoutMutation,
+      );
+      const v = emptyView();
+      v.dataset_order = ["wds-a"];
+      v.active_layouts = { "wds-a": "L0" };
+
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await applier.apply(v);
+
+      expect(calls.find((c) => c.includes('"set_active_layout"'))).toBeUndefined();
+      expect(docCmds.find((c) => c.includes('"set_active_layout"'))).toBeUndefined();
+      expect(applier.getState().warnings).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    },
+  );
+
   it("local layout mutation switches this scene's layout without broadcasting it", async () => {
     const { scene, calls } = createScene(["wds-a"], { layouts: ["wds-a"] });
     const applier = new SavedViewApplier(

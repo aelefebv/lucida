@@ -131,7 +131,9 @@
 
   /* Chart series: categorical slots, assigned in order and never cycled. The
      order keeps neighbors apart under red-green color-vision deficiency, so
-     a chart takes slot 1, 2, 3... for its series in sequence. */
+     a chart takes slot 1, 2, 3... for its series in sequence. Each theme's
+     slots hold 3:1 against its background and surface-1, which the theme
+     canvas and the dock draw them on. */
   --lc-chart-1: #3987e5;
   --lc-chart-2: #d95926;
   --lc-chart-3: #199e70;
@@ -179,10 +181,10 @@
   --lc-info-subtle: color-mix(in oklab, var(--lc-info) 12%, transparent);
 
   --lc-chart-1: #2a78d6;
-  --lc-chart-2: #eb6834;
-  --lc-chart-3: #1baf7a;
-  --lc-chart-4: #eda100;
-  --lc-chart-5: #e87ba4;
+  --lc-chart-2: #e76430;
+  --lc-chart-3: #00a06e;
+  --lc-chart-4: #bd8005;
+  --lc-chart-5: #d46992;
   --lc-chart-6: #008300;
   --lc-chart-7: #6250d6;
   --lc-chart-8: #e34948;
@@ -245,11 +247,9 @@
    keep the conventional red, green, and blue.
 
    Chart series take the themes' categorical slots, by the canvas rather than
-   the theme: the dark theme's on a dark canvas, and on white the light
-   theme's, except slots 3 to 5, which fall under 3:1 there and take the dark
-   theme's darker values of the same hues. The theme canvas takes the theme's
-   own slots, so a series drawn on it matches the dock's, at the dock's
-   contrast rather than 3:1. */
+   the theme: the dark theme's on a dark canvas and the light theme's on white.
+   The theme canvas takes the theme's own slots, so a series drawn on it
+   matches the dock's. */
 :root {
   --lc-canvas-axis-x: #ff4444;
   --lc-canvas-axis-y: #44cc44;
@@ -282,10 +282,10 @@
   --lc-canvas-danger: #d42a2a;
   --lc-canvas-info: #2563eb;
   --lc-canvas-chart-1: #2a78d6;
-  --lc-canvas-chart-2: #eb6834;
-  --lc-canvas-chart-3: #199e70;
-  --lc-canvas-chart-4: #c98500;
-  --lc-canvas-chart-5: #d55181;
+  --lc-canvas-chart-2: #e76430;
+  --lc-canvas-chart-3: #00a06e;
+  --lc-canvas-chart-4: #bd8005;
+  --lc-canvas-chart-5: #d46992;
   --lc-canvas-chart-6: #008300;
   --lc-canvas-chart-7: #6250d6;
   --lc-canvas-chart-8: #e34948;

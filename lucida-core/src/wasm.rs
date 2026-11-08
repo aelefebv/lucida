@@ -848,39 +848,12 @@ impl WasmScene {
     // ordinary document commands through [`Self::apply_command`]; only the
     // read side lives here.
 
-    /// Returns a JSON array of `{id, name}` for all available layouts
-    /// (source_layouts + registered_layouts) for a dataset.
+    /// A JSON array of `{id, name, active}` for a dataset's layouts, as
+    /// [`Scene::available_layouts`] lists them.
     pub fn available_layouts(&self, dataset_id: &str) -> String {
-        let ds_id = DatasetId(dataset_id.to_string());
-
-        #[derive(serde::Serialize)]
-        struct LayoutInfo {
-            id: String,
-            name: String,
-        }
-
-        let mut layouts = Vec::new();
-
-        // Source layouts from the content graph
-        if let Some(content) = self.inner.document.manifests.get(&ds_id) {
-            for l in content.source_layouts() {
-                layouts.push(LayoutInfo {
-                    id: l.id.0.clone(),
-                    name: l.name.clone(),
-                });
-            }
-        }
-
-        // Registered layouts
-        if let Some(registered) = self.inner.document.registered_layouts.get(&ds_id) {
-            for l in registered {
-                layouts.push(LayoutInfo {
-                    id: l.id.0.clone(),
-                    name: l.name.clone(),
-                });
-            }
-        }
-
+        let layouts = self
+            .inner
+            .available_layouts(&DatasetId(dataset_id.to_string()));
         serde_json::to_string(&layouts).unwrap()
     }
 

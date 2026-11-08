@@ -2480,9 +2480,9 @@ mod tests {
             [(
                 ImportWarningKind::MismatchedTileGeometry,
                 "mixed",
-                "tiles differ in shape, and smaller tiles are padded with fill to 2×16×16 \
-                 (c×y×x), the largest on each axis. Smaller (2 of 3): \"A/1/0\" is 2×14×12, \
-                 \"B/1/0\" is 2×12×10",
+                "tiles differ in size, so smaller tiles are padded with empty space to the \
+                 largest size on each axis, 2×16×16 (channels × height × width). Smaller \
+                 (2 of 3): \"A/1/0\" is 2×14×12, \"B/1/0\" is 2×12×10",
             )]
         );
 
@@ -2734,10 +2734,11 @@ mod tests {
         assert_eq!(
             warnings_of(&result, ImportWarningKind::MismatchedTileGeometry),
             [
-                "tiles differ in level count, and every tile shows only the levels all of them \
-                 have (1). Fewer than 2 (1 of 3): \"B/1/0\" has 1",
-                "tiles differ in pixel size, and every tile is shown at \"A/1/0\"'s 1×1×1 \
-                 (z×y×x). Different (1 of 3): \"C/1/0\" is 1×2×2",
+                "tiles have different numbers of resolution levels, so every tile shows only \
+                 the 1 level they all have. Fewer than 2 levels (1 of 3): \"B/1/0\" has 1",
+                "tiles have different pixel sizes, so every tile is shown at the pixel size of \
+                 \"A/1/0\", 1×1×1 (depth × height × width). Different (1 of 3): \"C/1/0\" is \
+                 1×2×2",
             ]
         );
         assert_eq!(result.warnings.len(), 2, "{:?}", result.warnings);
@@ -2782,8 +2783,8 @@ mod tests {
         assert_eq!(
             warnings_of(&result, ImportWarningKind::DuplicateTile),
             [
-                "tiles duplicate each other in 2 places: group \"A/1\" lists 2 tiles, more than \
-              the collection's field_count of 1; \"A/2/0\" is listed twice and is shown once"
+                "tiles duplicate each other in 2 places: group \"A/1\" lists 2 tiles, but the \
+              collection allows 1 per group; \"A/2/0\" is listed twice and is shown once"
             ]
         );
         let tile_names: Vec<_> = result
@@ -2836,9 +2837,9 @@ mod tests {
             warnings_of(&result, ImportWarningKind::MalformedCollectionLayout),
             [
                 "the collection's layout metadata is malformed in 3 places: row entry 1 has no \
-              name and is labelled \"1\"; group \"C/2\" has no columnIndex and is placed in \
-              column \"2\" by its path; groups \"A/1\" and \"A/1b\" are both at row \"A\", \
-              column \"1\" and overlap"
+              name and is labelled \"1\"; group \"C/2\" doesn't say which column it is in, \
+              so its path places it in column \"2\"; groups \"A/1\" and \"A/1b\" are both at \
+              row \"A\", column \"1\" and overlap"
             ]
         );
         let group_names: Vec<_> = result

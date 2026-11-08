@@ -86,9 +86,8 @@ pub(crate) fn group_index(
     labels: &[String],
     problems: &mut Vec<String>,
 ) -> u32 {
-    let key = axis.key();
     if let Some(index) = entry
-        .get(key)
+        .get(axis.key())
         .and_then(|v| v.as_u64())
         .and_then(|v| u32::try_from(v).ok())
     {
@@ -102,14 +101,16 @@ pub(crate) fn group_index(
     match segment.and_then(|segment| labels.iter().position(|label| label == segment)) {
         Some(index) => {
             problems.push(format!(
-                "group {group_path:?} has no {key} and is placed in {axis_noun} {:?} by its path",
+                "group {group_path:?} doesn't say which {axis_noun} it is in, so its path \
+                 places it in {axis_noun} {:?}",
                 labels[index]
             ));
             index as u32
         }
         None => {
             problems.push(format!(
-                "group {group_path:?} has no {key} and is placed in {axis_noun} 0"
+                "group {group_path:?} doesn't say which {axis_noun} it is in and is placed in \
+                 the first {axis_noun}"
             ));
             0
         }
@@ -177,8 +178,7 @@ pub(crate) fn duplicate_tiles(groups: &[GroupParsed], field_count: Option<u64>) 
             && group.tiles.len() as u64 > field_count
         {
             problems.push(format!(
-                "group {:?} lists {} tiles, more than the collection's field_count of \
-                 {field_count}",
+                "group {:?} lists {} tiles, but the collection allows {field_count} per group",
                 group.path,
                 group.tiles.len(),
             ));
@@ -266,8 +266,9 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "group \"B/1\" has no rowIndex and is placed in row \"B\" by its path",
-                "group \"Z/1\" has no rowIndex and is placed in row 0",
+                "group \"B/1\" doesn't say which row it is in, so its path places it in row \
+                 \"B\"",
+                "group \"Z/1\" doesn't say which row it is in and is placed in the first row",
             ]
         );
     }
@@ -316,9 +317,9 @@ mod tests {
             problems,
             [
                 "\"A/1/1\" is at the same position as \"A/1/0\"",
-                "group \"A/1\" lists 2 tiles, more than the collection's field_count of 1",
+                "group \"A/1\" lists 2 tiles, but the collection allows 1 per group",
                 "\"B/1/0\" is listed twice and is shown once",
-                "group \"C/1\" lists 2 tiles, more than the collection's field_count of 1",
+                "group \"C/1\" lists 2 tiles, but the collection allows 1 per group",
             ]
         );
         assert!(duplicate_tiles(&groups[2..], None).is_empty());

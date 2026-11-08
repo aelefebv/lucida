@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo } from "react";
 import type { WasmScene } from "lucida-core";
-import { Axis } from "../axes.ts";
+import { Axis, resolveIndex, type IndexChange } from "../axes.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { invalidateSelection, requestRender } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -114,13 +114,14 @@ export function useDimensions({
 
   // The recorder hears the scrub here, at the control, not where the value
   // reaches the render loop. A saved-view apply and a followed peer move the
-  // same selectors, and neither is an input.
-  const handleZChange = useCallback((v: number) => {
+  // same selectors, and neither is an input. A step reads the scene at the
+  // press, not the last render, so presses before a render each move.
+  const handleZChange = useCallback((v: IndexChange) => {
     bridgeCallbacksRef.current.breakFollow();
     loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
-      applyViewportCommand(scene, { type: "set_z", z: v });
+      applyViewportCommand(scene, { type: "set_z", z: resolveIndex(v, scene.z()) });
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
@@ -135,12 +136,12 @@ export function useDimensions({
     }
   }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
-  const handleTChange = useCallback((v: number) => {
+  const handleTChange = useCallback((v: IndexChange) => {
     bridgeCallbacksRef.current.breakFollow();
     loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
-      applyViewportCommand(scene, { type: "set_t", t: v });
+      applyViewportCommand(scene, { type: "set_t", t: resolveIndex(v, scene.t()) });
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
