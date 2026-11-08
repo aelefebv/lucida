@@ -11,11 +11,13 @@ ratios, and print one table of what each run's diagnostic says.
     uv run scripts/perf.py --dataset volume --scenario orbit,z-scrub --ratio 2
     uv run scripts/perf.py --list
     uv run scripts/perf.py --repeat 3 --save-baseline
+    uv run scripts/perf.py --suite gate --gate --cli <lucida> --server <url>
 
 It builds whatever is stale (server and CLI, wasm, web bundle), generates the
 datasets the selection needs, starts its own server, gives every run a
 workspace of its own, and stops the server and every browser on the way out,
-Ctrl-C included. The catalog, scenarios and suites live in `scripts/perf/`;
+Ctrl-C included. `--cli` and `--server` hand it a built CLI and a running
+server instead. The catalog, scenarios and suites live in `scripts/perf/`;
 `docs/perf.md` describes them.
 
 Every number in the table is a field of a run's diagnostic. This script
@@ -435,18 +437,26 @@ def _run_build(argv: list[str], cwd: Path, what: str, env: dict[str, str] | None
 
 @dataclass(frozen=True)
 class Build:
-    server: Path
     cli: Path
-    web_dist: Path
+    # None when the runs drive a server this script did not start.
+    server: Path | None = None
+    web_dist: Path | None = None
 
 
-def build() -> Build:
-    """Bring the server, CLI, wasm and web bundle up to the checkout.
+def build(cli: Path | None = None, server: bool = True) -> Build:
+    """Bring what this script runs up to the checkout: the CLI unless one is
+    given, and the server, wasm and web bundle unless the runs drive a server
+    that is already running.
 
     Cargo judges the binaries itself. The wasm package and the web bundle
     are rebuilt when the files git sees under their inputs, or the outputs
     themselves, differ from what this script last built.
     """
+    release = REPO / "target" / "release"
+    packages = (["lucida-server"] if server else []) + ([] if cli else ["lucida-cli"])
+    if not packages:
+        assert cli is not None
+        return Build(cli)
     print("build", flush=True)
     cargo = _tool("cargo", "build the server and the CLI")
     env = dict(os.environ)
@@ -455,11 +465,14 @@ def build() -> Build:
     if os.name == "nt" and "AWS_LC_SYS_PREBUILT_NASM" not in env and shutil.which("nasm") is None:
         env["AWS_LC_SYS_PREBUILT_NASM"] = "1"
     _run_build(
-        [cargo, "build", "--release", "--locked", "-p", "lucida-server", "-p", "lucida-cli"],
+        [cargo, "build", "--release", "--locked", *(arg for p in packages for arg in ("-p", p))],
         REPO,
-        "server and CLI",
+        "server and CLI" if len(packages) == 2 else packages[0],
         env,
     )
+    cli = cli or release / f"lucida{EXE}"
+    if not server:
+        return Build(cli)
 
     web_dir = REPO / "lucida-web"
     root_files = [REPO / "Cargo.toml", REPO / "Cargo.lock"]
@@ -484,8 +497,7 @@ def build() -> Build:
         _run_build([pnpm, "run", "build"], web_dir, "web bundle")
         _record(web, web_fingerprint)
 
-    release = REPO / "target" / "release"
-    return Build(release / f"lucida-server{EXE}", release / f"lucida{EXE}", web_dir / "dist")
+    return Build(cli, release / f"lucida-server{EXE}", web_dir / "dist")
 
 
 # ---------------------------------------------------------------------------
@@ -713,7 +725,25 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
+def _answers(url: str, timeout: float) -> bool:
+    try:
+        with urllib.request.urlopen(f"{url}/healthz", timeout=timeout):
+            return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def existing_server(url: str) -> str:
+    """A server someone else started. It opens datasets by the path a run
+    names, so it has to see the data directory at the same absolute path."""
+    url = url.rstrip("/")
+    if not _answers(url, 5):
+        raise PerfError(f"no server answers {url}/healthz; start one, or leave out --server to have one started")
+    return url
+
+
 def start_server(built: Build, out_dir: Path, port: int) -> tuple[ProcessTree, str]:
+    assert built.server is not None and built.web_dist is not None
     # The server keeps its database in its working directory.
     server_dir = out_dir / "server"
     server_dir.mkdir(parents=True, exist_ok=True)
@@ -731,11 +761,8 @@ def start_server(built: Build, out_dir: Path, port: int) -> tuple[ProcessTree, s
     while time.monotonic() < deadline:
         if tree.wait(0.25) is not None:
             raise PerfError(f"the server exited at startup; see {tree.log}")
-        try:
-            with urllib.request.urlopen(f"{url}/healthz", timeout=1):
-                return tree, url
-        except (urllib.error.URLError, OSError):
-            continue
+        if _answers(url, 1):
+            return tree, url
     raise PerfError(f"the server did not answer {url}/healthz within 30 s; see {tree.log}")
 
 
@@ -782,13 +809,17 @@ def run_case(
     out_dir: Path,
     timeout: int,
     stamp: str,
+    gate: bool = False,
+    bundle: bool = False,
     knobs: tuple[str, ...] = (),
 ) -> Row:
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     row = Row(case, runs_dir / f"{case.id}.json", runs_dir / f"{case.id}.txt")
-    # An output directory used before may hold this case's file from then.
+    bundle_file = runs_dir / f"{case.id}.bundle.json"
+    # An output directory used before may hold this case's files from then.
     row.run_file.unlink(missing_ok=True)
+    bundle_file.unlink(missing_ok=True)
     # The browser's throwaway profile lands here rather than the system
     # temp directory, so one killed mid-run is cleaned up with the rest.
     tmp = out_dir / "tmp"
@@ -831,6 +862,10 @@ def run_case(
         argv += ["--width", str(scenario.width)]
     if scenario.height is not None:
         argv += ["--height", str(scenario.height)]
+    if gate:
+        argv.append("--gate")
+    if bundle:
+        argv += ["--bundle", str(bundle_file)]
     argv += knob_args(knobs)
     if scenario.steps:
         # A scenario file is a script file: the CLI reads its steps and
@@ -1223,9 +1258,11 @@ def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison
             comparison.notes.append(f"dpr {dpr}: not compared: {error}")
             continue
         if baseline is None:
+            # Nothing to say where no baseline was ever saved, as in CI.
             others = sorted(p.parent.name for p in root.glob(f"*/dpr{dpr}.json"))
-            elsewhere = f"; {root} has one for {', '.join(others)}" if others else ""
-            comparison.notes.append(f"dpr {dpr}: no baseline for this adapter{elsewhere}")
+            if others:
+                has = f"{root} has one for {', '.join(others)}"
+                comparison.notes.append(f"dpr {dpr}: no baseline for this adapter; {has}")
             continue
         if baseline.get("adapter") != adapter:
             comparison.refused = True
@@ -1360,6 +1397,23 @@ def write_summary(rows: list[Row], out_dir: Path, meta: dict[str, Any], comparis
     return markdown
 
 
+def report_failures(rows: list[Row], github: bool) -> None:
+    """Name every run that failed, and in a GitHub Actions job annotate each
+    on the workflow run."""
+    failed = [row for row in rows if row.error]
+    if not failed:
+        return
+    print(f"{len(failed)} of {len(rows)} runs failed:")
+    for row in failed:
+        print(f"  {row.case.id}: {row.error}")
+    if github:
+        for row in failed:
+            # A workflow command ends at a newline, and % starts an escape.
+            message = (row.error or "").replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::error title={row.case.id}::{message}")
+    sys.stdout.flush()
+
+
 # ---------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------
@@ -1399,7 +1453,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, help="where runs and the summary go (default target/perf/runs/<time>)")
     parser.add_argument("--data", type=Path, help="where generated datasets are cached (default target/perf/datasets)")
     parser.add_argument("--local-catalog", type=Path, default=LOCAL_CATALOG, help="real datasets, merged in")
-    parser.add_argument("--port", type=int, help="the server's port (default a free one)")
+    server = parser.add_mutually_exclusive_group()
+    server.add_argument("--port", type=int, help="the started server's port (default a free one)")
+    server.add_argument(
+        "--server", metavar="URL", help="drive this running server instead of building and starting one"
+    )
+    parser.add_argument("--cli", type=Path, metavar="PATH", help="run this built lucida CLI instead of building one")
+    parser.add_argument(
+        "--gate", action="store_true", help="fail a run that stalls or never settles, as `lucida trace --gate` does"
+    )
+    parser.add_argument("--bundle", action="store_true", help="also write each run's bundle beside its run file")
     parser.add_argument("--list", action="store_true", help="list datasets, scenarios and suites, then exit")
     parser.add_argument("--dry-run", action="store_true", help="print the runs the selection makes, then exit")
     return parser.parse_args(argv)
@@ -1450,6 +1513,9 @@ def main(argv: list[str]) -> int:
             print(case.id)
         return 0
 
+    cli = args.cli.resolve() if args.cli else None
+    if cli is not None and not cli.is_file():
+        raise PerfError(f"--cli names no file: {cli}")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = (args.output or REPO / "target" / "perf" / "runs" / stamp).resolve()
     data_dir = (args.data or REPO / "target" / "perf" / "datasets").resolve()
@@ -1471,21 +1537,37 @@ def main(argv: list[str]) -> int:
             "knobs": list(knobs),
         },
     }
+    github = os.environ.get("GITHUB_ACTIONS") == "true"
     rows: list[Row] = []
     interrupted = False
     try:
-        built = build()
+        server_url = existing_server(args.server) if args.server else None
+        built = build(cli, server=server_url is None)
         unique = list({case.dataset.name: case.dataset for case in cases}.values())
         locations = ensure_datasets(unique, data_dir)
-        _, server_url = start_server(built, out_dir, args.port or free_port())
+        if server_url is None:
+            _, server_url = start_server(built, out_dir, args.port or free_port())
         meta["server"] = server_url
         print(f"server {server_url}, runs in {out_dir}", flush=True)
         for index, case in enumerate(cases, start=1):
             print(f"[{index}/{len(cases)}] {case.id} ...", end=" ", flush=True)
-            location = locations[case.dataset.name]
-            row = run_case(case, built, server_url, location, out_dir, args.timeout_seconds, stamp, knobs)
+            row = run_case(
+                case,
+                built,
+                server_url,
+                locations[case.dataset.name],
+                out_dir,
+                args.timeout_seconds,
+                stamp,
+                gate=args.gate,
+                bundle=args.bundle,
+                knobs=knobs,
+            )
             rows.append(row)
             print(f"error: {row.error}" if row.error else (row.fields.get("verdict") or "no verdict"), flush=True)
+            if github:
+                print(f"::group::{case.id}\n{row.log.read_text(encoding='utf-8', errors='replace').rstrip()}")
+                print("::endgroup::", flush=True)
     except KeyboardInterrupt:
         interrupted = True
         print("\ninterrupted; stopping the server and browsers", flush=True)
@@ -1498,13 +1580,20 @@ def main(argv: list[str]) -> int:
     baseline_dir = (args.baseline or default_baseline_dir()).resolve()
     comparison = compare(cells, baseline_dir, knobs)
     print()
-    print(write_summary(rows, out_dir, meta, comparison))
+    markdown = write_summary(rows, out_dir, meta, comparison)
+    print(markdown)
     print(f"summary: {out_dir / 'summary.md'}")
+    report_failures(rows, github)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as step_summary:
+            step_summary.write(markdown)
     if args.save_baseline and not interrupted:
         for note in save_baseline(cells, baseline_dir, meta, knobs):
             print(note)
     if interrupted:
         return 130
+    # 1 when what was measured failed or got worse, 2 when the setup has to
+    # change first: a baseline recorded on another adapter is the wrong one.
     if comparison.refused:
         return 2
     return 1 if any(row.error for row in rows) or any(comparison.regressed(c) for c in cells) else 0

@@ -1,9 +1,10 @@
 name: Trace gate
 
 # Opens generated datasets in headless Chrome on SwiftShader's WebGPU and runs
-# `lucida trace --gate` on each: a view that never settles, stalls, or leaves
-# a failing verdict fails the job. No GPU is needed, so a hosted runner can
-# catch what the unit tests cannot see.
+# `lucida trace --gate` on each, through the perf runner's `gate` suite: a
+# view that never settles, stalls, or leaves a failing verdict fails the job.
+# No GPU is needed, so a hosted runner can catch what the unit tests cannot
+# see.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -58,11 +59,15 @@ jobs:
               - 'lucida-web/tsconfig*.json'
               - 'lucida-web/vite.config.ts'
               - 'extras/synthetic_ome_zarr.py'
+              - 'scripts/perf.py'
+              - 'scripts/perf/**'
               - 'scripts/trace_gate.sh'
               - '.github/workflows/trace-gate.yml'
 
   # Two halves of the runs on two runners, so the wall clock is one half's.
-  # The runs are split by their measured seconds, not by count.
+  # The runs are split by dataset and by their measured seconds, not by
+  # count: the volume's two runs take about as long as the other three
+  # datasets' together.
   gate:
     name: lucida trace --gate (SwiftShader, ${{ matrix.part }})
     needs: changes
@@ -73,11 +78,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - part: image and volume
-            runs: image volume
+          - part: volume, sliced and ray-marched
+            datasets: volume
             saves-cache: true
-          - part: ray-march, collection and generated coarse
-            runs: volume-render collection single-level
+          - part: image, collection and generated coarse
+            datasets: image collection single-level
             saves-cache: false
     steps:
       - uses: actions/checkout@v7
@@ -166,12 +171,15 @@ jobs:
           $lucida workspace create warm-up > /dev/null
           $lucida --workspace warm-up trace "$data/warm-up.ome.zarr" --output "$RUNNER_TEMP/warm-up.json" > /dev/null || true
 
+      # The runner builds nothing and starts no server here: it drives the
+      # container with the CLI built above.
       - name: Run the gate
         env:
+          LUCIDA_GATE_SERVER: http://127.0.0.1:9876
           LUCIDA_GATE_CLI: ${{ runner.temp }}/cli/lucida
           LUCIDA_GATE_DATA: ${{ runner.temp }}/gate-data
           LUCIDA_GATE_OUTPUT: ${{ runner.temp }}/gate-out
-          LUCIDA_GATE_ONLY: ${{ matrix.runs }}
+          LUCIDA_GATE_ONLY: ${{ matrix.datasets }}
         run: scripts/trace_gate.sh
 
       - name: Server logs
