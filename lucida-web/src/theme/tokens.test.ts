@@ -75,6 +75,7 @@ function contrast(a: Rgb, b: Rgb): number {
 }
 
 const CHART = THEMED_TOKEN_NAMES.filter((name) => name.startsWith("--lc-chart-"));
+const FLOAT_CHART = THEMED_TOKEN_NAMES.filter((name) => name.startsWith("--lc-float-chart-"));
 
 describe.each([
   ["dark", dark],
@@ -101,13 +102,30 @@ describe.each([
     }
   });
 
-  // The dock draws its charts on surface-1 and its bars on a field, and the
-  // theme canvas is the background.
-  it("draws chart series at 3:1 on the background, the dock, and its fields", () => {
-    const behind = { bg: surfaces.bg, "surface-1": surface1, "field on surface-1": surfaces["field on surface-1"] };
+  // The dock draws its charts on surface-1 and its bars on a field, popovers
+  // sit on surface-2, and the theme canvas is the background.
+  it("draws chart series at 3:1 on the background, every opaque surface, and the dock's fields", () => {
+    const behind = {
+      bg: surfaces.bg,
+      "surface-1": surface1,
+      "surface-2": surface2,
+      "field on surface-1": surfaces["field on surface-1"],
+    };
     for (const series of CHART) {
       for (const [name, rgb] of Object.entries(behind)) {
         expect(contrast(solid(series), rgb), `${series} on ${name}`).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
+  // The HUD draws its series on the floating card, which lets the data
+  // behind it show through, so they have to hold over the darkest and the
+  // brightest data alike.
+  it("draws the floating card's chart series at 3:1 over black and over white", () => {
+    expect(FLOAT_CHART.length).toBeGreaterThan(0);
+    for (const series of FLOAT_CHART) {
+      for (const name of ["float over black", "float over white"]) {
+        expect(contrast(solid(series), surfaces[name]), `${series} on ${name}`).toBeGreaterThanOrEqual(3);
       }
     }
   });
