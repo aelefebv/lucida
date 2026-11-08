@@ -16,7 +16,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 7;
+export const RULESET_VERSION = 8;
 
 export interface AbsoluteRule {
   id: string;
@@ -143,6 +143,31 @@ export interface ReplanRule {
   why: string;
 }
 
+/** One ceiling on input to frame, and the reason for its number. */
+export interface LagCeiling {
+  ceilMs: number;
+  why: string;
+}
+
+/**
+ * How the view kept up with input: two ceilings on input to frame, the p95
+ * for a gesture that fell behind and the max for one freeze the p95 leaves
+ * out. Judged on interaction runs only. Input during a cold open waits on the
+ * first frame's pipeline compile by design, which the first-paint rule
+ * already reads.
+ */
+export interface LagRule {
+  id: string;
+  p95: LagCeiling & {
+    /** Fewest answered inputs the p95 is judged over. */
+    minInputs: number;
+    minInputsWhy: string;
+  };
+  max: LagCeiling;
+  /** Why a breach on a software fallback adapter is a note rather than a stall. */
+  softwareAdapter: string;
+}
+
 /**
  * The five steady-state rules. Each carries its floor and its rationale, as
  * every other rule here does, so a finding prints the number that judged it
@@ -185,6 +210,8 @@ export interface Ruleset {
   held: HeldRule;
   /** A lost device or a GPU error, which leaves the frame's pixels unproven. */
   gpuError: GpuErrorRule;
+  /** Input to frame on an interaction run. */
+  lag: LagRule;
   /**
    * What the run left behind: four rules over the interval that opened when
    * it closed, and one over its settle block. None of them judges the run.
@@ -390,6 +417,22 @@ export const RULESET: Ruleset = {
     id: "gpu.error",
     minErrors: 1,
     why: "WebGPU raises no exception for a lost device, a failed allocation, or an invalid command: the object comes back unusable and the draw that uses it does nothing. A frame drawn around one may be missing data or show none, while the pipeline's own phases look healthy. The renderer replaces a lost device and drops an atlas it could not allocate, and the page sends those chunks again, so the run carries that cost too. One error is enough to report, because a correct build reports none.",
+  },
+  lag: {
+    id: "lag.input-to-frame",
+    p95: {
+      minInputs: 21,
+      minInputsWhy:
+        "The p95 is the input at the 95th rank, which over 20 inputs or fewer is the slowest one. That input is the max ceiling's to judge, so a short gesture, a few wheel notches, is held to the max alone.",
+      ceilMs: 100,
+      why: "A response within 100 ms of an input reads as immediate, and past it the view is felt to trail the hand. A frame that keeps up lands two or three display intervals after its input at 60 Hz: the wait for the next frame callback, the tick and the GPU pass, and the refresh that shows it, about 50 ms. The ceiling is twice that, so a breach means the pipeline fell behind its input rather than that one frame came late. The figure stops where the GPU finishes, a refresh short of the screen, so it reads low and a breach is never the measurement's own slack.",
+    },
+    max: {
+      ceilMs: 200,
+      why: "One input that took longer than 200 ms to reach a frame is a freeze a person sees as the view stopping, however smooth the rest of the gesture was. 200 ms is where browsers grade a page's slowest input-to-paint as needing improvement. A gesture sends a few dozen inputs, so its p95 leaves out the slowest one or two, and a single long task on the main thread lands on just those; the max is judged so that the freeze is not averaged away.",
+    },
+    softwareAdapter:
+      "A software fallback adapter rasterizes on the CPU, so its frame times measure the machine the run was on rather than the build, and on one a breach is a note.",
   },
   steadyState: {
     received: {

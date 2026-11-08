@@ -5,6 +5,7 @@ import { WorkspaceRoot } from './WorkspaceRoot.tsx'
 import { AuthGate } from './auth/AuthGate.tsx'
 import { installTraceSeam, resolveGpuIdentity } from './trace/seam.ts'
 import { traceRecorder } from './trace/recorder.ts'
+import { observeLongTasks } from './trace/longTasks.ts'
 import { installAppearance } from './theme/appearance.ts'
 import { installDeploymentTheme } from './theme/deployment.ts'
 import { isCaptureSurface } from './captureSurface.ts'
@@ -13,6 +14,7 @@ import { isCaptureSurface } from './captureSurface.ts'
 // exists in development cannot explain a field report.
 installTraceSeam()
 void resolveGpuIdentity().then(gpu => traceRecorder.setGpu(gpu))
+observeLongTasks(traceRecorder)
 
 // index.html already applied the stored appearance before first paint; this
 // keeps it current as preferences and the OS setting change. The deployment's

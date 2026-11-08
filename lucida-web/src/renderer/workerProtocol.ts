@@ -963,6 +963,12 @@ export interface MinimapOverviewsLostMessage {
 export interface FrameDoneMessage {
   type: "frameDone";
   frameSeq: number;
+  /**
+   * When the GPU finished, as `performance.timeOrigin + performance.now()`
+   * in the worker: a clock the page shares, so it reads the moment the frame
+   * was done rather than the later moment its own busy thread heard of it.
+   */
+  doneAtMs?: number;
 }
 
 /** Why a frame could not be read: the error's name and message, as the bundle's reason carries them. */
