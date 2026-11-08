@@ -15,6 +15,7 @@ from lucida.client import (  # noqa: E402
     LucidaClient,
     LucidaError,
     WorkspaceResource,
+    absolute_dataset_source,
     default_ws_connect,
     level_pin_label,
     normalize_server_base_url,
@@ -325,6 +326,46 @@ def test_dataset_open_sends_protocol_message_and_reads_broadcast(tmp_path, monke
     assert result["workspace_dataset_id"] == "wds-new"
     assert result["seq"] == 13
     assert result["progress"][0]["stage"] == "metadata_import"
+
+
+def test_dataset_open_resolves_a_relative_path_before_sending(tmp_path, monkeypatch):
+    class FakeUuid:
+        hex = "abc123"
+
+    monkeypatch.setattr("lucida.client.uuid.uuid4", lambda: FakeUuid())
+    monkeypatch.chdir(tmp_path)
+    opened = {
+        "type": "open_dataset_succeeded",
+        "request_id": "py-abc123",
+        "seq": 3,
+        "opened": {"manifest": manifest("wds-new", "new.zarr")},
+    }
+    connector = FakeConnector([snapshot(), opened])
+    client = LucidaClient(
+        "http://127.0.0.1:9988",
+        config_path=tmp_path / "config.json",
+        ws_connect=connector,
+    )
+    workspace = WorkspaceResource(client, workspace_record())
+
+    workspace.datasets.open("./data/new.zarr")
+
+    assert connector.websocket.sent[0]["url"] == str(tmp_path / "data" / "new.zarr")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "/srv/new.zarr",
+        "file:///srv/new.zarr",
+        "C:\\data\\new.zarr",
+        "\\\\server\\share\\new.zarr",
+        "gs://bucket/new.zarr",
+        "https://host/new.zarr",
+    ],
+)
+def test_absolute_dataset_source_passes_absolute_locations_through(source):
+    assert absolute_dataset_source(source) == source
 
 
 def test_dataset_open_failure_preserves_diagnostic(tmp_path, monkeypatch):

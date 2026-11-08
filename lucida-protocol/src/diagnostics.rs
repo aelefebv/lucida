@@ -29,6 +29,7 @@ pub enum DatasetOpenFailureKind {
     SessionClosed,
     WorkspaceLookup,
     UnsupportedScheme,
+    InvalidLocation,
     LocalPath,
     MissingObject,
     Permission,

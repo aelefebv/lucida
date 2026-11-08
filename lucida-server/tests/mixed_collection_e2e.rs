@@ -37,7 +37,7 @@ struct Opened {
 
 async fn open() -> Opened {
     let store = Arc::new(CachedStore::new(
-        lucida_store::backend::open(fixture_dir().to_str().unwrap()).unwrap(),
+        lucida_store::backend::open(&fixture_dir().to_str().unwrap().parse().unwrap()).unwrap(),
         DEFAULT_SOURCE_CACHE_BYTES,
     ));
     let result = import_dataset(&store, "mixed", "mixed").await.unwrap();

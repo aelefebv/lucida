@@ -55,9 +55,10 @@ use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store
 use crate::dataset::{
     DatasetBrowseOutput, DatasetHealthOutput, DatasetHttpClient, DatasetInfoOutput,
     DatasetListOutput, DatasetOpenClient, DatasetOpenOutput, DatasetRemoveOutput,
-    DatasetRetryOutput, DatasetWorkspaceClient, format_dataset_browse_human,
-    format_dataset_health_human, format_dataset_info_human, format_dataset_list_human,
-    format_dataset_open_human, format_dataset_remove_human, format_dataset_retry_human,
+    DatasetRetryOutput, DatasetWorkspaceClient, absolute_dataset_source,
+    format_dataset_browse_human, format_dataset_health_human, format_dataset_info_human,
+    format_dataset_list_human, format_dataset_open_human, format_dataset_remove_human,
+    format_dataset_retry_human,
 };
 
 use crate::error::{CliError, ErrorKind};
@@ -2195,9 +2196,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 )
                 .await?;
                 let target = target_for(&server.url, &workspace)?;
+                let source = absolute_dataset_source(source)?;
                 let dataset_client = DatasetOpenClient::new(target.ws_url.clone(), token);
                 let dataset = dataset_client
-                    .open(source, &workspace.id, Duration::from_secs(*timeout_seconds))
+                    .open(
+                        &source,
+                        &workspace.id,
+                        Duration::from_secs(*timeout_seconds),
+                    )
                     .await?;
                 let output_payload = DatasetOpenOutput {
                     server,
@@ -4333,7 +4339,7 @@ fn dataset_source_url(dataset: &str, health: &[DatasetSourceHealth]) -> Result<S
         .collect();
     match by_name.as_slice() {
         [only] => Ok(only.source_url.clone().unwrap_or_default()),
-        [] => Ok(dataset.to_string()),
+        [] => absolute_dataset_source(dataset),
         many => Err(CliError::new(
             ErrorKind::AmbiguousName,
             format!(
