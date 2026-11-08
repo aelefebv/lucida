@@ -14,6 +14,7 @@ use crate::decode::StorageCompression;
 pub(crate) fn four_byte_level() -> LevelInfo {
     LevelInfo {
         level_index: 0,
+        path: "0".to_string(),
         compression: StorageCompression::None,
         chunk_shape: vec![1, 1, 1, 1, 2],
         chunk_byte_layout: ChunkByteLayout {

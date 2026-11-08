@@ -497,7 +497,39 @@ def test_parse_args_reads_the_storage_options() -> None:
     assert (opts.zarr_version, opts.compressor, opts.order, opts.endian, opts.dimension_separator) == (2, "blosc-lz4", "F", "big", ".")
     defaults = gen.parse_args(["out.zarr"])
     assert (defaults.zarr_version, defaults.compressor, defaults.order, defaults.endian, defaults.checksum) == (3, "zstd", "C", "little", False)
+    assert (defaults.level_prefix, defaults.consolidated) == ("", False)
     assert gen.parse_args(["out.zarr", "--checksum"]).checksum is True
+    named = gen.parse_args(["out.zarr", "--level-prefix", "s", "--consolidated"])
+    assert (named.level_prefix, named.consolidated) == ("s", True)
+
+
+@pytest.mark.parametrize("version", ["2", "3"])
+def test_level_prefix_names_each_level_s_array_and_its_multiscale_path(tmp_path: Path, version: str) -> None:
+    common = ["--size", "16,16", "--levels", "2", "--chunk", "8", "--seed", "4", "--zarr-version", version]
+    named = generate(tmp_path, "named.ome.zarr", *common, "--level-prefix", "s")
+    plain = generate(tmp_path, "plain.ome.zarr", *common)
+    attributes = read_json(named / (".zattrs" if version == "2" else "zarr.json"))
+    ms = attributes["multiscales"][0] if version == "2" else attributes["attributes"]["ome"]["multiscales"][0]
+    assert [d["path"] for d in ms["datasets"]] == ["s0", "s1"]
+    for level in range(2):
+        a = np.asarray(zarr.open_array(str(named / f"s{level}"), mode="r")[:])
+        np.testing.assert_array_equal(a, level_array(plain, level))
+    assert not (named / "0").exists()
+
+
+def test_consolidated_zarr_v2_writes_every_document_into_zmetadata(tmp_path: Path) -> None:
+    out = generate(
+        tmp_path, "consolidated.ome.zarr", "--tiles", "2", "--size", "8,8", "--levels", "2", "--chunk", "8",
+        "--zarr-version", "2", "--consolidated",
+    )
+    consolidated = read_json(out / ".zmetadata")
+    assert consolidated["zarr_consolidated_format"] == 1
+    documents = consolidated["metadata"]
+    assert documents[".zattrs"]["plate"]["version"] == "0.4"
+    assert documents["A/1/.zattrs"]["well"]["images"] == [{"path": "0"}]
+    for tile in ["A/1/0", "A/2/0"]:
+        for level in range(2):
+            assert documents[f"{tile}/{level}/.zarray"] == read_json(out / tile / str(level) / ".zarray")
 
 
 def test_zarr_v2_writes_ome_ngff_0_4_metadata_and_v2_arrays(tmp_path: Path) -> None:
@@ -602,10 +634,13 @@ COMMITTED = [
     "v2-twin.ome.zarr",
     "v3-codec-chain.ome.zarr",
     "v2-collection.ome.zarr",
+    "v3-level-paths.ome.zarr",
+    "v2-consolidated.ome.zarr",
 ]
 
-# Zarr v3 keeps a node's metadata in zarr.json; Zarr v2 splits it across these.
-METADATA_NAMES = ("zarr.json", ".zarray", ".zattrs", ".zgroup")
+# Zarr v3 keeps a node's metadata in zarr.json; Zarr v2 splits it across
+# these, and may consolidate them all into the root .zmetadata.
+METADATA_NAMES = ("zarr.json", ".zarray", ".zattrs", ".zgroup", ".zmetadata")
 
 
 def is_array(meta_path: Path) -> bool:
@@ -645,10 +680,18 @@ def test_committed_twins_hold_identical_samples() -> None:
     for twin in ["twin-sharded.ome.zarr", "v2-twin.ome.zarr", "v3-codec-chain.ome.zarr"]:
         for level in range(3):
             np.testing.assert_array_equal(level_array(flat, level), level_array(FIXTURES_DIR / twin, level), err_msg=twin)
-    collection, v2 = FIXTURES_DIR / "collection-unsharded.ome.zarr", FIXTURES_DIR / "v2-collection.ome.zarr"
+    named = FIXTURES_DIR / "v3-level-paths.ome.zarr"
+    for level in range(3):
+        a = np.asarray(zarr.open_array(str(named / f"s{level}"), mode="r")[:])
+        np.testing.assert_array_equal(level_array(flat, level), a, err_msg=f"v3-level-paths s{level}")
+    collection = FIXTURES_DIR / "collection-unsharded.ome.zarr"
+    v2, consolidated = FIXTURES_DIR / "v2-collection.ome.zarr", FIXTURES_DIR / "v2-consolidated.ome.zarr"
     for tile in ["A/1/0", "A/2/0", "B/1/0"]:
         for level in range(2):
-            np.testing.assert_array_equal(level_array(collection / tile, level), level_array(v2 / tile, level), err_msg=tile)
+            reference = level_array(collection / tile, level)
+            np.testing.assert_array_equal(reference, level_array(v2 / tile, level), err_msg=tile)
+            a = np.asarray(zarr.open_array(str(consolidated / tile / f"s{level}"), mode="r")[:])
+            np.testing.assert_array_equal(reference, a, err_msg=f"v2-consolidated {tile}")
 
 
 def test_committed_sparse_pyramid_has_absent_inner_chunks_and_an_unwritten_level() -> None:

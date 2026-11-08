@@ -1,6 +1,6 @@
 /**
  * Memory budgets fitted to the device. The page reads the device's memory
- * once; the render worker adds its GPU's limits.
+ * once and hands it to the render worker, which fits its GPU total from it.
  */
 
 const MIB = 1024 * 1024;
@@ -16,10 +16,12 @@ export const FULL_BUDGET_MEMORY_GIB = 8;
 export const ASSUMED_TOUCH_MEMORY_GIB = 4;
 
 export interface DeviceBudgets {
-  /** One volume atlas pool on the GPU. Pools grow toward it as chunks arrive. */
-  volumeAtlasBytes: number;
-  /** One slice atlas pool on the GPU. */
-  sliceAtlasBytes: number;
+  /**
+   * Everything the render worker holds on the GPU: chunk, label, and proxy
+   * pools, render targets, and minimap textures. Chunk pools grow toward it
+   * as chunks arrive and share what the rest leave.
+   */
+  gpuTotalBytes: number;
   /** One label's volume atlas, chosen by level. */
   labelVolumeBytes: number;
   /** Every label volume atlas shown at once. */
@@ -36,8 +38,7 @@ export interface DeviceBudgets {
 
 /** A capable desktop's budgets, which no device exceeds. */
 export const CEILING_BUDGETS: Readonly<DeviceBudgets> = {
-  volumeAtlasBytes: 512 * MIB,
-  sliceAtlasBytes: 64 * MIB,
+  gpuTotalBytes: 1536 * MIB,
   labelVolumeBytes: 512 * MIB,
   labelTotalVolumeBytes: 512 * MIB,
   cpuMainBytes: 512 * MIB,
@@ -48,8 +49,7 @@ export const CEILING_BUDGETS: Readonly<DeviceBudgets> = {
 
 /** Below these a viewport stops fitting its own chunks, whatever the device. */
 const FLOOR_BUDGETS: Readonly<DeviceBudgets> = {
-  volumeAtlasBytes: 64 * MIB,
-  sliceAtlasBytes: 16 * MIB,
+  gpuTotalBytes: 192 * MIB,
   labelVolumeBytes: 64 * MIB,
   labelTotalVolumeBytes: 64 * MIB,
   cpuMainBytes: 64 * MIB,
@@ -58,25 +58,17 @@ const FLOOR_BUDGETS: Readonly<DeviceBudgets> = {
   cpuBytesInFlight: 8 * MIB,
 };
 
-/** What the render worker knows of its GPU. */
-export interface GpuBudgetLimits {
-  maxBufferSize: number;
-}
-
 /**
  * The budgets for a device with `memoryGiB` of memory, or the ceiling when
  * that is unknown. Each scales linearly below {@link FULL_BUDGET_MEMORY_GIB}
- * down to its floor. With `gpu`, a GPU atlas is also held to the adapter's
- * largest buffer: a device that can't allocate a buffer that size has no
- * room for a texture that size beside everything else.
+ * down to its floor.
  */
-export function fitBudgets(memoryGiB: number | null, gpu?: GpuBudgetLimits): DeviceBudgets {
+export function fitBudgets(memoryGiB: number | null): DeviceBudgets {
   const fraction = memoryGiB === null ? 1 : Math.min(1, Math.max(0, memoryGiB / FULL_BUDGET_MEMORY_GIB));
   const fit = (key: keyof DeviceBudgets) =>
     Math.max(FLOOR_BUDGETS[key], Math.floor((CEILING_BUDGETS[key] * fraction) / MIB) * MIB);
-  const budgets: DeviceBudgets = {
-    volumeAtlasBytes: fit("volumeAtlasBytes"),
-    sliceAtlasBytes: fit("sliceAtlasBytes"),
+  return {
+    gpuTotalBytes: fit("gpuTotalBytes"),
     labelVolumeBytes: fit("labelVolumeBytes"),
     labelTotalVolumeBytes: fit("labelTotalVolumeBytes"),
     cpuMainBytes: fit("cpuMainBytes"),
@@ -84,25 +76,18 @@ export function fitBudgets(memoryGiB: number | null, gpu?: GpuBudgetLimits): Dev
     cpuProxyBytes: fit("cpuProxyBytes"),
     cpuBytesInFlight: fit("cpuBytesInFlight"),
   };
-  if (gpu && gpu.maxBufferSize > 0) {
-    budgets.volumeAtlasBytes = Math.min(budgets.volumeAtlasBytes, gpu.maxBufferSize);
-    budgets.sliceAtlasBytes = Math.min(budgets.sliceAtlasBytes, gpu.maxBufferSize);
-  }
-  return budgets;
 }
 
+/** The smallest GPU total. Below it one viewport's chunks stop fitting. */
+export const GPU_TOTAL_FLOOR_BYTES = FLOOR_BUDGETS.gpuTotalBytes;
+
 /**
- * Halve one GPU atlas budget, down to its floor, after the device ran out of
- * memory at the current one. False when it was already at the floor.
+ * The GPU total after the device ran out of memory under `bytes`: half, down
+ * to the floor. Returns `bytes` unchanged when it is already at the floor.
  */
-export function shrinkAtlasBudget(
-  budgets: Pick<DeviceBudgets, "volumeAtlasBytes" | "sliceAtlasBytes">,
-  key: "volumeAtlasBytes" | "sliceAtlasBytes",
-): boolean {
-  const floor = FLOOR_BUDGETS[key];
-  if (budgets[key] <= floor) return false;
-  budgets[key] = Math.max(floor, Math.floor(budgets[key] / 2 / MIB) * MIB);
-  return true;
+export function halvedGpuTotal(bytes: number): number {
+  if (bytes <= GPU_TOTAL_FLOOR_BYTES) return bytes;
+  return Math.max(GPU_TOTAL_FLOOR_BYTES, Math.floor(bytes / 2 / MIB) * MIB);
 }
 
 /** The parts of the page {@link readDeviceMemoryGiB} reads, so a test can supply its own. */

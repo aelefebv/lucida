@@ -289,6 +289,7 @@ describe("epoch caching", () => {
       datasets,
       client: {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -805,6 +806,7 @@ describe("display-only fast path", () => {
       datasets,
       client: {
         coldState: over?.coldState ?? vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: over?.coldStateDisplay ?? vi.fn(),
         coldStateSelection: over?.coldStateSelection ?? vi.fn(),
         coldStateDelta: over?.coldStateDelta ?? vi.fn(),
@@ -1491,6 +1493,7 @@ describe("multi-dataset planning", () => {
       datasets,
       client: {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -1644,6 +1647,7 @@ describe("incremental delta fold", () => {
       datasets,
       client: {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -1888,6 +1892,7 @@ describe("incremental delta fold", () => {
       const cpuCache = createMockCpuCache();
       const client = {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -1929,6 +1934,30 @@ describe("incremental delta fold", () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(["slice", "volume"] as const)(
+    "admits a %s view against the GPU room the render worker reports, not the CPU budgets alone",
+    (mode) => {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2) }],
+      ]);
+      const scene = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        viewQuery: { visible_entities: [foldRow({ target_level: 1 })] },
+      });
+      const ctx = makeCtx(scene, datasets);
+      // The other holders take the whole total, so no chunk pool has room.
+      const full = { budgetBytes: 192 * 1024 * 1024, reservedBytes: 192 * 1024 * 1024, pools: [] };
+      Object.assign(ctx, { mode });
+      Object.assign(ctx.client, { gpuCapacity: () => full });
+
+      makeOrch().planAndFetch(ctx, emptyMinimap);
+
+      const plan = vi.mocked(ctx.cpuCache.submit).mock.calls[0][0] as RequestPlan;
+      expect(plan.requests.filter((r) => r.lane === "detail")).toEqual([]);
+      expect(plan.shortfall?.detail).toBeGreaterThan(0);
+    },
+  );
 
   it("keeps the target level under memory pressure: a budget that holds less never lowers it", async () => {
     // A real CPU cache with a 1.5-chunk budget, smaller than the four
