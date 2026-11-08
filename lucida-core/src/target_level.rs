@@ -28,6 +28,11 @@ pub const IN_PLANE_AXES: [usize; 2] = [AXIS_Y, AXIS_X];
 /// The axes a volume view resolves.
 pub const VOLUME_AXES: [usize; 3] = [AXIS_Z, AXIS_Y, AXIS_X];
 
+/// The highest pixel ratio the browser's render target draws at, the same
+/// cap as `MAX_RENDER_PIXEL_RATIO` in `lucida-web/src/renderResolution.ts`.
+/// The target level is chosen at no more than this density.
+pub const MAX_RENDER_PIXEL_RATIO: f64 = 2.0;
+
 /// The level the screen calls for.
 ///
 /// `pixels_per_sample` is the number of device pixels one level-0 sample
