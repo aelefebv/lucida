@@ -9,7 +9,7 @@ use lucida_protocol::{
     GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerTimingBatch, SourceChunkStatus,
 };
 
-use crate::camera::Camera;
+use crate::camera::{Camera, Framing, Slice};
 use crate::command::DocumentCommand;
 use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
 use crate::view::ViewState;
@@ -173,9 +173,12 @@ impl From<PresenceState> for PresenceStateWire {
             match (presence.camera, presence.view, presence.display) {
                 (Some(camera), Some(view), Some(display)) => (camera, view, display, true),
                 // The values older readers have always received for a client
-                // that has not reported.
+                // that has not reported, byte for byte.
                 _ => (
-                    Camera::new_2d([800, 600]),
+                    Camera::Slice(Slice {
+                        framing: Framing::Placed,
+                        ..Slice::new([800, 600])
+                    }),
                     ViewState::new(),
                     DisplayState::default(),
                     false,

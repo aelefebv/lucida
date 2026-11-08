@@ -133,7 +133,8 @@ vi.mock("lucida-core", () => {
     }
     import_dataset_presence(_json: string) {}
     compute_peer_cursors() { return JSON.stringify({ gpu: [], labels: [] }); }
-    fit_camera_to_dataset_bounds(_id: string) {}
+    frame(_width: number, _height: number) { return false; }
+    explore() { return JSON.stringify({ error: "unavailable" }); }
     epochs() {
       return JSON.stringify({ content: 0, layout: 0, ...this.epochCounts });
     }
@@ -143,7 +144,6 @@ vi.mock("lucida-core", () => {
     default: vi.fn(() => Promise.resolve()),
     WasmScene: FakeWasmScene,
     set_debug_categories: vi.fn(),
-    explore_view: vi.fn(() => JSON.stringify({ error: "unavailable" })),
     camera_matrices: vi.fn(() => new Float32Array(32)),
     is_local_dataset_url: vi.fn(() => true),
     normalize_dataset_url: vi.fn((url: string) => url),

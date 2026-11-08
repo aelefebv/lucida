@@ -1024,6 +1024,7 @@ mod tests {
                 center: [10.0, 20.0],
                 zoom: 2.0,
                 viewport: [800, 600],
+                framing: lucida_core::camera::Framing::Placed,
             })),
             view: Some(ViewState::new()),
             display: Some(DisplayState::default()),

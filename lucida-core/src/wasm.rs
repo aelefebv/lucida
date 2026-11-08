@@ -2,9 +2,11 @@ use wasm_bindgen::prelude::*;
 
 use lucida_content::DatasetId;
 
-use crate::camera::{Arcball, Camera, ClipMode};
+use crate::camera::{Arcball, Camera, ClipMode, Framing};
 use crate::command::{Command, ViewportCommand};
-use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState, Scene};
+use crate::framing::VoxBox;
+use crate::saved_view::SavedView;
+use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene};
 use crate::view::ViewState;
 
 #[wasm_bindgen]
@@ -136,33 +138,79 @@ impl WasmScene {
         Ok(())
     }
 
-    /// Frame the named dataset's full world extent in the main viewport,
-    /// preserving the current camera mode (2D stays 2D, 3D stays 3D). This is
-    /// the "auto-fit on open" entry point the web bridge calls for a
-    /// freshly-opened dataset; [`Scene::fit_camera_to_dataset`] bumps the view
-    /// epoch (exactly as pan/zoom/rotate do) so the viewport redraws with the
-    /// new framing. Returns `Err` if the dataset has no bounds (unknown id /
-    /// no members), leaving the camera unchanged so the caller can ignore it
-    /// without side effects.
-    pub fn fit_camera_to_dataset_bounds(&mut self, dataset_id: &str) -> Result<(), JsError> {
-        if self.inner.fit_camera_to_dataset(dataset_id) {
-            Ok(())
-        } else {
-            Err(JsError::new(&format!(
-                "no world bounds to fit for dataset '{dataset_id}'"
-            )))
+    /// Fit everything visible on a canvas of `width` × `height` device
+    /// pixels, in the current mode, leaving the camera framed
+    /// ([`Scene::frame`]). The fit key and double tap call it. Returns whether
+    /// there was anything to fit; when there wasn't, the camera is unchanged.
+    pub fn frame(&mut self, width: u32, height: u32) -> bool {
+        self.inner.frame(&FrameTarget::Visible, [width, height])
+    }
+
+    /// Fit the slice camera to the voxel rect `[min_x, min_y]..[max_x,
+    /// max_y]` on its canvas, as a collection's group navigator does. Returns
+    /// whether it moved the camera; a volume camera ignores it.
+    pub fn frame_region(&mut self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> bool {
+        self.inner
+            .frame_voxel_region(VoxBox::new([min_x, min_y, 0.0], [max_x, max_y, 0.0]))
+    }
+
+    /// The camera's framing: `"placed"`, `"framed"`, or `"unframed"`. An
+    /// unframed camera shows a stand-in, which a client never persists.
+    pub fn camera_framing(&self) -> String {
+        match self.inner.camera.framing() {
+            Framing::Placed => "placed",
+            Framing::Framed => "framed",
+            Framing::Unframed => "unframed",
         }
+        .to_string()
     }
 
     /// The dataset's bounds in the current camera's coordinate space as
-    /// `[min_x, min_y, min_z, max_x, max_y, max_z]`, the box
-    /// [`Self::fit_camera_to_dataset_bounds`] frames; empty when it has none.
-    /// Guided exploration passes it to [`crate::view_transform::explore_view`]
-    /// so its Home move frames what the viewer's own fit does.
+    /// `[min_x, min_y, min_z, max_x, max_y, max_z]`; empty when it has none.
     pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Vec<f64> {
         match self.inner.dataset_fit_bounds(dataset_id) {
             Some((min, max)) => vec![min[0], min[1], min[2], max[0], max[1], max[2]],
             None => Vec::new(),
+        }
+    }
+
+    /// Guided exploration of `dataset_id` from the `SavedView` in
+    /// `view_json`, or from the dataset's Home view on a canvas of
+    /// `viewport_w` × `viewport_h` when it is absent or empty
+    /// ([`crate::view_transform::explore`]). `depth` is recorded on the
+    /// current node.
+    ///
+    /// Returns the serialized `ExplorationSidecar`, or `{"error": "<message>"}`
+    /// for a malformed view or a dataset the scene can't frame.
+    pub fn explore(
+        &self,
+        view_json: Option<String>,
+        dataset_id: &str,
+        viewport_w: u32,
+        viewport_h: u32,
+        depth: u32,
+    ) -> String {
+        let error = |message: String| serde_json::json!({ "error": message }).to_string();
+        let view = match view_json.as_deref() {
+            Some(json) if !json.is_empty() => match serde_json::from_str::<SavedView>(json) {
+                Ok(view) => Some(view),
+                Err(e) => return error(e.to_string()),
+            },
+            _ => None,
+        };
+        let id = DatasetId(dataset_id.to_string());
+        match crate::view_transform::explore(
+            &self.inner,
+            &id,
+            view.as_ref(),
+            [viewport_w, viewport_h],
+            depth,
+            Vec::new(),
+        ) {
+            Some(sidecar) => {
+                serde_json::to_string(&sidecar).unwrap_or_else(|e| error(e.to_string()))
+            }
+            None => error(format!("dataset '{dataset_id}' has nothing to explore")),
         }
     }
 
@@ -387,7 +435,7 @@ impl WasmScene {
     /// with the member's position offset baked into the translation.
     ///
     /// The placement math is owned by `Scene::member_world_matrix` (non-gated, so
-    /// the minimap and the camera auto-fit share the exact same world boxes); this
+    /// the minimap and the camera's fit share the exact same world boxes); this
     /// only resolves the member by id (O(1) via the derived-state member index)
     /// and delegates.
     pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
@@ -868,6 +916,7 @@ impl WasmScene {
                     far: (distance * 4.0_f64).max(100.0),
                     clip_distance: 0.0,
                     clip_mode: crate::camera::ClipMode::default(),
+                    framing: Framing::Placed,
                 };
                 (cam.view_proj_f64(), cam.eye_position(), false)
             }
@@ -898,7 +947,7 @@ impl WasmScene {
                 .unwrap_or(true);
             for member in &derived.members {
                 members.push(crate::minimap::MinimapMember {
-                    // Shared with the renderer and auto-fit, so the minimap
+                    // Shared with the renderer and the camera's fit, so the minimap
                     // frames the boxes that are drawn.
                     model: self.inner.member_world_matrix(member),
                     visible,

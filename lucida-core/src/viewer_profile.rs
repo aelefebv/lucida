@@ -11,7 +11,7 @@ use lucida_content::{DatasetId, LayoutId};
 use crate::camera::Camera;
 use crate::command::{Command, ViewportCommand};
 use crate::saved_view::{SAVED_VIEW_VERSION, SavedView};
-use crate::scene::{DocumentState, Scene};
+use crate::scene::{DocumentState, FrameTarget, Scene};
 
 /// The canvas a view is framed for when no client has reported one.
 pub const FITTED_VIEWPORT: [u32; 2] = [1440, 900];
@@ -439,7 +439,6 @@ impl std::error::Error for ProfileCommandError {}
 pub enum FrameError {
     EmptyViewport,
     NothingVisible,
-    DegenerateExtent,
 }
 
 impl FrameError {
@@ -453,7 +452,6 @@ impl fmt::Display for FrameError {
         f.write_str(match self {
             Self::EmptyViewport => "overview viewport must be positive",
             Self::NothingVisible => "no visible image dataset is available for overview",
-            Self::DegenerateExtent => "visible image dataset has invalid XY dimensions",
         })
     }
 }
@@ -462,41 +460,21 @@ impl std::error::Error for FrameError {}
 
 impl Scene {
     /// Frame every visible image in a 2D camera on a `viewport` canvas, at the
-    /// middle Z plane.
+    /// middle Z plane: the fit any client makes ([`Scene::frame`]).
     pub fn frame_visible_2d(&mut self, viewport: [u32; 2]) -> Result<(), FrameError> {
         if viewport[0] == 0 || viewport[1] == 0 {
             return Err(FrameError::EmptyViewport);
         }
-        let bounds = self
-            .visible_content_bounds_2d()
-            .ok_or(FrameError::NothingVisible)?;
-        let width = bounds.width();
-        let height = bounds.height();
-        if width <= 0.0 || height <= 0.0 {
-            return Err(FrameError::DegenerateExtent);
+        self.apply(Command::Viewport(ViewportCommand::SetMode2D));
+        if !self.frame(&FrameTarget::Visible, viewport) {
+            return Err(FrameError::NothingVisible);
         }
-
-        let zoom_x = viewport[0] as f64 / width;
-        let zoom_y = viewport[1] as f64 / height;
-        let zoom = zoom_x.min(zoom_y).max(f64::EPSILON) * 0.9;
-        for command in [
-            ViewportCommand::SetMode2D,
-            ViewportCommand::SetViewport {
-                width: viewport[0],
-                height: viewport[1],
-                pixel_ratio: None,
-            },
-            ViewportCommand::SetCenter {
-                x: bounds.center_x(),
-                y: bounds.center_y(),
-            },
-            ViewportCommand::SetZoom { value: zoom },
-            ViewportCommand::SetZ {
-                z: bounds.max_depth.saturating_sub(1) / 2,
-            },
-        ] {
-            self.apply(Command::Viewport(command));
-        }
+        let depth = self
+            .visible_bounds()
+            .map_or(0, |bounds| bounds.vox.max[2] as u32);
+        self.apply(Command::Viewport(ViewportCommand::SetZ {
+            z: depth.saturating_sub(1) / 2,
+        }));
         Ok(())
     }
 }
@@ -609,7 +587,7 @@ mod tests {
         assert_eq!(slice.viewport, FITTED_VIEWPORT);
         assert_eq!(slice.center, [128.0, 256.0]);
         let limiting = FITTED_VIEWPORT[1] as f64 / 512.0;
-        assert!((slice.zoom - limiting * 0.9).abs() < 1e-12);
+        assert!((slice.zoom - limiting / crate::framing::FIT_MARGIN_2D).abs() < 1e-12);
         assert_eq!(profile.scene.view.z_range, 19..20);
     }
 

@@ -134,6 +134,17 @@ def test_a_python_view_change_persists_for_a_second_client(server_url, tmp_path)
     assert seen["web_url"] == f"{server_url}/w/{first.id}?viewer_profile=default"
 
 
+def assert_same_camera(a: dict, b: dict) -> None:
+    """The same camera, its numbers to the last bit or two: a camera crosses
+    the server as JSON, whose float parse need not round the last bit back."""
+    assert a.keys() == b.keys()
+    for key, value in a.items():
+        if isinstance(value, str):
+            assert value == b[key], key
+        else:
+            assert value == pytest.approx(b[key], rel=1e-12, abs=1e-15), key
+
+
 def test_a_3d_camera_persists_and_rejected_changes_store_nothing(server_url, tmp_path):
     first = client(server_url, tmp_path, "first").workspaces.create("viewer-3d")
     dataset_id = first.datasets.open(str(DATASET.resolve()))["workspace_dataset_id"]
@@ -145,5 +156,5 @@ def test_a_3d_camera_persists_and_rejected_changes_store_nothing(server_url, tmp
 
     seen = client(server_url, tmp_path, "second").workspaces.get(first.id).viewer.state()
     assert seen["camera"]["mode"] == "arcball"
-    assert seen["camera"] == rotated["camera"]
+    assert_same_camera(seen["camera"], rotated["camera"])
     assert seen["updated_at"] == rotated["updated_at"]
