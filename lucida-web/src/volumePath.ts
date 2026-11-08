@@ -1,4 +1,5 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
+import { assertCanvasSize } from "./applyAndSend.ts";
 import { Axis } from "./axes.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
@@ -231,7 +232,7 @@ export function tickVolume(
   // by the render resolution, which drops while the camera moves.
   const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
   const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
-  scene.set_viewport(fullW, fullH, devicePixelRatio);
+  assertCanvasSize(scene, fullW, fullH, devicePixelRatio);
 
   const scale = ctx.renderScale * ctx.resolutionScale;
   const canvasW = Math.round(fullW * scale);

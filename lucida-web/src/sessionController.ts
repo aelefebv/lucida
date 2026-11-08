@@ -33,8 +33,8 @@ import { derivedBuildersFor } from "./pipeline/layoutBuilders.ts";
 import type { WireAssetCatalog } from "./pipeline/assetCatalog.ts";
 import { Session } from "./session.ts";
 import type { RenderLoop } from "./renderLoop.ts";
+import { assertCanvasSize } from "./applyAndSend.ts";
 import { AVAILABILITY_UPDATE_SOURCE, invalidateDisplaySettings, requestRender } from "./invalidation.ts";
-import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { watchStream } from "./trace/watchStream.ts";
@@ -84,10 +84,6 @@ const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
 export interface SavedViewBridgeHooks {
   onDatasetOpened: (datasetId: string) => void;
   onOpenDatasetFailed: (url: string, error: string) => void;
-  /** `true` while a saved or last view is mid-restore, through its camera step.
-   * Suppresses auto-fit-on-open so the restore's camera wins. Optional so
-   * older callers stay compatible. */
-  isInProgress?: () => boolean;
 }
 
 /** Aggregate open-remote-dataset UI state (spinner / error banner / progress
@@ -422,7 +418,7 @@ export class SessionController {
    *  it. */
   private assertViewport(scene: WasmScene): void {
     const viewport = this.deps.getViewportSize();
-    if (viewport) scene.set_viewport(viewport.width, viewport.height, viewport.pixelRatio);
+    if (viewport) assertCanvasSize(scene, viewport.width, viewport.height, viewport.pixelRatio);
   }
 
   private importPresence(scene: WasmScene, presenceJson: string): void {
@@ -1025,20 +1021,22 @@ export class SessionController {
       },
       onCommand: (_seq, commandJson) => {
         try {
+          const cmd = JSON.parse(commandJson);
           let scene = this.deps.getScene();
           if (!scene) {
-            const cmd = JSON.parse(commandJson);
             if (cmd.type === "dataset_opened") {
               scene = this.ensureScene();
             } else {
               return;
             }
           }
+          // An open can fit the camera, which must see the canvas the user
+          // has rather than the size the scene was built at.
+          if (cmd.type === "dataset_opened") this.assertViewport(scene);
           guardedSceneCall("apply_command", scene, () => scene.apply_command(commandJson));
           // Covers the overlay re-projecting a peer's annotation and the
           // planner re-reading a peer's layout switch.
           invalidateDisplaySettings(this.deps.getLoop(), "remote_command");
-          const cmd = JSON.parse(commandJson);
           if (cmd.type === "dataset_opened") {
             this.handleDatasetOpened(cmd, scene);
           }
@@ -1296,15 +1294,14 @@ export class SessionController {
   }
 
   /** The live `dataset_opened` arm: shared registration, then the policies
-   *  only a live open triggers (loading clear, auto-fit, applier notification).
-   *  A snapshot skips them, since a join or repair is not a user open. */
+   *  only a live open triggers (loading clear, applier notification). A
+   *  snapshot skips them, since a join or repair is not a user open. */
   private handleDatasetOpened(
     cmd: {
       type: string;
       manifest: DatasetManifestWire;
       fetch: FetchSourceWire;
       catalog?: WireAssetCatalog | null;
-      opener_client_id?: number | null;
     },
     scene: WasmScene,
   ): void {
@@ -1345,41 +1342,9 @@ export class SessionController {
       reason: "success",
     });
     this.deps.events.onSceneChanged(scene);
-    // Auto-fit only on the client that opened the dataset: `dataset_opened`
-    // runs on every peer, and the server stamps `opener_client_id`. Also
-    // suppressed while a saved view restores its camera and while following.
-    // Id 0 is a real id here since the snapshot arrives first; a missing
-    // opener id fits no one. Best-effort, so a failed fit can't break the open.
-    const isOpener = isOpenerOf(cmd.opener_client_id, this.myId);
-    const restoreInProgress =
-      this.deps.getSavedViewHooks()?.isInProgress?.() ?? false;
-    const following = this.followTarget !== null;
-    if (shouldAutoFitOnOpen(cmd.type, { isOpener, restoreInProgress, following })) {
-      try {
-        this.assertViewport(scene);
-        // Untyped call: the wasm export may predate the regenerated
-        // bindings, so reach it structurally rather than via the type.
-        (
-          scene as unknown as {
-            fit_camera_to_dataset_bounds?: (id: string) => void;
-          }
-        ).fit_camera_to_dataset_bounds?.(datasetId);
-        requestRender(this.deps.getLoop(), "auto_fit_on_open");
-        bridgeLog("auto_fit_on_open.applied", { datasetId });
-      } catch (e) {
-        bridgeLog("auto_fit_on_open.failed", {
-          datasetId,
-          error: String(e),
-        });
-      }
-    } else {
-      bridgeLog("auto_fit_on_open.suppressed", {
-        datasetId,
-        isOpener,
-        restoreInProgress,
-        following,
-      });
-    }
+    // The scene fitted the camera on the open if nothing had placed it, on
+    // every peer alike, so the open needs no fit of its own.
+    requestRender(this.deps.getLoop(), "dataset_opened");
     // Resolve the saved-view applier's pending open. Safe for opens it didn't
     // start: `notifyDatasetOpened` ignores unknown ids.
     this.deps.getSavedViewHooks()?.onDatasetOpened(datasetId);

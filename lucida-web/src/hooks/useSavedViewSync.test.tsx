@@ -391,6 +391,99 @@ describe("useSavedViewSync — capture surface writes no user state (#923)", () 
   });
 });
 
+describe("useSavedViewSync — the URL and the last view follow the camera", () => {
+  let scene: MockScene;
+  let store: SceneStore;
+  let outRef: Captured;
+  let written: Promise<SavedView["camera"]>[];
+  let originalReplace: History["replaceState"];
+
+  // Real timers: the URL write waits on an encode the fake clock can't drive.
+  // The URL writes are read from `replaceState` rather than the hash, since a
+  // flush another test left in flight can land on the hash at any time.
+  beforeEach(() => {
+    scene = makeMockScene();
+    store = new SceneStore(() => scene as unknown as WasmScene);
+    outRef = { current: null };
+    window.history.replaceState(null, "", "/");
+    written = [];
+    originalReplace = window.history.replaceState;
+    window.history.replaceState = ((s: unknown, t: string, url?: string | URL | null) => {
+      const payload = /view=([^&]+)/.exec(String(url ?? ""))?.[1];
+      if (payload) written.push(decode(payload).then((v) => v.camera));
+      return originalReplace.call(window.history, s, t, url);
+    }) as History["replaceState"];
+  });
+
+  afterEach(() => {
+    window.history.replaceState = originalReplace;
+  });
+
+  function setCamera(camera: Record<string, unknown>) {
+    scene.import_presence(JSON.stringify({ camera }));
+    store.sync();
+  }
+
+  const writtenCameras = () => Promise.all(written);
+
+  /** Past both debounces and the encode. */
+  const settle = () => act(async () => {
+    await new Promise((r) => setTimeout(r, 80));
+  });
+
+  it("persists neither while the camera is unframed, and both once it is fitted", async () => {
+    const loop = makeMockLoop();
+    const persisted: SavedView[] = [];
+    setCamera({ mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600], framing: "unframed" });
+    await act(async () => {
+      render(
+        <HookHarness
+          scene={scene}
+          store={store}
+          outRef={outRef}
+          loopRef={loop.ref}
+          persistLastView={async (v) => { persisted.push(v); }}
+          lastViewDebounceMs={5}
+        />,
+      );
+    });
+    await act(async () => {
+      outRef.current!.handle.notifyChange();
+    });
+    await settle();
+    expect(persisted).toHaveLength(0);
+    expect((await writtenCameras()).filter((c) => c.framing === "unframed")).toHaveLength(0);
+
+    await act(async () => {
+      setCamera({ mode: "slice", center: [64, 64], zoom: 2, viewport: [800, 600], framing: "framed" });
+    });
+    await vi.waitFor(async () => {
+      expect(persisted).toHaveLength(1);
+      expect((await writtenCameras()).some((c) => c.framing === "framed")).toBe(true);
+    });
+  });
+
+  it("rewrites #view= when a canvas change moves the view with no control touched", async () => {
+    const loop = makeMockLoop();
+    await act(async () => {
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
+    });
+    await act(async () => {
+      outRef.current!.handle.notifyChange();
+    });
+    await settle();
+
+    // A resize refits a framed camera: only the scene's epochs say so.
+    await act(async () => {
+      setCamera({ mode: "slice", center: [64, 64], zoom: 0.5, viewport: [400, 600], framing: "framed" });
+    });
+    await vi.waitFor(async () => {
+      const viewports = (await writtenCameras()).map((c) => c.viewport.join("x"));
+      expect(viewports).toContain("400x600");
+    });
+  });
+});
+
 describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
   let scene: MockScene;
   let store: SceneStore;
