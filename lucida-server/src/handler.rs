@@ -7,7 +7,9 @@ use lucida_content::url::{DatasetLocation, normalize_dataset_url};
 use lucida_content::{DatasetId, DatasetManifest, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, PeerIdentity, ServerMessage};
+use lucida_core::protocol::{
+    ChunkMessage, ClientId, ClientMessage, CommandRejection, PeerIdentity, ServerMessage,
+};
 use lucida_protocol::{
     AssetMessage, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
@@ -77,22 +79,27 @@ pub async fn handle_client(
     handle_client_inner(id, ws, session, tx, unicast_routes, proxy_config, None).await;
 }
 
-/// Serialize an applied `(seq, command)` pair into the broadcast/ack
-/// envelope: the sender receives `Ack { seq }`, everyone else the
-/// `CommandBroadcast`.
-fn broadcast_applied_command(
+/// Tell `sender` its document command was refused.
+fn reject_command(
     tx: &broadcast::Sender<BroadcastItem>,
     sender: ClientId,
-    seq: u64,
-    command: DocumentCommand,
+    reason: CommandRejection,
 ) {
-    let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-    let ack_msg = ServerMessage::Ack { seq };
-    let _ = tx.send(BroadcastItem::CommandBroadcast {
+    let msg = ServerMessage::CommandRejected { reason };
+    let _ = tx.send(BroadcastItem::CommandRejected {
         sender,
-        broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-        ack_json: serde_json::to_string(&ack_msg).unwrap(),
+        json: serde_json::to_string(&msg).unwrap(),
     });
+}
+
+fn rename_rejection(error: &WorkspaceError) -> CommandRejection {
+    match error {
+        WorkspaceError::Forbidden => CommandRejection::Forbidden,
+        WorkspaceError::NotFound | WorkspaceError::Archived | WorkspaceError::BadRequest(_) => {
+            CommandRejection::Invalid
+        }
+        WorkspaceError::Store(_) => CommandRejection::Unavailable,
+    }
 }
 
 async fn handle_client_inner(
@@ -222,6 +229,10 @@ async fn handle_client_inner(
                                         broadcast_json
                                     }
                                 }
+                                BroadcastItem::CommandRejected { sender, json } => {
+                                    if *sender != id { continue; }
+                                    json
+                                }
                                 BroadcastItem::PresenceUpdate { sender, json } => {
                                     if *sender == id { continue; }
                                     json
@@ -329,23 +340,22 @@ async fn handle_client_inner(
                                         workspace_id = %ctx.live.workspace_id,
                                         "workspace.command.rejected_client_dataset_opened"
                                     );
+                                    reject_command(&tx, id, CommandRejection::Invalid);
                                     continue;
                                 }
                                 // Authorization lives in WorkspaceManager:
                                 // `rename_dataset` for a dataset rename,
                                 // `apply_document_command` for everything
-                                // else. This loop only broadcasts the applied
-                                // command or drops it with a log line.
+                                // else. The manager broadcasts what it applies;
+                                // this loop tells the sender what it refused.
                                 if let DocumentCommand::RenameDataset { id: ds_id, name } = &command
                                 {
                                     match ctx
                                         .manager
-                                        .rename_dataset(&ctx.live, &ctx.principal, ds_id, name)
+                                        .rename_dataset(&ctx.live, &ctx.principal, id, ds_id, name)
                                         .await
                                     {
-                                        Ok((seq, applied)) => {
-                                            broadcast_applied_command(&tx, id, seq, applied);
-                                        }
+                                        Ok(_) => {}
                                         Err(e) => {
                                             tracing::warn!(
                                                 client_id = %id,
@@ -353,18 +363,17 @@ async fn handle_client_inner(
                                                 error = %e,
                                                 "workspace.command.rename_dataset_rejected"
                                             );
+                                            reject_command(&tx, id, rename_rejection(&e));
                                         }
                                     }
                                     continue;
                                 }
                                 match ctx
                                     .manager
-                                    .apply_document_command(&ctx.live, &ctx.principal, command)
+                                    .apply_document_command(&ctx.live, &ctx.principal, id, command)
                                     .await
                                 {
-                                    Ok((seq, applied)) => {
-                                        broadcast_applied_command(&tx, id, seq, applied);
-                                    }
+                                    Ok(_) => {}
                                     Err(e @ CommandApplyError::Forbidden) => {
                                         tracing::warn!(
                                             client_id = %id,
@@ -372,6 +381,7 @@ async fn handle_client_inner(
                                             error = %e,
                                             "workspace.command.forbidden"
                                         );
+                                        reject_command(&tx, id, CommandRejection::Forbidden);
                                     }
                                     // A role-lookup store failure is not an
                                     // authorization verdict — no role was
@@ -387,6 +397,7 @@ async fn handle_client_inner(
                                             error = %e,
                                             "workspace.command.authorization_unavailable"
                                         );
+                                        reject_command(&tx, id, CommandRejection::Unavailable);
                                     }
                                     Err(e @ CommandApplyError::PersistFailed(_)) => {
                                         tracing::error!(
@@ -395,6 +406,7 @@ async fn handle_client_inner(
                                             error = %e,
                                             "workspace.command.persist_failed"
                                         );
+                                        reject_command(&tx, id, CommandRejection::Unavailable);
                                     }
                                 }
                                 continue;
@@ -407,6 +419,7 @@ async fn handle_client_inner(
                                 client_id = %id,
                                 "legacy_session.command.rejected"
                             );
+                            reject_command(&tx, id, CommandRejection::Forbidden);
                         }
                         ClientMessage::Presence {
                             camera,
