@@ -15,7 +15,7 @@ import { writeSliceRegion } from "../gpuContext.ts";
 import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint16Slice, asUint32Slice } from "../dataTypeUtil.ts";
+import { asUint32Slice, atlasTexels, atlasTextureFormat, decodedValues } from "../dataTypeUtil.ts";
 import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
@@ -159,15 +159,7 @@ export function handleSliceChunkData(
       const existingSlot = atlas.slots.get(compositeKey);
       if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) continue;
 
-      const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
-      if (!isU8 && chunk.data.byteLength % 2 !== 0) {
-        throw new Error(
-          `slice chunk ${chunk.key}: byteLength ${chunk.data.byteLength} is not a multiple of 2 ` +
-          `(server likely returned a compressed or wrong-shape chunk)`,
-        );
-      }
-      const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
-      const r = sampleIntensityRange(rawView, perChunkSamples);
+      const r = sampleIntensityRange(decodedValues(chunk.data, chunk.dataType), perChunkSamples);
       if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
       if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
 
@@ -201,11 +193,14 @@ export function handleSliceChunkData(
       const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
       const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
       const sliceOffset = localZ * chunkY * chunkX;
-      const sliceData = asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
+      const sliceData = atlasTexels(chunk.data, chunk.dataType, atlas.format, sliceOffset, chunkY * chunkX);
 
       const xOff = sx * chunkX;
       const yOff = sy * chunkY;
-      writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
+      writeSliceRegion(
+        ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH,
+        atlasTextureFormat(atlas.format),
+      );
 
       const [, , lodGridX] = lodMeta.gridDims;
       const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;

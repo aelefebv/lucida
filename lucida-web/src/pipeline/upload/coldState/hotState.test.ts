@@ -68,6 +68,7 @@ function makeColdMsg(
     },
     activeSet,
     viewMode: "slice",
+    sampleFormat: "u16",
   };
 }
 
