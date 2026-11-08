@@ -33,6 +33,8 @@ interface Params {
    *  follows this client afterwards adopts the restored view. */
   emitPresence?: () => void;
   emitDatasetPresence?: () => void;
+  /** Stop following a peer. Called as every restore starts. */
+  breakFollow?: () => void;
   /** Increments whenever the scene mutates locally; drives URL re-encoding. */
   changeTick: number;
   /** The scene's view state. A move of the camera or the selectors arms the
@@ -100,6 +102,7 @@ export function useSavedViewSync({
   sendCommand,
   emitPresence,
   emitDatasetPresence,
+  breakFollow,
   changeTick,
   sceneStore,
   debounceMs,
@@ -307,6 +310,15 @@ export function useSavedViewSync({
       armLastView();
     });
   }, [sceneStore, armLastView, bundle.urlSync]);
+
+  // A restore (a saved view, an explored view, a link) is a navigation of its
+  // own, so it ends a follow, or the leader's next update would replace the
+  // view just chosen. It ends as the restore starts: a restore can wait
+  // seconds on dataset opens, and updates adopted meanwhile would mix into it.
+  useEffect(() => {
+    if (!breakFollow) return;
+    return bundle.applier.subscribeApplyStart(breakFollow);
+  }, [bundle.applier, breakFollow]);
 
   useEffect(() => {
     if (!onApplyResult) return;
