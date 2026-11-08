@@ -79,7 +79,7 @@ jobs:
       # merge step is what makes them addressable as :vX.Y.Z + :latest.
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
