@@ -160,13 +160,20 @@
   font-weight: 600;
 }
 
+/* An entry wraps between its parts, never inside its label, so a narrow
+   column breaks it into whole lines. */
 .monitor-timeline-chart dd {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: 0 5px;
   margin: 0;
   font-family: var(--lc-font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+.monitor-timeline-series {
+  white-space: nowrap;
 }
 
 .monitor-timeline-absent {
