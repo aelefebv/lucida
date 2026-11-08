@@ -1,5 +1,6 @@
 import { CaretLeftIcon, CaretRightIcon } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
+import { positionNumber } from "../axes.ts";
 import { IconButton } from "../ui/Button.tsx";
 import type { KeyCombo } from "../ui/shortcuts.ts";
 import { Slider } from "../ui/Slider.tsx";
@@ -58,7 +59,7 @@ export function AxisScrubber({
         valueDisplay="none"
         minValue={1}
         maxValue={count}
-        value={value + 1}
+        value={positionNumber(value)}
         onChange={(position) => onChange(position - 1)}
         className="lc-dim-slider"
       />
@@ -73,7 +74,7 @@ export function AxisScrubber({
       <span className="lc-dim-readout" aria-hidden="true">
         {/* Wide enough for the largest position, so the readout never shifts. */}
         <span className="lc-dim-readout-value" style={{ minWidth: `${String(count).length}ch` }}>
-          {value + 1}
+          {positionNumber(value)}
         </span>
         {` / ${count}`}
       </span>
