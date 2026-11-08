@@ -15,6 +15,7 @@ import {
   type LabelVolumePool,
   ensureDepthTexture,
   getDepthTexture,
+  markLabelVolumeFailed,
 } from "./atlas.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
@@ -116,6 +117,7 @@ function renderLabelVolumeLayer(
   const memberId = layer.datasetId;
   const pool = ctx.state.labelVolumePools.get(memberId);
   if (!pool) return false;
+  if (layer.labelChunk) markLabelVolumeFailed(ctx, memberId, pool, layer.labelChunk);
 
   const opacity = layer.opacity ?? DEFAULT_LABEL_OPACITY;
   const model = layer.modelMatrix ?? IDENTITY_4X4;

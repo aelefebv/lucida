@@ -2,7 +2,7 @@
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
-import { serializeTransientDescriptor } from "./descriptor/transient.ts";
+import { serializeTransientDescriptor, type TransientDescriptorParams } from "./descriptor/transient.ts";
 import type { PassTiming } from "./passTiming.ts";
 import { requireCompiled } from "./pipelineCompile.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
@@ -67,7 +67,6 @@ export class VolumeRenderer {
   private camForward: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private clipDistance = 0;
   private clipMode = 0; // 0=plane, 1=sphere
-  private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
 
@@ -313,6 +312,7 @@ export class VolumeRenderer {
     gamma: number,
     opacity: number,
     sampleFormat: SampleFormat,
+    chunkGrid?: TransientDescriptorParams["chunkGrid"],
   ) {
     if (!this.transientDescriptorBuffer) {
       this.transientDescriptorBuffer = this.device.createBuffer({
@@ -330,28 +330,13 @@ export class VolumeRenderer {
       gamma,
       opacity,
       sampleFormat,
+      chunkGrid,
     });
     this.device.queue.writeBuffer(this.transientDescriptorBuffer, 0, cpu);
     // The minimap/thumbnail path is intensity-only; bind the dummy palette
     // so a prior label draw's (possibly freed) palette buffer can't leak in.
     this.setLabelColorBuffer(null);
     this.setDescriptorBinding(this.transientDescriptorBuffer, 0);
-  }
-
-  /** Bind a monolithic texture as a single-slot atlas at level pool binding 0 (used by minimap). */
-  setVolume(texture: GPUTexture) {
-    if (!this.singleSlotIndirectionBuf) {
-      const data = new Uint32Array([0]);
-      this.singleSlotIndirectionBuf = this.device.createBuffer({
-        size: 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-      this.device.queue.writeBuffer(this.singleSlotIndirectionBuf, 0, data);
-    }
-    this.setTierAtlases(
-      [{ texture, indirectionBuf: this.singleSlotIndirectionBuf, slotsX: 1, slotsY: 1, slotsZ: 1 }],
-      null,
-    );
   }
 
   setRenderMode(mode: number) {
