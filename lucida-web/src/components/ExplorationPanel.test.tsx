@@ -418,8 +418,11 @@ describe("ExplorationPanel — Home on a page", () => {
     return page;
   }
 
-  /** Home frames every fixture and shows it at one CSS size at both ratios. */
-  async function assertHomeFrames(live: boolean): Promise<void> {
+  /** Whether Home frames every fixture, and whether it shows each at one CSS
+   *  size at both ratios. */
+  async function homeReports(
+    live: boolean,
+  ): Promise<{ framed: PropertyReport; sized: PropertyReport }> {
     const framed = new PropertyReport();
     const sized = new PropertyReport();
     for (const f of FIXTURES) {
@@ -439,19 +442,25 @@ describe("ExplorationPanel — Home on a page", () => {
         }
       }
     }
-    framed.assertHolds();
-    sized.assertHolds();
+    return { framed, sized };
   }
 
   it("frames the dataset from the live view", async () => {
-    await assertHomeFrames(true);
+    const { framed, sized } = await homeReports(true);
+    framed.assertHolds();
+    sized.assertHolds();
   });
 
-  // Fails while the synthesized Home frames the first image's voxel box at
-  // the viewport in CSS pixels: a volume's 3D Home points at empty space, a
-  // collection's frames one tile, and a 2x canvas shows it at half size.
+  // The panel fits the synthesized Home to the canvas in CSS pixels, and the
+  // page fits that region to its canvas in device pixels.
+  it("shows the synthesized Home at one CSS size at both pixel ratios", async () => {
+    (await homeReports(false)).sized.assertHolds();
+  });
+
+  // Fails while the synthesized Home frames the first image's voxel box: a
+  // volume's 3D Home points at empty space and a collection's frames one tile.
   it.fails("frames the dataset when the generator synthesizes Home", async () => {
-    await assertHomeFrames(false);
+    (await homeReports(false)).framed.assertHolds();
   });
 });
 

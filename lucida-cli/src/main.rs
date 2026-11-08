@@ -728,6 +728,7 @@ impl ViewCommand {
                 ViewportCommand::SetViewport {
                     width: *width,
                     height: *height,
+                    pixel_ratio: None,
                 }
             }
         })
