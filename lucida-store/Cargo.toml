@@ -6,7 +6,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
-tiff = "0.9"
+tiff = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
