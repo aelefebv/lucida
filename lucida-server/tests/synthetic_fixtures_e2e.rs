@@ -12,10 +12,12 @@ use std::sync::Arc;
 
 use lucida_content::ImageId;
 use lucida_server::binding::ChunkResolver;
+use lucida_server::chunk_read::read_chunk;
 use lucida_server::decode::decode_storage_bytes;
 use lucida_store::cache::{CachedStore, DEFAULT_SOURCE_CACHE_BYTES};
 use lucida_store::import::import_dataset;
 use lucida_store::import_types::ImportResult;
+use lucida_store::source_limiter::{ReaderId, RequestLabel};
 
 fn fixture_dir(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,7 +51,8 @@ fn decode_chunk(dir: &Path, resolver: &ChunkResolver, image_id: &ImageId, key: &
     let bytes = fs::read(dir.join(path.as_ref())).unwrap_or_else(|e| panic!("{path}: {e}"));
     decode_storage_bytes(
         &bytes,
-        info.compression,
+        &info.compression,
+        &info.chunk_shape,
         info.chunk_byte_layout.on_disk_byte_size,
     )
     .unwrap()
@@ -85,6 +88,53 @@ async fn level_index_pyramid_reads_back_its_level_number_at_every_level() {
             let expected = if inside { level as u16 } else { 0 };
             assert_eq!(value, expected, "level {level} sample ({z}, {y}, {x})");
         }
+    }
+}
+
+/// The fixture keeps one 16-cubed chunk on every level, so its coarse levels
+/// store chunks larger than themselves. Each level is served at its own
+/// extent, and a served chunk holds the level's samples and nothing else.
+#[tokio::test]
+async fn level_index_pyramid_serves_each_level_at_its_own_extent() {
+    let dir = fixture_dir("level-index.ome.zarr");
+    let store = Arc::new(CachedStore::new(
+        lucida_store::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap(),
+        DEFAULT_SOURCE_CACHE_BYTES,
+    ));
+    let result = import_dataset(&store, "level-index", "level-index")
+        .await
+        .unwrap();
+    let resolver = ChunkResolver::new(&result.binding_seed);
+    let image_id = ImageId("level-index".to_string());
+    let levels = &result.manifest.images()[0].multiscale.levels;
+    for level in 0..4u32 {
+        let extent = [32u64 >> level, 64 >> level, 64 >> level].map(|e| e.min(16));
+        let geometry = &levels[level as usize];
+        assert_eq!(
+            geometry.chunk_shape,
+            [1, 1, extent[0], extent[1], extent[2]]
+        );
+        let served = read_chunk(
+            &resolver,
+            &store,
+            &image_id,
+            &format!("{level}/0/0/0/0/0")
+                .parse::<lucida_content::ChunkKey>()
+                .unwrap(),
+            ReaderId(1),
+            RequestLabel(1),
+            None,
+        )
+        .await
+        .unwrap()
+        .into_bytes();
+        let values = samples(&served);
+        assert_eq!(
+            values.len() as u64,
+            extent.iter().product::<u64>(),
+            "level {level}"
+        );
+        assert!(values.iter().all(|&v| v == level as u16), "level {level}");
     }
 }
 

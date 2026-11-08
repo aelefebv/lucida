@@ -50,7 +50,7 @@ import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
-import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
+import { useAutoContrast } from "./hooks/useAutoContrast.ts";
 import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
@@ -589,15 +589,16 @@ function Viewer({
     datasetsRef,
   });
 
-  useIntensityBatcher({
-    clientReady: render.clientReady,
-    clientRef: render.clientRef,
+  useAutoContrast({
+    activeLoop: render.activeLoop,
     autoContrastMapRef: layers.autoContrastMapRef,
+    contrastFitMapRef: layers.contrastFitMapRef,
+    setContrastFitMap: layers.setContrastFitMap,
     wasmSceneRef: scene.wasmSceneRef,
     loopRef: render.loopRef,
     sessionRef: bridge.sessionRef,
-    datasetsRef,
-    setDataRangeMap: layers.setDataRangeMap,
+    followTarget: bridge.followTarget,
+    followTargetRef: bridge.followTargetRef,
   });
 
   // The volume viewer owns the fly toggle: entering fly mode also sets the fly
@@ -1126,7 +1127,7 @@ function Viewer({
                         canvasRef={render.canvasRef}
                         datasets={datasetsRef.current}
                         getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
-                        getGpuAtlases={() => render.clientRef.current?.gpuAtlases() ?? null}
+                        getGpuMemory={() => render.clientRef.current?.gpuMemory() ?? null}
                       />
                     </Suspense>
                   )}

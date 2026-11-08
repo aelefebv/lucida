@@ -22,8 +22,7 @@ pub struct ShownChannel {
     pub gamma: f64,
     /// How this channel combines with what is drawn beneath it. A layer
     /// showing one channel uses its layer blend, and a layer showing several
-    /// uses its channel blend for each, which is what the two separate render
-    /// paths used to do.
+    /// uses its channel blend for each.
     pub blend_mode: BlendMode,
 }
 

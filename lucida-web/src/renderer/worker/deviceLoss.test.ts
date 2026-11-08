@@ -353,7 +353,7 @@ describe("GPU errors", () => {
     clearGpuErrorReports(ctx);
   });
 
-  it("from an atlas the device could not allocate hand its chunks back and rebuild it under half the budget", async () => {
+  it("from an atlas the device could not allocate hand its chunks back, halve the GPU total, and rebuild it", async () => {
     const gpu = mockDevice();
     const { ctx, posts } = makeCtx(gpu.device);
     await dispatchMessage(ctx, cold("ds1"));
@@ -374,7 +374,7 @@ describe("GPU errors", () => {
     });
     expect(posts).toContainEqual(expect.objectContaining({ type: "gpuError", kind: "out-of-memory" }));
     expect((lost.texture as unknown as MockTexture).destroyed).toBe(true);
-    expect(ctx.state.atlasBudgets.volumeAtlasBytes).toBe(CEILING_BUDGETS.volumeAtlasBytes / 2);
+    expect(ctx.state.gpuTotalBytes).toBe(CEILING_BUDGETS.gpuTotalBytes / 2);
     const rebuilt = ctx.state.volumeAtlases.get(DETAIL_POOL)!;
     expect(rebuilt).not.toBe(lost);
     expect(rebuilt.slots.size).toBe(0);

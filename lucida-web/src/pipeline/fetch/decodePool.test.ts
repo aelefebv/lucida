@@ -3,7 +3,7 @@ import { DecodePool } from "./decodePool.ts";
 import type { WireFormat } from "../../manifestTypes.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { Boundary } from "../../trace/types.ts";
-import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { createSettleState } from "../settle.ts";
 
 const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "test" } as const;
 
@@ -30,7 +30,7 @@ const ENVIRONMENT = {
     devicePixelRatio: 2,
     viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
   }),
-  captureOutstanding: () => createQuiescenceState(),
+  captureOutstanding: () => createSettleState(),
 };
 
 /**

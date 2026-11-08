@@ -43,6 +43,7 @@ import {
 } from "./slice/index.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
+import { measureGpuMemory } from "./worker/gpuBudget.ts";
 import type {
   Chunk,
   ChunkResidencyChange,
@@ -226,7 +227,7 @@ function oneSlotVolume(ctx: WorkerCtx, rayHit: [number, number, number]): AtlasS
 
 describe("volume pool growth", () => {
   /** A ctx whose device records texture sizes and copies. */
-  function makeGrowthCtx(volumeAtlasBytes?: number) {
+  function makeGrowthCtx(gpuTotalBytes?: number) {
     const testCtx = makeMockCtx();
     const device = testCtx.ctx.device as unknown as {
       createCommandEncoder: () => unknown;
@@ -238,9 +239,7 @@ describe("volume pool growth", () => {
       finish: () => ({}),
     });
     device.queue.submit = () => {};
-    if (volumeAtlasBytes !== undefined) {
-      testCtx.ctx.state.atlasBudgets.volumeAtlasBytes = volumeAtlasBytes;
-    }
+    if (gpuTotalBytes !== undefined) testCtx.ctx.state.gpuTotalBytes = gpuTotalBytes;
     return { ...testCtx, copies };
   }
 
@@ -258,20 +257,21 @@ describe("volume pool growth", () => {
     }
   }
 
-  it("allocates one layer of the budget's slot grid, not the whole budget", () => {
+  it("allocates one layer of its cap's slot grid, not the whole cap", () => {
     const { ctx } = makeGrowthCtx();
-    // 32³ r16uint chunks under 512 MiB: a 20×20×20 grid.
+    // 32³ r16uint chunks under the device's 256 MiB largest buffer: 4096
+    // slots, in layers of 8×8 as deep as the texture allows.
     const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
-    expect([atlas.slotsX, atlas.slotsY, atlas.slotsZ, atlas.maxSlotsZ]).toEqual([20, 20, 1, 20]);
-    expect(atlas.totalSlots).toBe(400);
-    expect(textureSizes(ctx)).toEqual([[640, 640, 32]]);
+    expect([atlas.slotsX, atlas.slotsY, atlas.slotsZ, atlas.maxSlotsZ]).toEqual([8, 8, 1, 64]);
+    expect(atlas.totalSlots).toBe(64);
+    expect(textureSizes(ctx)).toEqual([[256, 256, 32]]);
   });
 
-  it("holds float samples as r32uint bits and reports their range in data units", () => {
-    const { ctx, posts } = makeGrowthCtx();
-    // Four bytes a texel: half the u16 pool's slots under the same budget.
+  it("holds float samples as r32uint bits", () => {
+    const { ctx } = makeGrowthCtx();
+    // Four bytes a texel: half the u16 pool's slots under the same cap.
     const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "f32");
-    expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([16, 16, 16]);
+    expect(atlas.slotsX * atlas.slotsY * atlas.maxSlotsZ).toBe(2048);
     const create = ctx.device.createTexture as unknown as { mock: { calls: [GPUTextureDescriptor][] } };
     expect(create.mock.calls.at(-1)![0].format).toBe("r32uint");
     atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
@@ -290,9 +290,6 @@ describe("volume pool growth", () => {
     const [, texels, layout] = write.mock.calls.at(-1)! as [unknown, ArrayBuffer, GPUTexelCopyBufferLayout];
     expect(Array.from(new Float32Array(texels, 0, 2))).toEqual([-5, 500.25]);
     expect(layout.bytesPerRow).toBe(32 * 4);
-    expect(posts.filter((m) => m.type === "intensityRange")).toEqual([
-      { type: "intensityRange", datasetId: "imgA", min: -5, max: 500.25 },
-    ]);
   });
 
   it("doubles its layers once full, copying the resident chunks in place", () => {
@@ -307,28 +304,77 @@ describe("volume pool growth", () => {
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), "ds1", "imgA");
 
     expect(atlas.slotsZ).toBe(2);
-    expect(atlas.totalSlots).toBe(800);
-    expect(copies).toEqual([[640, 640, 32]]);
-    expect(textureSizes(ctx).at(-1)).toEqual([640, 640, 64]);
+    expect(atlas.totalSlots).toBe(128);
+    expect(copies).toEqual([[256, 256, 32]]);
+    expect(textureSizes(ctx).at(-1)).toEqual([256, 256, 64]);
     expect(firstTexture.destroyed).toBe(true);
     // The chunk took a new slot and nothing was evicted for it.
     const slot = atlas.slots.get("imgA|0/0/0/0/0/0");
-    expect(slot).toBeGreaterThanOrEqual(400);
+    expect(slot).toBeGreaterThanOrEqual(64);
     expect(atlas.indirectionData[0]).toBe(slot);
     expect(reports(posts, "lost")).toEqual([]);
   });
 
-  it("evicts rather than grows once it holds the whole budget", () => {
-    // 64 MiB of 32³ chunks: 1024 slots, a 10×10×10 grid.
+  it("grows to its cap's grid and no further", () => {
+    // 64 MiB of 32³ chunks: 1024 slots, in layers of 4×4.
     const { ctx, copies } = makeGrowthCtx(64 * 1024 * 1024);
     const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
-    expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([10, 10, 10]);
+    expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([4, 4, 64]);
     const grown: number[] = [];
     while (growVolumeAtlas(ctx.device, atlas)) grown.push(atlas.slotsZ);
-    expect(grown).toEqual([2, 4, 8, 10]);
-    expect(atlas.totalSlots).toBe(1000);
-    expect(copies).toHaveLength(4);
+    expect(grown).toEqual([2, 4, 8, 16, 32, 64]);
+    expect(atlas.totalSlots).toBe(1024);
+    expect(copies).toHaveLength(6);
     expect(growVolumeAtlas(ctx.device, atlas)).toBe(false);
+  });
+
+  /** Hold the chunk at each grid cell of `imgA`'s 5×4×4 section in slot order, mapped. */
+  function holdLayer(atlas: AtlasState): string[] {
+    atlas.entityMetas.set("imgA", [makeVolumeMeta(5, 4, 4)]);
+    atlas.indirectionData = new Uint32Array(5 * 4 * 4).fill(0xFFFFFFFF);
+    const keys: string[] = [];
+    for (let slot = 0; slot < atlas.totalSlots; slot++) {
+      const key = chunkKey(0, 0, 0, Math.floor(slot / 16), Math.floor(slot / 4) % 4, slot % 4);
+      atlas.slots.set(`imgA|${key}`, slot);
+      atlas.slotGridIdx[slot] = slot;
+      atlas.indirectionData[slot] = slot;
+      keys.push(key);
+    }
+    atlas.freeSlots = [];
+    return keys;
+  }
+
+  it("takes a slot the planner doesn't want rather than grow past the GPU total", () => {
+    const { ctx, posts, copies } = makeGrowthCtx();
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
+    const held = holdLayer(atlas);
+    // The total holds this one layer and nothing more.
+    ctx.state.gpuTotalBytes = measureGpuMemory(ctx.state).bytes;
+    const incoming = makeChunk(0, 0, 0, 4, 0, 0);
+    want(ctx, "imgA", [...held.slice(1), incoming.key]);
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+
+    expect(atlas.slotsZ).toBe(1);
+    expect(copies).toEqual([]);
+    expect(atlas.slots.get(`imgA|${incoming.key}`)).toBe(0);
+    expect(reports(posts, "lost").map((r) => [r.reason, r.keys])).toEqual([["evicted", [held[0]]]]);
+  });
+
+  it("grows while the total has room even when it could evict", () => {
+    const { ctx, posts, copies } = makeGrowthCtx();
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
+    const held = holdLayer(atlas);
+    const incoming = makeChunk(0, 0, 0, 4, 0, 0);
+    want(ctx, "imgA", [incoming.key]);
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+
+    // Fallback the planner no longer wants stays resident while there is room.
+    expect(atlas.slotsZ).toBe(2);
+    expect(copies).toHaveLength(1);
+    expect(held.every((key) => atlas.slots.has(`imgA|${key}`))).toBe(true);
+    expect(reports(posts, "lost")).toEqual([]);
   });
 });
 

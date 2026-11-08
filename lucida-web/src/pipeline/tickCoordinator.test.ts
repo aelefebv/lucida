@@ -49,6 +49,7 @@ function createMockCpuCache(): CpuCache {
   return {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
+    tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
     getDeliverable: vi.fn(function* () {}),
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
@@ -283,6 +284,7 @@ describe("epoch caching", () => {
       datasets,
       client: {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -799,6 +801,7 @@ describe("display-only fast path", () => {
       datasets,
       client: {
         coldState: over?.coldState ?? vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: over?.coldStateDisplay ?? vi.fn(),
         coldStateSelection: over?.coldStateSelection ?? vi.fn(),
         coldStateDelta: over?.coldStateDelta ?? vi.fn(),
@@ -1485,6 +1488,7 @@ describe("multi-dataset planning", () => {
       datasets,
       client: {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -1638,6 +1642,7 @@ describe("incremental delta fold", () => {
       datasets,
       client: {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -1882,6 +1887,7 @@ describe("incremental delta fold", () => {
       const cpuCache = createMockCpuCache();
       const client = {
         coldState: vi.fn(),
+        gpuCapacity: () => null,
         coldStateDisplay: vi.fn(),
         coldStateSelection: vi.fn(),
         coldStateDelta: vi.fn(),
@@ -1924,9 +1930,33 @@ describe("incremental delta fold", () => {
     }
   });
 
-  it("keeps the target level under memory pressure: a cache evicting past its budget never lowers it", async () => {
-    // A real CPU cache with a 1.5-chunk budget, so delivering the four
-    // level-1 chunks evicts. Pressure changes coverage, never the level.
+  it.each(["slice", "volume"] as const)(
+    "admits a %s view against the GPU room the render worker reports, not the CPU budgets alone",
+    (mode) => {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2) }],
+      ]);
+      const scene = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        viewQuery: { visible_entities: [foldRow({ target_level: 1 })] },
+      });
+      const ctx = makeCtx(scene, datasets);
+      // The other holders take the whole total, so no chunk pool has room.
+      const full = { budgetBytes: 192 * 1024 * 1024, reservedBytes: 192 * 1024 * 1024, pools: [] };
+      Object.assign(ctx, { mode });
+      Object.assign(ctx.client, { gpuCapacity: () => full });
+
+      makeOrch().planAndFetch(ctx, emptyMinimap);
+
+      const plan = vi.mocked(ctx.cpuCache.submit).mock.calls[0][0] as RequestPlan;
+      expect(plan.requests.filter((r) => r.lane === "detail")).toEqual([]);
+      expect(plan.shortfall?.detail).toBeGreaterThan(0);
+    },
+  );
+
+  it("keeps the target level under memory pressure: a budget that holds less never lowers it", async () => {
+    // A real CPU cache with a 1.5-chunk budget, smaller than the four
+    // level-1 chunks. Pressure changes coverage, never the level.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const chunkBytes = 100;
@@ -1975,21 +2005,24 @@ describe("incremental delta fold", () => {
       };
       const detailLevels = (p: RequestPlan) =>
         p.requests.filter((r) => r.lane === "detail").map((r) => r.level);
+      // What the plan asked for at level 1: what admission let through, and
+      // the shortfall it declared for the rest.
+      const asked = (p: RequestPlan) => detailLevels(p).length + (p.shortfall?.detail ?? 0);
 
       tick(1);
-      expect(detailLevels(submit.mock.calls[0][0])).toEqual([1, 1, 1, 1]);
+      const first = submit.mock.calls[0][0];
+      expect(asked(first)).toBe(4);
+      expect(first.shortfall?.detail).toBeGreaterThan(0);
+      expect(detailLevels(first).every((level) => level === 1)).toBe(true);
       await flush();
-
-      // Guard against a vacuous test: eviction happened.
-      expect(cache.telemetry().mainBytes).toBeLessThanOrEqual(chunkBytes + chunkBytes / 2);
-      expect(cache.snapshot().cached.get("tile-0")?.size ?? 0).toBeLessThan(4);
 
       submit.mockClear();
       vi.advanceTimersByTime(500);
       tick(2);
 
       const next = submit.mock.calls[0][0];
-      expect(detailLevels(next)).toEqual([1, 1, 1, 1]);
+      expect(asked(next)).toBe(4);
+      expect(detailLevels(next).every((level) => level === 1)).toBe(true);
       const entry = next.activeSet.find((e) => e.entityId === "tile-0");
       expect(entry?.kind === "tile" ? entry.detailLevels : null).toEqual([1]);
     } finally {

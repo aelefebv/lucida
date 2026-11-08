@@ -106,7 +106,7 @@ describe("buildViewHotState", () => {
 
   it("dedupes when two entries produce the same memberId", () => {
     // group-as-proxy entityId="dup", tile imageId="dup" → both yield
-    // memberId "dup" in single-channel mode. Only the first one emits.
+    // memberId "dup:ch0". Only the first one emits.
     const cold = makeColdMsg(
       [0],
       [

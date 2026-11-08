@@ -13,6 +13,7 @@ import { invalidateDisplaySettings, invalidateSelection } from "../invalidation.
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
 import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
+import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import { channelDisplayName, channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
 import { readResolvedLayers } from "../resolvedLayers.ts";
 
@@ -167,8 +168,8 @@ export function buildLayerInfos(
   datasets: Map<string, DatasetState>,
   maps: {
     autoContrast: Map<string, boolean>;
-    /** Keyed by {@link channelRangeKey}. */
-    dataRange: Map<string, { min: number; max: number }>;
+    /** Each channel's latest auto-contrast fit, keyed by {@link channelRangeKey}. */
+    contrastFit: Map<string, ChannelFit>;
     /** The worker's per-dataset level readout; a dataset it has not reported yet is absent. */
     levels: Map<string, DatasetLevels>;
   },
@@ -209,7 +210,7 @@ export function buildLayerInfos(
         contrastMin: raw?.contrast_min ?? settings?.contrast_min ?? 0,
         contrastMax: raw?.contrast_max ?? settings?.contrast_max ?? 65535,
         gamma: raw?.gamma ?? settings?.gamma ?? 1,
-        dataRange: maps.dataRange.get(channelRangeKey(id, i)) ?? null,
+        dataRange: maps.contrastFit.get(channelRangeKey(id, i))?.range ?? null,
       };
     });
 
@@ -277,7 +278,7 @@ export function useDatasetSettings({
   datasetLevels,
 }: Params) {
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
-  const [dataRangeMap, setDataRangeMap] = useState<Map<string, { min: number; max: number }>>(new Map());
+  const [contrastFitMap, setContrastFitMap] = useState<Map<string, ChannelFit>>(new Map());
   const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null);
   const [layerSettingsVersion, setLayerSettingsVersion] = useState(0);
   const lastAutoExpandedLayerRef = useRef<string | null>(null);
@@ -285,6 +286,9 @@ export function useDatasetSettings({
   const autoContrastMapRef = useRef<Map<string, boolean>>(new Map());
   // eslint-disable-next-line react-hooks/refs
   autoContrastMapRef.current = autoContrastMap;
+  const contrastFitMapRef = useRef<Map<string, ChannelFit>>(new Map());
+  // eslint-disable-next-line react-hooks/refs
+  contrastFitMapRef.current = contrastFitMap;
 
   const bumpLayerSettingsVersion = useCallback(() => {
     setLayerSettingsVersion((v) => v + 1);
@@ -296,7 +300,7 @@ export function useDatasetSettings({
 
   const cleanupLayerMaps = useCallback((id: string) => {
     setAutoContrastMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-    setDataRangeMap(prev => {
+    setContrastFitMap(prev => {
       const next = new Map(prev);
       for (const key of prev.keys()) if (parseChannelRangeKey(key)?.datasetId === id) next.delete(key);
       return next;
@@ -408,28 +412,28 @@ export function useDatasetSettings({
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
   // A hand-set limit stops continuous auto-contrast for the layer, or the next
-  // loaded chunk would refit over it.
+  // fit would replace it.
   const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
     applyChannelContrast(id, channel, min, max);
     setAutoContrastMap((prev) => (prev.get(id) === false ? prev : new Map(prev).set(id, false)));
   }, [applyChannelContrast]);
 
-  /** Fit a channel's limits to its loaded data once. */
+  /** Set a channel's limits to its latest fit once. */
   const handleChannelAutoFit = useCallback((id: string, channel: number) => {
-    const range = dataRangeMap.get(channelRangeKey(id, channel));
-    if (range) applyChannelContrast(id, channel, range.min, range.max);
-  }, [dataRangeMap, applyChannelContrast]);
+    const fit = contrastFitMap.get(channelRangeKey(id, channel));
+    if (fit) applyChannelContrast(id, channel, fit.limits.min, fit.limits.max);
+  }, [contrastFitMap, applyChannelContrast]);
 
-  /** Keep every channel of the layer fitted to its loaded data, or stop. */
+  /** Keep every channel of the layer at its latest fit, or stop. */
   const handleAutoContrastChange = useCallback((id: string, on: boolean) => {
     setAutoContrastMap((prev) => new Map(prev).set(id, on));
     if (!on) return;
     const count = settingsChannelCount(wasmSceneRef.current, id);
     for (let channel = 0; channel < count; channel++) {
-      const range = dataRangeMap.get(channelRangeKey(id, channel));
-      if (range) applyChannelContrast(id, channel, range.min, range.max);
+      const fit = contrastFitMap.get(channelRangeKey(id, channel));
+      if (fit) applyChannelContrast(id, channel, fit.limits.min, fit.limits.max);
     }
-  }, [dataRangeMap, wasmSceneRef, applyChannelContrast]);
+  }, [contrastFitMap, wasmSceneRef, applyChannelContrast]);
 
   const handleChannelSetGamma = useCallback((id: string, channel: number, gamma: number) => {
     const scene = wasmSceneRef.current;
@@ -562,7 +566,7 @@ export function useDatasetSettings({
   const layerInfos = scene
     ? buildLayerInfos(scene, datasets, {
         autoContrast: autoContrastMap,
-        dataRange: dataRangeMap,
+        contrastFit: contrastFitMap,
         levels: datasetLevels,
       }, viewMode)
     : [];
@@ -575,8 +579,9 @@ export function useDatasetSettings({
     autoContrastMap,
     setAutoContrastMap,
     autoContrastMapRef,
-    dataRangeMap,
-    setDataRangeMap,
+    contrastFitMap,
+    contrastFitMapRef,
+    setContrastFitMap,
     expandedLayerId,
     layerSettingsVersion,
     bumpLayerSettingsVersion,

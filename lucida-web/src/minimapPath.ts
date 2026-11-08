@@ -796,6 +796,17 @@ export function forgetMinimapOverviewUploads(state: MinimapState): void {
   invalidateMinimapOverview(state);
 }
 
+/** The worker lost these members' overview textures: upload them again, starting next tick. */
+export function forgetMinimapOverviewsOf(state: MinimapState, memberIds: readonly string[]): void {
+  for (const memberId of memberIds) {
+    state.overviewKey.delete(memberId);
+    state.overviewUploaded.delete(memberId);
+    state.overviewSeeded.delete(memberId);
+  }
+  state.lastOverviewScanMs = Number.NEGATIVE_INFINITY;
+  invalidateMinimapOverview(state);
+}
+
 export function clearMinimapForDataset(state: MinimapState, dsId: string): void {
   // Clear the dataset ID itself (single-member case).
   state.overviewKey.delete(dsId);

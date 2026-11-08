@@ -11,13 +11,12 @@ use lucida_core::view_properties::{
 };
 
 use crate::montage::{build_cell_view, plan_montage};
-use crate::view::apply_overview_to_scene;
 
 /// `lucida viewer overview` for a window the size of `vp`, shown on a page at
 /// `vp` and `dpr`.
 fn overview(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
     let mut cli = join(f, vp, 1).scene;
-    apply_overview_to_scene(&mut cli, vp.css).unwrap();
+    cli.frame_visible_2d(vp.css).unwrap();
     vec![Produced::framing(
         "overview",
         restore(&capture(&cli), f, vp, dpr),

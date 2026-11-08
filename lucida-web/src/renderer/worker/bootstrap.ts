@@ -10,7 +10,7 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { WorkerToMainMessage } from "../workerProtocol.ts";
-import { getDeviceLimits, initGPU, requestGpuDevice } from "../gpuContext.ts";
+import { initGPU, requestGpuDevice } from "../gpuContext.ts";
 import { fitBudgets } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
@@ -68,7 +68,7 @@ export async function bootstrapWorker(
   schedule: (task: () => Promise<void>) => void = (task) => void task(),
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
-  const state = createInitialState(fitBudgets(deviceMemoryGiB, getDeviceLimits(device)));
+  const state = createInitialState(fitBudgets(deviceMemoryGiB).gpuTotalBytes);
   let renderers = createRenderers(device, format, post);
   // The page holds the minimap overlay's content draws until this report
   // (Minimap.tsx).
@@ -98,7 +98,7 @@ export async function bootstrapWorker(
     getCursorRenderer() {
       return renderers.cursor;
     },
-    ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(ctx.device, count, w, h),
+    ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(ctx, count, w, h),
     getOrCreateLUT: (name) => getOrCreateLUT(ctx.device, name),
     post,
     postWantedSet,

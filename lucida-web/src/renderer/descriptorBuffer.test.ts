@@ -226,7 +226,7 @@ function sourcesFromEntry(entry: ColdStateActiveEntry, detailPoolKey = "ds1:ch0:
 }
 
 /** Build a per-dataset sources map for all entries in `cold.activeSet`
- *  (single-channel only — multi-channel tests can build their own map if
+ *  (channel 0 only; tests showing several channels build their own map if
  *  they need one). */
 function sourcesForCold(cold: ColdStateMessage): Map<string, EntitySource[]> {
   const out = new Map<string, EntitySource[]>();

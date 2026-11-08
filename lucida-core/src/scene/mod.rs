@@ -19,7 +19,9 @@ use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
 use crate::epoch::SceneEpochs;
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
-use crate::target_level::{self, IN_PLANE_AXES, VOLUME_AXES, level_shape_ratios};
+use crate::target_level::{
+    self, IN_PLANE_AXES, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios,
+};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
@@ -1355,7 +1357,23 @@ impl Scene {
             _ => &VOLUME_AXES,
         };
         let ratios = level_shape_ratios(&member.levels, axes);
-        target_level::target_level(pixels_per_sample, &ratios, previous)
+        target_level::target_level(
+            pixels_per_sample * self.render_ratio_scale(),
+            &ratios,
+            previous,
+        )
+    }
+
+    /// The share of device pixels the render target keeps. A browser draws at
+    /// no more than [`MAX_RENDER_PIXEL_RATIO`], so a level finer than that
+    /// density shows would be fetched and never seen. The adaptive scale a
+    /// long gesture applies on top is left out, so the level holds still
+    /// mid-gesture.
+    fn render_ratio_scale(&self) -> f64 {
+        match self.pixel_ratio {
+            Some(ratio) if ratio > MAX_RENDER_PIXEL_RATIO => MAX_RENDER_PIXEL_RATIO / ratio,
+            _ => 1.0,
+        }
     }
 
     /// The dataset's level pin, as stored. `None` means the target follows

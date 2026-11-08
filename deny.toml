@@ -1,0 +1,62 @@
+[graph]
+# Optional dependencies ship too, so check them.
+all-features = true
+
+[advisories]
+# Each entry says who pulls the crate in and why the advisory does not reach
+# lucida. Drop it once the dependency moves past the affected version.
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa is a dev-dependency of lucida-server, used only to sign test tokens; no fixed release exists" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint comes from p256, a dev-dependency of lucida-server used only to sign test tokens" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml comes from object_store 0.12, which parses only responses from the store a deployment configures; the fix needs object_store 0.14" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml comes from object_store 0.12, which parses only responses from the store a deployment configures; the fix needs object_store 0.14" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained but has no known vulnerability; object_store 0.12 needs it and 0.13 drops it" },
+]
+
+[licenses]
+# Permissive licenses: an MIT project meets their terms by keeping notices.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = [
+    # MPL-2.0 is copyleft per file. It binds changes to option-ext's own files,
+    # and lucida uses the crate unmodified.
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
+
+[bans]
+# Most duplicates come from dependencies that have not caught up yet, so they
+# only warn. Two copies of a crate below would split types that lucida passes
+# between crates, or run two runtimes, so those fail.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "bytes", deny-multiple-versions = true },
+    { crate = "http", deny-multiple-versions = true },
+    { crate = "hyper", deny-multiple-versions = true },
+    { crate = "object_store", deny-multiple-versions = true },
+    { crate = "pyo3", deny-multiple-versions = true },
+    { crate = "reqwest", deny-multiple-versions = true },
+    { crate = "rustls", deny-multiple-versions = true },
+    { crate = "serde", deny-multiple-versions = true },
+    { crate = "tokio", deny-multiple-versions = true },
+    { crate = "wasm-bindgen", deny-multiple-versions = true },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

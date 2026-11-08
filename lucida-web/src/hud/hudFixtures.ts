@@ -9,6 +9,7 @@ import type { HudCacheReads } from "./hudSource.ts";
 import type { LaneOutstanding } from "../pipeline/fetch/types.ts";
 import { TraceRecorder } from "../trace/recorder.ts";
 import type { GpuIdentity } from "../trace/types.ts";
+import type { GpuMemoryReport } from "../renderer/workerProtocol.ts";
 
 export const MIB = 1024 * 1024;
 
@@ -53,6 +54,25 @@ export function lanes(overrides: Partial<LaneOutstanding> = {}): LaneOutstanding
   };
 }
 
+/** A render worker's GPU memory report: `bytes` of chunk pools under `budgetBytes`. */
+export function gpuReport(overrides: Partial<GpuMemoryReport> = {}): GpuMemoryReport {
+  const bytes = overrides.bytes ?? 0;
+  return {
+    budgetBytes: 1536 * MIB,
+    bytes,
+    chunkBytes: bytes,
+    labelBytes: 0,
+    proxyBytes: 0,
+    targetBytes: 0,
+    minimapBytes: 0,
+    atlases: 0,
+    slotsHeld: 0,
+    slots: 0,
+    overviewsRefused: 0,
+    ...overrides,
+  };
+}
+
 /** A sample at `atMs` with a busy pipeline on a hardware adapter. */
 export function hudSample(atMs: number, overrides: Partial<HudSample> = {}): HudSample {
   return {
@@ -67,7 +87,7 @@ export function hudSample(atMs: number, overrides: Partial<HudSample> = {}): Hud
       overview: { bytes: 63 * MIB, budgetBytes: 64 * MIB },
       proxy: { bytes: 0, budgetBytes: 256 * MIB },
     },
-    gpuAtlases: null,
+    gpuMemory: null,
     levels: [
       { datasetId: "ds-a", name: "a.zarr", target: { min: 2, max: 2 }, pinned: false, displayed: { min: 3, max: 3 } },
     ],

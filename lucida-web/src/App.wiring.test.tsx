@@ -174,7 +174,6 @@ const appRenders = vi.hoisted(() => ({ count: 0 }));
 
 vi.mock("./renderer/renderClient.ts", () => {
   class MockRenderClient {
-    onIntensityRange: unknown = null;
     onEntityLevels: unknown = null;
     pipelinesCompiled = false;
     ready() { return gpu.ready ? Promise.resolve() : new Promise(() => {}); }
@@ -183,7 +182,7 @@ vi.mock("./renderer/renderClient.ts", () => {
     destroy() {}
     updateCursorData(_data: Float32Array, _count: number) {}
     removeLayerResources(_id: string) {}
-    gpuAtlases() { return { atlases: 0, bytes: 0 }; }
+    gpuMemory() { return null; }
     onGpuStatus() { return () => {}; }
   }
   return { RenderClient: MockRenderClient };
@@ -203,6 +202,7 @@ vi.mock("./renderLoop.ts", async (importOriginal) => {
     updateDatasetManifest() {}
     setMinimap() {}
     setThumbnailOverview() {}
+    setAutoContrastListener() {}
     getTickCoordinator() { return {}; }
     captureFrame() { return Promise.resolve({ frame: null, reason: "stub" }); }
   }

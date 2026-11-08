@@ -12,7 +12,7 @@
  */
 
 import type { Lane, LaneOutstanding, PoolResidencyReport } from "../pipeline/fetch/types.ts";
-import type { GpuAtlasReport, LevelRange } from "../renderer/workerProtocol.ts";
+import type { GpuMemoryReport, LevelRange } from "../renderer/workerProtocol.ts";
 import { adapterKindOf, adapterName } from "../trace/diagnose/renderTiming.ts";
 import type { GpuIdentity } from "../trace/types.ts";
 
@@ -62,7 +62,7 @@ export interface HudSample {
   lanes: LaneOutstanding | null;
   pools: PoolResidencyReport | null;
   /** Null with no render worker to ask. */
-  gpuAtlases: GpuAtlasReport | null;
+  gpuMemory: GpuMemoryReport | null;
   levels: readonly HudLevelSample[];
   gpu: GpuIdentity | null;
   runOpen: boolean;
@@ -334,19 +334,26 @@ function poolsOf(last: HudSample | null): HudPoolView[] {
     if (fill >= 0.9) return { label, text, fill, state: "near budget", tone: "busy" };
     return { label, text, fill, state: "under budget", tone: "ok" };
   });
-  out.push(gpuPoolOf(last?.gpuAtlases ?? null));
+  out.push(gpuPoolOf(last?.gpuMemory ?? null));
   return out;
 }
 
 /**
- * The render worker's atlases, as bytes and a count. Nothing adds the GPU
- * pools up to one budget yet, so there is no fill to draw.
+ * Everything the render worker holds on the GPU against its one budget, with
+ * the chunk pools' slot occupancy and the minimap overviews the budget left
+ * out.
  */
-function gpuPoolOf(report: GpuAtlasReport | null): HudPoolView {
+function gpuPoolOf(report: GpuMemoryReport | null): HudPoolView {
   // With no worker to ask, absent rather than a confident zero.
   if (!report) return { label: "GPU", text: "not reported", fill: null, state: "not reported", tone: "absent" };
-  const atlases = `${formatCount(report.atlases)} ${report.atlases === 1 ? "atlas" : "atlases"}`;
-  return { label: "GPU", text: `${formatMiB(report.bytes)} MiB`, fill: null, state: atlases, tone: "info" };
+  const text = `${formatMiB(report.bytes)} / ${formatMiB(report.budgetBytes)} MiB`;
+  const slots = `${formatCount(report.slotsHeld)} of ${formatCount(report.slots)} slots`;
+  const refused = report.overviewsRefused > 0 ? ` · ${formatCount(report.overviewsRefused)} minimap overviews left out` : "";
+  const fill = report.budgetBytes > 0 ? report.bytes / report.budgetBytes : null;
+  if (fill === null) return { label: "GPU", text: `${formatMiB(report.bytes)} MiB`, fill, state: slots + refused, tone: "info" };
+  if (fill >= 0.98) return { label: "GPU", text, fill, state: `at budget · ${slots}${refused}`, tone: "busy" };
+  if (fill >= 0.9) return { label: "GPU", text, fill, state: `near budget · ${slots}${refused}`, tone: "busy" };
+  return { label: "GPU", text, fill, state: `under budget · ${slots}${refused}`, tone: "ok" };
 }
 
 function levelOf(level: HudLevelSample): HudLevelView {
@@ -373,6 +380,7 @@ const REASONS: Record<string, string> = {
   pending_unclassified: "queue too deep to classify",
   chunks_in_flight: "chunks in flight",
   chunks_pending: "chunks pending",
+  uploads_unanswered: "renderer still placing chunks",
   detail_not_resident: "detail not yet resident",
   coarse_not_resident: "coarse not yet resident",
 };
@@ -380,6 +388,9 @@ const REASONS: Record<string, string> = {
 function quiescenceOf(quiescence: HudQuiescenceSample | null): HudStatusView {
   if (!quiescence) {
     return { label: "unpublished", detail: "the page has not published quiescence yet", tone: "absent" };
+  }
+  if (quiescence.quiescent && quiescence.reason === "coverage_limited") {
+    return { label: "quiescent", detail: "settled covering what the memory budgets hold", tone: "ok" };
   }
   if (quiescence.quiescent) {
     return { label: "quiescent", detail: "nothing pending, nothing in flight, the view resident", tone: "ok" };

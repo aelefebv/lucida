@@ -42,7 +42,6 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     maxSlotsZ: 2,
     entityMetas,
     t: 0, c: 0,
-    intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,
   };
@@ -76,12 +75,11 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     freeSlots: [],
     totalSlots,
     chunkX: 32, chunkY: 32,
-    slotsX: 4, slotsY: 4,
+    slotsX: 4, slotsY: 4, maxSlotsY: 4,
     entityMetas,
     entityZInfo,
     z: 0, t: 0, c: 0,
     slotLevelZ: new Int32Array(totalSlots).fill(-1),
-    intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,
   };
