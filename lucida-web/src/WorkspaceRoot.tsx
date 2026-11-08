@@ -239,6 +239,10 @@ function WorkspaceViewerRoute({
   // page. A failed create-from-selection must leave the current workspace in
   // place, so it renders as a dismissible notice beside <App>.
   const [createError, setCreateError] = useState<string | null>(null);
+  // Set when the server closes the viewer's connection because this person's
+  // access was removed. Unmounting <App> ends its connection for good.
+  const [accessRemoved, setAccessRemoved] = useState(false);
+  const handleAccessRevoked = useCallback(() => setAccessRemoved(true), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -288,6 +292,25 @@ function WorkspaceViewerRoute({
     );
   }
 
+  if (accessRemoved) {
+    // This person was a member a moment ago, so saying the workspace exists
+    // leaks nothing.
+    return (
+      <div className="lc-auth-screen">
+        <div className="lc-auth-card">
+          <h1 className="lc-auth-title">Access removed</h1>
+          <p className="lc-auth-body" data-testid="workspace-access-removed">
+            You no longer have access to this workspace. Ask an owner to
+            invite you again.
+          </p>
+          <Button variant="primary" onPress={onBackToDashboard}>
+            All workspaces
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   if (!workspace) {
     return (
       <div className="lc-auth-screen">
@@ -315,6 +338,7 @@ function WorkspaceViewerRoute({
         canRenameWorkspace={workspace.role === "owner"}
         initialDatasetUrls={initialDatasetUrls}
         onBackToDashboard={onBackToDashboard}
+        onAccessRevoked={handleAccessRevoked}
         onRenameWorkspace={handleRename}
         onSetDefaultSavedView={handleSetDefaultSavedView}
         onCreateWorkspaceFromDatasets={(paths) => {

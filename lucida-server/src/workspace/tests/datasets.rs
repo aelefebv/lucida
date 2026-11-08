@@ -312,7 +312,7 @@ async fn live_workspace_sessions_are_independent() {
         (seq, sess.document.clone())
     };
     manager
-        .persist_applied_command(&live_a, &cmd, seq, &document)
+        .persist_applied_command(&live_a, 1, &cmd, seq, &document)
         .await
         .unwrap();
 
