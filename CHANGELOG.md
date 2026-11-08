@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.23.0](https://github.com/aelefebv/lucida/compare/v0.22.0...v0.23.0) (2026-11-08)
+
+
+### Features
+
+* give each browser its own anonymous identity when auth is disabled ([#1342](https://github.com/aelefebv/lucida/issues/1342)) ([6c4ddac](https://github.com/aelefebv/lucida/commit/6c4ddacf3c3a2224fd77b8dad75934694d2c4b81))
+* label ids and 3D ray samples in the pixel readout, whole values in slider fields ([#1350](https://github.com/aelefebv/lucida/issues/1350)) ([94dd68a](https://github.com/aelefebv/lucida/commit/94dd68ab2dcdcb336e0652a48db219631daea314)), closes [#1332](https://github.com/aelefebv/lucida/issues/1332)
+
+
+### Bug Fixes
+
+* **core:** bracket the fly camera's depth range around the data after every move ([#1339](https://github.com/aelefebv/lucida/issues/1339)) ([afea648](https://github.com/aelefebv/lucida/commit/afea64832eb1883e54cbbaa9b52f9502f9f9a8bd))
+* replay a bundle at the device memory it ran under, and count other-plane skips apart ([#1343](https://github.com/aelefebv/lucida/issues/1343)) ([abfa0e0](https://github.com/aelefebv/lucida/commit/abfa0e01d61a4f8e53f6c6cc1249a04e84d3f619))
+* **server:** batch tiny generated chunks, key generated levels by fill value, and finish the histograms views show ([#1349](https://github.com/aelefebv/lucida/issues/1349)) ([bceb5b2](https://github.com/aelefebv/lucida/commit/bceb5b24b8ef4ea90153ccf9a9951ad1e6b078c3))
+* **trace:** fail the gate on a lost socket, budget wide cold opens, and run it on pull requests ([#1352](https://github.com/aelefebv/lucida/issues/1352)) ([740da15](https://github.com/aelefebv/lucida/commit/740da15761b5fad70c7da22e296cdd16072e8c02))
+* volume zoom in core, scrollbar-free captures, and old sample-unit cameras read as a fit ([#1346](https://github.com/aelefebv/lucida/issues/1346)) ([ce53ff3](https://github.com/aelefebv/lucida/commit/ce53ff3a8da66f9bae954934f6e47e3656abedf5))
+* **web:** a reconnect reports presence, a restore ends follow, and a cached page leaves the session ([#1348](https://github.com/aelefebv/lucida/issues/1348)) ([9e84c49](https://github.com/aelefebv/lucida/commit/9e84c490b97bf7089a016a939579ec209cf67177))
+* **web:** chart contrast on the HUD and dark theme, and plain Health wording ([#1344](https://github.com/aelefebv/lucida/issues/1344)) ([904c51c](https://github.com/aelefebv/lucida/commit/904c51c35bebb09538912a12020abebfcf6e24ce))
+* **web:** exempt the entry point from react-refresh/only-export-components ([#1365](https://github.com/aelefebv/lucida/issues/1365)) ([bd4c14c](https://github.com/aelefebv/lucida/commit/bd4c14c66bafb2bf3d8d9f07744ead60bb5cff7b))
+
+
+### Performance
+
+* **core:** shrink the WASM module below its size before the view codec ([#1340](https://github.com/aelefebv/lucida/issues/1340)) ([1c8be8f](https://github.com/aelefebv/lucida/commit/1c8be8ffea25d18c36ace862ffb2753cb6aace66))
+* serve precompressed SPA assets with long-lived caching ([#1345](https://github.com/aelefebv/lucida/issues/1345)) ([299050d](https://github.com/aelefebv/lucida/commit/299050d9e7eb1b0a9d6d8c7c965f98bed39e16b2))
+* **trace:** cut the recorder's per-row write cost ([#1354](https://github.com/aelefebv/lucida/issues/1354)) ([4970b99](https://github.com/aelefebv/lucida/commit/4970b9907f62e618280c00cda6af78fc6f241eaa))
+* **trace:** read the clock once per dispatched burst, not once per row ([#1367](https://github.com/aelefebv/lucida/issues/1367)) ([c0286b4](https://github.com/aelefebv/lucida/commit/c0286b44cb3aa5e53a1cd8f56eba1c535b0f0e6f))
+* **web:** pace frames to the GPU and skip unloaded cells in the ray march ([#1355](https://github.com/aelefebv/lucida/issues/1355)) ([20dcc1b](https://github.com/aelefebv/lucida/commit/20dcc1bcbcad16a1d871aef4675f66db45134f56))
+
 ## [0.22.0](https://github.com/aelefebv/lucida/compare/v0.21.0...v0.22.0) (2026-11-08)
 
 
