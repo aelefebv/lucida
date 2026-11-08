@@ -3,11 +3,12 @@
 # requires-python = ">=3.10"
 # dependencies = ["zarr>=3.1,<4", "numpy>=2"]
 # ///
-"""Write synthetic OME-Zarr 0.5 datasets for tests and measurements.
+"""Write synthetic OME-Zarr datasets for tests and measurements.
 
-The output is a Zarr v3 dataset that lucida opens like any other: a single
-multiscale image, or a collection of tiles laid out as a grid of groups.
-Every option below is a command-line flag.
+The output is an OME-Zarr 0.5 dataset on Zarr v3, or an OME-NGFF 0.4 one on
+Zarr v2, that lucida opens like any other: a single multiscale image, or a
+collection of tiles laid out as a grid of groups. Every option below is a
+command-line flag.
 
 Run it with uv, which installs the dependencies declared at the top of this
 file into a throwaway environment:
@@ -61,13 +62,29 @@ Options:
                          screenshot names the level that rendered. Without it,
                          every level samples one smooth picture at its own
                          sample spacing.
-    --dtype T            Sample data type: uint16 (default), uint32, int16,
-                         int32, float32, or float64.
+    --dtype T            Sample data type: uint16 (default), uint8, uint32,
+                         int8, int16, int32, float32, or float64.
     --range=LO,HI        The values the picture spans, darkest to brightest.
                          Default 0,60000. Integer types round to the nearest
                          whole value; a range reaching below zero needs a
                          signed or float type. Write it with `=`, since a
                          negative LO would otherwise read as a flag.
+    --zarr-version V     3 (default) writes OME-Zarr 0.5 on Zarr v3. 2 writes
+                         OME-NGFF 0.4 on Zarr v2: `.zgroup`, `.zattrs`, and
+                         `.zarray`, with the OME blocks at the top of `.zattrs`.
+                         Not combinable with --shard.
+    --compressor C       The codec that compresses each chunk: zstd (default),
+                         gzip, blosc-lz4 (Blosc with lz4 and byte shuffle, as
+                         numcodecs writes by default), or none.
+    --order O            C (default) or F. F stores each chunk in Fortran
+                         order: Zarr v2's `order` field, or on Zarr v3 a
+                         transpose codec that reverses the axes.
+    --endian E           little (default) or big: the byte order each sample
+                         is stored in.
+    --checksum           End each chunk in a crc32c checksum. Zarr v3 only.
+    --dimension-separator S
+                         The separator between chunk coordinates in a Zarr v2
+                         chunk key: / (default) or a dot.
     --seed N             Seed for the picture. The same seed gives the same
                          samples whatever the layout. Default 0.
     --overwrite          Replace OUT if it exists.
@@ -89,6 +106,9 @@ Examples:
 
     A large collection for measurements:
         uv run extras/synthetic_ome_zarr.py big.ome.zarr --tiles 216 --size 2048,2048 --channels 3 --chunk 64 --shard 512
+
+    The same samples on Zarr v2, compressed as numcodecs does by default:
+        uv run extras/synthetic_ome_zarr.py v2.ome.zarr --size 48,48 --chunk 8 --zarr-version 2 --compressor blosc-lz4
 """
 
 from __future__ import annotations
@@ -102,13 +122,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+import numcodecs
 import numpy as np
 import zarr
-from zarr.codecs import BytesCodec, ZstdCodec
+from zarr.codecs import BloscCodec, BytesCodec, Crc32cCodec, GzipCodec, TransposeCodec, ZstdCodec
 
-# Never a one-byte type. zarr-python omits the `bytes` codec's `endian` for
-# those, and lucida's import rejects a `bytes` codec without it.
-DTYPES = ("uint16", "uint32", "int16", "int32", "float32", "float64")
+DTYPES = ("uint8", "uint16", "uint32", "int8", "int16", "int32", "float32", "float64")
 DEFAULT_DTYPE = "uint16"
 
 # Below uint16's maximum so an auto-contrast window has headroom above the data.
@@ -118,6 +137,8 @@ DEFAULT_SIZE = (256, 256)
 DEFAULT_CHUNK = 64
 DEFAULT_FACTOR = 2
 DEFAULT_LEVELS = 3
+
+COMPRESSORS = ("zstd", "gzip", "blosc-lz4", "none")
 
 AXIS_TYPES = {"t": "time", "c": "channel", "z": "space", "y": "space", "x": "space"}
 
@@ -147,6 +168,12 @@ class Options:
     level_index: bool = False
     dtype: str = DEFAULT_DTYPE
     value_range: tuple[float, float] = DEFAULT_RANGE
+    zarr_version: int = 3
+    compressor: str = "zstd"
+    order: str = "C"
+    endian: str = "little"
+    checksum: bool = False
+    dimension_separator: str = "/"
     seed: int = 0
     overwrite: bool = False
 
@@ -246,6 +273,12 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--level-index", action="store_true", help="give every sample at level L the value L")
     parser.add_argument("--dtype", choices=DTYPES, default=DEFAULT_DTYPE, help="sample data type (default uint16)")
     parser.add_argument("--range", type=_value_range, default=DEFAULT_RANGE, metavar="LO,HI", dest="value_range", help="values the picture spans (default 0,60000)")
+    parser.add_argument("--zarr-version", type=int, choices=(2, 3), default=3, help="Zarr format version (default 3)")
+    parser.add_argument("--compressor", choices=COMPRESSORS, default="zstd", help="chunk compressor (default zstd)")
+    parser.add_argument("--order", choices=("C", "F"), default="C", help="memory order of each chunk (default C)")
+    parser.add_argument("--endian", choices=("little", "big"), default="little", help="byte order of each sample (default little)")
+    parser.add_argument("--checksum", action="store_true", help="end each chunk in a crc32c checksum (Zarr v3 only)")
+    parser.add_argument("--dimension-separator", choices=("/", "."), default="/", help="Zarr v2 chunk key separator (default /)")
     parser.add_argument("--seed", type=int, default=0, metavar="N", help="seed for the picture (default 0)")
     parser.add_argument("--overwrite", action="store_true", help="replace OUT if it exists")
     args = parser.parse_args(argv)
@@ -279,6 +312,10 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     for level in unwritten:
         if level < 1 or level >= args.levels:
             parser.error(f"--unwritten-level {level} is outside 1..{args.levels - 1}; level 0 is always written")
+    if args.zarr_version == 2 and args.shard is not None:
+        parser.error("--shard needs --zarr-version 3; Zarr v2 has no sharding")
+    if args.zarr_version == 2 and args.checksum:
+        parser.error("--checksum needs --zarr-version 3")
     if np.issubdtype(np.dtype(args.dtype), np.integer):
         info = np.iinfo(args.dtype)
         lo, hi = args.value_range
@@ -301,6 +338,12 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         level_index=args.level_index,
         dtype=args.dtype,
         value_range=args.value_range,
+        zarr_version=args.zarr_version,
+        compressor=args.compressor,
+        order=args.order,
+        endian=args.endian,
+        checksum=args.checksum,
+        dimension_separator=args.dimension_separator,
         seed=args.seed,
         overwrite=args.overwrite,
     )
@@ -319,6 +362,13 @@ def plan_levels(opts: Options, size: tuple[int, ...]) -> list[Level]:
     return levels
 
 
+def ome_attributes(opts: Options, blocks: dict) -> dict:
+    """OME blocks placed as the version puts them: under `ome` in 0.5, at the top in 0.4."""
+    if opts.zarr_version == 2:
+        return {key: {"version": "0.4", **value} for key, value in blocks.items()}
+    return {"ome": {"version": "0.5", **blocks}}
+
+
 def multiscales_attributes(opts: Options, levels: list[Level], name: str) -> dict:
     axes = [{"name": name, "type": AXIS_TYPES[name]} for name in opts.axis_names]
     leading_scale = [1.0] * len(opts.leading_axes)
@@ -329,7 +379,10 @@ def multiscales_attributes(opts: Options, levels: list[Level], name: str) -> dic
         }
         for level in levels
     ]
-    return {"ome": {"version": "0.5", "multiscales": [{"name": name, "axes": axes, "datasets": datasets}]}}
+    multiscale = {"name": name, "axes": axes, "datasets": datasets}
+    if opts.zarr_version == 2:
+        return {"multiscales": [{"version": "0.4", **multiscale}]}
+    return {"ome": {"version": "0.5", "multiscales": [multiscale]}}
 
 
 def tile_grid(tiles: int) -> tuple[int, int]:
@@ -354,7 +407,7 @@ def tile_group_path(tile: int, columns: int) -> str:
     return f"{row_name(tile // columns)}/{tile % columns + 1}"
 
 
-def collection_attributes(tiles: int, name: str) -> dict:
+def collection_attributes(opts: Options, tiles: int, name: str) -> dict:
     """Root attributes of a collection, in the OME-Zarr 0.5 layout the format calls a plate."""
     rows, columns = tile_grid(tiles)
     entries = [
@@ -367,7 +420,7 @@ def collection_attributes(tiles: int, name: str) -> dict:
         "wells": entries,
         "field_count": 1,
     }
-    return {"ome": {"version": "0.5", "plate": collection}}
+    return ome_attributes(opts, {"plate": collection})
 
 
 def picture_region(opts: Options, tile: int, t: int, c: int, level: Level, origin: Sequence[int], extent: Sequence[int]) -> np.ndarray:
@@ -407,9 +460,44 @@ def picture_region(opts: Options, tile: int, t: int, c: int, level: Level, origi
 
 def write_image(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int, name: str) -> None:
     """Write one multiscale image group and its level arrays under ``prefix``."""
-    zarr.create_group(store=store, path=prefix, attributes=multiscales_attributes(opts, levels, name), zarr_format=3)
+    zarr.create_group(store=store, path=prefix, attributes=multiscales_attributes(opts, levels, name), zarr_format=opts.zarr_version)
     for level in levels:
         write_level(store, prefix, opts, level, tile)
+
+
+def storage_arguments(opts: Options) -> dict:
+    """How each chunk is encoded, as `zarr.create_array` takes it for the version."""
+    ndim = len(opts.axis_names)
+    if opts.zarr_version == 2:
+        compressor = {
+            "zstd": numcodecs.Zstd(),
+            "gzip": numcodecs.GZip(),
+            "blosc-lz4": numcodecs.Blosc(cname="lz4", clevel=5, shuffle=numcodecs.Blosc.SHUFFLE),
+            "none": None,
+        }[opts.compressor]
+        byte_order = "<" if opts.endian == "little" else ">"
+        return {
+            "dtype": np.dtype(opts.dtype).newbyteorder(byte_order),
+            "compressors": compressor,
+            "order": opts.order,
+            "chunk_key_encoding": {"name": "v2", "separator": opts.dimension_separator},
+        }
+    compressors = {
+        "zstd": [ZstdCodec()],
+        "gzip": [GzipCodec()],
+        "blosc-lz4": [BloscCodec(cname="lz4", clevel=5, shuffle="shuffle")],
+        "none": [],
+    }[opts.compressor]
+    if opts.checksum:
+        compressors.append(Crc32cCodec())
+    filters = [TransposeCodec(order=tuple(reversed(range(ndim))))] if opts.order == "F" else []
+    return {
+        "dtype": opts.dtype,
+        "dimension_names": opts.axis_names,
+        "filters": filters,
+        "serializer": BytesCodec(endian=opts.endian),
+        "compressors": compressors,
+    }
 
 
 def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, level: Level, tile: int) -> None:
@@ -422,16 +510,13 @@ def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
         shape=leading_shape + level.shape,
         chunks=leading_ones + chunk,
         shards=(leading_ones + opts.shard) if opts.shard else None,
-        dtype=opts.dtype,
         fill_value=0,
-        dimension_names=opts.axis_names,
-        serializer=BytesCodec(endian="little"),
-        compressors=[ZstdCodec()],
         # Level 0 of a level-index pyramid is all zeros, equal to the fill
         # value; the default would elide its chunks and make a written level
         # look unwritten.
         config={"write_empty_chunks": True},
-        zarr_format=3,
+        zarr_format=opts.zarr_version,
+        **storage_arguments(opts),
     )
     if level.index in opts.unwritten_levels:
         return
@@ -471,14 +556,14 @@ def generate(opts: Options) -> list[Level]:
         write_image(store, "", opts, levels, tile=0, name=name)
         return levels
 
-    zarr.create_group(store=store, attributes=collection_attributes(opts.tiles, name), zarr_format=3)
+    zarr.create_group(store=store, attributes=collection_attributes(opts, opts.tiles, name), zarr_format=opts.zarr_version)
     rows, columns = tile_grid(opts.tiles)
     for row in range(rows):
-        zarr.create_group(store=store, path=row_name(row), zarr_format=3)
+        zarr.create_group(store=store, path=row_name(row), zarr_format=opts.zarr_version)
     for tile in range(opts.tiles):
         group_path = tile_group_path(tile, columns)
-        group_attributes = {"ome": {"version": "0.5", "well": {"images": [{"path": "0"}]}}}
-        zarr.create_group(store=store, path=group_path, attributes=group_attributes, zarr_format=3)
+        group_attributes = ome_attributes(opts, {"well": {"images": [{"path": "0"}]}})
+        zarr.create_group(store=store, path=group_path, attributes=group_attributes, zarr_format=opts.zarr_version)
         tile_levels = plan_levels(opts, opts.size_of(tile))
         write_image(store, f"{group_path}/0", opts, tile_levels, tile=tile, name=f"{name} {group_path}")
     return levels
