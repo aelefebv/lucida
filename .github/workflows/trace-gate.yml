@@ -84,61 +84,51 @@ jobs:
           echo "::error::healthz never responded within 30s"
           exit 1
 
-      - name: Probe Chrome flags (temporary)
+      # With the CLI's Vulkan flags and no Vulkan device, Chrome's GPU
+      # process falls back again and again, and each fallback destroys the
+      # page's WebGPU device. Mesa's lavapipe gives it a CPU Vulkan device to
+      # start on; WebGPU itself still runs on SwiftShader.
+      - name: Install a software Vulkan driver
+        run: sudo apt-get install -y -q mesa-vulkan-drivers
+
+      - name: Probe (temporary)
         run: |
           set +e -uo pipefail
           out="$RUNNER_TEMP/gate-out"; mkdir -p "$out"
-          uv run extras/synthetic_ome_zarr.py "$RUNNER_TEMP/gate-data/image.ome.zarr" --size 2048,2048 --channels 2 --levels 4 --chunk 256
+          data="$RUNNER_TEMP/gate-data"
+          uv run extras/synthetic_ome_zarr.py "$data/image.ome.zarr" --overwrite --size 2048,2048 --channels 2 --levels 4 --chunk 256
+          uv run extras/synthetic_ome_zarr.py "$data/volume.ome.zarr" --overwrite --size 128,512,512 --channels 3 --levels 3 --chunk 64
           export LUCIDA_CONFIG_PATH="$out/probe-config.json" LUCIDA_TRACE_DIR="$out"
           cli="$RUNNER_TEMP/cli/lucida"
-          strip='s/ --enable-features=Vulkan / /; s/ --use-angle=vulkan / /; s/ --disable-vulkan-surface / /'
-          declare -A variants=(
-            [b-angle-sw]='keep|--use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
-            [c-no-vulkan-sw]='keep|--use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
-            [e-strip-novulkan]='strip|--use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
-            [g-keep-unsafe]='keep|--enable-unsafe-swiftshader --no-sandbox'
-            [h-keep-vulkansw]='keep|--use-vulkan=swiftshader --enable-unsafe-swiftshader --no-sandbox'
-            [i-strip-vulkan-anglesw]='strip|--enable-features=Vulkan --use-angle=swiftshader --enable-unsafe-swiftshader --no-sandbox'
-            [k-strip-unsafe]='strip|--enable-unsafe-swiftshader --no-sandbox'
-            [l-lavapipe]='keep|--no-sandbox'
-          )
-          picked=""
-          for v in b-angle-sw c-no-vulkan-sw e-strip-novulkan g-keep-unsafe h-keep-vulkansw i-strip-vulkan-anglesw k-strip-unsafe l-lavapipe; do
-            if [[ "$v" == l-lavapipe ]]; then sudo apt-get install -y -q mesa-vulkan-drivers > /dev/null 2>&1; echo "lavapipe installed: $?"; fi
-            mode="${variants[$v]%%|*}"; extra="${variants[$v]#*|}"
-            w="$RUNNER_TEMP/chrome-$v"
-            {
-              echo '#!/bin/bash'
-              if [[ "$mode" == strip ]]; then
-                echo 'args=" $* "'
-                echo "args=\"\$(sed -e '$strip' <<< \"\$args\")\""
-                echo "exec google-chrome \$args $extra --enable-logging --log-file=$out/chrome-$v.log"
-              else
-                echo "exec google-chrome \"\$@\" $extra --enable-logging --log-file=$out/chrome-$v.log"
-              fi
-            } > "$w"
-            chmod +x "$w"
-            cat "$w"
-            "$cli" --server http://127.0.0.1:9876 workspace create "probe-$v" > /dev/null
-            LUCIDA_BROWSER="$w" timeout 100 "$cli" --server http://127.0.0.1:9876 --workspace "probe-$v" \
-              trace "$RUNNER_TEMP/gate-data/image.ome.zarr" --camera slice --timeout-seconds 40 --gate \
-              --output "$out/probe-$v.json" > "$out/probe-$v.txt" 2>&1
-            status=$?
-            echo "=== $v exit $status"
-            grep -E "VERDICT|^client|^run  |^error" "$out/probe-$v.txt"
-            grep -iE "lost|crash|vulkan|dawn|webgpu|swiftshader|gpu_process|CONSOLE|instance" "$out/chrome-$v.log" | grep -v "Fontconfig" | head -12
-            if [[ "$status" -eq 0 && -z "$picked" ]]; then picked="$w"; fi
-          done
-          echo "picked: ${picked:-none}"
-          echo "LUCIDA_BROWSER=${picked:-$RUNNER_TEMP/chrome-g-keep-unsafe}" >> "$GITHUB_ENV"
-          rm -rf "$RUNNER_TEMP/gate-data/image.ome.zarr"
+          printf '#!/bin/sh\nexec google-chrome "$@" --no-sandbox\n' > "$RUNNER_TEMP/chrome-no-sandbox"
+          chmod +x "$RUNNER_TEMP/chrome-no-sandbox"
+          probe() {
+            local name=$1 browser=$2; shift 2
+            "$cli" --server http://127.0.0.1:9876 workspace create "probe-$name" > /dev/null
+            local started=$SECONDS
+            if [[ -n "$browser" ]]; then export LUCIDA_BROWSER="$browser"; else unset LUCIDA_BROWSER; fi
+            timeout 300 "$cli" --server http://127.0.0.1:9876 --workspace "probe-$name" trace "$@" --gate \
+              --output "$out/probe-$name.json" > "$out/probe-$name.txt" 2>&1
+            local status=$?
+            echo "=== $name exit $status in $((SECONDS - started)) s"
+            grep -E "VERDICT|^client|^run  |^error" "$out/probe-$name.txt"
+            return $status
+          }
+          browser=""
+          if ! probe plain "" "$data/image.ome.zarr" --camera slice --timeout-seconds 60; then
+            browser="$RUNNER_TEMP/chrome-no-sandbox"
+            probe no-sandbox "$browser" "$data/image.ome.zarr" --camera slice --timeout-seconds 60
+          fi
+          probe arcball-small-dpr1 "$browser" "$data/volume.ome.zarr" --camera arcball --width 720 --height 450 --device-pixel-ratio 1 --timeout-seconds 240
+          probe arcball-small-dpr2 "$browser" "$data/volume.ome.zarr" --camera arcball --width 720 --height 450 --device-pixel-ratio 2 --timeout-seconds 240
+          if [[ -n "$browser" ]]; then echo "LUCIDA_BROWSER=$browser" >> "$GITHUB_ENV"; fi
+          exit 0
 
       - name: Run the gate
         env:
           LUCIDA_GATE_CLI: ${{ runner.temp }}/cli/lucida
           LUCIDA_GATE_DATA: ${{ runner.temp }}/gate-data
           LUCIDA_GATE_OUTPUT: ${{ runner.temp }}/gate-out
-          LUCIDA_GATE_TIMEOUT: '90'
         run: scripts/trace_gate.sh
 
       - name: Server logs

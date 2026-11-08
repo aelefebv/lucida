@@ -35,13 +35,14 @@ fi
 export LUCIDA_CONFIG_PATH="${output_dir}/config.json"
 export LUCIDA_TRACE_DIR="${output_dir}"
 
-# name|camera|generator options. Each dataset is framed whole by the camera
-# of the mode it is meant for. Sizes are large enough to need several levels
-# and many chunks, and small enough to generate in seconds. `single-level`
-# has no pyramid, so the server generates its coarse tier.
+# name|camera|generator options. Each dataset is framed whole. Sizes are large
+# enough to need several levels and many chunks, and small enough to generate
+# in seconds. The volume is cut by the slice camera: a software rasterizer
+# takes minutes to ray-march one frame of it. `single-level` has no pyramid,
+# so the server generates its coarse tier.
 fixtures=(
   "image|slice|--size 2048,2048 --channels 2 --levels 4 --chunk 256"
-  "volume|arcball|--size 128,512,512 --channels 3 --levels 3 --chunk 64"
+  "volume|slice|--size 128,512,512 --channels 3 --levels 3 --chunk 64"
   "collection|slice|--tiles 12 --size 512,512 --channels 2 --levels 3 --chunk 128"
   "single-level|slice|--size 4096,4096 --levels 1 --chunk 512"
 )
@@ -62,7 +63,7 @@ for fixture in "${fixtures[@]}"; do
 done
 
 summary="${output_dir}/summary.md"
-printf '| run | exit | result |\n| --- | --- | --- |\n' > "${summary}"
+printf '| run | exit | seconds | result |\n| --- | --- | --- | --- |\n' > "${summary}"
 failures=0
 stamp="$(date +%Y%m%d-%H%M%S)"
 
@@ -78,6 +79,7 @@ for fixture in "${fixtures[@]}"; do
     workspace="trace-gate-${run}-${stamp}"
     "${lucida_cmd[@]}" --server "${server}" workspace create "${workspace}" > /dev/null
     echo "::group::${run}"
+    started=${SECONDS}
     set +e
     "${lucida_cmd[@]}" --server "${server}" --workspace "${workspace}" \
       trace "${data_dir}/${name}.ome.zarr" \
@@ -90,6 +92,7 @@ for fixture in "${fixtures[@]}"; do
       > "${log}" 2>&1
     status=$?
     set -e
+    seconds=$((SECONDS - started))
     cat "${log}"
     echo "::endgroup::"
     verdict="$(grep -m1 -o 'VERDICT: .*' "${log}" || true)"
@@ -97,9 +100,9 @@ for fixture in "${fixtures[@]}"; do
       failures=$((failures + 1))
       reason="$(grep -m1 '^error' "${log}" || tail -n 1 "${log}")"
       echo "::error title=trace gate ${run}::${reason}"
-      printf '| %s | %s | %s |\n' "${run}" "${status}" "${reason//|/\\|}" >> "${summary}"
+      printf '| %s | %s | %s | %s |\n' "${run}" "${status}" "${seconds}" "${reason//|/\\|}" >> "${summary}"
     else
-      printf '| %s | 0 | %s |\n' "${run}" "${verdict//|/\\|}" >> "${summary}"
+      printf '| %s | 0 | %s | %s |\n' "${run}" "${seconds}" "${verdict//|/\\|}" >> "${summary}"
     fi
   done
 done
