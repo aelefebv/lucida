@@ -1,0 +1,9 @@
+{
+  "description": "switch the slice view to the volume view, then back",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "mode", "to": "3d" },
+    { "kind": "mode", "to": "2d" }
+  ]
+}

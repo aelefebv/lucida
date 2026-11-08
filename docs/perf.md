@@ -9,6 +9,7 @@ uv run scripts/perf.py --suite full
 uv run scripts/perf.py --dataset volume --scenario orbit,z-scrub --ratio 2 --repeat 3
 uv run scripts/perf.py --list               # datasets, scenarios, suites
 uv run scripts/perf.py --suite full --dry-run
+uv run scripts/perf.py --network remote --scenario pan-sustained
 uv run scripts/perf.py --repeat 3 --save-baseline   # keep these results as the reference
 ```
 
@@ -21,35 +22,43 @@ and `summary.json` go to `target/perf/runs/<time>/` beside the run files, and
 Speed numbers need a GPU. CI renders with SwiftShader, which shows whether a view settles
 but not how fast. The table's first line names the adapter.
 
-The runner passes `LUCIDA_SOURCE_THROTTLE` and its companions through to its server, so a
-local dataset can load like a remote one. A throttled table says so on its second line, and
-`summary.json` records the throttle as `sourceThrottle`.
+`--network local,remote` starts a server under each source throttle profile in turn, so a
+local dataset loads the way a remote one does; the `full` suite runs both. Without it the
+runner passes `LUCIDA_SOURCE_THROTTLE` and its companions through to its server, and with
+`--server` each run records whatever throttle that server reports. A throttled table says so
+on its second line and in its throttle column, and `summary.json` records the throttle as
+`sourceThrottle`.
 
 ## The table
 
-One row per dataset, scenario and ratio. Each column is a field of the run file's
-diagnostic. With `--repeat N` a number is the median of the N runs, followed by half their
-range when they differ.
+One row per dataset, scenario, ratio and network. Each column is a field of the run file's
+diagnostic, or of its header where it says so. With `--repeat N` a number is the median of
+the N runs, followed by half their range when they differ.
 
 | column | field |
 | --- | --- |
+| throttle | the profile in `header.sourceThrottle`; `-` when unthrottled |
 | first frame | `load.firstFrameMs` |
 | settle | `load.settleMs` |
 | fetched, chunks | `load.received.bytes`, `load.received.requests` |
 | evicted | the `evictions` entry of `coverage.notHealthSignals` |
 | top limiter | `attribution.cause` and `.confidence` |
+| input to frame p95, longest task, dropped | `lag.inputToFrame.p95Ms`, `lag.longTasks.longestMs`, `lag.frames.dropped` |
+| errors | the `header.errors` the allow list does not name, repeats counted |
 | verdict | `verdict.kind` |
-| steps | each script step's verdict, from `header.script` |
 
 Times count from the run's start. A scenario with steps reports the run its last step
-opened, so the steps column is where an earlier step's stall shows.
+opened, and a row for each step follows, from its record in `header.script.steps`. Its
+`duration` is the step run's `durationUs`, which includes the quiescence hold that settle
+leaves out. A step with no verdict says why, and the table lists it underneath.
 
 ## Baselines
 
 `--save-baseline` keeps the results as the baseline for their adapter and device pixel
-ratio, cell by cell; a cell with a failed run is not kept. Baselines live in
-`perf-baselines/` in the clone's git directory, which every worktree shares and
-`cargo clean` leaves alone. `--baseline DIR` keeps them elsewhere.
+ratio, cell by cell; a cell with a failed run is not kept. A throttled cell has a key of its
+own, such as `volume.orbit@remote`, and is never compared with an entry saved under another
+throttle. Baselines live in `perf-baselines/` in the clone's git directory, which every
+worktree shares and `cargo clean` leaves alone. `--baseline DIR` keeps them elsewhere.
 
 Every invocation compares against its adapter's baseline, if one was saved. A `vs baseline`
 column names what moved by more than the noise allowance in `METRICS` in `scripts/perf.py`,
@@ -62,10 +71,11 @@ slowdown the comparison flags.
 
 ## Selection
 
-A suite in `scripts/perf/suites.json` names datasets, scenarios and ratios. `--dataset`,
-`--scenario` and `--ratio` replace that part of the suite. With no suite, whatever the
-flags leave open means every dataset, every scenario, and ratios 1 and 2. A scenario never
-runs on a dataset it does not apply to.
+A suite in `scripts/perf/suites.json` names datasets, scenarios, ratios and, optionally,
+networks. `--dataset`, `--scenario`, `--ratio` and `--network` replace that part of the
+suite. With no suite, whatever the flags leave open means every dataset, every scenario,
+ratios 1 and 2, and the server as the environment sets it. `--network` alone runs the quick
+suite under it. A scenario never runs on a dataset it does not apply to.
 
 ## Datasets
 
@@ -87,7 +97,11 @@ The traits are `volume`, `time`, `channels` and `collection`.
 `scripts/perf/scenarios/` holds one file per interaction. A file has `steps` in the trace
 script format, the `camera` that frames the dataset, the traits it `requires`, and an
 optional `width` and `height`. The runner hands the file to `lucida trace --script`
-unchanged.
+unchanged, except that an add or remove step's `"url": "dataset:<name>"` becomes that
+catalog dataset's location. A scenario never runs on the dataset it adds.
+
+Keep a scenario to a few steps. The recorder drops its oldest runs to stay under its memory
+cap, so a long script on a large volume can lose an early step's run before the export.
 
 ## Builds
 
@@ -95,9 +109,9 @@ Cargo decides whether the server and CLI are current. The runner rebuilds the wa
 and the web bundle when the files git sees in their sources, or the built output itself,
 differ from what it last built. A failed build stops the invocation before any run.
 
-The server stays up for the whole invocation, so only a dataset's first run meets a cold
-server. Every browser starts cold. Each run file's `header.serverWarmth` says which case it
-was.
+The server stays up for the whole invocation, or for each network in turn, so only a
+dataset's first run on each meets a cold server. Every browser starts cold. Each run file's
+`header.serverWarmth` says which case it was.
 
 `--cli` runs a CLI that is already built, and `--server` drives a running server instead of
 starting one. With both, the runner builds nothing. The server opens datasets by the path

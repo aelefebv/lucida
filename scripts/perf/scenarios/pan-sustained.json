@@ -1,0 +1,8 @@
+{
+  "description": "zoom in by 4, then drag across the view for 3 s at a person's pace",
+  "camera": "slice",
+  "steps": [
+    { "kind": "zoom", "factor": 4 },
+    { "kind": "pan", "dx": -1200, "dy": -300, "durationMs": 3000 }
+  ]
+}

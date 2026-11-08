@@ -1,0 +1,8 @@
+{
+  "description": "narrow channel 0's contrast window to 0-15000, then widen it to 0-60000, the generator's default range",
+  "camera": "slice",
+  "steps": [
+    { "kind": "contrast", "channel": 0, "min": 0, "max": 15000 },
+    { "kind": "contrast", "channel": 0, "min": 0, "max": 60000 }
+  ]
+}

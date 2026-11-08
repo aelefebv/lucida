@@ -1,0 +1,8 @@
+{
+  "description": "add the image dataset to the workspace beside the one open, then remove it",
+  "camera": "slice",
+  "steps": [
+    { "kind": "add", "url": "dataset:image" },
+    { "kind": "remove", "url": "dataset:image" }
+  ]
+}

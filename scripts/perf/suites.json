@@ -7,10 +7,11 @@
       "ratios": [1, 2]
     },
     "full": {
-      "description": "every dataset through every scenario that applies to it",
+      "description": "every dataset through every scenario that applies to it, from local disk and through the remote source throttle",
       "datasets": "all",
       "scenarios": "all",
-      "ratios": [1, 2]
+      "ratios": [1, 2],
+      "networks": ["local", "remote"]
     },
     "gate": {
       "description": "what CI's trace gate opens cold under a software rasterizer, judged on whether each run settles",
