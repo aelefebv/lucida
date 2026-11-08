@@ -326,6 +326,7 @@ function Viewer({
     sendCommand: bridge.sendCommand,
     emitPresence: bridge.emitPresence,
     emitDatasetPresence: bridge.emitDatasetPresence,
+    breakFollow: bridge.breakFollow,
     // Any local or remote scene mutation bumps one of these. Viewport-only
     // changes bypass them and go through emitPresenceWithUrl.
     changeTick: datasetsVersion + remoteDocumentVersion,
@@ -762,17 +763,15 @@ function Viewer({
   }, []);
 
   // Descend into a guided-exploration candidate (or Home/Back) from the Explore
-  // panel: this is a deliberate navigation, so break peer-follow first, then
-  // apply the view and co-tap the URL/last-view sync. Distinct from
+  // panel: apply the view and co-tap the URL/last-view sync. Distinct from
   // handleOpenWorkspaceSavedView because there is no saved-view id to flag as
   // the active row (an explored view is ephemeral until bookmarked).
   const applyExploreView = useCallback(
     async (view: SavedView) => {
-      breakFollow();
       await savedViewApplier.apply(view);
       notifySavedViewChange();
     },
-    [breakFollow, savedViewApplier, notifySavedViewChange],
+    [savedViewApplier, notifySavedViewChange],
   );
 
   const hasData = layers.layerInfos.length > 0;
