@@ -93,13 +93,13 @@ server, system Chrome with WebGPU, M-series laptop.
 | no-op sink | 1,144 | 114.2 | 207 ms |
 
 The arms are 1.0% apart, inside the 5% band, and both sit within 1.3% of the
-1,148 frames the debug panel measured on the same shape. The recorder does not show in
-frame throughput.
+1,148 frames measured with the debug panel on the same shape. The recorder
+does not show in frame throughput.
 
 Live heap, 2026-08-11, across the debug panel teardown, with
 `AB_MODE=heap` and the same drive. This settled the memory half of the
 recorder's net obligation: total observability cost no higher than the
-floor the debug panel measured.
+floor measured with the debug panel.
 
 | Arm | Live heap, post-GC | Frames in 10 s |
 | --- | --- | --- |
@@ -126,5 +126,6 @@ had the A/B on a hardware adapter.
 - A lifecycle row widened from 76 to 92 bytes and gained one hash probe per
   row birth. The floor check's live state grew from 663 kB to about 822 kB,
   still under the 1.05 MB floor.
-- The dock's live charts and the volume overlay each gate their pure work. The browser's cost of drawing them, shown against hidden, has not
-  been measured.
+- The dock's live charts and the volume overlay each gate their pure work.
+  The browser's cost of drawing them, shown against hidden, has not been
+  measured.

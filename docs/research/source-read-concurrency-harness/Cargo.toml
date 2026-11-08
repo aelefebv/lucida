@@ -9,8 +9,9 @@ publish = false
 
 # Deliberately its own workspace root (the empty `[workspace]` above), so the
 # repo's workspace never picks it up: this is measurement tooling, not product
-# code, and it must not join the workspace build, lockfile or CI. It pins the same object_store version lucida-store uses so the transport
-# behaviour it measures is the transport behaviour production gets.
+# code, and it must not join the workspace build, lockfile or CI. It pins the
+# same object_store version lucida-store uses so the transport behaviour it
+# measures is the transport behaviour production gets.
 
 [dependencies]
 object_store = { version = "0.14", features = ["gcp"] }

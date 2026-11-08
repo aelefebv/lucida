@@ -3,9 +3,10 @@
 
     python3 docs/perf/recorder-cost/ab_compare.py OUT_DIR
 
-The number to beat comes from the debug-panel A/B, which ran this exact shape — same warm
-re-open, same ten-second window, at devicePixelRatio 2 — against the debug
-panel and measured **1,148 rendered frames either way**. The claim under test
+The number to beat comes from the debug-panel A/B, which ran this exact
+shape — same warm re-open, same ten-second window, at devicePixelRatio 2 —
+with the panel open and closed, and measured **1,148 rendered frames either
+way**. The claim under test
 is that the recorder's cost is unrepresentable at a 100 microsecond clock, so
 the two arms should be indistinguishable; a real difference is the claim
 failing, not the harness being imprecise.
