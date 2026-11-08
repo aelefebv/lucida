@@ -32,7 +32,7 @@ function postError(err: unknown): void {
 async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
   try {
     if (msg.type === "init") {
-      ctx = await bootstrapWorker(msg.canvas, post, msg.deviceMemoryGiB ?? null);
+      ctx = await bootstrapWorker(msg.canvas, post, msg.deviceMemoryGiB ?? null, (task) => enqueue(task));
       installDevtools(ctx.state);
       post({ type: "ready" });
       return;
@@ -50,8 +50,9 @@ async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
 }
 
 // The main thread relies on the worker handling messages in arrival order
-// (`worker/inOrder.ts`). A frame's wait for its pipelines must not break it.
-const enqueue = inOrder(handleMessage, postError);
+// (`worker/inOrder.ts`). A frame's wait for its pipelines must not break it,
+// and replacing a lost device takes its turn in the same order.
+const enqueue = inOrder((task: () => Promise<void>) => task(), postError);
 self.onmessage = (e: MessageEvent<MainToWorkerMessage>) => {
-  enqueue(e.data);
+  enqueue(() => handleMessage(e.data));
 };

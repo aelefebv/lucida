@@ -20,7 +20,12 @@ import {
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
-import { acquireLabelSlot, getOrCreateLabelVolumePool, growVolumeAtlas } from "./atlas.ts";
+import {
+  acquireLabelSlot,
+  getOrCreateLabelVolumePool,
+  growVolumeAtlasWatched,
+  type AtlasState,
+} from "./atlas.ts";
 
 /**
  * Write whole 3D uint32 label chunks into the member's bricked r32uint
@@ -40,7 +45,11 @@ export function handleLabelVolumeChunkData(
   const pool = getOrCreateLabelVolumePool(
     ctx, memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ,
   );
-  if (!pool) return;
+  if (!pool) {
+    // Nothing of the batch is resident, so the page must not count it as sent.
+    postChunksRejected(ctx, memberId, msg.chunks);
+    return;
+  }
 
   let wrote = false;
   for (const chunk of msg.chunks) {
@@ -129,91 +138,108 @@ export function handleVolumeChunkData(
   const insertedKeys: string[] = []; // composite keys we successfully inserted
   const radiusFilteredKeys: string[] = [];
   const radiusFilteredKeySet = new Set<string>();
+  // A chunk that throws goes back to the page to be sent again, and the rest
+  // of the batch still lands.
+  const failedKeys: string[] = [];
+  const failedKeySet = new Set<string>();
+  let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
-    if (
-      !chunkAllowedByCurrentRenderRadius(
-        ctx.state,
-        memberId,
-        msg.tier,
-        { ...chunk, level },
-      )
-    ) {
-      radiusFilteredKeys.push(chunk.key);
-      radiusFilteredKeySet.add(chunk.key);
-      continue;
-    }
-    const compositeKey = makeCompositeKey(memberId, chunk.key);
-    if (atlas.slots.has(compositeKey)) continue;
-
-    // A pool grows only once every slot it has holds a chunk.
-    if (atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
-      growVolumeAtlas(ctx.device, atlas);
-    }
-    let slotIndex: number;
-    if (atlas.freeSlots.length > 0) {
-      slotIndex = atlas.freeSlots.pop()!;
-    } else {
-      const { key: evictKey, dist: farthestDist } = findFarthestSlot(ctx.state, atlas);
-      if (!evictKey) continue;
-      const cam = rayHitForMember(ctx.state, memberId);
-      const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
-      // A tie keeps the resident, or mirror-image chunks displace each other
-      // on every re-send. A T or C scrub still replaces in place, because the
-      // remap unmaps the old selection's slots and they rank at infinite distance.
-      if (incomingDist >= farthestDist) continue;
-      slotIndex = atlas.slots.get(evictKey)!;
-      atlas.slots.delete(evictKey);
-      evictedKeys.push(evictKey);
-      const oldGridIdx = atlas.slotGridIdx[slotIndex];
-      if (oldGridIdx >= 0) {
-        atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+    let claimed = -1;
+    try {
+      if (
+        !chunkAllowedByCurrentRenderRadius(
+          ctx.state,
+          memberId,
+          msg.tier,
+          { ...chunk, level },
+        )
+      ) {
+        radiusFilteredKeys.push(chunk.key);
+        radiusFilteredKeySet.add(chunk.key);
+        continue;
       }
+      const compositeKey = makeCompositeKey(memberId, chunk.key);
+      if (atlas.slots.has(compositeKey)) continue;
+
+      // A pool grows only once every slot it has holds a chunk.
+      if (atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+        growVolumeAtlasWatched(ctx, poolKey, atlas);
+      }
+      let slotIndex: number;
+      if (atlas.freeSlots.length > 0) {
+        slotIndex = atlas.freeSlots.pop()!;
+      } else {
+        const { key: evictKey, dist: farthestDist } = findFarthestSlot(ctx.state, atlas);
+        if (!evictKey) continue;
+        const cam = rayHitForMember(ctx.state, memberId);
+        const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
+        // A tie keeps the resident, or mirror-image chunks displace each other
+        // on every re-send. A T or C scrub still replaces in place, because the
+        // remap unmaps the old selection's slots and they rank at infinite distance.
+        if (incomingDist >= farthestDist) continue;
+        slotIndex = atlas.slots.get(evictKey)!;
+        atlas.slots.delete(evictKey);
+        evictedKeys.push(evictKey);
+        const oldGridIdx = atlas.slotGridIdx[slotIndex];
+        if (oldGridIdx >= 0) {
+          atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+        }
+      }
+      claimed = slotIndex;
+
+      const sx = slotIndex % atlas.slotsX;
+      const sy = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
+      const sz = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
+
+      const data = atlasTexels(chunk.data, chunk.dataType, atlas.format);
+      const xOff = sx * chunkX;
+      const yOff = sy * chunkY;
+      const zOff = sz * chunkZ;
+      const cw = Math.min(chunkX, levelWidth - chunk.x * chunkX);
+      const ch = Math.min(chunkY, levelHeight - chunk.y * chunkY);
+      const cd = Math.min(chunkZ, levelDepth - chunk.z * chunkZ);
+
+      writeVolumeChunk(
+        ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff,
+        atlasTextureFormat(atlas.format),
+      );
+
+      const [, lodGridY, lodGridX] = lodMeta.gridDims;
+      const globalIdx = lodMeta.offset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
+      if (globalIdx < atlas.indirectionData.length) {
+        atlas.indirectionData[globalIdx] = slotIndex;
+        atlas.slotGridIdx[slotIndex] = globalIdx;
+      }
+      atlas.slots.set(compositeKey, slotIndex);
+      claimed = -1;
+      insertedKeys.push(compositeKey);
+      atlas.indirectionDirty = true;
+
+      const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
+      const { min, max } = sampleIntensityRange(texelValues(data, atlas.format), perChunkSamples);
+      if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }
+      if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
+    } catch (err) {
+      failure ??= err;
+      failedKeys.push(chunk.key);
+      failedKeySet.add(chunk.key);
+      // A slot taken for a chunk that never landed would hold nothing for good.
+      if (claimed >= 0) releaseSlot(atlas, claimed);
     }
-
-    const sx = slotIndex % atlas.slotsX;
-    const sy = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
-    const sz = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
-
-    const data = atlasTexels(chunk.data, chunk.dataType, atlas.format);
-    const xOff = sx * chunkX;
-    const yOff = sy * chunkY;
-    const zOff = sz * chunkZ;
-    const cw = Math.min(chunkX, levelWidth - chunk.x * chunkX);
-    const ch = Math.min(chunkY, levelHeight - chunk.y * chunkY);
-    const cd = Math.min(chunkZ, levelDepth - chunk.z * chunkZ);
-
-    writeVolumeChunk(
-      ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff,
-      atlasTextureFormat(atlas.format),
-    );
-
-    const [, lodGridY, lodGridX] = lodMeta.gridDims;
-    const globalIdx = lodMeta.offset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
-    if (globalIdx < atlas.indirectionData.length) {
-      atlas.indirectionData[globalIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = globalIdx;
-    }
-    atlas.slots.set(compositeKey, slotIndex);
-    insertedKeys.push(compositeKey);
-    atlas.indirectionDirty = true;
-
-    const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-    const { min, max } = sampleIntensityRange(texelValues(data, atlas.format), perChunkSamples);
-    if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }
-    if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
   }
 
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
     if (radiusFilteredKeySet.has(chunk.key)) continue;
+    if (failedKeySet.has(chunk.key)) continue;
     const compositeKey = makeCompositeKey(memberId, chunk.key);
     if (!atlas.slots.has(compositeKey)) {
       skippedKeys.push(chunk.key); // report bare chunk key (not composite) for orchestrator
     }
   }
 
-  if (evictedKeys.length > 0 || skippedKeys.length > 0 || radiusFilteredKeys.length > 0) {
+  if (evictedKeys.length > 0 || skippedKeys.length > 0 || radiusFilteredKeys.length > 0 || failedKeys.length > 0) {
     // Eviction keys are composite; each member has its own delivery tracking.
     const evictedByMember = new Map<string, string[]>();
     for (const ck of evictedKeys) {
@@ -241,10 +267,17 @@ export function handleVolumeChunkData(
         "radius-filter",
       );
     }
+    postChunksRequeued(ctx, memberId, failedKeys.map(key => ({ key })), "upload-failed");
     ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
   }
 
   if (intensityChanged) {
     ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
   }
+  if (failure !== null) throw failure;
+}
+
+function releaseSlot(atlas: AtlasState, slot: number): void {
+  atlas.slotGridIdx[slot] = -1;
+  atlas.freeSlots.push(slot);
 }

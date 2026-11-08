@@ -605,7 +605,7 @@ function events(spec: TimelineChartSpec, input: DeriveInput, axis: Axis): Timeli
   return buildChart(
     spec,
     series,
-    "evictions, rejections, retries, failures and level changes where they happened, reconnects from the connection records, " +
+    "evictions, rejections, retries, failures, level changes and GPU errors where they happened, reconnects from the connection records, " +
       "and one mark per planning pass, so a pass that planned nothing new is still visible, " +
       `from ${input.events.length} event(s), ${input.connections.length} connection(s) and ` +
       `${input.ticks.length} sample(s); ${NOT_A_HEALTH_SIGNAL}` +

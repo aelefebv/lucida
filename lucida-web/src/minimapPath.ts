@@ -818,6 +818,15 @@ export function invalidateMinimapOverview(state: MinimapState): void {
   state.overviewGeometryKey = null;
 }
 
+/** The worker lost every overview texture with its device: upload them all again, starting next tick. */
+export function forgetMinimapOverviewUploads(state: MinimapState): void {
+  state.overviewKey.clear();
+  state.overviewUploaded.clear();
+  state.overviewSeeded.clear();
+  state.lastOverviewScanMs = Number.NEGATIVE_INFINITY;
+  invalidateMinimapOverview(state);
+}
+
 export function clearMinimapForDataset(state: MinimapState, dsId: string): void {
   // Clear the dataset ID itself (single-member case).
   state.overviewKey.delete(dsId);

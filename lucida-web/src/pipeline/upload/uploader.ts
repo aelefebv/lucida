@@ -465,6 +465,12 @@ export class Uploader {
     return this.workerFeedback.chunkResidency(datasetId, imageId, c, chunkKey);
   }
 
+  /** The worker rebuilt its pools empty on a new GPU device: send everything again, held chunks too. */
+  handleDeviceRestored(cpuCache: CpuCache): void {
+    cpuCache.forgetDelivered();
+    this.resendGuard.onRebuild();
+  }
+
   // Lifecycle (dataset removal, multi-channel transitions)
 
   clearMember(workerMemberId: string): void {

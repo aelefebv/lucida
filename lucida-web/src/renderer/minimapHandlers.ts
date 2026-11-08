@@ -317,6 +317,30 @@ export function handleMinimapDestroy(): void {
   thumbnailCanvas = null;
 }
 
+/**
+ * Forget every texture the minimap and thumbnails built on a lost device. The
+ * minimap canvas stays, for {@link rebindMinimapCanvas} to point at the next one.
+ */
+export function releaseMinimapDeviceResources(): void {
+  deferredMinimapRender = null;
+  for (const entry of minimapOverviewPerDataset.values()) entry.texture.destroy();
+  minimapOverviewPerDataset.clear();
+  for (const tex of minimapOffscreenPool) tex.destroy();
+  minimapOffscreenPool = [];
+  minimapPoolWidth = 0;
+  minimapPoolHeight = 0;
+  for (const tex of thumbnailOffscreenPool) tex.destroy();
+  thumbnailOffscreenPool = [];
+  thumbnailPoolSize = 0;
+  thumbnailContext = null;
+  thumbnailCanvas = null;
+}
+
+/** Point the minimap canvas, if there is one, at the worker's current device. */
+export function rebindMinimapCanvas(ctx: WorkerCtx): void {
+  minimapContext?.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
+}
+
 export function removeMinimapResources(datasetId: string): void {
   const mmEntry = minimapOverviewPerDataset.get(datasetId);
   if (mmEntry) {

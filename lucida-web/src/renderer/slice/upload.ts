@@ -21,7 +21,7 @@ import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.t
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { sliceLevelZ } from "../slicePlane.ts";
 import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
-import { getOrCreateLabelSlicePool } from "./atlas.ts";
+import { getOrCreateLabelSlicePool, type SliceAtlasState } from "./atlas.ts";
 
 /**
  * Write pre-sliced uint32 label planes into the member's r32uint label pool.
@@ -39,7 +39,11 @@ export function handleLabelSliceChunkData(
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
   const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
-  if (!pool) return;
+  if (!pool) {
+    // Nothing of the batch is resident, so the page must not count it as sent.
+    postChunksRejected(ctx, memberId, msg.chunks);
+    return;
+  }
 
   for (const chunk of msg.chunks) {
     const xOff = chunk.x * chunkX;
@@ -122,96 +126,115 @@ export function handleSliceChunkData(
   const requeueKeySet = new Set<string>();
   const radiusFilteredKeys: string[] = [];
   const radiusFilteredKeySet = new Set<string>();
+  // A chunk that throws goes back to the page to be sent again, and the rest
+  // of the batch still lands.
+  const failedKeys: string[] = [];
+  const failedKeySet = new Set<string>();
+  let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
-    if (chunk.z !== targetChunkZ) {
-      if (!requeueKeySet.has(chunk.key)) {
-        requeueKeySet.add(chunk.key);
-        requeueKeys.push(chunk.key);
+    let claimed = -1;
+    try {
+      if (chunk.z !== targetChunkZ) {
+        if (!requeueKeySet.has(chunk.key)) {
+          requeueKeySet.add(chunk.key);
+          requeueKeys.push(chunk.key);
+        }
+        continue;
       }
-      continue;
-    }
-    if (
-      !chunkAllowedByCurrentRenderRadius(
-        ctx.state,
-        memberId,
-        msg.tier,
-        { ...chunk, level },
-      )
-    ) {
-      radiusFilteredKeys.push(chunk.key);
-      radiusFilteredKeySet.add(chunk.key);
-      continue;
-    }
-    const compositeKey = makeCompositeKey(memberId, chunk.key);
-
-    const existingSlot = atlas.slots.get(compositeKey);
-    if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) continue;
-
-    const r = sampleIntensityRange(decodedValues(chunk.data, chunk.dataType), perChunkSamples);
-    if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
-    if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
-
-    let slotIndex: number;
-    if (existingSlot !== undefined) {
-      slotIndex = existingSlot;
-    } else if (atlas.freeSlots.length > 0) {
-      slotIndex = atlas.freeSlots.pop()!;
-    } else {
-      const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(ctx.state, atlas);
-      if (!evictKey) continue;
-      const cam = cameraUVForMember(ctx.state, memberId);
-      const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
-      // A tie keeps the resident. Mirror-image chunks sit at one distance, and
-      // letting either displace the other turns their re-sends into a loop. A
-      // T or C scrub still replaces in place: the remap unmaps the old
-      // selection's slots, and an unmapped slot ranks at infinite distance.
-      if (incomingDist >= farthestDist) continue;
-      slotIndex = atlas.slots.get(evictKey)!;
-      atlas.slots.delete(evictKey);
-      evictedKeys.push(evictKey);
-      const oldGridIdx = atlas.slotGridIdx[slotIndex];
-      if (oldGridIdx >= 0) {
-        atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+      if (
+        !chunkAllowedByCurrentRenderRadius(
+          ctx.state,
+          memberId,
+          msg.tier,
+          { ...chunk, level },
+        )
+      ) {
+        radiusFilteredKeys.push(chunk.key);
+        radiusFilteredKeySet.add(chunk.key);
+        continue;
       }
+      const compositeKey = makeCompositeKey(memberId, chunk.key);
+
+      const existingSlot = atlas.slots.get(compositeKey);
+      if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) continue;
+
+      const r = sampleIntensityRange(decodedValues(chunk.data, chunk.dataType), perChunkSamples);
+      if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
+      if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
+
+      let slotIndex: number;
+      if (existingSlot !== undefined) {
+        slotIndex = existingSlot;
+      } else if (atlas.freeSlots.length > 0) {
+        slotIndex = atlas.freeSlots.pop()!;
+      } else {
+        const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(ctx.state, atlas);
+        if (!evictKey) continue;
+        const cam = cameraUVForMember(ctx.state, memberId);
+        const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
+        // A tie keeps the resident. Mirror-image chunks sit at one distance, and
+        // letting either displace the other turns their re-sends into a loop. A
+        // T or C scrub still replaces in place: the remap unmaps the old
+        // selection's slots, and an unmapped slot ranks at infinite distance.
+        if (incomingDist >= farthestDist) continue;
+        slotIndex = atlas.slots.get(evictKey)!;
+        atlas.slots.delete(evictKey);
+        evictedKeys.push(evictKey);
+        const oldGridIdx = atlas.slotGridIdx[slotIndex];
+        if (oldGridIdx >= 0) {
+          atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+        }
+      }
+      if (existingSlot === undefined) claimed = slotIndex;
+
+      const sx = slotIndex % atlas.slotsX;
+      const sy = Math.floor(slotIndex / atlas.slotsX);
+      const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
+      const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
+      const sliceOffset = localZ * chunkY * chunkX;
+      const sliceData = atlasTexels(chunk.data, chunk.dataType, atlas.format, sliceOffset, chunkY * chunkX);
+
+      const xOff = sx * chunkX;
+      const yOff = sy * chunkY;
+      writeSliceRegion(
+        ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH,
+        atlasTextureFormat(atlas.format),
+      );
+
+      const [, , lodGridX] = lodMeta.gridDims;
+      const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;
+      if (globalIdx < atlas.indirectionData.length) {
+        atlas.indirectionData[globalIdx] = slotIndex;
+        atlas.slotGridIdx[slotIndex] = globalIdx;
+      }
+      atlas.slots.set(compositeKey, slotIndex);
+      atlas.slotLevelZ[slotIndex] = levelZ;
+      atlas.indirectionDirty = true;
+    } catch (err) {
+      failure ??= err;
+      failedKeys.push(chunk.key);
+      failedKeySet.add(chunk.key);
+      // A slot taken for a chunk that never landed would hold nothing for good.
+      if (claimed >= 0) releaseSlot(atlas, claimed);
     }
-
-    const sx = slotIndex % atlas.slotsX;
-    const sy = Math.floor(slotIndex / atlas.slotsX);
-    const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
-    const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
-    const sliceOffset = localZ * chunkY * chunkX;
-    const sliceData = atlasTexels(chunk.data, chunk.dataType, atlas.format, sliceOffset, chunkY * chunkX);
-
-    const xOff = sx * chunkX;
-    const yOff = sy * chunkY;
-    writeSliceRegion(
-      ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH,
-      atlasTextureFormat(atlas.format),
-    );
-
-    const [, , lodGridX] = lodMeta.gridDims;
-    const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;
-    if (globalIdx < atlas.indirectionData.length) {
-      atlas.indirectionData[globalIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = globalIdx;
-    }
-    atlas.slots.set(compositeKey, slotIndex);
-    atlas.slotLevelZ[slotIndex] = levelZ;
-    atlas.indirectionDirty = true;
   }
 
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
     if (requeueKeySet.has(chunk.key)) continue;
     if (radiusFilteredKeySet.has(chunk.key)) continue;
+    if (failedKeySet.has(chunk.key)) continue;
     const compositeKey = makeCompositeKey(memberId, chunk.key);
     if (!atlas.slots.has(compositeKey)) {
       skippedKeys.push(chunk.key);
     }
   }
 
-  if (evictedKeys.length > 0 || requeueKeys.length > 0 || skippedKeys.length > 0 || radiusFilteredKeys.length > 0) {
+  if (
+    evictedKeys.length > 0 || requeueKeys.length > 0 || skippedKeys.length > 0 ||
+    radiusFilteredKeys.length > 0 || failedKeys.length > 0
+  ) {
     const evictedByMember = new Map<string, string[]>();
     for (const ck of evictedKeys) {
       const parsed = parseCompositeKey(ck);
@@ -246,10 +269,18 @@ export function handleSliceChunkData(
         skippedKeys.map(key => ({ key })),
       );
     }
+    postChunksRequeued(ctx, memberId, failedKeys.map(key => ({ key })), "upload-failed");
     ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
   }
 
   if (intensityChanged) {
     ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
   }
+  if (failure !== null) throw failure;
+}
+
+function releaseSlot(atlas: SliceAtlasState, slot: number): void {
+  atlas.slotGridIdx[slot] = -1;
+  atlas.slotLevelZ[slot] = -1;
+  atlas.freeSlots.push(slot);
 }

@@ -413,6 +413,15 @@ export interface DestroyMessage {
 }
 
 /**
+ * Destroy the worker's GPU device, as a driver reset or a crashed GPU process
+ * would lose it. A test hook: the worker recovers the way it does from a real
+ * loss.
+ */
+export interface LoseDeviceMessage {
+  type: "loseDevice";
+}
+
+/**
  * Ask the worker for the frame on its canvas as a PNG, for the trace
  * bundle. `id` correlates the {@link FrameCapturedMessage} reply. The
  * worker takes the frame from inside the next frame it renders, because
@@ -679,7 +688,8 @@ export type MainToWorkerMessage =
   | ColdStateSelectionMessage
   | ColdStateDeltaMessage
   | ViewHotStateMessage
-  | CaptureFrameMessage;
+  | CaptureFrameMessage
+  | LoseDeviceMessage;
 
 export interface ReadyMessage {
   type: "ready";
@@ -727,7 +737,40 @@ export type ChunkFeedbackReason =
   | "missing-entity-meta"
   | "missing-lod-meta"
   | "radius-filter"
-  | "atlas-policy";
+  | "atlas-policy"
+  | "upload-failed"
+  | "out-of-memory";
+
+/**
+ * What the GPU reported: the device was lost, or an error no error scope
+ * caught. The last three are the WebGPU `GPUError` subclasses.
+ */
+export type GpuErrorKind = "device-lost" | "out-of-memory" | "validation" | "internal";
+
+/**
+ * A GPU error, or a lost device. Reports of one kind are spaced out, so
+ * `count` says how many errors this one stands for.
+ */
+export interface GpuErrorMessage {
+  type: "gpuError";
+  kind: GpuErrorKind;
+  message: string;
+  count: number;
+}
+
+/**
+ * The worker replaced a lost device and rebuilt its pools empty, so nothing
+ * the page sent before is resident. The cold states it held still apply.
+ */
+export interface GpuDeviceRestoredMessage {
+  type: "gpuDeviceRestored";
+}
+
+/** The worker lost its device and could not get another. Nothing draws until the page reloads. */
+export interface GpuFailedMessage {
+  type: "gpuFailed";
+  message: string;
+}
 
 export interface ChunksEvictedMessage {
   type: "chunksEvicted";
@@ -913,4 +956,7 @@ export type WorkerToMainMessage =
   | GpuPassTimeMessage
   | GpuAtlasesMessage
   | FrameDoneMessage
-  | FrameCapturedMessage;
+  | FrameCapturedMessage
+  | GpuErrorMessage
+  | GpuDeviceRestoredMessage
+  | GpuFailedMessage;

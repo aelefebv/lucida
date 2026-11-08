@@ -86,6 +86,8 @@ function makeWorkerCtx(writes: WriteTextureCall[]): WorkerCtx {
     limits: { maxTextureDimension2D: 8192 },
     createTexture: vi.fn(() => ({ destroy: vi.fn(), createView: vi.fn(() => ({})) })),
     createBuffer: vi.fn(() => ({ destroy: vi.fn() })),
+    pushErrorScope: vi.fn(),
+    popErrorScope: vi.fn(() => Promise.resolve(null)),
     queue: {
       writeBuffer: vi.fn(),
       writeTexture: vi.fn((_dest: unknown, buffer: ArrayBuffer) => { writes.push({ buffer }); }),
