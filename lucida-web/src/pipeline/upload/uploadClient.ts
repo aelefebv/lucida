@@ -7,6 +7,7 @@ import type {
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
+  FailedChunksMessage,
   ChunkResidencyMessage,
   ViewHotStateMessage,
   MissingChunk,
@@ -52,6 +53,9 @@ export interface UploadClient {
    * {@link ColdStateDeltaMessage}.
    */
   coldStateDelta(msg: ColdStateDeltaMessage): void;
+
+  /** Replace one dataset's list of chunks the source failed for good. See {@link FailedChunksMessage}. */
+  failedChunks(msg: FailedChunksMessage): void;
 
   /**
    * Must be sent before subsequent render messages so the worker's

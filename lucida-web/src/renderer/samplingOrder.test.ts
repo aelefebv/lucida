@@ -35,9 +35,11 @@ import {
 import { serializeEntityDescriptor } from "./descriptorBuffer.ts";
 import { selectEntitySources, type EntitySource } from "./entitySources.ts";
 import type { ColdStateActiveEntry } from "./workerProtocol.ts";
+import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
 
 /** The shaders' `MISS`: an indirection cell with no resident slot. */
-const MISS = 0xffffffff;
+const MISS = INDIRECTION_MISS;
+const FAILED = INDIRECTION_FAILED;
 
 // ---------------------------------------------------------------------------
 // A fake pool: an indirection table plus per-slot texel values.
@@ -100,7 +102,7 @@ function sampleSource2D(source: SourceView, pool: FakePool | null, uv: [number, 
   const ty = Math.min(Math.max(Math.trunc(uv[1] * levelH), 0), levelH - 1);
   const gridIdx = source.indirectionOffset + Math.trunc(ty / chunkH) * source.gridDims[0] + Math.trunc(tx / chunkW);
   const slot = pool.indirection[gridIdx];
-  if (slot === MISS) return MISS;
+  if (slot === MISS || slot === FAILED) return slot;
   return pool.slotValue.get(slot) ?? MISS;
 }
 
@@ -249,6 +251,65 @@ describe("sampling order across three resident levels plus coarse", () => {
       }
     }
     expect([...seen].sort()).toEqual([0, 1, 2]);
+  });
+});
+
+describe("a chunk the source failed for good", () => {
+  it("answers failed at the target level instead of falling through to a coarser one", () => {
+    const detail = makePool(21);
+    const coarse = makePool(1);
+    reside(detail, 20, 1, 0, 0, 2);
+    reside(coarse, 0, 1, 0, 0, 3);
+    // Level 0's bottom-right cell failed; level 2 and the coarse tier hold data there.
+    detail.indirection[3 * 4 + 3] = FAILED;
+    const entry = serialize(entryWithTarget(0));
+    expect(sampleEntityValue(entry, [detail], coarse, [0.9, 0.9])).toEqual({ value: FAILED, from: "level", level: 0 });
+    // The rest of level 0 is loading, so level 2 stands in there.
+    expect(sampleEntityValue(entry, [detail], coarse, [0.1, 0.1])).toEqual({ value: 2, from: "level", level: 2 });
+  });
+
+  it("answers failed from the coarse tier where no level source has an answer", () => {
+    const detail = makePool(21);
+    const coarse = makePool(1);
+    coarse.indirection[0] = FAILED;
+    const entry = serialize(entryWithTarget(0));
+    expect(sampleEntityValue(entry, [detail], coarse, [0.5, 0.5])).toEqual({ value: FAILED, from: "coarse", level: 3 });
+  });
+});
+
+describe("the shaders read a failed cell as the indirection writes it", () => {
+  function constant(src: string, name: string): number {
+    const match = new RegExp(`const ${name}: u32 = (0x[0-9A-Fa-f]+)u;`).exec(src);
+    expect(match).not.toBeNull();
+    return Number(match![1]);
+  }
+
+  it("declares MISS and FAILED with the values the remap writes", () => {
+    for (const src of [sliceSrc, volumeSrc]) {
+      expect(constant(src, "MISS")).toBe(INDIRECTION_MISS);
+      expect(constant(src, "FAILED")).toBe(INDIRECTION_FAILED);
+    }
+  });
+
+  it("returns a failed slot as the sample and never loads a texel for it", () => {
+    for (const src of [sliceSrc, volumeSrc]) {
+      const reads = src.match(/if \(slot == MISS \|\| slot == FAILED\) \{\s*return slot;/g) ?? [];
+      // One for the level sources, one for the coarse tier.
+      expect(reads).toHaveLength(2);
+    }
+  });
+
+  it("draws the hatch for a failed sample before any value math", () => {
+    const fs = sliceSrc.slice(sliceSrc.indexOf("fn fs("));
+    expect(fs.indexOf("chunkVal == FAILED")).toBeGreaterThan(-1);
+    expect(fs.indexOf("chunkVal == FAILED")).toBeLessThan(fs.indexOf("texelValue("));
+    const aggregate = sliceSrc.slice(sliceSrc.indexOf("fn fsAggregate("));
+    expect(aggregate.indexOf("chunkVal == FAILED")).toBeGreaterThan(-1);
+    expect(aggregate.indexOf("chunkVal == FAILED")).toBeLessThan(aggregate.indexOf("texelValue("));
+    const march = volumeSrc.slice(volumeSrc.indexOf("// Front-to-back compositing"));
+    expect(march.indexOf("s.value == FAILED")).toBeGreaterThan(-1);
+    expect(march.indexOf("s.value == FAILED")).toBeLessThan(march.indexOf("texelValue("));
+    expect(march).toMatch(/if \(crossedFailed\) \{\s*let hatch = failedHatch\(/);
   });
 });
 

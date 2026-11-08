@@ -4,12 +4,16 @@
 const MAX_LEVEL_SOURCES: u32 = 4u;
 // The indirection sentinel, and the sample value for "nothing resident here".
 const MISS: u32 = 0xFFFFFFFFu;
+// The indirection entry and sample value for a chunk the source failed for
+// good (INDIRECTION_FAILED in remap.ts). A ray through one draws the hatch.
+const FAILED: u32 = 0xFFFFFFFEu;
 
 struct Uniforms {
   invViewProj: mat4x4f,                // offset 0   (64 bytes)
   cameraPos: vec4f,                    // offset 64  (16 bytes)
   // stepInfo.x=opacityScale (translucent compositing constant),
-  // stepInfo.y=renderMode (0=translucent,1=MIP), zw=reserved.
+  // stepInfo.y=renderMode (0=translucent,1=MIP),
+  // stepInfo.z=render pixels per CSS pixel, w=reserved.
   stepInfo: vec4f,                     // offset 80  (16 bytes)
   levelAtlasSlotDims: array<vec4u, 4>, // offset 96  (64 bytes) — xyz=slots per axis, one per level pool binding
   coarseAtlasSlotDims: vec4u,          // offset 160 (16 bytes) — xyz=slots per axis
@@ -177,8 +181,8 @@ fn sampleLevelVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
   }
   let cell = locateCell3D(source, pos);
   let slot = levelSlotAt(source.poolIndex, cell.gridIdx);
-  if (slot == MISS) {
-    return MISS;
+  if (slot == MISS || slot == FAILED) {
+    return slot;
   }
   return levelTexelAt(source.poolIndex, atlasCoord3D(slot, slotDims, cell));
 }
@@ -190,10 +194,31 @@ fn sampleCoarseVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
   }
   let cell = locateCell3D(source, pos);
   let slot = coarseIndirection[cell.gridIdx];
-  if (slot == MISS) {
-    return MISS;
+  if (slot == MISS || slot == FAILED) {
+    return slot;
   }
   return textureLoad(coarseTex, atlasCoord3D(slot, slotDims, cell), 0).r;
+}
+
+// The failed hatch, the same pattern as slice.wgsl, anchored to the screen
+// because a ray has no surface to anchor it to.
+const FAILED_HATCH_PERIOD_CSS: f32 = 8.0;
+const FAILED_HATCH_LINE_CSS: f32 = 1.5;
+const FAILED_HATCH_RGB: vec3f = vec3f(0.6, 0.6, 0.6);
+const FAILED_HATCH_LINE_ALPHA: f32 = 0.7;
+const FAILED_HATCH_FILL_ALPHA: f32 = 0.12;
+
+// Premultiplied hatch color at `px`, in render pixels.
+fn failedHatch(px: vec2f, pixelRatio: f32) -> vec4f {
+  let ratio = select(pixelRatio, 1.0, pixelRatio <= 0.0);
+  let along = (px.x + px.y) / ratio;
+  let offLine = abs(fract(along / FAILED_HATCH_PERIOD_CSS + 0.5) - 0.5) * FAILED_HATCH_PERIOD_CSS;
+  // Perpendicular distance to the line, in render pixels, for a one-pixel edge.
+  let dist = offLine * 0.70710678 * ratio;
+  let halfWidth = 0.5 * FAILED_HATCH_LINE_CSS * ratio;
+  let onLine = 1.0 - smoothstep(halfWidth - 0.5, halfWidth + 0.5, dist);
+  let alpha = mix(FAILED_HATCH_FILL_ALPHA, FAILED_HATCH_LINE_ALPHA, onLine);
+  return vec4f(FAILED_HATCH_RGB * alpha, alpha);
 }
 
 // The march step for a level: two thirds of one sample spacing along
@@ -213,7 +238,9 @@ struct VolumeSample {
 
 // Sampling order: the level sources finest first (the target level,
 // then the coarser resident levels), then the coarse tier, then empty.
-// Every sample comes from exactly one level; there is no blending.
+// Every sample comes from exactly one level; there is no blending. A
+// failed chunk answers like a resident one, with FAILED as its value.
+//
 // An entity that binds no tier at all has no level dims to step by, so it
 // misses at the unit step.
 fn sampleWithFallback(pos: vec3f) -> VolumeSample {
@@ -472,6 +499,8 @@ fn fs(input: VSOut) -> FsOut {
   var t = tStart;
   var hitDepth = 1.0;
   var depthRecorded = false;
+  // The ray crossed a failed chunk, so what it accumulated is missing a part.
+  var crossedFailed = false;
 
   for (var i = 0; i < maxSteps; i++) {
     if (t >= tEnd) { break; }
@@ -482,6 +511,11 @@ fn fs(input: VSOut) -> FsOut {
 
     let s = sampleWithFallback(pos);
     let advance = max(s.step, minStep);
+    if (s.value == FAILED) {
+      crossedFailed = true;
+      t += advance;
+      continue;
+    }
     // A u16 zero sits at or below any window over unsigned data, so it adds
     // nothing; a float zero can sit inside a window that reaches below it.
     if (s.value == MISS
@@ -524,6 +558,10 @@ fn fs(input: VSOut) -> FsOut {
     out.color = vec4f(mipColor, 1.0) * layerOpacity;
   } else {
     out.color = vec4f(color * layerOpacity, alpha * layerOpacity);
+  }
+  if (crossedFailed) {
+    let hatch = failedHatch(input.pos.xy, u.stepInfo.z) * layerOpacity;
+    out.color = hatch + out.color * (1.0 - hatch.a);
   }
   return out;
 }

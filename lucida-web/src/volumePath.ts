@@ -196,7 +196,8 @@ function uploadAndRenderVolume(
     );
   }
 
-  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode);
+  const pixelRatio = devicePixelRatio * ctx.renderScale * ctx.resolutionScale;
+  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode, pixelRatio);
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.

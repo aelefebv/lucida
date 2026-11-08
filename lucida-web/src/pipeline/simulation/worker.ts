@@ -23,6 +23,9 @@ import type {
 } from "../../renderer/workerProtocol.ts";
 import { setCameraUVForMember } from "../../renderer/slice/eviction.ts";
 import { memberCameraUV } from "../../renderer/slice/render.ts";
+import { INDIRECTION_FAILED } from "../../renderer/remap.ts";
+import { chunkPoolTier } from "../../renderer/poolKeys.ts";
+import type { LodIndirectionMeta } from "../../renderer/volume/atlas.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
 /** Messages that only draw, capture or style, so the simulation answers them without a handler. */
@@ -185,6 +188,36 @@ export class SimulatedWorker {
       if (!this.ctx.state.memberSourcePools.has(layer.datasetId)) continue;
       setCameraUVForMember(this.ctx.state, layer.datasetId, memberCameraUV(msg, layer));
     }
+  }
+
+  /**
+   * Each indirection cell of one dataset's pools that the shader would draw
+   * as failed, as `member tier level L cell x,y[,z]`.
+   */
+  failedCells(datasetId: string): string[] {
+    const out: string[] = [];
+    type Pool = { datasetId: string; indirectionData: Uint32Array; entityMetas: Map<string, LodIndirectionMeta[]> };
+    const pools: Array<readonly [string, Pool, boolean]> = [
+      ...[...this.ctx.state.sliceAtlases].map(([key, atlas]) => [key, atlas, false] as const),
+      ...[...this.ctx.state.volumeAtlases].map(([key, atlas]) => [key, atlas, true] as const),
+    ];
+    for (const [poolKey, atlas, volume] of pools) {
+      if (atlas.datasetId !== datasetId) continue;
+      for (const [memberId, metas] of atlas.entityMetas) {
+        for (const meta of metas) {
+          const [gridZ, gridY, gridX] = meta.gridDims;
+          const cells = gridX * gridY * (volume ? gridZ : 1);
+          for (let i = 0; i < cells; i++) {
+            if (atlas.indirectionData[meta.offset + i] !== INDIRECTION_FAILED) continue;
+            const x = i % gridX;
+            const y = Math.floor(i / gridX) % gridY;
+            const cell = volume ? `${x},${y},${Math.floor(i / (gridX * gridY))}` : `${x},${y}`;
+            out.push(`${memberId} ${chunkPoolTier(poolKey)} level ${meta.level} cell ${cell}`);
+          }
+        }
+      }
+    }
+    return out.sort();
   }
 
   /**

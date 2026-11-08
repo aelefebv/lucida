@@ -4,7 +4,7 @@
  * eligibility and keeps the mirror of what the worker holds.
  */
 
-import type { CpuCache, ReadyChunkDelivery } from "../fetch/index.ts";
+import type { CpuCache, FailedChunk, ReadyChunkDelivery } from "../fetch/index.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type {
   ActiveSetEntry,
@@ -72,6 +72,11 @@ export class Uploader {
 
   /** The wanted chunks each dataset's last cold state carried, which a delta diffs against. */
   private readonly wantedByDataset = new Map<string, WantedChunksByMember>();
+
+  /** The cache's failure version the worker last heard about. */
+  private failedVersionSent = 0;
+  /** Each dataset's failed chunks as last sent, `imageId\nchunkKey` sorted and joined. */
+  private failedSent = new Map<string, string>();
 
   /** Snapshotted by `sendColdState` so `deliverToWorker` can stamp chunks. */
   private lastEpochs: SceneEpochs | null = null;
@@ -278,6 +283,42 @@ export class Uploader {
     return true;
   }
 
+  /**
+   * Tell the worker each dataset's chunks the source failed for good, when
+   * they changed, so the next frame draws them hatched. Runs before the
+   * tick's render message, which the worker handles after this. Returns the
+   * failures when they changed, else null.
+   */
+  syncFailedChunks(ctx: TickContext): FailedChunk[] | null {
+    const version = ctx.cpuCache.failedChunksVersion();
+    if (version === this.failedVersionSent) return null;
+    this.failedVersionSent = version;
+    const failed = ctx.cpuCache.failedChunks();
+    const byDataset = new Map<string, Map<string, string[]>>();
+    for (const { datasetId, imageId, chunkKey } of failed) {
+      let byImage = byDataset.get(datasetId);
+      if (!byImage) {
+        byImage = new Map();
+        byDataset.set(datasetId, byImage);
+      }
+      const keys = byImage.get(imageId);
+      if (keys) keys.push(chunkKey);
+      else byImage.set(imageId, [chunkKey]);
+    }
+    for (const datasetId of new Set([...byDataset.keys(), ...this.failedSent.keys()])) {
+      const images = [...(byDataset.get(datasetId) ?? [])].map(([imageId, chunkKeys]) => ({ imageId, chunkKeys }));
+      const signature = images
+        .flatMap(({ imageId, chunkKeys }) => chunkKeys.map((key) => `${imageId}\n${key}`))
+        .sort()
+        .join("\n");
+      if (signature === (this.failedSent.get(datasetId) ?? "")) continue;
+      ctx.client.failedChunks({ type: "failedChunks", datasetId, images });
+      if (images.length > 0) this.failedSent.set(datasetId, signature);
+      else this.failedSent.delete(datasetId);
+    }
+    return failed;
+  }
+
   // Per-tick upload (slicePath / volumePath)
 
   /**
@@ -481,6 +522,8 @@ export class Uploader {
     this.workerResources.clearDataset(datasetId);
     this.lastViewEpochByDataset.delete(datasetId);
     this.wantedByDataset.delete(datasetId);
+    // The worker dropped its list with the dataset, so a reopen sends it again.
+    this.failedSent.delete(datasetId);
   }
 
   getTrackedResourceMemberIds(): string[] {

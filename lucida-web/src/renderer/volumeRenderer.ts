@@ -16,7 +16,7 @@ import type { SampleFormat } from "./dataTypeUtil.ts";
 export const VOLUME_UNIFORM_OFFSETS = {
   invViewProj: 0,           // mat4x4f (64B)
   cameraPos: 64,            // vec4f (16B)
-  stepInfo: 80,             // vec4f (16B) — x=opacityScale, y=renderMode
+  stepInfo: 80,             // vec4f (16B) — x=opacityScale, y=renderMode, z=pixelRatio
   levelAtlasSlotDims: 96,   // array<vec4u, 4> (64B) — xyz=slots per axis per level pool binding
   coarseAtlasSlotDims: 160, // vec4u (16B)
   viewProj: 176,            // mat4x4f (64B)
@@ -58,6 +58,7 @@ export class VolumeRenderer {
    *  aren't backed by cold-state. Lazily allocated. */
   private transientDescriptorBuffer: GPUBuffer | null = null;
   private renderMode = 0;
+  private pixelRatio = 1;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private levelBindings: Array<VolumePoolBinding | null> = [];
@@ -357,6 +358,11 @@ export class VolumeRenderer {
     this.renderMode = mode;
   }
 
+  /** Render-target pixels per CSS pixel, from the next draw on. */
+  setPixelRatio(ratio: number) {
+    this.pixelRatio = ratio;
+  }
+
   /** Per-frame view-projection, eye, and clip params. Model matrices live in the descriptor. */
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
@@ -405,9 +411,9 @@ export class VolumeRenderer {
     const uniformData = new Float32Array(VOLUME_UNIFORM_SIZE / 4);
     uniformData.set(this.invViewProj, O.invViewProj / 4);
     uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], O.cameraPos / 4);
-    // stepInfo = (opacityScale, renderMode, _, _). The march step comes
-    // from the sampled level's dims in the descriptor.
-    uniformData.set([0.08, this.renderMode, 0, 0], O.stepInfo / 4);
+    // stepInfo = (opacityScale, renderMode, pixelRatio, _). The march step
+    // comes from the sampled level's dims in the descriptor.
+    uniformData.set([0.08, this.renderMode, this.pixelRatio, 0], O.stepInfo / 4);
 
     const u32View = new Uint32Array(uniformData.buffer);
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {

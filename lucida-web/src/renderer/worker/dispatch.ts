@@ -170,6 +170,18 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       postGpuMemoryIfChanged(ctx);
       return;
 
+    case "failedChunks": {
+      // No residency changed, so no wanted-set is posted. The retained cold
+      // state is re-ingested so the indirection marks the new list now,
+      // not at the next view change.
+      const failed = new Map(msg.images.map(({ imageId, chunkKeys }) => [imageId, new Set(chunkKeys)]));
+      if (failed.size > 0) ctx.state.failedByDataset.set(msg.datasetId, failed);
+      else ctx.state.failedByDataset.delete(msg.datasetId);
+      const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
+      if (cold) applyColdState(ctx, cold);
+      return;
+    }
+
     case "removeLayerResources":
       removeDatasetResources(ctx, msg.datasetId);
       postGpuMemoryIfChanged(ctx);
