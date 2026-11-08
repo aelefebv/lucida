@@ -88,13 +88,13 @@ const WORST_TICK_CEILING_US = 250;
 const PER_EVENT_BUDGET_NS: Readonly<Record<number, number>> = {
   1: 590,
   8: 300,
-  128: 290,
-  2943: 290,
+  128: 250,
+  2943: 250,
 };
 
 /** Tick budgets in nominal microseconds, about twice each typical figure. */
-const WORST_TICK_BUDGET_US = 3_800;
-const MATCHED_TICK_BUDGET_US = 32;
+const WORST_TICK_BUDGET_US = 3_200;
+const MATCHED_TICK_BUDGET_US = 26;
 const LIVE_READ_BUDGET_US = 2.1;
 
 /**
