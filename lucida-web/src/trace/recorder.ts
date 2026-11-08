@@ -296,6 +296,8 @@ export class TraceRecorder {
   private readonly planEndsMs = new Float64Array(PLAN_SPAN_RING);
   private planSpanCount = 0;
   private openPlanStartMs: number | null = null;
+  /** The ring slot the open pass's span is in, or -1 before it enqueues. */
+  private openPlanSlot = -1;
 
   /**
    * Rows handed to the renderer but not yet covered by a frame, and rows
@@ -799,12 +801,15 @@ export class TraceRecorder {
    * `queue` and opens `wire`. Splitting it into three calls would triple the
    * per-chunk event count the 250 µs tick ceiling is derived from.
    *
-   * `admittedAtMs` is the scheduler's admission stamp, kept for the admission
-   * window only. A row admitted straight off the backlog dates its queue from
-   * the plan pass that enqueued it, so queue time before the window is a
-   * floor, not a total. `plan` is attributed to the last pass that ended at
-   * or before admission; with none in the ring the plan slot stays unset,
-   * which reads as "not measured" rather than as zero.
+   * `admittedAtMs` is the scheduler's admission stamp, which only the
+   * admission window carries. `plan` is the newest pass that started at or
+   * before admission, and `queue` starts where that pass enqueued, not at the
+   * stamp: a request promoted from the backlog into the window is stamped
+   * when it is promoted, and its wait before that is queue time, not
+   * planning. A request the backlog held across several passes dates its
+   * queue from the newest, so queue time is a floor, not a total. With no
+   * pass in the ring the plan slot stays unset, which reads as "not
+   * measured" rather than as zero.
    */
   beginChunkRow(src: ChunkRowSource, tier: 0 | 1, admittedAtMs?: number): number {
     const run = this.intervalForRecording();
@@ -820,11 +825,13 @@ export class TraceRecorder {
     // between two halves of the same boundary.
     const dispatchedAtMs = this.now();
     const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedAtMs;
-    const planStartMs = this.planStartAtOrBefore(admittedMs);
-    if (planStartMs !== null) {
-      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, planStartMs));
+    const pass = this.planPassAt(admittedMs);
+    let queuedMs = admittedMs;
+    if (pass >= 0) {
+      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, this.planStartsMs[pass]));
+      queuedMs = Math.min(admittedMs, this.planEndsMs[pass]);
     }
-    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, admittedMs));
+    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, queuedMs));
     run.sink.stamp(index, Boundary.WireStart, this.offsetUs(run, dispatchedAtMs));
 
     return run.generation * GENERATION_STRIDE + index;
@@ -849,22 +856,28 @@ export class TraceRecorder {
    */
   markPlanStart(): void {
     this.openPlanStartMs = this.now();
+    this.openPlanSlot = -1;
   }
 
   /**
-   * Close the plan pass at the moment its requests were handed to the
+   * End the plan pass at the moment its requests were handed to the
    * scheduler. The caller passes the timestamp it enqueued with rather than
    * letting the recorder read the clock again, so a row's plan end and its
    * queue start are the same number and the phases meet exactly.
+   *
+   * A pass submits once per dataset, so it can enqueue more than once. Each
+   * enqueue moves the pass's end: a row enqueued by a later dataset's submit
+   * keeps that dataset's planning in `plan`.
    */
   notePlanEnqueue(enqueuedAtMs: number): void {
     const startMs = this.openPlanStartMs;
     if (startMs === null) return;
-    this.openPlanStartMs = null;
-    const slot = this.planSpanCount % PLAN_SPAN_RING;
-    this.planStartsMs[slot] = startMs;
-    this.planEndsMs[slot] = enqueuedAtMs;
-    this.planSpanCount++;
+    if (this.openPlanSlot < 0) {
+      this.openPlanSlot = this.planSpanCount % PLAN_SPAN_RING;
+      this.planStartsMs[this.openPlanSlot] = startMs;
+      this.planSpanCount++;
+    }
+    this.planEndsMs[this.openPlanSlot] = enqueuedAtMs;
   }
 
   /**
@@ -1358,6 +1371,7 @@ export class TraceRecorder {
     this.lastQuiescence = null;
     this.planSpanCount = 0;
     this.openPlanStartMs = null;
+    this.openPlanSlot = -1;
     this.lastTargetByDataset.clear();
     this.beginInterval(null);
   }
@@ -1589,18 +1603,20 @@ export class TraceRecorder {
     return this.planEndsMs[(this.planSpanCount - 1) % PLAN_SPAN_RING];
   }
 
-  /** The start of the newest plan pass that had already enqueued by `atMs`. */
-  private planStartAtOrBefore(atMs: number): number | null {
+  /**
+   * The ring slot of the newest enqueuing plan pass that started by `atMs`,
+   * or -1. Matched by start rather than end, because a pass that enqueues
+   * once per dataset ends after the rows its first enqueue admitted.
+   */
+  private planPassAt(atMs: number): number {
     const spans = Math.min(this.planSpanCount, PLAN_SPAN_RING);
-    let bestEnd = -Infinity;
-    let bestStart: number | null = null;
+    let best = -1;
     for (let i = 0; i < spans; i++) {
-      const end = this.planEndsMs[i];
-      if (end > atMs || end <= bestEnd) continue;
-      bestEnd = end;
-      bestStart = this.planStartsMs[i];
+      const start = this.planStartsMs[i];
+      if (start > atMs || (best >= 0 && start <= this.planStartsMs[best])) continue;
+      best = i;
     }
-    return bestStart;
+    return best;
   }
 
   private resolve(handle: number): OpenInterval | null {
