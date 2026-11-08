@@ -15,7 +15,7 @@
 import type { EvictionTier } from "../pipeline/fetch/index.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import { formatMs } from "../monitor/monitorModel.ts";
-import { ROW_STATE_COLORS, withAlpha } from "../monitor/timelinePalette.ts";
+import { CANVAS_ROW_STATE_COLORS, withAlpha } from "../monitor/timelinePalette.ts";
 import type { ChunkSelection } from "../trace/diagnose/chunkSelection.ts";
 import { chunkIdentity, type ChunkReading } from "../trace/diagnose/chunkStates.ts";
 import { describeState } from "../trace/diagnose/rowState.ts";
@@ -307,7 +307,7 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
     let fill: string;
     let border = paints.cellBorder;
     if (modes.phaseColor) {
-      fill = reading ? withAlpha(ROW_STATE_COLORS[reading.state], PHASE_FILL_ALPHA) : paints.noRowFill;
+      fill = reading ? withAlpha(CANVAS_ROW_STATE_COLORS[reading.state], PHASE_FILL_ALPHA) : paints.noRowFill;
       if (!reading) border = paints.noRowBorder;
       if (band) border = band.border;
     } else if (modes.churnTint) {

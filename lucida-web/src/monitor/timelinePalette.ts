@@ -77,6 +77,21 @@ export const ROW_STATE_COLORS: Record<RowState, string> = {
   ...ENDING_COLORS,
 };
 
+/** A chart slot's variant for the canvas background (tokens.css). */
+function onCanvas(color: string): string {
+  return color.replace(/^var\(--lc-chart-/, "var(--lc-canvas-chart-");
+}
+
+/**
+ * {@link ROW_STATE_COLORS} as the overlay paints them, on the canvas. Each
+ * state keeps its slot, so a phase is still one colour in space and in time,
+ * but takes the slot's canvas variant: the canvas has a background setting of
+ * its own, and the theme's slots are tuned to the theme's surfaces.
+ */
+export const CANVAS_ROW_STATE_COLORS = Object.fromEntries(
+  Object.entries(ROW_STATE_COLORS).map(([state, color]) => [state, onCanvas(color)]),
+) as Record<RowState, string>;
+
 export const LANE_COLORS: Record<LaneName, string> = {
   ...slots(["minimap", "detail", "coarse", "prefetch"] as const),
   overview: NEUTRAL,
