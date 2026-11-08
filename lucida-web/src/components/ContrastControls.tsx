@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { ArrowsOutLineHorizontalIcon, MagicWandIcon } from "@phosphor-icons/react";
 import { Button, IconButton, Slider, Switch, Tooltip } from "../ui/index.ts";
 import { contrastBounds, orderLimits } from "./contrastLimits.ts";
+import { shortestFloat32Text } from "./pixelReadout.ts";
 import "./ContrastControls.css";
 
 const GAMMA_MIN = 0.1;
@@ -51,15 +52,21 @@ export function ContrastControls({
   const [minValue, maxValue] = contrastBounds(contrastMin, contrastMax, dataRange, valueRange, fullRange);
   const span = maxValue - minValue;
   const step = integer ? 1 : span > 0 ? span / 1000 : 0.001;
+  // The fields show each limit whole. The renderer applies a limit in float32,
+  // so a float limit shows the fewest digits that name the same float32, up to
+  // the nine any float32 needs, and an integer limit shows every digit.
   const format: Intl.NumberFormatOptions = integer
     ? { maximumFractionDigits: 0, useGrouping: false }
-    : { maximumSignificantDigits: 4, useGrouping: false };
+    : { maximumSignificantDigits: 9, useGrouping: false };
+  const shown = (limit: number) => (integer ? limit : Number(shortestFloat32Text(limit)));
+  const shownMin = shown(contrastMin);
+  const shownMax = shown(contrastMax);
 
   return (
     <div className="lc-contrast" role="group" aria-label={`${label} contrast`}>
       <Slider<readonly [number, number]>
         label="Contrast"
-        value={[contrastMin, contrastMax]}
+        value={[shownMin, shownMax]}
         minValue={minValue}
         maxValue={maxValue}
         step={step}
@@ -67,8 +74,11 @@ export function ContrastControls({
         valueDisplay="field"
         thumbLabels={["Minimum", "Maximum"]}
         onChange={(next) => {
-          const [lo, hi] = orderLimits(next, contrastMin, step);
-          if (lo !== contrastMin || hi !== contrastMax) onContrastChange(lo, hi);
+          const [lo, hi] = orderLimits(next, shownMin, step);
+          // A limit left where it showed keeps the value it holds.
+          const nextMin = lo === shownMin ? contrastMin : lo;
+          const nextMax = hi === shownMax ? contrastMax : hi;
+          if (nextMin !== contrastMin || nextMax !== contrastMax) onContrastChange(nextMin, nextMax);
         }}
       />
       <Slider<number>

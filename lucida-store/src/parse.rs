@@ -12,7 +12,7 @@ use object_store::path::Path;
 use serde::Deserialize;
 
 use lucida_content::normalize::normalize_f64_to_5d;
-use lucida_content::{ChannelInfo, LabelColor};
+use lucida_content::{ChannelInfo, LabelColor, LabelName};
 
 use crate::backend::StoreError;
 use crate::cache::CachedStore;
@@ -25,6 +25,16 @@ const MAX_LABEL_GROUPS: usize = 4096;
 /// Upper bound on color-table entries kept per label. A display palette, not a
 /// per-object table, so this is generous while still bounding memory.
 const MAX_LABEL_COLORS: usize = 1 << 16;
+
+/// Upper bound on named label values kept per label, as for colors.
+const MAX_LABEL_NAMES: usize = 1 << 16;
+
+/// Longest label name kept, in characters; a longer one is cut to this.
+const MAX_LABEL_NAME_CHARS: usize = 256;
+
+/// The property keys that name a label value, most specific first. The format
+/// sets no key for a name; `class` is the one its own example uses.
+const LABEL_NAME_KEYS: [&str; 2] = ["name", "class"];
 
 /// Intermediate per-level metadata parsed from OME multiscales.
 #[derive(Debug, Clone)]
@@ -671,6 +681,8 @@ pub(crate) fn parse_labels_names(labels_group_json: &serde_json::Value) -> Vec<S
 pub(crate) struct ImageLabelMeta {
     /// Validated color table, in declared order; empty when absent/malformed.
     pub colors: Vec<LabelColor>,
+    /// Names from the property table, in declared order; empty when it names none.
+    pub names: Vec<LabelName>,
     /// Whether `image-label.source.image` was present (a declared back-pointer
     /// to the source intensity image).
     pub source_declared: bool,
@@ -683,8 +695,8 @@ pub(crate) struct ImageLabelMeta {
 /// `label-value` (kept as `i64` — never truncated, since ids exceed 16 bits)
 /// and an `rgba` array of exactly four `0..=255` integers; malformed entries
 /// are skipped individually and the kept count is capped at
-/// [`MAX_LABEL_COLORS`]. `properties`, when present, is intentionally not
-/// consumed here.
+/// [`MAX_LABEL_COLORS`]. Of `properties`, only each entry's name is kept
+/// (see [`parse_label_name`]).
 pub(crate) fn parse_image_label(label_group_json: &serde_json::Value) -> ImageLabelMeta {
     let Some(image_label) = resolve_ome_block(label_group_json, "image-label") else {
         return ImageLabelMeta::default();
@@ -706,10 +718,37 @@ pub(crate) fn parse_image_label(label_group_json: &serde_json::Value) -> ImageLa
         })
         .unwrap_or_default();
 
+    let names = image_label
+        .get("properties")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(parse_label_name)
+                .take(MAX_LABEL_NAMES)
+                .collect()
+        })
+        .unwrap_or_default();
+
     ImageLabelMeta {
         colors,
+        names,
         source_declared,
     }
+}
+
+/// The name one `image-label.properties` entry gives its integer `label-value`:
+/// the first non-blank string under [`LABEL_NAME_KEYS`]. `None` drops the entry.
+fn parse_label_name(entry: &serde_json::Value) -> Option<LabelName> {
+    let value = entry.get("label-value")?.as_i64()?;
+    let name = LABEL_NAME_KEYS
+        .iter()
+        .filter_map(|key| entry.get(*key)?.as_str())
+        .map(str::trim)
+        .find(|name| !name.is_empty())?;
+    Some(LabelName {
+        value,
+        name: name.chars().take(MAX_LABEL_NAME_CHARS).collect(),
+    })
 }
 
 /// Validate one `image-label.colors` entry. Returns `None` (dropping the entry)
@@ -1614,6 +1653,52 @@ mod tests {
         // A `source` object lacking a string `image` does not count.
         let json = image_label_group(serde_json::json!({"source": {"note": "x"}}));
         assert!(!parse_image_label(&json).source_declared);
+    }
+
+    #[test]
+    fn image_label_reads_names_from_properties() {
+        let long = "n".repeat(MAX_LABEL_NAME_CHARS + 10);
+        let json = image_label_group(serde_json::json!({
+            "properties": [
+                {"label-value": 1, "name": "region one", "class": "ignored"},
+                {"label-value": 92801, "class": " far region "},
+                {"label-value": 3, "name": "  ", "class": "blank name falls through"},
+                {"label-value": 4, "area": 1200},          // no name
+                {"label-value": 5, "name": 7},             // not a string
+                {"name": "no value"},                      // missing label-value
+                {"label-value": 1.5, "name": "fractional"}, // not an integer
+                {"label-value": 6, "name": long}
+            ]
+        }));
+        let names = parse_image_label(&json).names;
+        assert_eq!(
+            names[..3],
+            [
+                LabelName {
+                    value: 1,
+                    name: "region one".into()
+                },
+                LabelName {
+                    value: 92801,
+                    name: "far region".into()
+                },
+                LabelName {
+                    value: 3,
+                    name: "blank name falls through".into()
+                },
+            ]
+        );
+        assert_eq!(names.len(), 4);
+        assert_eq!(names[3].value, 6);
+        assert_eq!(names[3].name.chars().count(), MAX_LABEL_NAME_CHARS);
+    }
+
+    #[test]
+    fn image_label_without_properties_names_nothing() {
+        let json = image_label_group(serde_json::json!({"properties": "none"}));
+        assert!(parse_image_label(&json).names.is_empty());
+        let json = image_label_group(serde_json::json!({"version": "0.5"}));
+        assert!(parse_image_label(&json).names.is_empty());
     }
 
     #[test]
