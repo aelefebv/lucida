@@ -38,7 +38,7 @@ describe("AdaptiveResolution", () => {
     const c = clock();
     const res = new AdaptiveResolution(c.now);
     for (let seq = 1; seq <= 30; seq++) {
-      res.noteInput();
+      res.noteInput(seq - 1);
       c.advance(16);
       expect(res.noteFrame(seq, 12, seq)).toBe(false);
     }
@@ -48,7 +48,7 @@ describe("AdaptiveResolution", () => {
   it("steps down once per frame drawn at the new resolution, to a floor", () => {
     const c = clock();
     const res = new AdaptiveResolution(c.now);
-    res.noteInput();
+    res.noteInput(0);
     expect(res.noteFrame(1, 50, 3)).toBe(true);
     expect(res.scale).toBeCloseTo(0.8, 6);
     // Frames 2 and 3 left before the step; their latency says nothing new.
@@ -57,16 +57,36 @@ describe("AdaptiveResolution", () => {
     expect(res.noteFrame(4, 50, 6)).toBe(true);
     expect(res.scale).toBeCloseTo(0.64, 6);
     for (let seq = 7; seq < 40; seq += 2) {
-      res.noteInput();
+      res.noteInput(seq - 1);
       res.noteFrame(seq, 50, seq);
     }
     expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
   });
 
+  it("leaves out the frames dispatched before a gesture began", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    // Frame 3, the last a load drew, is read at the gesture's first tick.
+    res.noteInput(3);
+    expect(res.noteFrame(3, 50, 4)).toBe(false);
+    expect(res.scale).toBe(1);
+    expect(res.noteFrame(4, 50, 4)).toBe(true);
+    expect(res.scale).toBeCloseTo(0.8, 6);
+  });
+
+  it("judges frames dispatched between a gesture's inputs as its own", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    c.advance(16);
+    res.noteInput(2);
+    expect(res.noteFrame(2, 50, 3)).toBe(true);
+  });
+
   it("restores full resolution once input stops", () => {
     const c = clock();
     const res = new AdaptiveResolution(c.now);
-    res.noteInput();
+    res.noteInput(0);
     res.noteFrame(1, 80, 1);
     expect(res.scale).toBeLessThan(1);
     c.advance(100);
