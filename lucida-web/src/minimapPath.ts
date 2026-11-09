@@ -4,7 +4,7 @@ import { Axis } from "./axes.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS } from "./renderLoopTypes.ts";
+import { MINIMAP_DISPLAY_HOLD_MS, MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import { datasetSampleFormat } from "./renderer/dataTypeUtil.ts";
 import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
@@ -77,6 +77,8 @@ export interface MinimapState {
    * main-camera pose, so a fly look-around with the eye fixed still re-strokes.
    */
   overlayCamKey: string | null;
+  /** `performance.now` of the last tick that saw {@link overlayCamKey} change. */
+  cameraMovedAt: number;
   /** Camera-invariant overview outputs, keyed by `overviewGeometryKey`. */
   overviewCache: MinimapOverviewCache | null;
   /** Bumped by tickMinimapOverview when new chunks reach the GPU. */
@@ -153,6 +155,7 @@ export function createMinimapState(): MinimapState {
     overviewVisibilitySig: null,
     overlayRenderKey: null,
     overlayCamKey: null,
+    cameraMovedAt: Number.NEGATIVE_INFINITY,
     overviewCache: null,
     uploadGeneration: 0,
     lastOverviewScanMs: Number.NEGATIVE_INFINITY,
@@ -691,8 +694,17 @@ export function readMinimapOverviewEpochs(scene: WasmScene): { content: number; 
   }
 }
 
-export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: number): void {
-  if (!state.enabled) return;
+/**
+ * Redraw what changed of the minimap. Returns how many milliseconds a display
+ * edit is held for, while the camera moves, or null when nothing is held.
+ */
+export function tickMinimap(
+  ctx: TickContext,
+  state: MinimapState,
+  sliceZ: number,
+  now: number = performance.now(),
+): number | null {
+  if (!state.enabled) return null;
 
   const { scene, canvas, mode } = ctx;
 
@@ -740,12 +752,14 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const cameraChanged = cameraKey !== state.overviewCameraKey;
   const settingsChanged = settingsSnap !== state.overviewSettingsSnap;
   const overlayChanged = overlayKey !== state.overlayRenderKey;
-  if (!geometryChanged && !cameraChanged && !settingsChanged && !overlayChanged && state.overviewCache) return;
+  if (!geometryChanged && !cameraChanged && !settingsChanged && !overlayChanged && state.overviewCache) return null;
+  if (state.overlayCamKey !== null && overlayCamKey !== state.overlayCamKey) state.cameraMovedAt = now;
   // A top-down camera ignores orientation, so an orbit leaves it and the
   // overview unchanged.
   const orbited = cameraChanged && !state.overviewCache?.topDown;
 
   let rebuilt = false;
+  let heldFor: number | null = null;
   if (geometryChanged || !state.overviewCache) {
     const layerOrder: string[] = JSON.parse(orderSnap);
     state.overviewCache = buildMinimapOverview(ctx, state.size, layerOrder, resolved, theta, phi);
@@ -762,6 +776,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       rebuilt = true;
     } else if (orbited) {
       updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, resolved, theta, phi);
+    } else if (now - state.cameraMovedAt < MINIMAP_DISPLAY_HOLD_MS) {
+      heldFor = MINIMAP_DISPLAY_HOLD_MS - (now - state.cameraMovedAt);
     } else {
       updateMinimapDisplay(ctx.client, state.overviewCache, resolved);
     }
@@ -782,7 +798,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
 
   state.overviewGeometryKey = geometryKey;
   state.overviewCameraKey = cameraKey;
-  state.overviewSettingsSnap = settingsSnap;
+  // A held edit leaves the snapshot behind, so a later tick still sees it.
+  if (heldFor === null) state.overviewSettingsSnap = settingsSnap;
   state.overlayRenderKey = overlayKey;
   state.overlayCamKey = overlayCamKey;
 
@@ -825,6 +842,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       staticDirty,
     });
   }
+  return heldFor;
 }
 
 /** Make the next tick rebuild the overview and redraw every overlay layer. */

@@ -209,6 +209,47 @@ describe("the minimap's overview render", () => {
     ]);
   });
 
+  it("draws every member through one offscreen target, compositing each before the next", () => {
+    const { renderer, compile } = makeVolumeRenderer();
+    compile();
+    const { ctx, composite } = makeCtx(renderer);
+    const createTexture = ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>;
+    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
+    const members = ["m0", "m1", "m2"];
+    for (const id of members) {
+      handleMinimapUploadOverviewChunks(ctx, {
+        type: "minimapUploadOverviewChunksForLayer",
+        datasetId: `${id}:ch0`,
+        imageId: id,
+        level: 0,
+        t: 0,
+        c: 0,
+        levelWidth: 2,
+        levelHeight: 2,
+        levelDepth: 1,
+        chunkX: 2,
+        chunkY: 2,
+        chunkZ: 1,
+        chunks: [{ key: "0/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array(4).buffer }],
+        sampleFormat: "u16",
+      });
+    }
+    const texturesBefore = createTexture.mock.calls.length;
+
+    const msg = renderMsg(100);
+    msg.layers = members.map((id) => ({ ...msg.layers[0], datasetId: `${id}:ch0` }));
+    handleMinimapRender(ctx, msg);
+
+    expect(renderer.renderTo).toHaveBeenCalledTimes(3);
+    expect(createTexture.mock.calls.length - texturesBefore).toBe(1);
+    // One layer per composite, the minimap cleared under the first only.
+    expect(composite.mock.calls.map((call) => [call[1].length, call[3]])).toEqual([
+      [1, true],
+      [1, false],
+      [1, false],
+    ]);
+  });
+
   it("draws each chunk at its place, a missing one as nothing and a failed one as failed", () => {
     const { renderer, compile } = makeVolumeRenderer();
     compile();
