@@ -164,7 +164,7 @@ impl FetchedChunk {
 }
 
 /// Read and decode the wire chunk for `chunk_key` of `image_id`, the decode
-/// on the [`DecodePool`] with a slot charged to `reader`. For `label`, see
+/// on the [`DecodePool`] in `reader`'s turn. For `label`, see
 /// [`fetch_chunk`].
 pub async fn read_chunk(
     resolver: &ChunkResolver,
@@ -176,9 +176,7 @@ pub async fn read_chunk(
 ) -> Result<ChunkRead, ChunkReadError> {
     let fetched = fetch_chunk(resolver, store, image_id, chunk_key, reader, label, None).await?;
     DecodePool::global()
-        .acquire(reader)
-        .await
-        .run(move || fetched.decode(None))
+        .run(reader, move || fetched.decode(None))
         .await
 }
 

@@ -2786,9 +2786,7 @@ async fn generate_chunk_from_source_level(
     // that would hold an async worker every chunk serve needs, so it takes a
     // decode thread. Generation is one reader there, as it is for reads.
     DecodePool::global()
-        .acquire(ReaderId::UNATTRIBUTED)
-        .await
-        .run(move || {
+        .run(ReaderId::UNATTRIBUTED, move || {
             let samples =
                 region_histogram(&source_data, data_type, source_region, region_dims, owned)
                     .map_err(GeneratedChunkBuildError::Downsample)?;
