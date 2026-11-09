@@ -49,6 +49,7 @@ interface TunableSpec {
 
 const PREFETCH: TunableSpec[] = [
   { field: "prefetchDepth", label: "Prefetch depth", min: 0, max: 5, step: 1 },
+  { field: "sliceBandPlanes", label: "Slice band (planes)", min: 0, max: 32, step: 1 },
 ];
 
 const PRIORITY_WEIGHTS: TunableSpec[] = [

@@ -151,11 +151,13 @@ export interface GpuSlot {
  * size, which is float32 for every type that draws as one.
  * The server serves every chunk whole at that shape, edge chunks included,
  * so this is what the cache and the GPU hold for it. A request for some of
- * a chunk's planes costs those planes.
+ * a chunk's planes costs those planes. A label's chunks are priced too,
+ * though admission never sees them, since the bytes a fetch holds in flight
+ * are charged at this price.
  */
 export function chunkBytesFor(manifest: DatasetManifest): (req: ChunkRequest) => number {
   const byImage = new Map<string, { levels: number[]; depths: number[]; fallback: number }>();
-  for (const image of manifest.images) {
+  for (const image of [...manifest.images, ...(manifest.labels ?? []).map((label) => label.image)]) {
     const sample = decodedBytesPerSample(image.multiscale.data_type);
     const levels: number[] = [];
     const depths: number[] = [];

@@ -1,0 +1,8 @@
+{
+  "description": "show the first label over the settled slice view and wait for it to settle",
+  "requires": ["labels"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "select", "label": 0 }
+  ]
+}

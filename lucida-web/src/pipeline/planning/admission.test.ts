@@ -183,4 +183,18 @@ describe("chunkBytesFor", () => {
       expect(chunkBytesFor(manifest)(request(0)), dataType).toBe(8 * 8 * 4);
     }
   });
+  it("charges a label's chunk and its planes, which the bytes a fetch holds in flight are charged at", () => {
+    const manifest = {
+      images: [],
+      labels: [{
+        image: {
+          image_id: "label",
+          multiscale: { data_type: "Uint32", levels: [{ level_index: 0, chunk_shape: [1, 1, 32, 64, 64] }] },
+        },
+      }],
+    } as unknown as DatasetManifest;
+    const bytesOf = chunkBytesFor(manifest);
+    expect(bytesOf(request(0, { imageId: "label" }))).toBe(32 * 64 * 64 * 4);
+    expect(bytesOf(request(0, { imageId: "label", plane: 3, planes: [1, 6] }))).toBe(5 * 64 * 64 * 4);
+  });
 });
