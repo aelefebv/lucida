@@ -147,6 +147,28 @@ describe("the header", () => {
     expect(header.deviceMemoryGib).toBeNull();
   });
 
+  it("says which page the run was on and the window it laid out in, so a replay drives the same", async () => {
+    const capture = (await exportBundle(context())).header;
+    expect(capture.fullUi).toBe(false);
+    expect(capture.mobile).toBe(false);
+    expect(capture.pageSize).toEqual({ cssWidth: 1440, cssHeight: 900 });
+
+    const run = healthyLocalOpen();
+    run.header.composedView = { url: "/w/ws-1#view=x", mode: "slice" };
+    const phone = (
+      await exportBundle(
+        context({
+          exportTrace: () => document(run),
+          pageSize: { cssWidth: 390, cssHeight: 844 },
+          mobile: true,
+        }),
+      )
+    ).header;
+    expect(phone.fullUi).toBe(true);
+    expect(phone.mobile).toBe(true);
+    expect(phone.pageSize).toEqual({ cssWidth: 390, cssHeight: 844 });
+  });
+
   it("says nothing is pinned when the URL carries no view, rather than inventing defaults", async () => {
     const run = healthyLocalOpen();
     run.header.composedView = { url: "/w/ws-1", mode: "slice" };
@@ -202,6 +224,7 @@ describe("choosing the run", () => {
     expect(bundle.renderings.summary).toContain("no run was recorded");
     expect(bundle.header.pins).toEqual([]);
     expect(bundle.header.datasets).toEqual([]);
+    expect(bundle.header.fullUi).toBeNull();
     expect(bundleFilename(bundle)).toBe("lucida-empty.bundle.json");
   });
 });
