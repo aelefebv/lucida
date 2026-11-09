@@ -25,14 +25,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
 
 use crate::metadata_reads::{self, MetadataReadPhase};
-use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
+use crate::source_limiter::{ReaderId, RequestLabel, SourceReadBounds, SourceReadLimiter};
 
-/// Default cap on concurrent backend source reads when no operator override
-/// is supplied.
+/// Concurrent backend source reads admitted whatever their size, by default.
 ///
-/// Measured, not chosen: a sweep of this value against a real remote
+/// Measured, not chosen: a sweep of a read count against a real remote
 /// collection (up to 1,200 reads per level, levels interleaved across
-/// passes). Completed reads per second, pooled:
+/// passes), reads of about 330 KB. Completed reads per second, pooled:
 ///
 /// ```text
 ///    8 -> 35.7      24 -> 57.1      96 -> 43.7
@@ -41,22 +40,47 @@ use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 /// ```
 ///
 /// The plateau starts at 16 and the aggregate bandwidth flattens with it at
-/// ~18 MiB/s, so past 16 the link is the constraint, not the cap. Everything
+/// ~18 MiB/s, so past 16 the link is the constraint, not the count. Everything
 /// above the plateau still costs: body-transfer p50 runs ~117 ms at 16, ~198 ms
 /// at 24 and ~280 ms at 32 for the same bytes, and by 48 throughput is falling.
-/// Extra permits past the knee do not deliver chunks sooner, they relocate the
-/// wait from our queue into the transfer. 16 is the smallest cap that reaches
-/// the plateau, so it takes the throughput without the tail.
+/// Extra reads past the knee do not deliver chunks sooner, they relocate the
+/// wait from our queue into the transfer. 16 is the smallest count that
+/// reaches the plateau, so it takes the throughput without the tail.
 ///
-/// The cap is not why the fetch rate stalls: 12 sits just below the plateau,
-/// worth ~12 % of throughput, and raising it past 16 makes things worse,
-/// because the ceiling is the link.
+/// Reads larger than that sweep's are still admitted sixteen at a time, so a
+/// large-chunk dataset reads exactly as wide as when the bound was a count.
+const DEFAULT_MIN_SOURCE_READS: usize = 16;
+
+/// Bytes in flight past [`DEFAULT_MIN_SOURCE_READS`], by default: sixteen of
+/// the reads that sweep measured.
+///
+/// A read holds its place for a whole round trip whatever its size, so a
+/// count that fills the link with 330 KB reads leaves it idle with 32 KB
+/// ones, which move a tenth the bytes in the same time. Bounding the bytes
+/// instead lets small reads go wider. The same sweep with reads of 22 KiB
+/// against another real remote store (1,152 reads per count), completed reads
+/// per second, median of three passes:
+///
+/// ```text
+///   16 ->  49.5     64 -> 181.7
+///   32 ->  97.5    128 -> 307.7
+/// ```
+///
+/// Time to first byte held at ~160 ms p50 at every count: that store did not
+/// push back, and small reads gained from every doubling.
 ///
 /// This is a bound on lucida's demand, not a property of the store, and the
-/// knee moves with the link. An operator on a fatter one can raise it with
-/// [`SOURCE_READ_CONCURRENCY_ENV`]; `docs/research/source-read-concurrency-harness/`
-/// re-runs the sweep to find where their own knee is.
-const DEFAULT_SOURCE_READ_CONCURRENCY: usize = 16;
+/// knee moves with the link: on that same store, 332 KiB reads were still
+/// gaining at 64 (10.3 MiB/s at 16, 21.3 MiB/s at 64). An operator on a
+/// fatter link can raise it with [`SOURCE_READ_BYTES_ENV`];
+/// `docs/research/source-read-concurrency-harness/` re-runs the sweep to find
+/// where their own knee is.
+const DEFAULT_SOURCE_READ_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Concurrent backend source reads never exceeded, by default, however small:
+/// the most either sweep measured. It binds only reads under 40 KiB, which
+/// the byte bound alone would let go wider.
+const DEFAULT_MAX_SOURCE_READS: usize = 128;
 
 /// Default byte budget for the process's source caches, all of them together.
 /// A store built with [`CachedStore::new`] gets a budget of its own of the
@@ -87,9 +111,15 @@ const DEFAULT_METADATA_READ_CONCURRENCY: usize = 32;
 /// still trivially small next to the byte cache.
 const ABSENT_MEMO_CAPACITY: usize = 65_536;
 
-/// Environment variable an operator can set to override the process-global
-/// concurrent-source-read cap. Read once, the first time the limiter is used.
+/// Environment variable an operator can set to fix the number of concurrent
+/// source reads, whatever their size, in place of the default bounds. Read
+/// once, the first time the limiter is used.
 const SOURCE_READ_CONCURRENCY_ENV: &str = "LUCIDA_SOURCE_READ_CONCURRENCY";
+
+/// Environment variable an operator can set to override
+/// [`DEFAULT_SOURCE_READ_BYTES`]. Read once, the first time the limiter is
+/// used, and ignored when [`SOURCE_READ_CONCURRENCY_ENV`] fixes the count.
+const SOURCE_READ_BYTES_ENV: &str = "LUCIDA_SOURCE_READ_BYTES";
 
 /// The process-global limiter shared by every [`CachedStore`] built via
 /// [`CachedStore::new`].
@@ -105,7 +135,7 @@ const SOURCE_READ_CONCURRENCY_ENV: &str = "LUCIDA_SOURCE_READ_CONCURRENCY";
 /// [`SourceReadLimiter`].
 fn global_source_read_limiter() -> &'static Arc<SourceReadLimiter> {
     static LIMITER: OnceLock<Arc<SourceReadLimiter>> = OnceLock::new();
-    LIMITER.get_or_init(|| SourceReadLimiter::new(configured_source_read_limit()))
+    LIMITER.get_or_init(|| SourceReadLimiter::with_bounds(configured_source_read_bounds()))
 }
 
 /// The process-global limiter for metadata reads, the counterpart to
@@ -115,11 +145,19 @@ fn global_metadata_read_limiter() -> &'static Arc<Semaphore> {
     LIMITER.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_METADATA_READ_CONCURRENCY)))
 }
 
-/// Resolve the source-read cap from the operator override, falling back to
-/// [`DEFAULT_SOURCE_READ_CONCURRENCY`]. A non-numeric or zero value is
-/// ignored in favour of the default so a typo can never wedge all reads.
-fn configured_source_read_limit() -> usize {
-    positive_env(SOURCE_READ_CONCURRENCY_ENV).unwrap_or(DEFAULT_SOURCE_READ_CONCURRENCY)
+/// Resolve the source-read bounds from the operator overrides, falling back
+/// to the defaults. A non-numeric or zero value is ignored in favour of the
+/// default so a typo can never wedge all reads.
+fn configured_source_read_bounds() -> SourceReadBounds {
+    match positive_env(SOURCE_READ_CONCURRENCY_ENV) {
+        Some(reads) => SourceReadBounds::reads(reads),
+        None => SourceReadBounds {
+            min_reads: DEFAULT_MIN_SOURCE_READS,
+            max_reads: DEFAULT_MAX_SOURCE_READS,
+            max_bytes: positive_env(SOURCE_READ_BYTES_ENV)
+                .map_or(DEFAULT_SOURCE_READ_BYTES, |bytes| bytes as u64),
+        },
+    }
 }
 
 fn positive_env(name: &str) -> Option<usize> {
@@ -997,6 +1035,18 @@ impl CachedStore {
         }
     }
 
+    /// The bytes the limiter charges a chunk read of `key` for. A range
+    /// knows its length. A whole object's arrives with its body, so the read
+    /// is charged `object_len`, what the caller expects it to hold, or with
+    /// no expectation, what the floor was sized for.
+    fn expected_read_bytes(&self, key: &ReadKey, object_len: Option<u64>) -> u64 {
+        match &key.range {
+            Some(ByteRange::Bounded(range)) => range.end.saturating_sub(range.start),
+            Some(ByteRange::Suffix(len)) => *len,
+            None => object_len.unwrap_or_else(|| self.source_read.bounds().unknown_read_bytes()),
+        }
+    }
+
     /// `max_bytes` is the whole budget this store draws on, shared or not;
     /// `current_bytes`, `entry_count` and `evictions` are this store's part.
     pub fn stats(&self) -> CacheStats {
@@ -1042,9 +1092,46 @@ impl CachedStore {
     /// `label` is the requesting browser's correlation label for this chunk,
     /// carried across the hop so a permit wait can be attributed to a request
     /// rather than only to a client.
+    ///
+    /// The object's length is unknown until its body arrives, so the read is
+    /// charged against the source-read bound as one of unknown size, and
+    /// goes only as wide as the floor. [`get_bytes_sized`] says how large it
+    /// is.
+    ///
+    /// [`get_bytes_sized`]: Self::get_bytes_sized
     pub async fn get_bytes(&self, path: &Path, reader: ReaderId, label: RequestLabel) -> TimedRead {
-        self.get_bytes_as(ReadKey::new(path, None), ReadClass::Chunk, reader, label)
-            .await
+        self.get_bytes_as(
+            ReadKey::new(path, None),
+            ReadClass::Chunk,
+            None,
+            reader,
+            label,
+        )
+        .await
+    }
+
+    /// [`get_bytes`] for an object expected to hold about `expected_len`
+    /// bytes, the size its read is charged against the source-read bound.
+    /// For a chunk that is its decoded size. A compressed chunk moves less
+    /// than that, so the bound may admit fewer of them than would fit, never
+    /// more.
+    ///
+    /// [`get_bytes`]: Self::get_bytes
+    pub async fn get_bytes_sized(
+        &self,
+        path: &Path,
+        expected_len: u64,
+        reader: ReaderId,
+        label: RequestLabel,
+    ) -> TimedRead {
+        self.get_bytes_as(
+            ReadKey::new(path, None),
+            ReadClass::Chunk,
+            Some(expected_len),
+            reader,
+            label,
+        )
+        .await
     }
 
     /// Read one byte range of an object, keyed by the path and the range.
@@ -1079,6 +1166,7 @@ impl CachedStore {
         self.get_bytes_as(
             ReadKey::new(path, Some(ByteRange::Bounded(range))),
             ReadClass::Chunk,
+            None,
             reader,
             label,
         )
@@ -1109,6 +1197,7 @@ impl CachedStore {
         self.get_bytes_as(
             ReadKey::new(path, Some(ByteRange::Suffix(len))),
             ReadClass::Chunk,
+            None,
             reader,
             label,
         )
@@ -1123,6 +1212,7 @@ impl CachedStore {
         self.get_bytes_as(
             ReadKey::new(path, None),
             ReadClass::Metadata,
+            None,
             ReaderId::UNATTRIBUTED,
             RequestLabel::UNATTRIBUTED,
         )
@@ -1203,10 +1293,13 @@ impl CachedStore {
         }
     }
 
+    /// `object_len` is what a whole-object chunk read is expected to move;
+    /// see [`CachedStore::expected_read_bytes`].
     async fn get_bytes_as(
         &self,
         key: ReadKey,
         class: ReadClass,
+        object_len: Option<u64>,
         reader: ReaderId,
         label: RequestLabel,
     ) -> TimedRead {
@@ -1261,7 +1354,7 @@ impl CachedStore {
                     } else {
                         let mut guard = guard;
                         let read = self
-                            .fetch_from_backend(&key, class, reader, label, started)
+                            .fetch_from_backend(&key, class, object_len, reader, label, started)
                             .await;
                         guard.complete([(key.clone(), share(&read.result))]);
                         Led::Read(read)
@@ -1347,8 +1440,9 @@ impl CachedStore {
         label: RequestLabel,
     ) -> Led {
         let started = std::time::Instant::now();
-        let permit = tokio::select! {
-            permit = self.source_read.acquire(reader) => permit,
+        let own_bytes = self.expected_read_bytes(key, None);
+        let mut permit = tokio::select! {
+            permit = self.source_read.acquire(reader, own_bytes) => permit,
             delivered = delivery.recv() => {
                 guard.disarm();
                 return Led::Carried(delivered, started);
@@ -1367,6 +1461,11 @@ impl CachedStore {
             guard.disarm();
             return Led::Carried(delivery.recv().await, started);
         };
+        let group_bytes: u64 = keys
+            .iter()
+            .map(|key| self.expected_read_bytes(key, None))
+            .sum();
+        permit.grow(group_bytes.saturating_sub(own_bytes));
 
         let fetch = if keys.len() == 1 {
             self.request(key).await.map(|bytes| vec![bytes])
@@ -1508,6 +1607,7 @@ impl CachedStore {
             .get_bytes_as(
                 read,
                 ReadClass::OptionalMetadata,
+                None,
                 ReaderId::UNATTRIBUTED,
                 RequestLabel::UNATTRIBUTED,
             )
@@ -1530,6 +1630,7 @@ impl CachedStore {
         &self,
         key: &ReadKey,
         class: ReadClass,
+        object_len: Option<u64>,
         reader: ReaderId,
         label: RequestLabel,
         // When the *caller* asked, for a metadata read's row. A leader row
@@ -1556,7 +1657,11 @@ impl CachedStore {
             // permit from their own cap.
             let _permit = match class {
                 ReadClass::Chunk => {
-                    let permit = ReadPermit::Chunk(self.source_read.acquire(reader).await);
+                    let permit = ReadPermit::Chunk(
+                        self.source_read
+                            .acquire(reader, self.expected_read_bytes(key, object_len))
+                            .await,
+                    );
                     permit_wait = started.elapsed();
                     trace_permit_acquired(reader, label, permit_wait);
                     permit
@@ -3144,41 +3249,95 @@ mod tests {
     }
 
     #[test]
-    fn configured_source_read_limit_defaults_and_overrides() {
-        // Default when unset.
-        // SAFETY: single-threaded test; no other thread reads the env here.
-        unsafe {
-            std::env::remove_var(SOURCE_READ_CONCURRENCY_ENV);
-        }
+    fn configured_source_read_bounds_defaults_and_overrides() {
+        let defaults = SourceReadBounds {
+            min_reads: DEFAULT_MIN_SOURCE_READS,
+            max_reads: DEFAULT_MAX_SOURCE_READS,
+            max_bytes: DEFAULT_SOURCE_READ_BYTES,
+        };
+        let set = |name: &str, value: Option<&str>| {
+            // SAFETY: single-threaded test; no other thread reads these here.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        };
+        set(SOURCE_READ_CONCURRENCY_ENV, None);
+        set(SOURCE_READ_BYTES_ENV, None);
+        assert_eq!(configured_source_read_bounds(), defaults);
+
+        set(SOURCE_READ_BYTES_ENV, Some("1048576"));
         assert_eq!(
-            configured_source_read_limit(),
-            DEFAULT_SOURCE_READ_CONCURRENCY
+            configured_source_read_bounds(),
+            SourceReadBounds {
+                max_bytes: 1024 * 1024,
+                ..defaults
+            }
         );
 
-        unsafe {
-            std::env::set_var(SOURCE_READ_CONCURRENCY_ENV, "5");
-        }
-        assert_eq!(configured_source_read_limit(), 5);
+        // A fixed count is exactly that many reads, whatever their size.
+        set(SOURCE_READ_CONCURRENCY_ENV, Some("5"));
+        assert_eq!(configured_source_read_bounds(), SourceReadBounds::reads(5));
 
         // Garbage and zero fall back to the default rather than wedging reads.
-        unsafe {
-            std::env::set_var(SOURCE_READ_CONCURRENCY_ENV, "not-a-number");
-        }
-        assert_eq!(
-            configured_source_read_limit(),
-            DEFAULT_SOURCE_READ_CONCURRENCY
-        );
-        unsafe {
-            std::env::set_var(SOURCE_READ_CONCURRENCY_ENV, "0");
-        }
-        assert_eq!(
-            configured_source_read_limit(),
-            DEFAULT_SOURCE_READ_CONCURRENCY
-        );
+        set(SOURCE_READ_BYTES_ENV, Some("0"));
+        set(SOURCE_READ_CONCURRENCY_ENV, Some("not-a-number"));
+        assert_eq!(configured_source_read_bounds(), defaults);
+        set(SOURCE_READ_CONCURRENCY_ENV, Some("0"));
+        assert_eq!(configured_source_read_bounds(), defaults);
 
-        unsafe {
-            std::env::remove_var(SOURCE_READ_CONCURRENCY_ENV);
+        set(SOURCE_READ_CONCURRENCY_ENV, None);
+        set(SOURCE_READ_BYTES_ENV, None);
+    }
+
+    /// Whole objects read `distinct` at once, each said to hold
+    /// `expected_len` bytes, or nothing said when `None`; the most the
+    /// backend served at once.
+    async fn peak_whole_object_reads(expected_len: Option<u64>) -> usize {
+        let store = Arc::new(CountingStore::new(50));
+        let distinct = 12usize;
+        for i in 0..distinct {
+            store.seed(&format!("chunk-{i}"), b"x").await;
         }
+        let max_active = store.max_active.clone();
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024 * 1024,
+            SourceReadLimiter::with_bounds(SourceReadBounds {
+                min_reads: 2,
+                max_reads: 8,
+                max_bytes: 400 * 1024,
+            }),
+        ));
+        let handles: Vec<_> = (0..distinct)
+            .map(|i| {
+                let cached = cached.clone();
+                tokio::spawn(async move {
+                    let path = Path::from(format!("chunk-{i}"));
+                    match expected_len {
+                        Some(len) => cached.get_bytes_sized(&path, len, READER, LABEL).await,
+                        None => cached.get_bytes(&path, READER, LABEL).await,
+                    }
+                    .result
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+        max_active.load(Ordering::SeqCst)
+    }
+
+    /// A whole object's length arrives with its body, so its read is charged
+    /// what the caller expects it to hold: small objects go wide, large ones
+    /// only as wide as the floor, and with nothing said, as wide as the floor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_whole_object_read_is_charged_what_the_caller_expects() {
+        assert_eq!(peak_whole_object_reads(Some(20 * 1024)).await, 8);
+        assert_eq!(peak_whole_object_reads(Some(1024 * 1024)).await, 2);
+        assert_eq!(peak_whole_object_reads(None).await, 2);
     }
 
     // --- Merged range reads ---
@@ -3243,7 +3402,7 @@ mod tests {
             limiter.clone(),
         ));
 
-        let held = limiter.acquire(OUTSIDER).await;
+        let held = limiter.acquire(OUTSIDER, 0).await;
         let handles: Vec<_> = (0..4u64)
             .map(|i| spawn_range_read(&cached, "shard", i * 4..i * 4 + 4, RequestLabel(i as u32)))
             .collect();
@@ -3298,7 +3457,7 @@ mod tests {
             limiter.clone(),
         ));
 
-        let held = limiter.acquire(OUTSIDER).await;
+        let held = limiter.acquire(OUTSIDER, 0).await;
         let handles: Vec<_> = (0..4u64)
             .map(|i| spawn_range_read(&cached, "shard", i * 4..i * 4 + 4, RequestLabel(i as u32)))
             .collect();
@@ -3375,7 +3534,7 @@ mod tests {
         ));
 
         // One byte apart: two requests, and neither fetched the byte between.
-        let held = limiter.acquire(OUTSIDER).await;
+        let held = limiter.acquire(OUTSIDER, 0).await;
         let head = spawn_range_read(&cached, "gapped", 0..7, RequestLabel(1));
         let tail = spawn_range_read(&cached, "gapped", 8..16, RequestLabel(2));
         wait_for_queued(&limiter, 2).await;
@@ -3388,7 +3547,7 @@ mod tests {
         assert_eq!(get_count.load(Ordering::SeqCst), 2, "a gap of one byte");
         assert_eq!(cached.stats().current_bytes, 15);
 
-        let held = limiter.acquire(OUTSIDER).await;
+        let held = limiter.acquire(OUTSIDER, 0).await;
         let a = spawn_range_read(&cached, "a", 0..8, RequestLabel(3));
         let b = spawn_range_read(&cached, "b", 0..8, RequestLabel(4));
         wait_for_queued(&limiter, 2).await;
@@ -3397,7 +3556,7 @@ mod tests {
         b.await.unwrap().result.unwrap();
         assert_eq!(get_count.load(Ordering::SeqCst), 4, "two objects");
 
-        let held = limiter.acquire(OUTSIDER).await;
+        let held = limiter.acquire(OUTSIDER, 0).await;
         let bounded = spawn_range_read(&cached, "a", 8..16, RequestLabel(5));
         let suffix = {
             let cached = cached.clone();
@@ -3432,7 +3591,7 @@ mod tests {
         cached: &Arc<CachedStore>,
         limiter: &Arc<SourceReadLimiter>,
     ) -> [tokio::task::JoinHandle<TimedRead>; 3] {
-        let held = limiter.acquire(OUTSIDER).await;
+        let held = limiter.acquire(OUTSIDER, 0).await;
         let first = spawn_range_read(cached, "shard", 0..4, RequestLabel(1));
         wait_for_queued(limiter, 1).await;
         let second = spawn_range_read(cached, "shard", 4..8, RequestLabel(2));
@@ -3548,7 +3707,7 @@ mod tests {
             limiter.clone(),
         ));
 
-        let held = limiter.acquire(OUTSIDER).await;
+        let held = limiter.acquire(OUTSIDER, 0).await;
         let handles: Vec<_> = (0..3u64)
             .map(|i| spawn_range_read(&cached, "shard", i * 4..i * 4 + 4, RequestLabel(i as u32)))
             .collect();

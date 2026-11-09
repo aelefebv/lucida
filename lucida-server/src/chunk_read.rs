@@ -132,7 +132,7 @@ pub async fn read_chunk(
     if let Some(probe) = probe.as_deref_mut() {
         probe.mark(ServerPhase::Dispatch);
     }
-    let read = read_location(resolver, store, &location, reader, label).await;
+    let read = read_location(resolver, store, &location, &level_info, reader, label).await;
     if let Some(probe) = probe.as_deref_mut() {
         // The cached store owns this stretch of the row: only it knows whether
         // this request led the single flight or waited on someone else's read.
@@ -156,15 +156,24 @@ pub async fn read_chunk(
     Ok(ChunkRead::Present(wire?))
 }
 
+/// `level` is the stored level the location is in. A whole stored chunk
+/// is expected to move no more than its decoded size, which is what its read
+/// is charged against the source-read bound.
 async fn read_location(
     resolver: &ChunkResolver,
     store: &CachedStore,
     location: &ChunkLocation<'_>,
+    level: &LevelInfo,
     reader: ReaderId,
     label: RequestLabel,
 ) -> TimedRead {
     match location {
-        ChunkLocation::Object(path) => store.get_bytes(path, reader, label).await,
+        ChunkLocation::Object(path) => {
+            let expected_len = level.chunk_byte_layout.on_disk_byte_size as u64;
+            store
+                .get_bytes_sized(path, expected_len, reader, label)
+                .await
+        }
         ChunkLocation::InnerChunk { layout, location } => {
             resolver
                 .shard_indexes()
@@ -254,7 +263,7 @@ async fn read_regridded_chunk(
     let reads = futures_util::future::join_all(
         locations
             .iter()
-            .map(|location| read_location(resolver, store, location, reader, label)),
+            .map(|location| read_location(resolver, store, location, stored, reader, label)),
     )
     .await;
     if let Some(probe) = probe.as_deref_mut() {
