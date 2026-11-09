@@ -276,6 +276,12 @@ where
     (Box::pin(sink), writer)
 }
 
+/// How late a send may follow the bytes before it and still count as back
+/// to back. A timer wakes up to one OS tick late, 15.6 ms on Windows, and
+/// without this every late wake-up would be time the link sat idle, which
+/// held a 100 Mbit/s cap to about 85 Mbit/s there.
+const WAKE_SLACK: Duration = Duration::from_millis(20);
+
 /// One connection's share of the link's rate.
 struct Pacer {
     rate: Option<NonZeroU64>,
@@ -290,7 +296,10 @@ impl Pacer {
         let Some(rate) = self.rate else {
             return now;
         };
-        let start = self.free_at.map_or(now, |free| free.max(now));
+        let start = match self.free_at {
+            Some(free) if now.saturating_duration_since(free) <= WAKE_SLACK => free,
+            _ => now,
+        };
         let done = start + Duration::from_secs_f64(bytes as f64 / rate.get() as f64);
         self.free_at = Some(done);
         tokio::time::sleep_until(done).await;
@@ -473,23 +482,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_bytes_cross_at_the_capped_rate() {
-        let (socket, mut arrivals) = recording_socket();
-        let (mut sink, writer) = paced(socket, throttle(0, Some(1_000_000)));
+    async fn the_bytes_leave_at_the_capped_rate() {
+        let mut pacer = Pacer {
+            rate: NonZeroU64::new(1_000_000),
+            free_at: None,
+        };
         let started = Instant::now();
-        sink.send(binary(400_000)).await.unwrap();
+        let ms = Duration::from_millis;
+        assert_eq!(pacer.send(400_000).await - started, ms(400));
         assert_eq!(
             started.elapsed(),
-            Duration::from_millis(400),
+            ms(400),
             "a send holds the sender while its bytes leave"
         );
-        sink.send(binary(100_000)).await.unwrap();
-        drop(sink);
-        writer.await.unwrap();
-        let first = arrivals.try_recv().unwrap().0;
-        let second = arrivals.try_recv().unwrap().0;
-        assert_eq!(first - started, Duration::from_millis(400));
-        assert_eq!(second - started, Duration::from_millis(500));
+        tokio::time::advance(ms(15)).await;
+        assert_eq!(
+            pacer.send(100_000).await - started,
+            ms(500),
+            "a send a late wake-up behind starts where the last one's bytes ended"
+        );
+        tokio::time::advance(ms(100)).await;
+        assert_eq!(
+            pacer.send(100_000).await - started,
+            ms(700),
+            "after the link sat idle, the bytes leave from when they were sent"
+        );
     }
 
     #[tokio::test(start_paused = true)]
