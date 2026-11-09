@@ -22,7 +22,7 @@ import { emptyPlanStats } from "../pipeline/planning/index.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { setBundleServices } from "./bundle.ts";
 import { setScriptControls } from "./steps.ts";
-import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
+import { installTraceSeam, reportsMobile, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
 import { createSettleState, evaluateSettle } from "../pipeline/settle.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
@@ -331,6 +331,23 @@ describe("the trace seam", () => {
       if (own) Object.defineProperty(Navigator.prototype, "deviceMemory", own);
       else delete (Navigator.prototype as { deviceMemory?: unknown }).deviceMemory;
     }
+  });
+
+  it("records the page it ran on, the window, and whether the browser said it was a phone's", async () => {
+    installTraceSeam();
+    setBundleServices(null);
+    traceRecorder.openRun(OPEN_CAUSE);
+    const bundle = await window.lucidaTrace!.exportBundle();
+    expect(bundle.header.fullUi).toBe(true);
+    expect(bundle.header.pageSize).toEqual({ cssWidth: window.innerWidth, cssHeight: window.innerHeight });
+    expect(bundle.header.mobile).toBe(false);
+
+    const phone = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
+    expect(reportsMobile({ userAgent: phone } as Navigator)).toBe(true);
+    // The hints win where the browser sends them, since the string can be frozen.
+    expect(reportsMobile({ userAgent: phone, userAgentData: { mobile: false } } as unknown as Navigator)).toBe(false);
+    expect(reportsMobile({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)", userAgentData: { mobile: true } } as unknown as Navigator)).toBe(true);
+    expect(reportsMobile(undefined)).toBe(false);
   });
 
   it("carries the frame and the health the viewer registered, and the projection only when asked", async () => {

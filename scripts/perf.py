@@ -61,7 +61,7 @@ EXE = ".exe" if os.name == "nt" else ""
 # What a scenario can require of a dataset.
 TRAITS = ("volume", "time", "channels", "collection", "labels")
 CAMERAS = ("slice", "arcball")
-SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "mobile", "steps"}
+SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "mobile", "fullUi", "steps"}
 DEFAULT_SUITE = "quick"
 # Each network is the server's source throttle profile, on its reads, and its
 # link throttle profile, on the session socket to the page; `local` is neither.
@@ -118,6 +118,9 @@ class Scenario:
     # Drive the page as a phone: a mobile layout, touch input, and a mobile
     # user agent, at the scenario's width and height.
     mobile: bool = False
+    # Load the full viewer page, chrome and all, so the run reads the layout
+    # a person sees; the capture surface otherwise.
+    full_ui: bool = False
 
     @property
     def adds(self) -> tuple[str, ...]:
@@ -224,8 +227,9 @@ def load_scenario(path: Path) -> Scenario:
     for key in ("width", "height"):
         if key in entry and not (isinstance(entry[key], int) and entry[key] > 0):
             raise PerfError(f"{where}: {key} is a positive whole number of CSS pixels")
-    if not isinstance(entry.get("mobile", False), bool):
-        raise PerfError(f"{where}: mobile is true or false")
+    for key in ("mobile", "fullUi"):
+        if not isinstance(entry.get(key, False), bool):
+            raise PerfError(f"{where}: {key} is true or false")
     return Scenario(
         name=path.stem,
         description=entry.get("description", ""),
@@ -236,6 +240,7 @@ def load_scenario(path: Path) -> Scenario:
         width=entry.get("width"),
         height=entry.get("height"),
         mobile=entry.get("mobile", False),
+        full_ui=entry.get("fullUi", False),
     )
 
 
@@ -962,8 +967,8 @@ def script_file(scenario: Scenario, locations: dict[str, str], runs_dir: Path) -
 
 
 def viewport_args(scenario: Scenario) -> list[str]:
-    """The `lucida trace` flags for the window a scenario asks for; none
-    leaves the CLI's default desktop window."""
+    """The `lucida trace` flags for the window and the page a scenario asks
+    for; none leaves the CLI's default desktop window on the capture surface."""
     argv = []
     if scenario.width is not None:
         argv += ["--width", str(scenario.width)]
@@ -971,6 +976,8 @@ def viewport_args(scenario: Scenario) -> list[str]:
         argv += ["--height", str(scenario.height)]
     if scenario.mobile:
         argv.append("--mobile")
+    if scenario.full_ui:
+        argv.append("--full-ui")
     return argv
 
 

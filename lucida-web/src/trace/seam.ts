@@ -17,6 +17,7 @@ import { compareTraces, renderComparison, type CompareSide, type RunComparison }
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
 import { decodePngOnPage, pageDecodesPng, readFrame } from "./flatFrame.ts";
 import { readPageScroll } from "./pageScroll.ts";
+import { readChrome } from "./chromeLayout.ts";
 import {
   renderProvisional,
   type ProvisionalOptions,
@@ -42,6 +43,7 @@ import { requestAdapterWithRetry, type AdapterRetry } from "../renderer/requestA
 import type { SavedView } from "../savedView/types.ts";
 import {
   TRACE_SCHEMA_VERSION,
+  type ChromeReading,
   type FrameReading,
   type GpuIdentity,
   type PageScrollReading,
@@ -195,6 +197,14 @@ export interface LucidaTraceSeam {
    * finding. A driver calls this beside {@link readFrame}. Closes nothing.
    */
   readPageScroll(runId?: string): PageScrollReading;
+  /**
+   * Read where the viewer's chrome sits, its top bar and a phone's bottom
+   * sheet, and record it on run `runId` on the same terms as
+   * {@link readPageScroll}: a part not wholly inside the viewport is a
+   * finding. The capture surface renders no chrome and reads no parts.
+   * Closes nothing.
+   */
+  readChrome(runId?: string): ChromeReading;
   /**
    * The trace read as a diagnostic: thresholds, the attribution back-walk,
    * the coverage block and the verdict. Defaults to the newest run.
@@ -388,6 +398,11 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
           origin: target.location?.origin ?? null,
           devicePixelRatio: target.devicePixelRatio ?? null,
           deviceMemoryGib: readDeviceMemoryGiB(),
+          pageSize:
+            typeof target.innerWidth === "number"
+              ? { cssWidth: target.innerWidth, cssHeight: target.innerHeight }
+              : null,
+          mobile: reportsMobile(target.navigator),
           decodePng: pageDecodesPng() ? decodePngOnPage : null,
           now: Date.now(),
         },
@@ -407,6 +422,12 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       const reading = readPageScroll();
       const run = runId ?? traceRecorder.concludedRuns.lastId;
       if (run) traceRecorder.notePageScroll(run, reading);
+      return reading;
+    },
+    readChrome: (runId?: string) => {
+      const reading = readChrome();
+      const run = runId ?? traceRecorder.concludedRuns.lastId;
+      if (run) traceRecorder.noteChrome(run, reading);
       return reading;
     },
     diagnose: (runId?: string, scope?: Omit<DiagnoseScope, "runId">) =>
@@ -480,6 +501,18 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
 }
 
 const DEFAULT_ADD_TIMEOUT_MS = 60_000;
+
+/**
+ * Whether the browser says it is a phone's: its client hints where it sends
+ * them, and otherwise the `Mobi` token every phone browser's user agent
+ * carries, since Safari sends no hints.
+ */
+export function reportsMobile(nav: Navigator | undefined): boolean {
+  if (!nav) return false;
+  const hints = (nav as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData;
+  if (typeof hints?.mobile === "boolean") return hints.mobile;
+  return /Mobi/.test(nav.userAgent ?? "");
+}
 
 function refused(reason: string): StepOutcome {
   return { applied: false, reason };

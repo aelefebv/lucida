@@ -1183,6 +1183,13 @@ struct TraceRunArgs {
     /// --device-pixel-ratio 3 --mobile`
     #[arg(long)]
     mobile: bool,
+    /// Load the full viewer page, its top bar, panels or phone sheet around
+    /// the canvas, instead of the chrome-free capture surface, so the run
+    /// reads the layout a person sees. The full page also writes what a
+    /// person's page writes, such as the workspace's last view, so it is off
+    /// by default for measurement
+    #[arg(long)]
+    full_ui: bool,
     /// Drive the page as a device that reports this much memory, so it fits
     /// its memory budgets to it, as `navigator.deviceMemory` does
     #[arg(long, value_name = "GIB", value_parser = trace::parse_device_memory)]
@@ -4245,7 +4252,7 @@ async fn run_trace(
         let channels = trace::channel_count(&document, &dataset_id);
         trace::pin_display(&mut view, &dataset_id, channels, pins);
     }
-    let url = montage::with_render_param(&viewer_inline_view_web_url(target, &view)?);
+    let url = trace::driven_page_url(&viewer_inline_view_web_url(target, &view)?, args.full_ui);
     let composed = trace::ComposedView {
         dataset: normalize_dataset_url(&dataset_url),
         url: url.clone(),
@@ -4256,6 +4263,7 @@ async fn run_trace(
         cores: args.cores,
         camera: composed_camera,
         mobile: args.mobile,
+        full_ui: args.full_ui,
     };
 
     let facts = trace::DriverFacts {
@@ -4385,11 +4393,11 @@ async fn run_replay(
     .await?;
 
     let url = match &plan.view_fragment {
-        Some(fragment) => trace_replay::rehost_view(&target.web_url, fragment),
+        Some(fragment) => trace_replay::rehost_view(&target.web_url, fragment, plan.full_ui),
         None => {
             let view =
                 trace::compose_dataset_view(&plan.dataset_url, plan.width, plan.height, None);
-            montage::with_render_param(&viewer_inline_view_web_url(target, &view)?)
+            trace::driven_page_url(&viewer_inline_view_web_url(target, &view)?, plan.full_ui)
         }
     };
     let facts = trace::DriverFacts {
@@ -4402,7 +4410,8 @@ async fn run_replay(
             device_memory_gib: plan.device_memory_gib,
             cores: None,
             camera: None,
-            mobile: false,
+            mobile: plan.mobile,
+            full_ui: plan.full_ui,
         },
         server_warmth: warmth,
         source_throttle,
@@ -4415,7 +4424,8 @@ async fn run_replay(
         knobs: plan.knobs,
         replay: Some(plan.record),
     };
-    let viewport = Viewport::new(plan.width, plan.height, plan.device_pixel_ratio);
+    let viewport =
+        Viewport::new(plan.width, plan.height, plan.device_pixel_ratio).with_mobile(plan.mobile);
     drive_and_persist(&url, token, viewport, wait, &facts, sidecars, trace_dir).await
 }
 
@@ -6501,10 +6511,12 @@ mod tests {
         use std::collections::{BTreeMap, BTreeSet};
         let mut replayed_by: BTreeMap<&str, &str> = BTreeMap::from([
             ("dataset", "datasets"),
-            ("width", "viewport"),
-            ("height", "viewport"),
+            ("width", "pageSize"),
+            ("height", "pageSize"),
             ("device_pixel_ratio", "devicePixelRatio"),
             ("device_memory", "deviceMemoryGib"),
+            ("mobile", "mobile"),
+            ("full_ui", "fullUi"),
             ("camera", "viewUrl"),
             ("zoom", "viewUrl"),
             ("contrast", "pins"),
@@ -6516,9 +6528,8 @@ mod tests {
         // The planning knobs replay through the header's planning
         // configuration. The cache knobs have no header field, so a replay
         // runs the cache at its own values. The page reports no core count,
-        // so a replay runs on the replaying machine's cores, and no phone
-        // emulation, so a replay drives a desktop page at the same size.
-        let mut not_in_header = vec!["cores", "mobile"];
+        // so a replay runs on the replaying machine's cores.
+        let mut not_in_header = vec!["cores"];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {
