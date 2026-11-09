@@ -16,7 +16,9 @@ use lucida_core::DatasetId;
 use lucida_core::camera::{Camera, Framing};
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{Colormap, DatasetDisplaySettings, DocumentState, RenderMode, Scene};
-use lucida_protocol::{DatasetSourceCacheStats, DatasetSourceHealth, SourceThrottleReport};
+use lucida_protocol::{
+    DatasetSourceCacheStats, DatasetSourceHealth, LinkThrottleReport, SourceThrottleReport,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -485,6 +487,36 @@ pub struct CompareThrottle {
     pub settings: Option<SourceThrottleReport>,
 }
 
+/// The throttle the server put on the session socket during the run, which
+/// every chunk the page waited for crossed. Recorded for the same reason as
+/// [`SourceThrottleRecord`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkThrottleRecord {
+    /// The server's settings, absent when it sent at full speed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<LinkThrottleReport>,
+    /// One line a reader can put beside a duration.
+    pub summary: String,
+}
+
+impl LinkThrottleRecord {
+    pub fn from_report(settings: Option<LinkThrottleReport>) -> Self {
+        let summary = match &settings {
+            Some(report) => format!("session socket throttled on the server: {}", report.label()),
+            None => "session socket unthrottled".to_string(),
+        };
+        Self { settings, summary }
+    }
+}
+
+/// A side's link throttle as the page's comparison reads it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompareLinkThrottle {
+    /// The server's settings, null when it sent at full speed.
+    pub settings: Option<LinkThrottleReport>,
+}
+
 /// What only the driver knows. The page's own header carries everything it can
 /// observe from inside; this is the rest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -507,6 +539,10 @@ pub struct TraceRunHeader {
     /// file written before the driver recorded it, which then cannot say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_throttle: Option<SourceThrottleRecord>,
+    /// The throttle the server put on the session socket. Absent from a run
+    /// file written before the driver recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_throttle: Option<LinkThrottleRecord>,
     pub server_url: String,
     pub workspace_id: String,
     /// The settled frame, when the caller asked for one: a PNG of the page
@@ -1006,6 +1042,9 @@ pub struct BundleHealth {
     /// The throttle the server put on every source read, null when none.
     #[serde(default)]
     pub source_throttle: Option<SourceThrottleReport>,
+    /// The throttle the server put on the session socket, null when none.
+    #[serde(default)]
+    pub link_throttle: Option<LinkThrottleReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1249,6 +1288,9 @@ pub struct CompareSideFacts {
     /// The server's source throttle, or null when the file does not say.
     /// Unlike a condition, a difference here makes the two runs incomparable.
     pub source_throttle: Option<CompareThrottle>,
+    /// The server's link throttle, or null when the file does not say, and
+    /// judged as the source throttle is.
+    pub link_throttle: Option<CompareLinkThrottle>,
 }
 
 /// One side as the page is handed it: the document, and the side around it.
@@ -1283,6 +1325,11 @@ impl<'a> CompareSide<'a> {
                         settings: record.settings.clone(),
                     }
                 }),
+                link_throttle: file.header.link_throttle.as_ref().map(|record| {
+                    CompareLinkThrottle {
+                        settings: record.settings.clone(),
+                    }
+                }),
             },
         }
     }
@@ -1298,6 +1345,9 @@ impl<'a> CompareSide<'a> {
                 conditions: serde_json::json!({}),
                 source_throttle: bundle.health.as_ref().map(|health| CompareThrottle {
                     settings: health.source_throttle.clone(),
+                }),
+                link_throttle: bundle.health.as_ref().map(|health| CompareLinkThrottle {
+                    settings: health.link_throttle.clone(),
                 }),
             },
         }
@@ -1921,12 +1971,21 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .as_ref()
         .map(|script| format!("{}\n", format_script_human(script)))
         .unwrap_or_default();
-    let throttle = header
+    let source_throttle = header
         .source_throttle
         .as_ref()
         .filter(|record| record.settings.is_some())
-        .map(|record| format!("throttle  {}\n", record.summary))
-        .unwrap_or_default();
+        .map(|record| record.summary.as_str());
+    let link_throttle = header
+        .link_throttle
+        .as_ref()
+        .filter(|record| record.settings.is_some())
+        .map(|record| record.summary.as_str());
+    let throttle: String = source_throttle
+        .into_iter()
+        .chain(link_throttle)
+        .map(|summary| format!("throttle  {summary}\n"))
+        .collect();
     let knobs = header
         .knobs
         .as_ref()
@@ -2038,6 +2097,12 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
             if let Some(throttle) = &health.source_throttle {
                 lines.push(format!(
                     "throttle  source reads throttled on the server: {}",
+                    throttle.label()
+                ));
+            }
+            if let Some(throttle) = &health.link_throttle {
+                lines.push(format!(
+                    "throttle  session socket throttled on the server: {}",
                     throttle.label()
                 ));
             }
@@ -2611,6 +2676,7 @@ pub struct DriverFacts {
     pub composed_view: ComposedView,
     pub server_warmth: ServerWarmth,
     pub source_throttle: SourceThrottleRecord,
+    pub link_throttle: LinkThrottleRecord,
     pub server_url: String,
     pub workspace_id: String,
     /// Where to write the settled frame, when the caller wants one.
@@ -2645,6 +2711,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             stall_reason: export.stall_reason,
             server_warmth: facts.server_warmth.clone(),
             source_throttle: Some(facts.source_throttle.clone()),
+            link_throttle: Some(facts.link_throttle.clone()),
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
             screenshot: facts.screenshot.clone(),
@@ -2975,6 +3042,7 @@ mod tests {
             composed_view: composed(),
             server_warmth: cold(),
             source_throttle: SourceThrottleRecord::from_report(None),
+            link_throttle: LinkThrottleRecord::from_report(None),
             server_url: "http://host".to_string(),
             workspace_id: "ws".to_string(),
             screenshot: None,
@@ -2996,6 +3064,7 @@ mod tests {
                 stall_reason: None,
                 server_warmth: cold(),
                 source_throttle: Some(SourceThrottleRecord::from_report(None)),
+                link_throttle: Some(LinkThrottleRecord::from_report(None)),
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
                 screenshot: None,
@@ -3951,6 +4020,58 @@ mod tests {
         let artifact = TraceArtifact::Bundle(Box::new(no_health));
         let side = CompareSide::from_artifact(&artifact, Path::new("field.bundle.json"));
         assert_eq!(side.side.source_throttle, None);
+    }
+
+    /// The link throttle is recorded and read the way the source throttle
+    /// is, beside it.
+    #[test]
+    fn a_run_under_a_link_throttle_says_so_everywhere_it_is_read() {
+        let report = LinkThrottleReport {
+            profile: Some("broadband".into()),
+            latency_ms: 40,
+            bytes_per_sec: Some(12_500_000),
+        };
+        let throttled = DriverFacts {
+            link_throttle: LinkThrottleRecord::from_report(Some(report.clone())),
+            ..facts()
+        };
+        let file = assemble_run_file(minimal_export(), &throttled);
+        let header = serde_json::to_value(&file.header).unwrap();
+        assert_eq!(header["linkThrottle"]["settings"]["latency_ms"], json!(40));
+        let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
+        assert!(
+            text.contains(
+                "throttle  session socket throttled on the server: broadband: 40 ms round trip, 100 Mbit/s to each client\n"
+            ),
+            "{text}"
+        );
+        let side = CompareSide::from_run_file(&file, Path::new("runs/on.json"));
+        assert_eq!(
+            side.side.link_throttle,
+            Some(CompareLinkThrottle {
+                settings: Some(report)
+            })
+        );
+
+        let plain = assemble_run_file(minimal_export(), &facts());
+        assert_eq!(
+            serde_json::to_value(&plain.header).unwrap()["linkThrottle"],
+            json!({ "summary": "session socket unthrottled" })
+        );
+        let side = CompareSide::from_run_file(&plain, Path::new("runs/off.json"));
+        assert_eq!(
+            side.side.link_throttle,
+            Some(CompareLinkThrottle { settings: None })
+        );
+
+        let mut older = serde_json::to_value(&plain).unwrap();
+        older["header"]
+            .as_object_mut()
+            .unwrap()
+            .remove("linkThrottle");
+        let older: TraceRunFile = serde_json::from_value(older).unwrap();
+        let side = CompareSide::from_run_file(&older, Path::new("runs/old.json"));
+        assert_eq!(side.side.link_throttle, None);
     }
 
     /// A run file's side carries the knobs the driver set and the server's

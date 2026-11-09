@@ -33,6 +33,7 @@ use crate::generated::{
     GeneratedCoarseService,
 };
 use crate::inbox::{self, InboxStore, Report as InboxReport};
+use crate::link_throttle;
 use crate::open_diagnostics::{
     backend_kind_for_url, location_failure, open_failure, open_progress,
 };
@@ -95,7 +96,9 @@ async fn handle_client_inner(
     let session = Arc::clone(&ctx.live.session);
     let tx = ctx.live.tx.clone();
     let unicast_routes = Arc::clone(&ctx.live.unicast_routes);
-    let (mut ws_tx, mut ws_rx) = ws.split();
+    let (ws_tx, ws_rx) = ws.split();
+    let (mut ws_tx, link_writer) = link_throttle::outbound(ws_tx);
+    let mut ws_rx = link_throttle::inbound(ws_rx);
 
     // Per-client unicast queue for targeted messages (chunk routing). It
     // also carries the close signal anything in the server can raise.
@@ -282,6 +285,11 @@ async fn handle_client_inner(
                     }
                 }
             }
+        }
+        // Behind a link throttle the last messages are still crossing it.
+        drop(ws_tx);
+        if let Some(writer) = link_writer {
+            let _ = writer.await;
         }
     });
 
@@ -497,6 +505,7 @@ async fn handle_client_inner(
                                 request_id,
                                 datasets,
                                 source_throttle: lucida_store::source_throttle::report(),
+                                link_throttle: link_throttle::report(),
                             };
                             let senders = unicast_routes.lock().await;
                             if let Some(sender) = senders.get(&id) {

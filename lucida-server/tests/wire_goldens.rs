@@ -56,8 +56,8 @@ use lucida_protocol::{
     DirectFetchDescriptor, DirectImageSpec, FetchSource, GeneratedAvailabilityDelta,
     GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
     GeneratedLevelAvailability, GeneratedLevelHistogram, GeneratedLevelSummary, HistogramBin,
-    LABEL_NONE, LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET,
-    ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus,
+    LABEL_NONE, LevelAddress, LinkThrottleReport, LocalFetchDescriptor, MetadataReadPhase,
+    PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus,
     SourceThrottleReport, TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
@@ -1660,6 +1660,11 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     jitter_ms: 100,
                     bytes_per_sec: Some(18 * 1024 * 1024),
                 }),
+                link_throttle: Some(LinkThrottleReport {
+                    profile: Some("broadband".into()),
+                    latency_ms: 40,
+                    bytes_per_sec: Some(12_500_000),
+                }),
             },
             {
                 let mut keys = req(
@@ -1670,6 +1675,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                         "/datasets",
                         "/source_throttle/latency_ms",
                         "/source_throttle/jitter_ms",
+                        "/link_throttle/latency_ms",
                     ],
                 );
                 keys.extend(req("/datasets/0", SOURCE_HEALTH_REQUIRED));
