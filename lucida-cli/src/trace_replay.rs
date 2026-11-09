@@ -518,6 +518,7 @@ mod tests {
                     height: 900,
                     device_pixel_ratio: 2.0,
                     device_memory_gib: None,
+                    cores: None,
                     camera: None,
                 },
                 quiescence_hold_ms: 500.0,

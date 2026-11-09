@@ -9,6 +9,7 @@ import { debugLog } from "../../debug/logging.ts";
 import {
   CpuCache,
   CHUNK_FAILURE_STREAK_THRESHOLD,
+  DEFAULT_MAX_CONCURRENT_FETCHES,
   FAILURE_BACKOFF_BASE_MS,
   FAILURE_BACKOFF_FACTOR,
   FAILURE_BACKOFF_MAX_MS,
@@ -625,6 +626,44 @@ describe("CpuCache", () => {
       source.fetchCount = 0;
       cache.submit(makePlan([req]));
       expect(source.fetchCount).toBe(0);
+    });
+  });
+
+  describe("fetch caps", () => {
+    function manyRequests(n: number): ChunkRequest[] {
+      return Array.from({ length: n }, (_, x) => makeRequest({ x, chunkKey: `0/0/0/0/0/${x}` }));
+    }
+
+    it("keeps as many fetches in flight with one decode worker as with many", () => {
+      const source = createMockContentSource();
+      const oneWorker = { ...createSyncDecode(), size: 1 } as unknown as DecodePool;
+      const cache = new CpuCache(source, oneWorker);
+
+      cache.submit(makePlan(manyRequests(DEFAULT_MAX_CONCURRENT_FETCHES + 10)));
+
+      expect(cache.telemetry().inFlightCount).toBe(DEFAULT_MAX_CONCURRENT_FETCHES);
+    });
+
+    it("charges a fetch its chunk's decoded size before anything has landed", () => {
+      const { cache, source } = createTestCache({ maxBytesInFlight: 4_000 });
+
+      cache.submit(makePlan(manyRequests(10)), () => 1_000);
+
+      expect(cache.telemetry().inFlightCount).toBe(4);
+      expect(cache.telemetry().inFlightBytes).toBe(4_000);
+      expect(source.pendingFetches.size).toBe(4);
+    });
+
+    it("lets the next fetch start in the room a landed one leaves", async () => {
+      const { cache, source } = createTestCache({ maxBytesInFlight: 4_000 });
+      const requests = manyRequests(10);
+      cache.submit(makePlan(requests), () => 1_000);
+
+      source.resolve("entity-1/image-1/0/0/0/0/0/0", new ArrayBuffer(100));
+      await vi.waitFor(() => expect(cache.holds(requests[0])).toBe(true));
+
+      expect(cache.telemetry().inFlightCount).toBe(4);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/4")).toBe(true);
     });
   });
 

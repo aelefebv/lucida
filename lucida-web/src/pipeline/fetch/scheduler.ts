@@ -37,6 +37,12 @@ export const ADMISSION_WINDOW_CONCURRENCY_MULTIPLE = 4;
 export interface SchedulerConfig {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
+  /**
+   * The bytes in flight allowed before anything has landed. Each fetch that
+   * lands widens the window by what it carried, up to `maxBytesInFlight`.
+   * Absent, the window starts wide open.
+   */
+  initialBytesInFlight?: number;
   burstLogger?: BurstLogger;
   /**
    * How many front-of-queue entries carry an enqueue timestamp. Defaults
@@ -87,6 +93,8 @@ export class Scheduler<Req extends SchedulableRequest> {
   private pending: Req[] = [];
   private inFlight = new Map<string, InFlightEntry<Req>>();
   private inFlightBytesCounter = 0;
+  /** The bytes in flight allowed so far; see {@link SchedulerConfig.initialBytesInFlight}. */
+  private bytesAllowed: number;
   /**
    * Admission timestamps for the window only — the moment a request
    * entered the front {@link admissionWindow} entries of `pending`, i.e.
@@ -112,6 +120,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     this.keyFn = keyFn;
     this.startFn = startFn;
     this.admissionWindow = this.windowFor(config.maxConcurrentFetches);
+    this.bytesAllowed = config.initialBytesInFlight ?? Infinity;
   }
 
   private windowFor(maxConcurrentFetches: number): number {
@@ -309,7 +318,7 @@ export class Scheduler<Req extends SchedulableRequest> {
   private canStartMore(): boolean {
     return (
       this.inFlight.size < this.config.maxConcurrentFetches &&
-      this.inFlightBytesCounter < this.config.maxBytesInFlight
+      this.inFlightBytesCounter < Math.min(this.bytesAllowed, this.config.maxBytesInFlight)
     );
   }
 
@@ -331,12 +340,17 @@ export class Scheduler<Req extends SchedulableRequest> {
     this.startFn(req, controller, estimate, key, admittedAtMs, startedAtMs);
   }
 
-  /** No-op if the key was cancelled between fetch start and response. */
+  /**
+   * The fetch for `key` landed with `actualBytes`, which widens the bytes
+   * allowed in flight by as much. No-op if the key was cancelled between
+   * fetch start and response.
+   */
   correctInFlightBytes(key: string, actualBytes: number): void {
     const entry = this.inFlight.get(key);
     if (!entry) return;
     this.inFlightBytesCounter += actualBytes - entry.estimatedBytes;
     entry.estimatedBytes = actualBytes;
+    this.bytesAllowed += actualBytes;
   }
 
   /** Idempotent — safe to call after cancellation. */
@@ -450,6 +464,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     }
     this.inFlight.clear();
     this.inFlightBytesCounter = 0;
+    this.bytesAllowed = this.config.initialBytesInFlight ?? Infinity;
     this.pending = [];
     this.enqueuedAt.clear();
   }

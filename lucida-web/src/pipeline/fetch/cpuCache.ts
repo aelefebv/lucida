@@ -70,7 +70,24 @@ export type {
 export const DEFAULT_MAIN_BUDGET = CEILING_BUDGETS.cpuMainBytes;
 export const DEFAULT_OVERVIEW_BUDGET = CEILING_BUDGETS.cpuOverviewBytes;
 export const DEFAULT_MAX_BYTES_IN_FLIGHT = CEILING_BUDGETS.cpuBytesInFlight;
-export const FETCH_CONCURRENCY_MULTIPLIER = 3;
+/**
+ * Fetches in flight at once, the same on every device. A fetch waiting on the
+ * wire holds no decode worker and none of the page's memory, so the decode
+ * pool says nothing about how many the link can carry, and the bytes in flight
+ * are what bound memory. This is the most the server reads at once by default;
+ * a fetch past that only waits in its queue.
+ */
+export const DEFAULT_MAX_CONCURRENT_FETCHES = 128;
+/**
+ * The bytes allowed in flight before anything has landed. Each fetch that
+ * lands widens the allowance by what it carried, up to the bytes cap. Until
+ * replies come back the page cannot tell a server on this machine from one
+ * reading a store across a continent. A first wave of large chunks, sent all
+ * at once, queues behind the few cores a small server serves them from and
+ * delays every request in it, while a far link fills within a few round trips
+ * of growth. 4 MiB is about one 200 ms round trip at 18 MiB/s.
+ */
+export const INITIAL_BYTES_IN_FLIGHT = 4 * 1024 * 1024;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
 /** Consecutive chunk-delivery failures, with no delivered chunk between them,
@@ -374,6 +391,12 @@ export class CpuCache {
    */
   private rejectionTracker = new RejectionTracker();
 
+  /**
+   * Each dataset's decoded chunk size by request, as its last submit gave it:
+   * what a fetch is charged against the bytes in flight until it lands.
+   */
+  private readonly chunkBytesByDataset = new Map<string, (req: ChunkRequest) => number>();
+
   /** Reused by {@link levelResidency}; see its note on lifetime. */
   private readonly levelResidencyScratch: LevelResidency = { cached: [], inFlight: [] };
 
@@ -392,7 +415,7 @@ export class CpuCache {
     this.config = {
       mainBudgetBytes: config?.mainBudgetBytes ?? DEFAULT_MAIN_BUDGET,
       overviewBudgetBytes: config?.overviewBudgetBytes ?? DEFAULT_OVERVIEW_BUDGET,
-      maxConcurrentFetches: config?.maxConcurrentFetches ?? (decode.size * FETCH_CONCURRENCY_MULTIPLIER),
+      maxConcurrentFetches: config?.maxConcurrentFetches ?? DEFAULT_MAX_CONCURRENT_FETCHES,
       maxBytesInFlight: config?.maxBytesInFlight ?? DEFAULT_MAX_BYTES_IN_FLIGHT,
       onChunkFailureStreak: config?.onChunkFailureStreak,
       onChunkFailureRecovered: config?.onChunkFailureRecovered,
@@ -457,6 +480,7 @@ export class CpuCache {
       {
         maxConcurrentFetches: this.config.maxConcurrentFetches,
         maxBytesInFlight: this.config.maxBytesInFlight,
+        initialBytesInFlight: INITIAL_BYTES_IN_FLIGHT,
         burstLogger: burstBackpressure,
       },
       (req) => this.inFlightKey(req),
@@ -480,9 +504,15 @@ export class CpuCache {
    * no-op. In-flight work for active entities that left the new plan is
    * preempted, so scrubbed-away T/Z/channel work does not hold scheduler
    * slots ahead of current requests.
+   *
+   * `chunkBytes` gives what each of the plan's chunks decodes to. A plan is
+   * one dataset's, so it stands for that dataset's fetches from then on.
    */
-  submit(plan: RequestPlan): void {
+  submit(plan: RequestPlan, chunkBytes?: (req: ChunkRequest) => number): void {
     this.currentEpochs = plan.epochs;
+    if (chunkBytes && plan.requests.length > 0) {
+      this.chunkBytesByDataset.set(plan.requests[0].datasetId, chunkBytes);
+    }
 
     this.interactionDetector.push(plan.epochs);
 
@@ -505,7 +535,7 @@ export class CpuCache {
     const tiers = new Array<ResidencyTier>(requests.length);
     // Seeded with this submit's active-entity in-flight keys; the pass below
     // strikes out each key the plan still wants, leaving the work to abort.
-    // Bounded by the concurrency cap, so it stays a few dozen strings.
+    // Bounded by the concurrency cap.
     const unwantedInFlightKeys = this.activeInFlightChunkKeys(newActiveIds);
     for (let i = 0; i < requests.length; i++) {
       const req = requests[i];
@@ -825,6 +855,7 @@ export class CpuCache {
     this.wantedRequests = this.wantedRequests.map(
       (requests) => requests.filter((req) => req.datasetId !== datasetId),
     );
+    this.chunkBytesByDataset.delete(datasetId);
   }
 
   /**
@@ -1486,6 +1517,7 @@ export class CpuCache {
     this.deliveryState.reset();
     this.sentImagesByEntity.clear();
     this.inFlightChunkMeta.clear();
+    this.chunkBytesByDataset.clear();
     this.wantedRequests = [];
     this.disarmReconcile();
     this.lastReconcileAt = -Infinity;
@@ -1738,8 +1770,19 @@ export class CpuCache {
   }
 
   private drainScheduler(): void {
-    this.chunkScheduler.drain(() => this.counters.averageDecodedBytes());
+    this.chunkScheduler.drain(this.estimateFetchBytes);
   }
+
+  /**
+   * What a fetch is charged against the bytes in flight until it lands: about
+   * its chunk's decoded size, which a compressed chunk only undercuts. An
+   * average of what already landed knows nothing on a cold open, or of a
+   * dataset whose chunks are larger than the last one's, and the count cap
+   * is too wide to stand in for it. A chunk the manifest gives no size takes
+   * that average.
+   */
+  private readonly estimateFetchBytes = (req: ChunkRequest): number =>
+    this.chunkBytesByDataset.get(req.datasetId)?.(req) || this.counters.averageDecodedBytes();
 
   private applyElasticTierBudgets(): void {
     const detailDemand = this.desiredDetailKeysThisTick.size > 0;

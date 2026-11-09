@@ -1181,6 +1181,10 @@ struct TraceRunArgs {
     /// its memory budgets to it, as `navigator.deviceMemory` does
     #[arg(long, value_name = "GIB", value_parser = trace::parse_device_memory)]
     device_memory: Option<f64>,
+    /// Drive the page as a device with this many logical cores, so it sizes
+    /// its decode workers to them, as `navigator.hardwareConcurrency` reports
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    cores: Option<u32>,
     /// Accepted so older scripts still run. Every layer opens in its
     /// composite, so it changes nothing.
     #[arg(long, hide = true)]
@@ -4239,6 +4243,7 @@ async fn run_trace(
         height: args.height,
         device_pixel_ratio: args.device_pixel_ratio,
         device_memory_gib: args.device_memory,
+        cores: args.cores,
         camera: composed_camera,
     };
 
@@ -4379,6 +4384,7 @@ async fn run_replay(
             height: plan.height,
             device_pixel_ratio: plan.device_pixel_ratio,
             device_memory_gib: plan.device_memory_gib,
+            cores: None,
             camera: None,
         },
         server_warmth: warmth,
@@ -6490,8 +6496,9 @@ mod tests {
         ]);
         // The planning knobs replay through the header's planning
         // configuration. The cache knobs have no header field, so a replay
-        // runs the cache at its own values.
-        let mut not_in_header = vec![];
+        // runs the cache at its own values. The page reports no core count,
+        // so a replay runs on the replaying machine's cores.
+        let mut not_in_header = vec!["cores"];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {
