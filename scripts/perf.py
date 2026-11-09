@@ -59,7 +59,7 @@ GENERATOR = REPO / "extras" / "synthetic_ome_zarr.py"
 EXE = ".exe" if os.name == "nt" else ""
 
 # What a scenario can require of a dataset.
-TRAITS = ("volume", "time", "channels", "collection")
+TRAITS = ("volume", "time", "channels", "collection", "labels")
 CAMERAS = ("slice", "arcball")
 SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "mobile", "steps"}
 DEFAULT_SUITE = "quick"
@@ -168,6 +168,8 @@ def traits_from_options(options: tuple[str, ...]) -> frozenset[str]:
             traits.add("time")
         elif flag == "--tiles":
             traits.add("collection")
+    if "--labels" in options:
+        traits.add("labels")
     return frozenset(traits)
 
 

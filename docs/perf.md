@@ -120,7 +120,7 @@ Real datasets go in `scripts/perf/datasets.local.json`, which git ignores. Each 
 { "datasets": { "big-volume": { "url": "/srv/data/big.ome.zarr", "traits": ["volume", "channels"] } } }
 ```
 
-The traits are `volume`, `time`, `channels` and `collection`.
+The traits are `volume`, `time`, `channels`, `collection` and `labels`.
 
 ## Scenarios
 

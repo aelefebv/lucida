@@ -289,8 +289,9 @@ export interface LucidaTraceSeam {
    */
   scrub(axis: ScrubAxis, count: number): StepOutcome;
   /**
-   * A scripted select: show or hide a channel of the dataset in hand or a
-   * layer by dataset id, through the handler the layer panel calls. Shows
+   * A scripted select: show or hide a channel of the dataset in hand, a
+   * layer by dataset id, or a label of the dataset in hand by its index
+   * among the labels, through the handler the layer panel calls. Shows
    * unless `visible` is false. The layer panel is hidden on the capture
    * surface, which is why this entry exists beside {@link scrub}.
    */
@@ -429,7 +430,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     select: (target: SelectTarget, visible: boolean = true) => {
       const controls = scriptControls();
       if (!controls) return noControls();
-      const named = target as Partial<{ channel: unknown; layer: unknown }> | null;
+      const named = target as Partial<{ channel: unknown; layer: unknown; label: unknown }> | null;
       if (named && typeof named.channel === "number") {
         if (!Number.isInteger(named.channel) || named.channel < 0) {
           return refused(`a channel is a whole number from 0, not ${named.channel}`);
@@ -439,7 +440,13 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       if (named && typeof named.layer === "string" && named.layer !== "") {
         return controls.select({ layer: named.layer }, visible === true);
       }
-      return refused("a select names a channel index or a layer id");
+      if (named && typeof named.label === "number") {
+        if (!Number.isInteger(named.label) || named.label < 0) {
+          return refused(`a label is a whole number from 0, not ${named.label}`);
+        }
+        return controls.select({ label: named.label }, visible === true);
+      }
+      return refused("a select names a channel index, a layer id or a label index");
     },
     contrast: (channel: number, min: number, max: number) => {
       const controls = scriptControls();

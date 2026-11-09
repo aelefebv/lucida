@@ -1,0 +1,11 @@
+{
+  "description": "show the first label, then step Z by one twice and jump 70 planes, as z-scrub does",
+  "requires": ["volume", "labels"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "select", "label": 0 },
+    { "kind": "scrub", "axis": "z", "count": 1 },
+    { "kind": "scrub", "axis": "z", "count": 1 },
+    { "kind": "scrub", "axis": "z", "count": 70 }
+  ]
+}

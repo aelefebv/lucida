@@ -6745,6 +6745,7 @@ mod tests {
                         ScriptStep::Select {
                             channel: Some(0),
                             layer: None,
+                            label: None,
                             visible: false
                         },
                         ScriptStep::Zoom {
