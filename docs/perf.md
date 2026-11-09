@@ -39,7 +39,7 @@ the N runs, followed by half their range when they differ.
 | --- | --- |
 | throttle | the profile in `header.sourceThrottle`; `-` when unthrottled |
 | first frame | `load.firstFrameMs` |
-| settle | `load.settleMs`: the view has its wanted set, prefetch left out |
+| settle | `load.settleMs`: the view has its wanted set drawn, prefetch left out |
 | prefetch | `load.prefetchMs`: the last prefetched chunk decoded |
 | fetched, chunks | `load.received.bytes`, `load.received.requests` |
 | evicted | the `evictions` entry of `coverage.notHealthSignals` |

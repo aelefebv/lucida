@@ -962,10 +962,10 @@ export interface LoadReading {
   /** When a chunk this run fetched was first on screen, or null when none was. */
   firstFrameMs: number | null;
   /**
-   * When the view came to have its wanted set for good: every chunk it
-   * wants resident, or as many as the budgets hold. Prefetch is left out,
-   * though its arrivals hold the run's close off. Null on a run that did not
-   * close by settling.
+   * When the view came to have its wanted set for good, every chunk it wants
+   * resident or as many as the budgets hold, and the frame drawing the last
+   * of them had landed. Prefetch is left out, though its arrivals hold the
+   * run's close off. Null on a run that did not close by settling.
    */
   settleMs: number | null;
   /**

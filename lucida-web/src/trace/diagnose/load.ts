@@ -12,23 +12,33 @@ import type { LoadReading, TierAtSettle } from "./types.ts";
 
 export function deriveLoad(run: TraceRun, tiers: readonly TierAtSettle[]): LoadReading {
   let firstPresentUs: number | null = null;
+  let lastWantedPresentUs = 0;
   let prefetchUs: number | null = null;
   for (const row of run.rows) {
     const present = row.phases.present;
     if (present && (firstPresentUs === null || present.endUs < firstPresentUs)) firstPresentUs = present.endUs;
-    if (row.lane !== "prefetch") continue;
+    if (row.lane !== "prefetch") {
+      if (present) lastWantedPresentUs = Math.max(lastWantedPresentUs, present.endUs);
+      continue;
+    }
     // A prefetched chunk waits for its timepoint before it uploads, so it
     // is done once decoded.
     const landed = row.phases.decode ?? row.phases.wire;
     if (landed && (prefetchUs === null || landed.endUs > prefetchUs)) prefetchUs = landed.endUs;
   }
   const header = run.header;
-  // A document from before the page dated its wanted set falls back to the
-  // close less the hold it waited out, which counts prefetch in.
+  // The close waits out the hold after quiescence last went true. A document
+  // from before the page dated its wanted set settles there, prefetch and
+  // all; one that dates it settles once the frame that draws its last chunk
+  // has landed, a frame after the page found it resident.
+  const quietUs = Math.max(0, header.durationUs - header.quiescenceHoldMs * 1_000);
+  const metUs = header.wantedSetMetAtUs;
   const settleUs =
-    header.endReason === "quiescent"
-      ? (header.wantedSetMetAtUs ?? Math.max(0, header.durationUs - header.quiescenceHoldMs * 1_000))
-      : null;
+    header.endReason !== "quiescent"
+      ? null
+      : metUs == null
+        ? quietUs
+        : Math.min(quietUs, Math.max(metUs, lastWantedPresentUs));
   return {
     firstFrameMs: firstPresentUs === null ? null : usToMs(firstPresentUs),
     settleMs: settleUs === null ? null : usToMs(settleUs),

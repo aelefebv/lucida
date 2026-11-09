@@ -64,6 +64,24 @@ describe("the load reading", () => {
     expect(load.prefetchMs).toBe(710);
   });
 
+  it("settles once the frame drawing the last wanted chunk lands, which a prefetched one's does not move", () => {
+    const drawnLate = presented(304 * MS, 1, 1);
+    const prefetchShown = makeRow(
+      {
+        startUs: 300 * MS,
+        durations: { plan: 1 * MS, queue: 1 * MS, wire: 10 * MS, decode: 1 * MS, upload: 300 * MS, present: 6 * MS },
+        lane: "prefetch",
+      },
+      2,
+    );
+    const run = makeRun({
+      header: { durationUs: 1_300 * MS, quiescenceHoldMs: 500, endReason: "quiescent", wantedSetMetAtUs: 320 * MS },
+      rows: [presented(0, 0, 1), drawnLate, prefetchShown],
+    });
+
+    expect(diagnoseRun(run).load.settleMs).toBe(324);
+  });
+
   it("has no prefetch time on a run that prefetched nothing", () => {
     expect(diagnoseRun(makeRun({ rows: [presented(0, 0, 1)] })).load.prefetchMs).toBeNull();
   });
