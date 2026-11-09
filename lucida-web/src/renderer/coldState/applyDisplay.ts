@@ -3,16 +3,13 @@
  * dataset's retained cold state and rebuild only its descriptor buffer. A
  * display edit changes no geometry, so pools and indirection stay
  * untouched. The rebuild uses the full ingest's
- * {@link buildDescriptorBuffer}, so the result is byte-identical to a full
+ * {@link rebuildDescriptorBuffer}, so the result is byte-identical to a full
  * cold state. No-op when no cold state has landed for the dataset yet.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateDisplayMessage } from "../workerProtocol.ts";
-import {
-  buildDescriptorBuffer,
-  destroyDescriptorBuffer,
-} from "../descriptorBuffer.ts";
+import { rebuildDescriptorBuffer } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
 
 export function applyColdStateDisplay(
@@ -31,14 +28,8 @@ export function applyColdStateDisplay(
 
   const sources: Map<string, EntitySource[]> =
     state.currentSourcesByDataset.get(msg.datasetId) ?? new Map();
-  const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
-  if (oldDesc) destroyDescriptorBuffer(oldDesc);
   state.descriptorBuffersByDataset.set(
     msg.datasetId,
-    buildDescriptorBuffer(
-      ctx.device,
-      cold,
-      sources,
-    ),
+    rebuildDescriptorBuffer(ctx.device, state.descriptorBuffersByDataset.get(msg.datasetId), cold, sources),
   );
 }

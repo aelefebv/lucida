@@ -693,7 +693,7 @@ describe("Suite A — applyColdState", () => {
   });
 
   // 8. Cold-state churn (replace)
-  it("two cold states in a row → pool routing is repopulated; descriptor buffer is destroyed + replaced", () => {
+  it("two cold states in a row → pool routing is repopulated; descriptor buffer is rewritten in place", () => {
     const ctx = makeCtx(makeMockDevice());
     const coldA = makeCold([
       makeEntry({
@@ -716,13 +716,32 @@ describe("Suite A — applyColdState", () => {
     applyColdState(ctx, coldB);
     // Routing for B is set.
     expect(poolOf(ctx.state, "imgB:ch0", "detail", 0)).toBe("ds1:ch0:32x32x16:detail");
-    // Old descriptor buffer was destroyed (the new one replaces it).
-    expect(descABuffer.destroyed).toBe(true);
-    // A new descriptor buffer was written.
+    // B's entries are written into A's buffer, which holds them, so every
+    // bind group that names it stays valid.
     const descB = ctx.state.descriptorBuffersByDataset.get("ds1")!;
     expect(descB).not.toBe(descA);
+    expect(descB.buffer).toBe(descA.buffer);
+    expect(descABuffer.destroyed).toBe(false);
+    expect([...descB.indexByMember.keys()]).toEqual(["imgB:ch0"]);
     // Stale routing for A is cleared before B is registered.
     expect(ctx.state.memberSourcePools.has("imgA:ch0")).toBe(false);
+  });
+
+  it("replaces a descriptor buffer too small for the next cold state, destroying the old one", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const entry = (id: string) => makeEntry({
+      entityId: id, imageId: id,
+      levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
+    });
+    applyColdState(ctx, makeCold([entry("imgA")]));
+    const descA = ctx.state.descriptorBuffersByDataset.get("ds1")!;
+
+    applyColdState(ctx, makeCold([entry("imgA"), entry("imgB"), entry("imgC")]));
+
+    const descB = ctx.state.descriptorBuffersByDataset.get("ds1")!;
+    expect(descB.buffer).not.toBe(descA.buffer);
+    expect((descA.buffer as unknown as MockBuffer).destroyed).toBe(true);
+    expect(descB.entityCount).toBe(3);
   });
 
   // 9. Empty active-set cold state

@@ -365,6 +365,8 @@ export interface MinimapRenderMessage {
   type: "minimapRender";
   layers: MinimapLayerParams[];
   invViewProj: Float32Array;
+  /** The inverse of `invViewProj`, which places each layer on the canvas. */
+  viewProj: Float32Array;
   eye: Float32Array;
   canvasW: number;
   canvasH: number;
@@ -409,6 +411,8 @@ export interface ThumbnailRenderMessage {
   id: number;
   layers: MinimapLayerParams[];
   invViewProj: Float32Array;
+  /** See {@link MinimapRenderMessage.viewProj}. */
+  viewProj: Float32Array;
   eye: Float32Array;
   /** Square edge length of the off-screen target in device pixels. */
   size: number;

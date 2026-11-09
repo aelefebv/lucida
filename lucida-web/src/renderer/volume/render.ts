@@ -1,14 +1,16 @@
 /**
  * Volume render-multipass orchestration.
  *
- * Per layer: resolve member→dataset, look up the descriptor and the
- * pools its level sources and coarse source name, bind, draw to
- * offscreen, composite. After the loop: cursor draw.
+ * Per layer: resolve member→dataset and look up the descriptor and the
+ * pools its level sources and coarse source name. Then per batch of layers
+ * that do not overlap: draw them to offscreen in one pass, composite. After
+ * the batches: cursor draw.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { VolumeLayerParams, VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
-import type { VolumePoolBinding } from "../volumeRenderer.ts";
+import type { VolumeMemberDraw, VolumePoolBinding } from "../volumeRenderer.ts";
+import { batchLayers, type BatchLayer } from "../layerBatches.ts";
 import { resolveMemberPools } from "../descriptorBuffer.ts";
 import {
   type AtlasState,
@@ -166,6 +168,9 @@ function poolBinding(atlas: AtlasState): VolumePoolBinding {
   };
 }
 
+/** The member draw set the viewport's frames use. */
+const VIEW_DRAWS = "view";
+
 export async function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
   msg: VolumeRenderMultiPassMessage,
@@ -182,19 +187,27 @@ export async function handleVolumeRenderMultiPass(
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
 
-  // One offscreen texture: each layer is rendered and composited in turn.
+  // One offscreen texture: each batch of layers is rendered and composited in turn.
   const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
   // A slice frame before this one may have left more.
   trimOffscreenPool(1);
 
   const canvasTexture = ctx.context.getCurrentTexture();
   const canvasView = canvasTexture.createView();
-  let isFirstLayer = true;
   const atlasMap = ctx.state.volumeAtlases;
 
   const timing = ctx.passTimer;
   timing.beginFrame();
   renderer.setPixelRatio(msg.pixelRatio ?? 1);
+  renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
+
+  // What each drawn layer is, in message order: an intensity layer's index
+  // among the member draws, or a label layer drawn on its own.
+  const draws: VolumeMemberDraw[] = [];
+  const drawn: Array<{ draw: number } | { label: VolumeLayerParams }> = [];
+  const batchInput: BatchLayer[] = [];
+  // The minimap draws in the mode the last layer drawn left set.
+  let lastMode: number | null = null;
 
   for (const layer of msg.layers) {
     const memberId = layer.datasetId;
@@ -202,8 +215,10 @@ export async function handleVolumeRenderMultiPass(
     // Label overlays render from their own r32uint pool, independent of the
     // cold-state chunk pipeline.
     if (layer.isLabel) {
-      const drew = renderLabelVolumeLayer(ctx, msg, layer, pool[0], canvasView, comp, isFirstLayer);
-      if (drew) isFirstLayer = false;
+      if (!ctx.state.labelVolumePools.has(memberId)) continue;
+      drawn.push({ label: layer });
+      batchInput.push({ rect: layer.scissorRect, blendMode: layer.blendMode, alone: true });
+      lastMode = 0;
       continue;
     }
 
@@ -212,7 +227,6 @@ export async function handleVolumeRenderMultiPass(
     const datasetId = ctx.state.memberToDataset.get(memberId);
     const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
     if (!descIndex) continue;
-    const entityIndex = layer.entityIndex;
 
     const pools = resolveMemberPools(atlasMap, descIndex, memberId);
     const hasDetail = pools.levels.some((atlas) => atlas !== null);
@@ -221,10 +235,6 @@ export async function handleVolumeRenderMultiPass(
     // covers what this member lacks.
     if (!hasDetail && !hasCoarse) continue;
 
-    const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
-    const lutTex = ctx.getOrCreateLUT(colormapName);
-    renderer.setColormapTexture(lutTex);
-
     for (const atlas of [...pools.levels, pools.coarse]) {
       if (atlas && atlas.indirectionDirty) {
         ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
@@ -232,33 +242,51 @@ export async function handleVolumeRenderMultiPass(
       }
     }
 
-    renderer.setTierAtlases(
-      pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
-      pools.coarse ? poolBinding(pools.coarse) : null,
-    );
-
-    renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
-    renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
-    // Intensity draws carry no declared palette; bind the dummy (count 0) so
-    // a prior label draw's palette buffer never leaks into this bind group.
-    renderer.setLabelColorBuffer(null);
-    renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
-    const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
-    const depthView = depth.createView();
-
-    const encoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(pool[0].createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect, timing);
-    comp.composite(canvasView, [{ view: pool[0].createView(), blendMode: layer.blendMode }], encoder, isFirstLayer, timing);
-    ctx.device.queue.submit([encoder.finish()]);
-
-    isFirstLayer = false;
+    const renderMode = layer.renderMode === "max_intensity" ? 1 : 0;
+    drawn.push({ draw: draws.length });
+    draws.push({
+      levels: pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
+      coarse: pools.coarse ? poolBinding(pools.coarse) : null,
+      colormap: ctx.getOrCreateLUT(descIndex.colormapNameByMember.get(memberId) ?? "gray"),
+      renderMode,
+      descriptorBuffer: descIndex.buffer,
+      entityIndex: layer.entityIndex,
+      scissor: layer.scissorRect,
+    });
+    batchInput.push({ rect: layer.scissorRect, blendMode: layer.blendMode });
+    lastMode = renderMode;
   }
 
-  const backgroundEncoder = ctx.device.createCommandEncoder();
+  renderer.prepareMembers(VIEW_DRAWS, draws);
+  const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
+  const depthView = depth.createView();
+  const scratchView = pool[0].createView();
+
+  // One submit for every batch between label layers, which draw through the
+  // renderer's own buffers and submit on their own.
+  let encoder = ctx.device.createCommandEncoder();
+  let isFirstLayer = true;
+  for (const batch of batchLayers(batchInput, msg.canvasW, msg.canvasH)) {
+    const lead = drawn[batch.layers[0]];
+    if ("label" in lead) {
+      ctx.device.queue.submit([encoder.finish()]);
+      if (renderLabelVolumeLayer(ctx, msg, lead.label, pool[0], canvasView, comp, isFirstLayer)) isFirstLayer = false;
+      encoder = ctx.device.createCommandEncoder();
+      continue;
+    }
+    const indices = batch.layers.map((at) => (drawn[at] as { draw: number }).draw);
+    renderer.renderMembers(
+      VIEW_DRAWS, indices, scratchView, msg.canvasW, msg.canvasH, depthView, isFirstLayer, encoder, timing,
+    );
+    comp.composite(canvasView, [{ view: scratchView, blendMode: batch.blendMode }], encoder, isFirstLayer, timing);
+    isFirstLayer = false;
+  }
+  if (lastMode !== null) renderer.setRenderMode(lastMode);
+
   // With no layer drawn, nothing has cleared the canvas yet.
-  if (isFirstLayer) comp.composite(canvasView, [], backgroundEncoder, true, timing);
-  comp.underlayBackground(canvasView, backgroundEncoder, timing);
-  ctx.device.queue.submit([backgroundEncoder.finish()]);
+  if (isFirstLayer) comp.composite(canvasView, [], encoder, true, timing);
+  comp.underlayBackground(canvasView, encoder, timing);
+  ctx.device.queue.submit([encoder.finish()]);
 
   const depthTex = getDepthTexture();
   if (cr.hasData() && msg.viewProj && depthTex) {
