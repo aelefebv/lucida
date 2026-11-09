@@ -9,6 +9,7 @@
 //! and absence everywhere stays silent. On a sharded level the probe asks
 //! the shard index, because a shard can exist without its origin chunk.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::future::join_all;
@@ -17,6 +18,7 @@ use object_store::path::Path;
 use crate::ChunkKeyEncoding;
 use crate::cache::CachedStore;
 use crate::import_types::{ImportWarning, ImportWarningKind};
+use crate::parse::LevelEntry;
 use crate::shard::{self, ShardLayout};
 
 /// What the probe needs to know about one declared level.
@@ -58,31 +60,87 @@ pub(crate) enum OriginChunk {
 /// level the same path names the origin shard, the one that holds the
 /// origin inner chunk at its first index position.
 fn origin_chunk_path(base_prefix: &str, target: &ProbeTarget) -> String {
-    let coords = vec![0; target.axis_count];
+    origin_path(
+        base_prefix,
+        &target.path,
+        target.chunk_key_encoding,
+        target.axis_count,
+    )
+}
+
+fn origin_path(
+    base_prefix: &str,
+    level: &str,
+    encoding: ChunkKeyEncoding,
+    axis_count: usize,
+) -> String {
+    let coords = vec![0; axis_count];
     if base_prefix.is_empty() {
-        target.chunk_key_encoding.store_path(&target.path, &coords)
+        encoding.store_path(level, &coords)
     } else {
-        let level = format!("{base_prefix}/{}", target.path);
-        target.chunk_key_encoding.store_path(level, &coords)
+        encoding.store_path(format!("{base_prefix}/{level}"), &coords)
     }
 }
 
-/// Probe every level's origin chunk concurrently — N requests, one round trip.
-/// An unsharded level is a HEAD of the origin chunk; a sharded level is a
-/// read of the origin shard's index, for the reasons in the module doc.
+/// Whether an origin chunk is there, by object path, asked before the level
+/// metadata said which path each level's origin has.
+#[derive(Debug, Default)]
+pub(crate) struct LikelyOrigins(HashMap<String, bool>);
+
+/// HEAD each level's origin chunk at the path it most likely has, `encoding`
+/// with one coordinate per multiscale axis, so the probe shares the round
+/// trip that reads the level metadata rather than taking another after it.
+/// A level whose metadata names a different path is asked again once known.
+pub(crate) async fn probe_likely_origins(
+    store: &Arc<CachedStore>,
+    base_prefix: &str,
+    levels: &[LevelEntry],
+    encoding: ChunkKeyEncoding,
+    axis_count: usize,
+) -> LikelyOrigins {
+    let probes = levels.iter().map(|level| {
+        let path = origin_path(base_prefix, &level.path, encoding, axis_count);
+        async move {
+            let written = store.probe_exists(&Path::from(path.as_str())).await;
+            (path, written)
+        }
+    });
+    LikelyOrigins(
+        join_all(probes)
+            .await
+            .into_iter()
+            .filter_map(|(path, written)| Some((path, written.ok()?)))
+            .collect(),
+    )
+}
+
+/// Probe every level's origin chunk concurrently — N requests, one round trip,
+/// or none for a level `likely` already answers. An unsharded level is a HEAD
+/// of the origin chunk; a sharded level is a read of the origin shard's index,
+/// for the reasons in the module doc.
 async fn probe_level_origins(
     store: &Arc<CachedStore>,
     base_prefix: &str,
     targets: &[ProbeTarget],
+    likely: &LikelyOrigins,
 ) -> Vec<OriginChunk> {
     let probes = targets.iter().map(|target| {
-        let path = Path::from(origin_chunk_path(base_prefix, target));
+        let path = origin_chunk_path(base_prefix, target);
+        // A shard can be there without its origin chunk, so only a missing
+        // shard settles a sharded level.
+        let known = likely
+            .0
+            .get(&path)
+            .copied()
+            .filter(|written| target.shard.is_none() || !written);
+        let path = Path::from(path);
         let store = Arc::clone(store);
         let shard = target.shard.as_ref();
         async move {
-            let written = match shard {
-                None => store.probe_exists(&path).await,
-                Some(layout) => shard::inner_chunk_written(&store, layout, &path, 0).await,
+            let written = match (known, shard) {
+                (Some(written), _) => Ok(written),
+                (None, None) => store.probe_exists(&path).await,
+                (None, Some(layout)) => shard::inner_chunk_written(&store, layout, &path, 0).await,
             };
             match written {
                 Ok(true) => OriginChunk::Present,
@@ -178,14 +236,15 @@ fn unwritten_levels_warning(
 }
 
 /// Probe one multiscale geometry's declared levels and describe any that were
-/// never written. The whole check is one round trip and one warning.
+/// never written. The whole check is at most one round trip and one warning.
 pub(crate) async fn warn_unwritten_levels(
     store: &Arc<CachedStore>,
     base_prefix: &str,
     target: &str,
     targets: &[ProbeTarget],
+    likely: &LikelyOrigins,
 ) -> Option<ImportWarning> {
-    let probes = probe_level_origins(store, base_prefix, targets).await;
+    let probes = probe_level_origins(store, base_prefix, targets, likely).await;
     let indices = unwritten_level_indices(targets, &probes);
     unwritten_levels_warning(target, targets, &indices)
 }
