@@ -39,9 +39,10 @@ export class AdaptiveResolution {
   private factor = 1;
   private lastInputAt = Number.NEGATIVE_INFINITY;
   /**
-   * The last frame dispatched before the latest step down. Frames up to it
-   * were drawn at the old resolution, so their latency says nothing about
-   * the new one and must not step it down again.
+   * The last frame dispatched before the latest step down or before the
+   * gesture's first input, whichever is later. Frames up to it were drawn at
+   * the old resolution, or for no gesture, so their latency says nothing
+   * about the gesture's resolution and must not step it down.
    */
   private settledAfterSeq = 0;
   private readonly now: () => number;
@@ -55,8 +56,18 @@ export class AdaptiveResolution {
     return this.factor;
   }
 
-  noteInput(): void {
-    this.lastInputAt = this.now();
+  /**
+   * An input landed; `lastDispatchedSeq` is the newest frame already sent.
+   * A gesture's first input leaves the frames before it out: a frame's
+   * latency is read at the tick after it finishes, which is often the
+   * gesture's first, and a frame a load drew says nothing about the gesture.
+   */
+  noteInput(lastDispatchedSeq: number): void {
+    const now = this.now();
+    if (now - this.lastInputAt >= RESTORE_AFTER_MS) {
+      this.settledAfterSeq = Math.max(this.settledAfterSeq, lastDispatchedSeq);
+    }
+    this.lastInputAt = now;
   }
 
   /**

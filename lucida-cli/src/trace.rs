@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::browser::{self, Viewport};
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
+use crate::montage::with_render_param;
 use crate::session::{connect_workspace_socket, incoming_messages, wait_for_workspace_snapshot};
 use crate::trace_knobs::KnobSettings;
 use crate::trace_replay::{ReplayRecord, format_replay_block};
@@ -69,14 +70,16 @@ pub(crate) const CLOSE_AS_TIMEOUT: &str =
     "window.lucidaTrace ? (window.lucidaTrace.closeRun('timeout'), true) : false";
 
 /// Read the frame the waited-for run settled on through the page's own
-/// capture, and the page's scroll, and record both on that run, where its
-/// diagnostic reads them. Done before the export, which is where the
-/// diagnostic is derived. A page too old to read either is left alone.
+/// capture, the page's scroll, and where its chrome sits, and record them on
+/// that run, where its diagnostic reads them. Done before the export, which
+/// is where the diagnostic is derived. A page too old to read any of them is
+/// left alone.
 const FRAME_READ_EXPRESSION: &str = r#"(async () => {
   const seam = window.lucidaTrace;
   if (!seam || typeof seam.readFrame !== 'function') return null;
   const waited = window.__lucidaTraceRunId || seam.runState.lastConcludedRunId || undefined;
   if (typeof seam.readPageScroll === 'function') seam.readPageScroll(waited);
+  if (typeof seam.readChrome === 'function') seam.readChrome(waited);
   return JSON.stringify(await seam.readFrame(waited));
 })()"#;
 
@@ -324,6 +327,21 @@ pub struct ComposedView {
     /// input, and a mobile user agent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mobile: bool,
+    /// Whether the driver loaded the full viewer page, chrome and all,
+    /// rather than the chrome-free capture surface.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_ui: bool,
+}
+
+/// The page a run drives at `viewer_url`: the capture surface, or with
+/// `full_ui` the full viewer page, which lays its chrome out around the canvas
+/// and writes what a person's page writes.
+pub fn driven_page_url(viewer_url: &str, full_ui: bool) -> String {
+    if full_ui {
+        viewer_url.to_string()
+    } else {
+        with_render_param(viewer_url)
+    }
 }
 
 /// `--device-memory`: a positive number of GiB.
@@ -919,12 +937,23 @@ pub struct BundleHeader {
     pub datasets: Vec<BundleDataset>,
     /// The page the run happened on, absolute, view fragment and all.
     pub view_url: Option<String>,
+    /// The canvas the run drew into, which on the full viewer page is the
+    /// page less its chrome.
     pub viewport: Option<BundleViewport>,
+    /// The window the page laid out in. None on a bundle older than the field.
+    pub page_size: Option<BundlePageSize>,
     pub device_pixel_ratio: Option<f64>,
     /// The memory the page fitted its budgets to, in GiB: what the browser
     /// reported, or the driver's override of it. None when the page read
     /// none, or the bundle is older than the field.
     pub device_memory_gib: Option<f64>,
+    /// Whether the run happened on the full viewer page rather than the
+    /// capture surface. None when the page recorded no run, or the bundle is
+    /// older than the field.
+    pub full_ui: Option<bool>,
+    /// Whether the browser reported itself as a phone's. None on a bundle
+    /// older than the field.
+    pub mobile: Option<bool>,
     /// `slice` or `volume`.
     pub mode: Option<String>,
     /// The planning configuration, by the names the Dev controls panel shows.
@@ -952,6 +981,14 @@ pub struct BundleViewport {
     pub css_height: f64,
     pub device_width: f64,
     pub device_height: f64,
+}
+
+/// A window's size in CSS pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundlePageSize {
+    pub css_width: f64,
+    pub css_height: f64,
 }
 
 /// One dataset's pins in the run's view. Null means the view URL carried
@@ -1108,12 +1145,24 @@ pub const REPLAY_INPUTS: &[ReplayInput] = &[
         field: "viewport",
     },
     ReplayInput {
+        input: "page size",
+        field: "pageSize",
+    },
+    ReplayInput {
         input: "device pixel ratio",
         field: "devicePixelRatio",
     },
     ReplayInput {
         input: "device memory",
         field: "deviceMemoryGib",
+    },
+    ReplayInput {
+        input: "full UI",
+        field: "fullUi",
+    },
+    ReplayInput {
+        input: "phone emulation",
+        field: "mobile",
     },
     ReplayInput {
         input: "slice or volume mode",
@@ -2027,10 +2076,11 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .map(|cores| format!(" · {cores} cores"))
         .unwrap_or_default();
     let phone = if view.mobile { " · phone" } else { "" };
+    let full_ui = if view.full_ui { " · full UI" } else { "" };
     let errors = format_errors(&header.errors);
     format!(
         "{replay}\
-         view      {} @ {}x{} DPR {}{phone}{memory}{cores}\n\
+         view      {} @ {}x{} DPR {}{phone}{full_ui}{memory}{cores}\n\
          {camera}\
          server    {}\n\
          {throttle}\
@@ -3064,6 +3114,7 @@ mod tests {
             cores: None,
             camera: None,
             mobile: false,
+            full_ui: false,
         }
     }
 
@@ -4060,11 +4111,39 @@ mod tests {
         assert_eq!(json["composedView"]["mobile"], json!(true));
         let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
         assert!(text.contains("@ 390x844 DPR 3 · phone\n"), "{text}");
+        let full = DriverFacts {
+            composed_view: ComposedView {
+                full_ui: true,
+                ..with.composed_view.clone()
+            },
+            ..facts()
+        };
+        let file = assemble_run_file(minimal_export(), &full);
+        let json = serde_json::to_value(&file.header).unwrap();
+        assert_eq!(json["composedView"]["fullUi"], json!(true));
+        let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
+        assert!(
+            text.contains("@ 390x844 DPR 3 · phone · full UI\n"),
+            "{text}"
+        );
         let plain = assemble_run_file(minimal_export(), &facts());
         assert!(
             !serde_json::to_string(&plain.header)
                 .unwrap()
                 .contains("mobile")
+        );
+    }
+
+    /// The full page is the same viewer URL without the capture surface's flag.
+    #[test]
+    fn a_full_ui_run_drives_the_viewer_url_without_the_capture_flag() {
+        assert_eq!(
+            driven_page_url("http://h/w/ws#view=ABC", false),
+            "http://h/w/ws?render=1#view=ABC"
+        );
+        assert_eq!(
+            driven_page_url("http://h/w/ws#view=ABC", true),
+            "http://h/w/ws#view=ABC"
         );
     }
 
@@ -5401,6 +5480,7 @@ mod tests {
     fn the_frame_read_asks_the_page_for_the_run_the_driver_waited_for() {
         assert!(FRAME_READ_EXPRESSION.contains("seam.readFrame(waited)"));
         assert!(FRAME_READ_EXPRESSION.contains("seam.readPageScroll(waited)"));
+        assert!(FRAME_READ_EXPRESSION.contains("seam.readChrome(waited)"));
         assert!(FRAME_READ_EXPRESSION.contains("__lucidaTraceRunId"));
         assert!(FRAME_READ_EXPRESSION.contains("typeof seam.readFrame !== 'function'"));
     }
