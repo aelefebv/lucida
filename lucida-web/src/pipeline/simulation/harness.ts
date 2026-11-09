@@ -98,6 +98,11 @@ export interface ScenarioSpec {
    * default, answers each frame as the worker handles it.
    */
   gpuFrameMs?: number;
+  /**
+   * The stand-in device's largest buffer, which caps each chunk pool. The
+   * WebGPU minimum unless the scenario says otherwise.
+   */
+  maxBufferSize?: number;
   cache?: Partial<Pick<CpuCacheConfig, "mainBudgetBytes" | "overviewBudgetBytes">>;
   /** What happens after the open, each followed by its own settle. */
   steps?: ScenarioStep[];
@@ -117,6 +122,7 @@ export interface Scenario {
   readonly source: SourceSpec;
   readonly gpuTotalBytes: number;
   readonly gpuFrameMs: number;
+  readonly maxBufferSize: number | null;
   readonly cache: Partial<CpuCacheConfig>;
   readonly steps: readonly ScenarioStep[];
   readonly tickBound: number;
@@ -133,6 +139,7 @@ export function describeScenario(spec: ScenarioSpec): Scenario {
     source: spec.source ?? {},
     gpuTotalBytes: spec.gpuTotalBytes ?? CEILING_BUDGETS.gpuTotalBytes,
     gpuFrameMs: spec.gpuFrameMs ?? 0,
+    maxBufferSize: spec.maxBufferSize ?? null,
     cache: { ...spec.cache },
     steps: spec.steps ?? [],
     tickBound: spec.tickBound ?? DEFAULT_TICK_BOUND,
@@ -300,7 +307,11 @@ class Simulation {
   constructor(scenario: Scenario, dpr: number) {
     this.scenario = scenario;
     this.dpr = dpr;
-    this.worker = new SimulatedWorker(scenario.gpuTotalBytes, scenario.gpuFrameMs);
+    this.worker = new SimulatedWorker(
+      scenario.gpuTotalBytes,
+      scenario.gpuFrameMs,
+      scenario.maxBufferSize === null ? {} : { maxBufferSize: scenario.maxBufferSize },
+    );
     this.worker.onPost = (msg) => {
       if (msg.type !== "chunkResidency" || msg.change === "held") return;
       const reason = `${msg.change} ${msg.reason ?? ""}`.trim();

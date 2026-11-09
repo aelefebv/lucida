@@ -164,6 +164,8 @@ export class RenderClient implements UploadClient {
   /** Null until the worker's first report; it posts only changes after that. */
   private gpuMemoryReport: GpuMemoryReport | null = null;
   private gpuCapacityReport: GpuCapacityReport | null = null;
+  /** Hears each capacity report, after {@link gpuCapacity} returns it. */
+  onGpuCapacity: (() => void) | null = null;
   /** Hears minimap overviews the worker lost to an out-of-memory failure. */
   onMinimapOverviewsLost: ((memberIds: string[]) => void) | null = null;
 
@@ -330,6 +332,7 @@ export class RenderClient implements UploadClient {
     } else if (msg.type === "gpuCapacity") {
       const { type: _type, ...report } = msg;
       this.gpuCapacityReport = report;
+      this.onGpuCapacity?.();
     } else if (msg.type === "minimapOverviewsLost") {
       this.onMinimapOverviewsLost?.(msg.memberIds);
     } else if (msg.type === "frameDone") {

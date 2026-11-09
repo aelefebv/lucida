@@ -6,7 +6,7 @@
  * counted the same way.
  *
  * A pool the worker has not made yet, as on a dataset's first plan, is sized
- * as the worker would size it under the reported total.
+ * as the worker would size it, under the reported total and device limits.
  */
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
@@ -19,8 +19,9 @@ import { chunkTierPoolKey } from "../../renderer/poolKeys.ts";
 import { bytesPerTexel, datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
 
 /**
- * The WebGPU minimums. A worker's device can only have larger limits, which
- * leave a pool whose cap binds before its texture size the same size.
+ * The WebGPU minimums, for a plan made before the worker's first report. No
+ * device has less, so a pool sized from these is never larger than the one
+ * the worker makes, and the planner plans again once the report lets more in.
  */
 const MIN_LIMITS: DeviceLimits = {
   maxTextureDimension2D: 8192,
@@ -46,7 +47,8 @@ export function gpuSlotsFor(
 ): (req: ChunkRequest) => GpuSlot | null {
   const reported = new Map(report?.pools.map((pool) => [pool.poolKey, pool]) ?? []);
   const texel = bytesPerTexel(datasetSampleFormat(manifest));
-  const cap = poolCapBytes(MIN_LIMITS, report?.budgetBytes ?? fallbackTotalBytes);
+  const limits = report?.limits ?? MIN_LIMITS;
+  const cap = poolCapBytes(limits, report?.budgetBytes ?? fallbackTotalBytes);
   const chunkDims = new Map<string, Map<number, number[]>>();
   for (const image of manifest.images) {
     const byLevel = new Map<number, number[]>();
@@ -67,7 +69,7 @@ export function gpuSlotsFor(
     let slot = sized.get(pool);
     if (!slot) {
       const geometry = computeAtlasGeometry(
-        MIN_LIMITS,
+        limits,
         dims as [number, number] | [number, number, number],
         cap,
         mode === "volume" ? "3d" : "2d",
