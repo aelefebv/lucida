@@ -697,6 +697,94 @@ describe("computeLabelChunkRequests — volume mode", () => {
   });
 });
 
+describe("computeLabelChunkRequests — the slice view's planes", () => {
+  function image5(id: string, shape5: number[], chunk5: number[], dtype = "Uint32"): ImageSpec {
+    return {
+      image_id: id,
+      owner: "ent-0",
+      multiscale: {
+        axes: [
+          { name: "t", kind: "time" },
+          { name: "c", kind: "channel" },
+          { name: "z", kind: "space" },
+          { name: "y", kind: "space" },
+          { name: "x", kind: "space" },
+        ],
+        levels: [{ level_index: 0, shape: shape5, chunk_shape: chunk5, grid_shape: [1, 1, 1, 1, 1], scale: [1, 1, 1, 1, 1] }],
+        data_type: dtype,
+      },
+    };
+  }
+
+  /** A 100-plane label in 32-plane chunks, 128² at chunk 64, over a source of the same shape. */
+  function deepManifest(chunkZ = 32): DatasetManifest {
+    return {
+      dataset_id: "ds-0", name: "deep", kind: "Single",
+      entities: [], transforms: [], source_layouts: [], default_layout_id: null,
+      images: [image5("img-0", [1, 1, 100, 128, 128], [1, 1, chunkZ, 64, 64], "Uint16")],
+      labels: [{
+        name: "region-b",
+        source_image_id: "img-0",
+        image: image5("img-0:label:region-b", [1, 1, 100, 128, 128], [1, 1, chunkZ, 64, 64]),
+      }],
+    };
+  }
+
+  const at = (z: number, more: Partial<Parameters<typeof computeLabelChunkRequests>[0]> = {}) =>
+    computeLabelChunkRequests({ datasetId: "ds-0", manifest: deepManifest(), t: 0, z, labelSettings: allOn(1), ...more });
+
+  it("ask for the plane drawn and fetch a band around it, inside the chunk and off its padding", () => {
+    const reqs = at(40);
+    expect(reqs).toHaveLength(4);
+    // Plane 40 is plane 8 of chunk 1.
+    for (const req of reqs) expect(req).toMatchObject({ z: 1, lane: "detail", plane: 8, planes: [6, 11] });
+    expect(at(1)[0]).toMatchObject({ z: 0, plane: 1, planes: [0, 4] });
+    // Chunk 3 holds planes 96 to 99 and padding after them.
+    expect(at(99)[0]).toMatchObject({ z: 3, plane: 3, planes: [1, 4] });
+  });
+
+  it("take the band's width from the planning config", () => {
+    const config = { sliceBandPlanes: 5, prefetchLaneOffset: 1500 };
+    expect(at(40, { config })[0]).toMatchObject({ plane: 8, planes: [3, 14] });
+    expect(at(40, { config: { ...config, sliceBandPlanes: 0 } })[0]).toMatchObject({ plane: 8, planes: [8, 9] });
+  });
+
+  it("fetch whole a chunk one plane deep, one the band would cover, and every chunk in the volume view", () => {
+    const whole = (req: { plane?: number; planes?: readonly [number, number] }) =>
+      req.plane === undefined && req.planes === undefined;
+    const flat = computeLabelChunkRequests({
+      datasetId: "ds-0", manifest: deepManifest(1), t: 0, z: 40, labelSettings: allOn(1),
+    });
+    expect(flat.every(whole)).toBe(true);
+    const shallow = computeLabelChunkRequests({
+      // Plane 41 is plane 1 of a 4-plane chunk, and planes 0 to 3 are all of it.
+      datasetId: "ds-0", manifest: deepManifest(4), t: 0, z: 41, labelSettings: allOn(1),
+    });
+    expect(shallow.every(whole)).toBe(true);
+    expect(at(40, { mode: "volume" }).every(whole)).toBe(true);
+  });
+
+  it("after a step along Z, also prefetch each chunk whole, behind the band", () => {
+    expect(at(40).some((req) => req.lane === "prefetch")).toBe(false);
+    const stepped = at(41, { zStep: true, config: { sliceBandPlanes: 2, prefetchLaneOffset: 1500 } });
+    const band = stepped.filter((req) => req.lane === "detail");
+    const prefetch = stepped.filter((req) => req.lane === "prefetch");
+    expect(band).toHaveLength(4);
+    expect(prefetch).toHaveLength(4);
+    for (const req of prefetch) {
+      expect(req).toMatchObject({ z: 1, tier: "detail", priority: 1500 });
+      expect(req.plane).toBeUndefined();
+      expect(req.planes).toBeUndefined();
+    }
+    expect(new Set(prefetch.map((req) => req.chunkKey))).toEqual(new Set(band.map((req) => req.chunkKey)));
+    // A chunk already fetched whole has no band to follow up.
+    const flat = computeLabelChunkRequests({
+      datasetId: "ds-0", manifest: deepManifest(1), t: 0, z: 41, labelSettings: allOn(1), zStep: true,
+    });
+    expect(flat.some((req) => req.lane === "prefetch")).toBe(false);
+  });
+});
+
 describe("computeLabelChunkRequests — volume level selection (3D caps)", () => {
   interface Lvl { shape: number[]; chunk: number[]; scale: number[] }
   const AXES = [

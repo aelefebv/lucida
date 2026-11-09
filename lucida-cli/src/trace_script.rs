@@ -182,12 +182,15 @@ pub enum ScriptStep {
         )]
         interval_ms: Option<u64>,
     },
-    /// Show or hide a channel of the dataset in hand, or a layer by dataset id.
+    /// Show or hide a channel of the dataset in hand, a layer by dataset id,
+    /// or a label of the dataset in hand by its index among the labels.
     Select {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<u32>,
         #[serde(default = "visible_by_default")]
         visible: bool,
     },
@@ -289,14 +292,19 @@ impl ScriptStep {
                 "a scrub interval of 0 ms is a jump; leave the interval out for one".to_string(),
             ),
             Self::Scrub { .. } => Ok(()),
-            Self::Select { channel, layer, .. } => match (channel, layer) {
-                (Some(_), None) => Ok(()),
-                (None, Some(layer)) if !layer.is_empty() => Ok(()),
-                (None, Some(_)) => Err("a layer is named by its dataset id".to_string()),
-                (Some(_), Some(_)) => {
-                    Err("a select names a channel or a layer, not both".to_string())
+            Self::Select {
+                channel,
+                layer,
+                label,
+                ..
+            } => match (channel, layer, label) {
+                (Some(_), None, None) | (None, None, Some(_)) => Ok(()),
+                (None, Some(layer), None) if !layer.is_empty() => Ok(()),
+                (None, Some(_), None) => Err("a layer is named by its dataset id".to_string()),
+                (None, None, None) => {
+                    Err("a select names a channel, a layer or a label".to_string())
                 }
-                (None, None) => Err("a select names a channel or a layer".to_string()),
+                _ => Err("a select names one channel, layer or label".to_string()),
             },
             Self::Mode { .. } | Self::Fit => Ok(()),
             Self::Resize { width, height } => {
@@ -382,6 +390,11 @@ impl std::fmt::Display for ScriptStep {
                 visible,
                 ..
             } => write!(f, "select channel:{channel}{}", off_suffix(*visible)),
+            Self::Select {
+                label: Some(label),
+                visible,
+                ..
+            } => write!(f, "select label:{label}{}", off_suffix(*visible)),
             Self::Select { layer, visible, .. } => write!(
                 f,
                 "select layer:{}{}",
@@ -654,8 +667,9 @@ impl clap::Args for ScriptArgs {
                     .value_name("TARGET[=off]")
                     .action(ArgAction::Append)
                     .help(
-                        "Show a channel of the dataset in hand or a layer by dataset id: channel:1 or \
-                         layer:ID. Add =off to hide it instead",
+                        "Show a channel of the dataset in hand, a layer by dataset id, or a label of \
+                         the dataset in hand by its index among the labels: channel:1, layer:ID or \
+                         label:0. Add =off to hide it instead",
                     ),
             )
             .arg(
@@ -912,7 +926,7 @@ pub fn step_from_flag(id: &str, text: &str) -> Result<ScriptStep, String> {
             };
             let (kind, name) = target
                 .split_once(':')
-                .ok_or_else(|| "a select is channel:N or layer:ID".to_string())?;
+                .ok_or_else(|| "a select is channel:N, layer:ID or label:N".to_string())?;
             match kind {
                 "channel" => {
                     let channel: u32 = name
@@ -921,16 +935,31 @@ pub fn step_from_flag(id: &str, text: &str) -> Result<ScriptStep, String> {
                     Ok(ScriptStep::Select {
                         channel: Some(channel),
                         layer: None,
+                        label: None,
                         visible,
                     })
                 }
                 "layer" if !name.is_empty() => Ok(ScriptStep::Select {
                     channel: None,
                     layer: Some(name.to_string()),
+                    label: None,
                     visible,
                 }),
                 "layer" => Err("a layer is named by its dataset id".to_string()),
-                other => Err(format!("a select is channel:N or layer:ID, not {other}:…")),
+                "label" => {
+                    let label: u32 = name
+                        .parse()
+                        .map_err(|_| format!("a label is a whole number from 0, not {name}"))?;
+                    Ok(ScriptStep::Select {
+                        channel: None,
+                        layer: None,
+                        label: Some(label),
+                        visible,
+                    })
+                }
+                other => Err(format!(
+                    "a select is channel:N, layer:ID or label:N, not {other}:…"
+                )),
             }
         }
         other => Err(format!("no step flag is called {other}")),
@@ -1454,11 +1483,13 @@ async fn run_step(
         ScriptStep::Select {
             channel,
             layer,
+            label,
             visible,
         } => {
-            let target = match (channel, layer) {
-                (Some(channel), _) => json!({ "channel": channel }),
-                (None, layer) => json!({ "layer": layer }),
+            let target = match (channel, label, layer) {
+                (Some(channel), _, _) => json!({ "channel": channel }),
+                (None, Some(label), _) => json!({ "label": label }),
+                (None, None, layer) => json!({ "layer": layer }),
             };
             let expression =
                 format!("JSON.stringify(window.lucidaTrace.select({target}, {visible}))");
@@ -2195,11 +2226,13 @@ mod tests {
                 ScriptStep::Select {
                     channel: Some(1),
                     layer: None,
+                    label: None,
                     visible: true
                 },
                 ScriptStep::Select {
                     channel: None,
                     layer: Some("ds-1".to_string()),
+                    label: None,
                     visible: false
                 },
             ]
@@ -2224,12 +2257,12 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             both,
-            "step 2 (select): a select names a channel or a layer, not both"
+            "step 2 (select): a select names one channel, layer or label"
         );
         let neither = Script::from_json(r#"[{"kind": "select"}]"#).unwrap_err();
         assert_eq!(
             neither,
-            "step 1 (select): a select names a channel or a layer"
+            "step 1 (select): a select names a channel, a layer or a label"
         );
         let still = Script::from_json(r#"[{"kind": "zoom", "factor": 1}]"#).unwrap_err();
         assert_eq!(still, "step 1 (zoom): a zoom by 1 changes nothing");
@@ -2302,6 +2335,7 @@ mod tests {
             ScriptStep::Select {
                 channel: Some(1),
                 layer: None,
+                label: None,
                 visible: true
             }
         );
@@ -2310,6 +2344,7 @@ mod tests {
             ScriptStep::Select {
                 channel: Some(1),
                 layer: None,
+                label: None,
                 visible: false
             }
         );
@@ -2318,8 +2353,32 @@ mod tests {
             ScriptStep::Select {
                 channel: None,
                 layer: Some("ds-1".to_string()),
+                label: None,
                 visible: true
             }
+        );
+        assert_eq!(
+            step_from_flag("select", "label:0").unwrap(),
+            ScriptStep::Select {
+                channel: None,
+                layer: None,
+                label: Some(0),
+                visible: true
+            }
+        );
+        assert_eq!(
+            ScriptStep::Select {
+                channel: None,
+                layer: None,
+                label: Some(2),
+                visible: false
+            }
+            .to_string(),
+            "select label:2=off"
+        );
+        assert_eq!(
+            Script::from_json(r#"[{"kind": "select", "label": 0, "layer": "ds"}]"#).unwrap_err(),
+            "step 1 (select): a select names one channel, layer or label"
         );
 
         assert_eq!(
@@ -2351,12 +2410,16 @@ mod tests {
             "a layer is named by its dataset id"
         );
         assert_eq!(
-            step_from_flag("select", "label:1").unwrap_err(),
-            "a select is channel:N or layer:ID, not label:…"
+            step_from_flag("select", "label:x").unwrap_err(),
+            "a label is a whole number from 0, not x"
+        );
+        assert_eq!(
+            step_from_flag("select", "row:1").unwrap_err(),
+            "a select is channel:N, layer:ID or label:N, not row:…"
         );
         assert_eq!(
             step_from_flag("select", "1").unwrap_err(),
-            "a select is channel:N or layer:ID"
+            "a select is channel:N, layer:ID or label:N"
         );
     }
 
@@ -2411,6 +2474,7 @@ mod tests {
                 ScriptStep::Select {
                     channel: Some(0),
                     layer: None,
+                    label: None,
                     visible: false
                 },
             ]
@@ -2663,6 +2727,7 @@ mod tests {
             ScriptStep::Select {
                 channel: Some(1),
                 layer: None,
+                label: None,
                 visible: false,
             },
             None,
@@ -2828,6 +2893,7 @@ mod tests {
             ScriptStep::Select {
                 channel: Some(3),
                 layer: None,
+                label: None,
                 visible: true,
             },
             None,
@@ -2966,6 +3032,7 @@ mod tests {
             ScriptStep::Select {
                 channel: Some(1),
                 layer: None,
+                label: None,
                 visible: false
             }
             .to_string(),
@@ -2975,6 +3042,7 @@ mod tests {
             ScriptStep::Select {
                 channel: None,
                 layer: Some("ds-1".to_string()),
+                label: None,
                 visible: true
             }
             .to_string(),

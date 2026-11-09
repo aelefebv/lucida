@@ -59,6 +59,15 @@ export const COARSE_LANE_OFFSET = 2400;
 export const PREFETCH_DEPTH = 2;
 
 /**
+ * Planes the slice view fetches on each side of the one it draws, so its
+ * first steps along Z find their planes resident while the rest of the chunk
+ * is still on its way. A move of at most this many planes is a step along Z,
+ * after which the slice view fetches the whole chunks its plane lies in; a
+ * longer one is a jump, which fetches only the band.
+ */
+export const SLICE_BAND_PLANES = 2;
+
+/**
  * Render-radius slider value that disables radius filtering. Values
  * below this are interpreted as a multiplier of the current visible
  * region's half-diagonal.
@@ -95,6 +104,8 @@ export const DEPTH_BIAS_VIEW = 0;
 export interface PlanningConfig {
   /** See {@link PREFETCH_DEPTH}. */
   prefetchDepth: number;
+  /** See {@link SLICE_BAND_PLANES}. */
+  sliceBandPlanes: number;
 
   /** Coefficient on `(1 - importance)` in a request's place within its lane. */
   importanceWeight: number;
@@ -142,6 +153,7 @@ export interface PlanningConfig {
 /** Canonical defaults. Sourced from the module-level constants so the two cannot drift. */
 export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   prefetchDepth: PREFETCH_DEPTH,
+  sliceBandPlanes: SLICE_BAND_PLANES,
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
   depthBiasView: DEPTH_BIAS_VIEW,
