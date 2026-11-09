@@ -42,6 +42,8 @@ import {
   INPUT_KINDS,
   interactionCause,
   TRACE_SCHEMA_VERSION,
+  type ChromePart,
+  type ChromeReading,
   type GpuIdentity,
   type PageError,
   type RunCause,
@@ -612,6 +614,71 @@ describe("a page that scrolled or overflows", () => {
     expect(diagnoseRun(run).findings.slice(0, 2).map((f) => f.rule)).toEqual([
       RULESET.blankFrame.id,
       RULESET.pageScroll.id,
+    ]);
+  });
+});
+
+describe("chrome off the screen", () => {
+  const phone = (parts: ChromePart[]): ChromeReading => ({ viewportWidth: 390, viewportHeight: 844, parts });
+  const topBar: ChromePart = { part: "top bar", left: 0, top: 0, right: 390, bottom: 52.33 };
+  const sheet: ChromePart = { part: "bottom sheet", left: 0, top: 660, right: 390, bottom: 844 };
+
+  it("is a stall when a scroll carried the top bar off the top, as a route that kept the last page's offset does", () => {
+    const run = healthyLocalOpen();
+    run.chrome = phone([{ ...topBar, top: -80, bottom: -27.67 }, sheet]);
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain(
+      "the top bar spans 0,-80 to 390,-27.67 CSS pixels in a 390x844 viewport, so all of it is off the screen",
+    );
+    expect(doc.findings.filter((f) => f.rule === RULESET.chrome.id).map((f) => f.subject)).toEqual(["top bar"]);
+    expect(doc.findings[0]).toMatchObject({
+      rule: RULESET.chrome.id,
+      subject: "top bar",
+      observed: { chrome: { top: -80, viewportHeight: 844 } },
+      attribution: null,
+    });
+    expect(renderDiagnostic(doc).text).toContain("spans 0,-80 to 390,-27.67 in a 390x844 viewport, CSS pixels");
+  });
+
+  it("is a stall when the sheet reaches below the viewport, with nothing for the page to scroll", () => {
+    const run = healthyLocalOpen();
+    run.chrome = phone([topBar, { ...sheet, top: 740, bottom: 924 }]);
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.text).toContain("the bottom sheet spans 0,740 to 390,924 CSS pixels in a 390x844 viewport, so part of it");
+    expect(doc.findings.filter((f) => f.rule === RULESET.chrome.id).map((f) => f.subject)).toEqual(["bottom sheet"]);
+  });
+
+  it("is not found on chrome inside the viewport or within rounding of its edge, none rendered, none read, or a window", () => {
+    const run = healthyLocalOpen();
+    const chromeFindings = (options?: Parameters<typeof diagnoseRun>[1]) =>
+      diagnoseRun(run, options).findings.filter((f) => f.rule === RULESET.chrome.id);
+    run.chrome = phone([topBar, { ...sheet, bottom: 844.4 }]);
+    expect(chromeFindings()).toEqual([]);
+    run.chrome = phone([]);
+    expect(chromeFindings()).toEqual([]);
+    delete run.chrome;
+    expect(chromeFindings()).toEqual([]);
+    run.chrome = phone([{ ...topBar, top: -80, bottom: -28 }]);
+    expect(chromeFindings({ window: { startMs: 0, endMs: 10 } })).toEqual([]);
+  });
+
+  it("follows the scroll that carried it off", () => {
+    const run = healthyLocalOpen();
+    run.pageScroll = {
+      scrollX: 0,
+      scrollY: 80,
+      scrollWidth: 390,
+      scrollHeight: 924,
+      viewportWidth: 390,
+      viewportHeight: 844,
+    };
+    run.chrome = phone([{ ...topBar, top: -80, bottom: -28 }, sheet]);
+    expect(diagnoseRun(run).findings.slice(0, 2).map((f) => f.rule)).toEqual([
+      RULESET.pageScroll.id,
+      RULESET.chrome.id,
     ]);
   });
 });

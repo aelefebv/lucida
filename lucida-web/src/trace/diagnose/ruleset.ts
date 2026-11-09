@@ -17,7 +17,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 13;
+export const RULESET_VERSION = 14;
 
 export interface AbsoluteRule {
   id: string;
@@ -167,6 +167,14 @@ export interface PageScrollRule {
   why: string;
 }
 
+/** A part of the viewer's chrome reached off the screen. */
+export interface ChromeRule {
+  id: string;
+  /** How far past the viewport's edge a box may reach and still be inside it, in CSS pixels. */
+  tolerancePx: number;
+  why: string;
+}
+
 /** Planning passes woken by an availability update and nothing else. */
 export interface ReplanRule {
   id: string;
@@ -247,6 +255,8 @@ export interface Ruleset {
   blankFrame: BlankFrameRule;
   /** A page that scrolled or overflows its viewport once the run closed. */
   pageScroll: PageScrollRule;
+  /** The top bar or a phone's bottom sheet not wholly on screen once the run closed. */
+  chrome: ChromeRule;
   /** Input to frame on an interaction run. */
   lag: LagRule;
   /**
@@ -477,6 +487,11 @@ export const RULESET: Ruleset = {
   pageScroll: {
     id: "page.scroll",
     why: "The viewer fills the visible viewport, so the page under it never scrolls. A page that can scroll gets scrolled, by the browser, a focus, or a route that kept the last page's offset, and a scrolled page carries the top bar off the screen and shows empty space below the viewer. A phone's 100vh is its height with the address bar hidden, so a rule sized in it overflows there and nowhere on a desktop. Read once the run closed: the page's scroll offset, and the document's scroll size against the viewport it scrolls in. Any offset or any overflow is enough, because a correct page has neither.",
+  },
+  chrome: {
+    id: "page.chrome",
+    tolerancePx: 0.5,
+    why: "A person needs the whole top bar and a phone's whole bottom sheet on the screen: the way back, the name, search and the menu are in one, and the channels, the selectors and the panels in the other. A scrolled page carries the top bar off the top, and a shell taller than the visible viewport pushes the sheet off the bottom while a hidden overflow leaves the page itself nothing to scroll. Read once the run closed, on the full viewer page: each part's box against the viewport. Half a CSS pixel of slack absorbs layout rounding to device pixels.",
   },
   lag: {
     id: "lag.input-to-frame",

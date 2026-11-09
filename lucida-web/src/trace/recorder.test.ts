@@ -1712,4 +1712,21 @@ describe("errors the page raised", () => {
     expect(document.runs[0].pageScroll).toEqual(reading);
     expect(document.steadyState.every((interval) => interval.pageScroll === undefined)).toBe(true);
   });
+
+  it("puts where the chrome sat onto the closed run it names, and nothing onto one it no longer holds", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.closeRun("quiescent");
+    const runId = recorder.concludedRuns.lastId ?? "";
+    const reading = {
+      viewportWidth: 390,
+      viewportHeight: 844,
+      parts: [{ part: "top bar" as const, left: 0, top: -80, right: 390, bottom: -28 }],
+    };
+    recorder.noteChrome(runId, reading);
+    recorder.noteChrome("run-that-never-was", { ...reading, parts: [] });
+    const document = recorder.exportDocument();
+    expect(document.runs[0].chrome).toEqual(reading);
+    expect(document.steadyState.every((interval) => interval.chrome === undefined)).toBe(true);
+  });
 });

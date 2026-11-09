@@ -1304,6 +1304,30 @@ export interface PageScrollReading {
   viewportHeight: number;
 }
 
+/** A part of the viewer's chrome a person needs on screen. */
+export type ChromePartName = "top bar" | "bottom sheet";
+
+/** One part of the chrome as a run closed: its box against the viewport, in CSS pixels. */
+export interface ChromePart {
+  part: ChromePartName;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * Where the viewer's chrome sat once a run closed, in CSS pixels. Only the
+ * full viewer page has any: the capture surface reads no parts.
+ */
+export interface ChromeReading {
+  /** The viewport the boxes are measured against, less any scrollbar. */
+  viewportWidth: number;
+  viewportHeight: number;
+  /** The parts the page rendered, in a fixed order. */
+  parts: ChromePart[];
+}
+
 /**
  * The kinds of hole a run can have. A closed enum, because a reader deciding
  * whether to trust a verdict needs to know the list is exhaustive.
@@ -1459,6 +1483,8 @@ export interface TraceRun {
   frame?: FrameReading;
   /** The page's scroll once the run closed, read when its frame is. */
   pageScroll?: PageScrollReading;
+  /** Where the chrome sat once the run closed, read when its frame is. */
+  chrome?: ChromeReading;
   /** How the view kept up with input. Absent from an interval that took no input. */
   lag?: TraceLag;
 }
