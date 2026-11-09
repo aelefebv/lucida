@@ -117,7 +117,7 @@ mod tests {
     ) -> impl Future<Output = ()> + Send + 'static {
         let (limiter, reads) = (Arc::clone(limiter), Arc::clone(reads));
         async move {
-            let _permit = limiter.acquire(CLIENT).await;
+            let _permit = limiter.acquire(CLIENT, 0).await;
             reads.fetch_add(1, Ordering::SeqCst);
             std::future::pending::<()>().await;
         }

@@ -14,6 +14,6 @@ publish = false
 # measures is the transport behaviour production gets.
 
 [dependencies]
-object_store = { version = "0.14", features = ["gcp"] }
+object_store = { version = "0.14", features = ["gcp", "http"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 futures-util = "0.3"
