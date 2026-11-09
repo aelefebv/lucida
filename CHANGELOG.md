@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.25.0](https://github.com/aelefebv/lucida/compare/v0.24.0...v0.25.0) (2026-11-09)
+
+
+### Features
+
+* **perf:** each step's own load reading, a coverage column, and settle without prefetch ([#1405](https://github.com/aelefebv/lucida/issues/1405)) ([857f719](https://github.com/aelefebv/lucida/commit/857f7197879d5d76e5d4e4662c0bb65f2e440043))
+* **perf:** pass server settings through the runner, and read a run file with no workspace ([#1407](https://github.com/aelefebv/lucida/issues/1407)) ([6023956](https://github.com/aelefebv/lucida/commit/602395694895f9f45dbbc4eef2ff86bea1080cee))
+* **perf:** suite scenarios for the new steps, a remote-like network, and lag and error columns ([#1394](https://github.com/aelefebv/lucida/issues/1394)) ([5d1a1f7](https://github.com/aelefebv/lucida/commit/5d1a1f7019ae893b5915db55615ad4f3416272ba))
+
+
+### Bug Fixes
+
+* **planning:** a large volume settles with all its detail on the first plan ([#1404](https://github.com/aelefebv/lucida/issues/1404)) ([ba57168](https://github.com/aelefebv/lucida/commit/ba57168b577da059194da4cc769543a7a15cf6af))
+* **store:** bound source reads by bytes in flight, not only by count ([#1408](https://github.com/aelefebv/lucida/issues/1408)) ([ea16ccd](https://github.com/aelefebv/lucida/commit/ea16ccdcc00b13cff9bd2b6d6cddf9430808f30b))
+
+
+### Performance
+
+* **store:** overlap the metadata reads a dataset open waits on ([#1406](https://github.com/aelefebv/lucida/issues/1406)) ([a14418a](https://github.com/aelefebv/lucida/commit/a14418a332ab5a6cde05fd3229695bf497b102f1))
+
 ## [0.24.0](https://github.com/aelefebv/lucida/compare/v0.23.0...v0.24.0) (2026-11-08)
 
 
