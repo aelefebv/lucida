@@ -231,9 +231,9 @@ async fn import_single_image(
 }
 
 /// Maximum number of metadata object-store GETs kept in flight while importing
-/// a collection. Bounds fan-out so a wide collection opens quickly without self-throttling
-/// the backing store.
-const METADATA_FETCH_CONCURRENCY: usize = 32;
+/// a collection: the metadata-read cap, so the fan-out fills it and a wider
+/// one would only queue.
+const METADATA_FETCH_CONCURRENCY: usize = crate::cache::DEFAULT_METADATA_READ_CONCURRENCY;
 
 /// Sampled label discovery engages only when it would skip at least this
 /// many per-tile probes. Sampling probes each group's first and last tile,
@@ -1212,36 +1212,26 @@ async fn import_collection(
         ));
     }
 
-    // Build the probed labels serially, in declared tile order, gated by the
-    // shared running budget: `build_label`'s expensive per-label reads and
-    // allocations only run while the budget has room and stop the instant it is
-    // exhausted. This keeps peak label memory/IO O(budget) and reproduces the
-    // sequential importer's retention exactly — the same labels and colors are
-    // kept, and the same ones dropped, in the same order.
-    let mut tile_labels = Vec::with_capacity(tile_prefixes.len());
-    for (prefix, probed) in tile_prefixes.iter().zip(probed_labels) {
-        // A tile left unprobed by sampled discovery is treated as label-free
-        // (the sampling warning above covers the possibility it wasn't).
-        let probed = probed.unwrap_or_else(|| ProbedLabels {
-            labels_prefix: format!("{prefix}/labels"),
-            names: Vec::new(),
-            index: LabelIndexState::Absent,
-        });
-        let image_id = ImageId(format!("{id}:image:{prefix}"));
-        let owner = EntityId(format!("{id}:tile:{prefix}"));
-        let imported = build_labels_within_budget(
-            &mut label_budget,
-            store,
-            format,
-            id,
-            &image_id,
-            &owner,
-            probed,
-        )
-        .await;
-        tile_labels.push(imported);
-    }
-    let mut tile_labels = tile_labels.into_iter();
+    let label_sources = tile_prefixes
+        .iter()
+        .zip(probed_labels)
+        .map(|(prefix, probed)| LabelSource {
+            image_id: ImageId(format!("{id}:image:{prefix}")),
+            owner: EntityId(format!("{id}:tile:{prefix}")),
+            // A tile left unprobed by sampled discovery is treated as
+            // label-free (the sampling warning above covers the possibility
+            // it wasn't).
+            probed: probed.unwrap_or_else(|| ProbedLabels {
+                labels_prefix: format!("{prefix}/labels"),
+                names: Vec::new(),
+                index: LabelIndexState::Absent,
+            }),
+        })
+        .collect();
+    let mut tile_labels =
+        build_labels_in_order(&mut label_budget, store, format, id, label_sources)
+            .await
+            .into_iter();
     let mut stored_tiles = stored_tiles.iter();
 
     for group in &parsed_groups {
@@ -1819,10 +1809,10 @@ fn unusable_label_index_warning(
 /// an index that exists but yields no usable names is marked
 /// [`LabelIndexState::Unusable`] so callers can treat the anomaly as a signal.
 ///
-/// This reads exactly one small index object and holds only names, so it is the
-/// only per-tile label I/O safe to fan out concurrently: probing every tile of
-/// a wide collection at once costs no per-label memory. The expensive per-label reads
-/// happen later in [`build_labels_within_budget`], gated by the shared budget.
+/// This reads exactly one small index object and holds only names, so probing
+/// every tile of a wide collection at once costs no per-label memory. The
+/// expensive per-label reads happen later in [`build_labels_in_order`], gated by
+/// the shared budget.
 async fn probe_labels_for_image(
     store: &Arc<CachedStore>,
     format: &ZarrFormat,
@@ -1890,13 +1880,7 @@ async fn probe_labels_for_tiles(
     }
 }
 
-/// Build a source image's probed labels in declared order, charging the
-/// shared dataset budget and stopping as soon as it is exhausted.
-///
-/// The budget gates `build_label` itself, so label reads and memory stay
-/// O(budget) even for a dataset that declares far more labels. The retained
-/// set and the logging match a sequential importer whatever order the probe
-/// that produced `probed` ran in.
+/// Build one source image's probed labels, charging the shared dataset budget.
 async fn build_labels_within_budget(
     budget: &mut LabelBudget,
     store: &Arc<CachedStore>,
@@ -1906,55 +1890,137 @@ async fn build_labels_within_budget(
     source_owner: &EntityId,
     probed: ProbedLabels,
 ) -> ImportedLabels {
-    let ProbedLabels {
-        labels_prefix,
-        names,
-        // Build cost is driven purely by the names; how the index responded
-        // matters only to discovery scheduling.
-        index: _,
-    } = probed;
-    let mut imported = ImportedLabels::default();
-    for name in names {
-        if budget.labels_remaining == 0 {
-            tracing::warn!(
-                dataset = %dataset_id,
-                labels = %labels_prefix,
-                "import.label.budget_reached"
-            );
-            break;
-        }
-        match build_label(
-            store,
-            format,
-            &labels_prefix,
-            &name,
-            source_image_id,
-            source_owner,
-        )
+    let source = LabelSource {
+        image_id: source_image_id.clone(),
+        owner: source_owner.clone(),
+        probed,
+    };
+    build_labels_in_order(budget, store, format, dataset_id, vec![source])
         .await
+        .pop()
+        .unwrap_or_default()
+}
+
+/// A source image whose probed labels are to be built: the image they lie
+/// over and the entity that places it.
+struct LabelSource {
+    image_id: ImageId,
+    owner: EntityId,
+    probed: ProbedLabels,
+}
+
+/// One declared label waiting to be built, and which source it belongs to.
+struct PendingLabel {
+    source: usize,
+    labels_prefix: String,
+    name: String,
+    image_id: ImageId,
+    owner: EntityId,
+}
+
+/// Build every source's probed labels, one [`ImportedLabels`] per source in
+/// the order given, charging the shared dataset budget in declared order.
+///
+/// A build is two round trips, the label's group and then its levels, and a
+/// collection can carry a label on every tile, so builds overlap, up to
+/// [`METADATA_FETCH_CONCURRENCY`]. Results are still charged in declared
+/// order, so the labels, colors and names kept are the ones a build at a time
+/// would keep. No more builds are in flight than the budget has labels left,
+/// so a label past the budget is never read, and label reads and memory track
+/// the budget, never the number of labels a dataset declares.
+async fn build_labels_in_order(
+    budget: &mut LabelBudget,
+    store: &Arc<CachedStore>,
+    format: &ZarrFormat,
+    dataset_id: &str,
+    sources: Vec<LabelSource>,
+) -> Vec<ImportedLabels> {
+    let mut imported: Vec<ImportedLabels> =
+        sources.iter().map(|_| ImportedLabels::default()).collect();
+    let mut pending = sources
+        .into_iter()
+        .enumerate()
+        .flat_map(
+            |(
+                source,
+                LabelSource {
+                    image_id,
+                    owner,
+                    probed,
+                },
+            )| {
+                // Build cost is driven purely by the names; how the index
+                // responded matters only to discovery scheduling.
+                let ProbedLabels {
+                    labels_prefix,
+                    names,
+                    index: _,
+                } = probed;
+                names.into_iter().map(move |name| PendingLabel {
+                    source,
+                    labels_prefix: labels_prefix.clone(),
+                    name,
+                    image_id: image_id.clone(),
+                    owner: owner.clone(),
+                })
+            },
+        )
+        .peekable();
+    let mut in_flight = futures_util::stream::FuturesOrdered::new();
+    loop {
+        // A build in flight takes at most one label from the budget, so this
+        // never starts one the budget could not keep.
+        while in_flight.len() < METADATA_FETCH_CONCURRENCY.min(budget.labels_remaining)
+            && let Some(label) = pending.next()
         {
-            Ok(mut label) => {
+            let store = store.clone();
+            in_flight.push_back(async move {
+                let built = build_label(
+                    &store,
+                    format,
+                    &label.labels_prefix,
+                    &label.name,
+                    &label.image_id,
+                    &label.owner,
+                )
+                .await;
+                (label, built)
+            });
+        }
+        let Some((label, built)) = in_flight.next().await else {
+            break;
+        };
+        match built {
+            Ok(mut built) => {
                 // Clamp this label's colors and names to the remaining
                 // dataset-wide budgets before retaining them, then charge them.
-                label.spec.colors.truncate(budget.colors_remaining);
-                budget.colors_remaining -= label.spec.colors.len();
-                label.spec.names.truncate(budget.names_remaining);
-                budget.names_remaining -= label.spec.names.len();
+                built.spec.colors.truncate(budget.colors_remaining);
+                budget.colors_remaining -= built.spec.colors.len();
+                built.spec.names.truncate(budget.names_remaining);
+                budget.names_remaining -= built.spec.names.len();
                 budget.labels_remaining -= 1;
-                imported.specs.push(label.spec);
-                imported.fetch.push(label.fetch);
-                imported.bindings.push(label.binding);
+                let imported = &mut imported[label.source];
+                imported.specs.push(built.spec);
+                imported.fetch.push(built.fetch);
+                imported.bindings.push(built.binding);
             }
             Err(e) => {
                 tracing::warn!(
                     dataset = %dataset_id,
-                    labels = %labels_prefix,
-                    label = %name,
+                    labels = %label.labels_prefix,
+                    label = %label.name,
                     error = %e,
                     "import.label.skipped"
                 );
             }
         }
+    }
+    if let Some(label) = pending.peek() {
+        tracing::warn!(
+            dataset = %dataset_id,
+            labels = %label.labels_prefix,
+            "import.label.budget_reached"
+        );
     }
     imported
 }
@@ -5626,6 +5692,60 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A label that fails to build takes nothing from the budget, so the next
+    /// declared label is built in its place, and the one past the budget is
+    /// still never read.
+    #[tokio::test]
+    async fn a_failed_label_build_leaves_its_budget_to_the_next() {
+        let dir = temp_dir("label_budget_failed_build");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["keep0", "broken", "keep1", "over"]);
+        write_broken_label_group(&dir, "broken");
+        for name in ["keep0", "keep1", "over"] {
+            write_label_multiscale(
+                &dir,
+                name,
+                &["t", "z", "y", "x"],
+                &[1, 1, 16, 16],
+                &[1, 1, 16, 16],
+                &[1.0, 1.0, 1.0, 1.0],
+                "uint16",
+                serde_json::Value::Null,
+            );
+        }
+        let (store, reads) = recording_store(&dir);
+        let format = ZarrFormat::V3 { consolidated: None };
+        let mut budget = LabelBudget {
+            labels_remaining: 2,
+            ..LabelBudget::new()
+        };
+
+        let probed = probe_labels_for_image(&store, &format, "").await;
+        let imported = build_labels_within_budget(
+            &mut budget,
+            &store,
+            &format,
+            "ds",
+            &ImageId("img".to_string()),
+            &EntityId("owner".to_string()),
+            probed,
+        )
+        .await;
+
+        let kept: Vec<&str> = imported.specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(kept, ["keep0", "keep1"]);
+        assert_eq!(budget.labels_remaining, 0);
+        let reads = reads.lock().unwrap();
+        assert!(reads.iter().any(|p| p.contains("labels/broken/")));
+        assert!(
+            reads.iter().all(|p| !p.contains("labels/over")),
+            "no I/O may touch the over-budget label: {reads:?}",
+        );
+        drop(reads);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// An import reads through the source cache, so no object is fetched from
     /// the backend twice — within one import or across a repeat import
     /// through the same cache. The repeat is the case that matters remotely:
@@ -7306,6 +7426,60 @@ mod tests {
 
         assert_eq!(trips, 6);
         assert_eq!(result.manifest.images().len(), 4);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The labels on a collection's tiles are built together: they add two
+    /// round trips to the open, the labels' groups and then their levels,
+    /// not two per label. They are kept in declared tile order, and one that
+    /// fails to build is skipped where it stands.
+    #[tokio::test(start_paused = true)]
+    async fn a_collection_builds_its_tiles_labels_together() {
+        let dir = temp_dir("round_trips_collection_labels");
+        create_collection_fixture(
+            &dir,
+            "distant",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 2)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        for tile in ["A/1/0", "A/1/1", "A/2/0", "A/2/1"] {
+            let tile_dir = dir.join(tile);
+            write_labels_index(&tile_dir, &["mask"]);
+            if tile == "A/1/1" {
+                write_broken_label_group(&tile_dir, "mask");
+                continue;
+            }
+            write_label_multiscale(
+                &tile_dir,
+                "mask",
+                &["t", "z", "y", "x"],
+                &[1, 1, 64, 64],
+                &[1, 1, 64, 64],
+                &[1.0, 1.0, 1.0, 1.0],
+                "uint16",
+                serde_json::Value::Null,
+            );
+        }
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 8);
+        let labeled: Vec<String> = result
+            .manifest
+            .labels()
+            .into_iter()
+            .map(|label| label.source_image_id.0)
+            .collect();
+        assert_eq!(
+            labeled,
+            ["ds:image:A/1/0", "ds:image:A/2/0", "ds:image:A/2/1"]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

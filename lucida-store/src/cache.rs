@@ -94,15 +94,25 @@ pub const SOURCE_CACHE_BYTES_ENV: &str = "LUCIDA_SOURCE_CACHE_BYTES";
 
 /// Cap on concurrent backend reads of *metadata* objects, which are bounded
 /// separately from chunk reads. Not operator-tunable: unlike the chunk cap it
-/// has no pressure to relieve — it tracks the import pipeline's fan-out, and
-/// the two move together.
+/// has no pressure to relieve — it is the import pipeline's fan-out too
+/// (`METADATA_FETCH_CONCURRENCY`), so the two move together.
 ///
 /// A metadata object is a few kilobytes of JSON and an open reads hundreds of
 /// them back to back, so the cost profile is round trips, not bytes: the two
 /// classes want different bounds and sharing one would make an open queue
-/// behind the chunk cap for no bandwidth reason. This matches the fan-out the
-/// import pipeline already drives (`METADATA_FETCH_CONCURRENCY`).
-const DEFAULT_METADATA_READ_CONCURRENCY: usize = 32;
+/// behind the chunk cap for no bandwidth reason.
+///
+/// A collection reads a few documents per tile, so its open waits about one
+/// round trip per this many reads, and with no bytes to share the cap can sit
+/// well above the chunk cap's. A public HTTPS store read over HTTP/1.1, 1,024
+/// small documents at each count, kept its time to first byte at 146 ms p50
+/// at every count and served, in reads per second:
+///
+/// ```text
+///   16 ->  46.4      64 -> 167.3     256 -> 442.8
+///   32 ->  90.0     128 -> 275.3
+/// ```
+pub(crate) const DEFAULT_METADATA_READ_CONCURRENCY: usize = 256;
 
 /// How many known-absent object paths
 /// [`CachedStore::get_optional_metadata_bytes`] remembers. Each entry is a
