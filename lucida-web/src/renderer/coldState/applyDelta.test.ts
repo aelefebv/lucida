@@ -208,6 +208,79 @@ describe("applyColdStateDelta", () => {
     expect([...index.get("detail|img-a")!]).toEqual(["1/0/0/0/0/1"]);
   });
 
+  it("re-ingests nothing when only the wanted chunks moved, and indexes them as a full cold state would", () => {
+    const ctx = makeCtx();
+    const cold1: ColdStateMessage = {
+      ...makeCold([tile("a", "img-a", 1), tile("b", "img-b", 1)]),
+      wantedChunks: [
+        { memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] },
+        { memberId: "img-b:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] },
+      ],
+    };
+    ctx.state.coldStateByDataset.set("ds1", cold1);
+    applyColdState(ctx, cold1);
+    const descriptors = ctx.state.descriptorBuffersByDataset.get("ds1")!;
+    const writes = vi.mocked(ctx.device.queue.writeBuffer).mock.calls.length;
+
+    const delta: ColdStateDeltaMessage = {
+      type: "coldStateDelta",
+      datasetId: "ds1",
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: {
+        xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1], effectiveZoom: 2,
+        sortCenterVox: null, frustumPlanes: null,
+      },
+      wantedChunks: [
+        { memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
+        { memberId: "img-b:ch0", tier: "detail", chunkKeys: [] },
+      ],
+      removedEntityIds: [],
+      upserts: [],
+      activeSetOrder: ["a", "b"],
+    };
+    applyColdStateDelta(ctx, delta);
+
+    // No descriptor rewrite and no pool rebuilt.
+    expect(ctx.state.descriptorBuffersByDataset.get("ds1")).toBe(descriptors);
+    expect(vi.mocked(ctx.device.queue.writeBuffer).mock.calls.length).toBe(writes);
+    expect(ctx.state.currentEpochs?.view).toBe(2);
+
+    const ctxFull = makeCtx();
+    const full: ColdStateMessage = {
+      ...makeCold([tile("a", "img-a", 1), tile("b", "img-b", 1)]),
+      visibleRegion: delta.visibleRegion,
+      wantedChunks: [{ memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] }],
+    };
+    applyColdState(ctxFull, full);
+    expect(ctx.state.wantedByDataset.get("ds1")).toEqual(ctxFull.state.wantedByDataset.get("ds1"));
+  });
+
+  it("re-ingests in full while failed chunks are marked, since the marks follow the wanted set", () => {
+    const ctx = makeCtx();
+    const cold1 = makeCold([tile("a", "img-a", 1)]);
+    ctx.state.coldStateByDataset.set("ds1", cold1);
+    applyColdState(ctx, cold1);
+    ctx.state.failedByDataset.set("ds1", new Map([["img-a", new Set(["1/0/0/0/0/0"])]]));
+    const writes = vi.mocked(ctx.device.queue.writeBuffer).mock.calls.length;
+
+    applyColdStateDelta(ctx, {
+      type: "coldStateDelta",
+      datasetId: "ds1",
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: cold1.visibleRegion,
+      wantedChunks: [{ memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] }],
+      removedEntityIds: [],
+      upserts: [],
+      activeSetOrder: ["a"],
+    });
+
+    expect(vi.mocked(ctx.device.queue.writeBuffer).mock.calls.length).toBeGreaterThan(writes);
+  });
+
   it("is a no-op when no cold state has landed for the dataset yet", () => {
     const ctx = makeCtx();
     applyColdStateDelta(ctx, {

@@ -2,7 +2,9 @@
  * View-move cold-state delta: patch the dataset's retained cold state in place
  * (remove, upsert, reorder to `activeSetOrder`) and re-ingest it through
  * {@link applyColdState}, so departed entities release exactly as in a full
- * rebuild.
+ * rebuild. A delta that changed no entry, order or selection re-ingests
+ * nothing: only the wanted chunks moved, and nothing laid out reads them
+ * unless a render radius or failed chunks are in play.
  *
  * The reorder keeps descriptor-buffer entity indices in agreement with the main
  * thread, which computes them from the same order. No-op when no cold state
@@ -15,7 +17,13 @@ import type {
   ColdStateDeltaMessage,
 } from "../workerProtocol.ts";
 import { applyColdState } from "./apply.ts";
-import { patchWantedChunks } from "../wantedChunks.ts";
+import { indexWantedChunks, patchWantedChunks, patchWantedIndex } from "../wantedChunks.ts";
+import { renderRadiusEnabled } from "../../pipeline/renderRadius.ts";
+
+/** Whether either tier draws only the chunks inside a render radius, which moves with the view. */
+function radiusInPlay(radius: ColdStateDeltaMessage["renderRadiusView"]): boolean {
+  return radius !== undefined && (renderRadiusEnabled(radius.detail) || renderRadiusEnabled(radius.coarse));
+}
 
 export function applyColdStateDelta(
   ctx: WorkerCtx,
@@ -23,6 +31,17 @@ export function applyColdStateDelta(
 ): void {
   const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
   if (!cold) return;
+
+  const laidOutAsBefore =
+    msg.removedEntityIds.length === 0 &&
+    msg.upserts.length === 0 &&
+    msg.activeSetOrder.length === cold.activeSet.length &&
+    msg.activeSetOrder.every((entityId, i) => cold.activeSet[i].entityId === entityId) &&
+    msg.currentT === cold.currentT &&
+    msg.currentZ === cold.currentZ &&
+    !radiusInPlay(cold.renderRadiusView) &&
+    !radiusInPlay(msg.renderRadiusView) &&
+    !ctx.state.failedByDataset.has(msg.datasetId);
 
   const removed = new Set(msg.removedEntityIds);
   const byEntity = new Map<string, ColdStateActiveEntry>();
@@ -58,5 +77,11 @@ export function applyColdStateDelta(
 
   ctx.state.currentColdState = cold;
   ctx.state.currentEpochs = msg.epochs;
+  if (laidOutAsBefore) {
+    const index = ctx.state.wantedByDataset.get(msg.datasetId);
+    if (index) patchWantedIndex(index, msg.wantedChunks);
+    else ctx.state.wantedByDataset.set(msg.datasetId, indexWantedChunks(cold.wantedChunks));
+    return;
+  }
   applyColdState(ctx, cold);
 }
