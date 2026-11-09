@@ -508,6 +508,71 @@ describe("Suite A — applyColdState", () => {
     expect(findEvictionSlot(ctx.state, atlas, "detail")).toEqual({ key: "imgA:ch0|2/0/0/0/0/0", class: "unsampled", dist: Infinity });
   });
 
+  it("leaves a pool's indirection as it is when a cold state lays the pool out as the last one did", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const entry = () => makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [2], levels: HALVING_PYRAMID });
+    const first = ingest(ctx, [entry()]);
+    const poolKey = poolOf(ctx.state, "imgA:ch0", "detail", 2)!;
+    deliverVolume(ctx, chunkUpload("imgA:ch0", 2), first.epochs, poolKey, "imgA:ch0");
+    const atlas = vol(ctx.state).get(poolKey)!;
+    const slot = atlas.slots.get("imgA:ch0|2/0/0/0/0/0")!;
+    const indirection = atlas.indirectionData;
+    // As if the frame after the upload had written the indirection out.
+    atlas.indirectionDirty = false;
+
+    // The same layout, as a view move with nothing entering or leaving sends.
+    ingest(ctx, [entry()]);
+    expect(atlas.indirectionDirty).toBe(false);
+    expect(atlas.indirectionData).toBe(indirection);
+    expect(atlas.indirectionData[0]).toBe(slot);
+
+    // Another timepoint maps none of the resident chunks.
+    const later = makeCold([entry()], { currentT: 1 });
+    ctx.state.currentColdState = later;
+    applyColdState(ctx, later);
+    expect(atlas.indirectionDirty).toBe(true);
+    expect(atlas.indirectionData[0]).toBe(0xffffffff);
+    expect(atlas.slotGridIdx[slot]).toBe(-1);
+  });
+
+  it("remaps only the pools whose sections moved", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const levels: ColdStateActiveEntry["levels"] = [
+      { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+      { level: 1, chunkShape: [32, 64, 64], gridShape: [1, 2, 2], levelDims: [32, 128, 128] },
+      { level: 2, chunkShape: [8, 128, 128], gridShape: [8, 2, 2], levelDims: [64, 256, 256] },
+    ];
+    const entry = (target: number) =>
+      makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [target], coarseLevel: 2, levels });
+    ingest(ctx, [entry(1)]);
+    const detail = vol(ctx.state).get("ds1:ch0:64x64x32:detail")!;
+    const coarse = vol(ctx.state).get("ds1:ch0:128x128x8:coarse")!;
+    detail.indirectionDirty = false;
+    coarse.indirectionDirty = false;
+
+    // A finer target adds a level-0 section to the detail pool and leaves the
+    // coarse pool's one section where it was.
+    ingest(ctx, [entry(0)]);
+    expect(detail.indirectionDirty).toBe(true);
+    expect(detail.entityMetas.get("imgA:ch0")?.map((m) => m.level)).toEqual([0, 1]);
+    expect(coarse.indirectionDirty).toBe(false);
+  });
+
+  it("remaps every time while failed chunks are marked, since the marks follow the wanted set", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const entry = () => makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [2], levels: HALVING_PYRAMID });
+    ctx.state.failedByDataset.set("ds1", new Map([["imgA", new Set(["2/0/0/0/0/0"])]]));
+    const cold = makeCold([entry()]);
+    cold.wantedChunks = [{ tier: "detail", memberId: "imgA:ch0", chunkKeys: ["2/0/0/0/0/0"] }];
+    applyColdState(ctx, cold);
+    const atlas = vol(ctx.state).get(poolOf(ctx.state, "imgA:ch0", "detail", 2)!)!;
+    expect(atlas.indirectionData[0]).toBe(0xfffffffe);
+    atlas.indirectionDirty = false;
+
+    applyColdState(ctx, cold);
+    expect(atlas.indirectionDirty).toBe(true);
+  });
+
   it("records each member's target level for eviction, and drops it with the dataset", () => {
     const ctx = makeCtx(makeMockDevice());
     const cold = makeCold([
