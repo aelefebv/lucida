@@ -1801,6 +1801,14 @@ describe("wire goldens: content-source request envelopes", () => {
       chunkCancel.json(),
     );
   });
+
+  const chunkCodecs = claimFixture("session/chunk_codecs.json");
+  it("a new connection declares every codec the decode workers undo", () => {
+    const sent: string[] = [];
+    const source = new ProxiedContentSource((json) => sent.push(json));
+    source.resetConnection(1);
+    expect(sent.map((json) => JSON.parse(json))).toStrictEqual([chunkCodecs.json()]);
+  });
 });
 
 // Dataset-open payloads through the manifest mirrors

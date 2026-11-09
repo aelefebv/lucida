@@ -1048,6 +1048,9 @@ def _load(load: Any) -> dict[str, Any]:
         "settleMs": load.get("settleMs"),
         "prefetchMs": load.get("prefetchMs"),
         "bytesFetched": received.get("bytes"),
+        # A run file from before the wire carried encoded chunks has no
+        # `wireBytes`: its wire carried what it fetched.
+        "bytesWire": received.get("wireBytes", received.get("bytes")),
         "chunksFetched": received.get("requests"),
         "chunksShort": load.get("coverageLossChunks"),
     }
@@ -1126,6 +1129,7 @@ COLUMNS = [
     "prefetch",
     "duration",
     "fetched",
+    "wire",
     "chunks",
     "evicted",
     "short",
@@ -1178,6 +1182,7 @@ def step_outcome(step: dict[str, Any]) -> str:
 # allowance has been measured for their noise.
 READINGS = {
     "prefetch": ("prefetchMs", _ms),
+    "wire": ("bytesWire", _bytes),
     "input to frame p95": ("inputToFrameP95Ms", _ms),
     "longest task": ("longestTaskMs", _ms),
     "dropped": ("droppedFrames", _count),

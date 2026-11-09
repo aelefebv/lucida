@@ -108,6 +108,7 @@ function describeInterval(interval: TraceRun, replans: ReplanSummary): SteadySta
 interface Delivery {
   atUs: number;
   bytes: number;
+  wireBytes: number;
   lane: LaneName;
 }
 
@@ -131,7 +132,7 @@ function deliveries(interval: TraceRun): Delivery[] {
       if (seen.has(label)) continue;
       seen.add(label);
     }
-    out.push({ atUs: wire.endUs, bytes: row.bytes, lane: row.lane });
+    out.push({ atUs: wire.endUs, bytes: row.bytes, wireBytes: row.wireBytes ?? row.bytes, lane: row.lane });
   }
   return out;
 }
@@ -148,9 +149,11 @@ export function summariseReceived(interval: TraceRun): ReceivedSummary {
   const bySecond = new Map<number, number>();
   const byLaneBytes = new Map<LaneName, { bytes: number; requests: number }>();
   let bytes = 0;
+  let wireBytes = 0;
   const found = deliveries(interval);
   for (const delivery of found) {
     bytes += delivery.bytes;
+    wireBytes += delivery.wireBytes;
     const second = Math.floor(delivery.atUs / US_PER_SECOND);
     bySecond.set(second, (bySecond.get(second) ?? 0) + delivery.bytes);
     const lane = byLaneBytes.get(delivery.lane) ?? { bytes: 0, requests: 0 };
@@ -178,6 +181,7 @@ export function summariseReceived(interval: TraceRun): ReceivedSummary {
 
   return {
     bytes,
+    wireBytes,
     requests: found.length,
     bytesPerS: ratePerSecond(bytes, spanUs),
     busySeconds,

@@ -846,7 +846,7 @@ describe("recorder cost contract", () => {
     // happen where there is room.
     // Warmed short of the per-run cap, where every write would be refused and
     // allocate nothing for that reason alone.
-    const chunks = 128;
+    const chunks = 60;
     const rig = makeRig(chunks);
     for (let i = 0; i < 100; i++) rig.tick();
 

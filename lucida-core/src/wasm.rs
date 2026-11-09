@@ -33,6 +33,18 @@ pub fn enumerate_chunks(
     Ok(crate::chunk::enumerate_batch(&view, queries))
 }
 
+/// A chunk the server relayed still in the codecs it was stored in, decoded
+/// to exactly `len` bytes, the size its level's metadata gives one chunk.
+/// `codecs` is the codec list of its frame. Bytes that decode to any other
+/// size are an error, never a buffer.
+#[wasm_bindgen]
+pub fn decode_chunk(codecs: &[u8], payload: &[u8], len: usize) -> Result<Vec<u8>, JsError> {
+    let codecs =
+        lucida_protocol::codec::read_codecs(codecs).map_err(|e| JsError::new(&e.to_string()))?;
+    crate::chunk_codec::decode_relayed(&codecs, payload, len)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
 /// The level the screen calls for, from [`crate::target_level::target_level`],
 /// the rule every record of [`WasmScene::view_query`] applies.
 /// `pixels_per_sample` is device pixels per level-0 sample, `shape_ratios[L]`

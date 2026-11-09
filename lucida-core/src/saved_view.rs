@@ -25,7 +25,6 @@ use crate::camera::{Arcball, Camera, Framing};
 use crate::scene::{DatasetDisplaySettings, DisplayState};
 use crate::view::ViewState;
 
-mod gzip;
 mod payload;
 
 pub use payload::{PayloadError, decode_payload, encode_payload};

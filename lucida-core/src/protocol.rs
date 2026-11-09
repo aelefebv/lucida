@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
+use lucida_protocol::codec::ChunkCodec;
 use lucida_protocol::{
     ChunkFailureKind, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
     DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
@@ -825,6 +826,34 @@ pub enum ChunkMessage {
     /// Variant added at the end so the serde tag positions of older variants
     /// don't shift.
     ChunkCancel { rids: Vec<u32> },
+    /// Viewer -> Server: the codecs this connection decodes. The server may
+    /// then send a chunk still in the codecs it was stored in, as an encoded
+    /// frame (`lucida_protocol::codec::encode_chunk_frame`), and every other
+    /// chunk decoded as before. A connection that never sends it gets
+    /// decoded frames only. A name the server does not know is skipped, so a
+    /// newer client's list still reads.
+    ///
+    /// Variant added at the end so the serde tag positions of older variants
+    /// don't shift.
+    ChunkCodecs {
+        #[serde(deserialize_with = "known_codecs")]
+        codecs: Vec<ChunkCodec>,
+    },
+}
+
+fn known_codecs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ChunkCodec>, D::Error> {
+    use serde::de::IntoDeserializer;
+    let names = Vec::<String>::deserialize(deserializer)?;
+    Ok(names
+        .into_iter()
+        .filter_map(|name| {
+            let name: serde::de::value::StringDeserializer<serde::de::value::Error> =
+                name.into_deserializer();
+            ChunkCodec::deserialize(name).ok()
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -918,6 +947,17 @@ mod tests {
                 assert_eq!(key, "1/0/0/2/3/4");
             }
             _ => panic!("expected ChunkFetch"),
+        }
+    }
+
+    #[test]
+    fn chunk_codecs_skip_a_name_this_server_does_not_know() {
+        let json = r#"{"type":"chunk_codecs","codecs":["zstd","brotli","blosc"]}"#;
+        match serde_json::from_str::<ChunkMessage>(json).unwrap() {
+            ChunkMessage::ChunkCodecs { codecs } => {
+                assert_eq!(codecs, [ChunkCodec::Zstd, ChunkCodec::Blosc]);
+            }
+            other => panic!("expected ChunkCodecs, got {other:?}"),
         }
     }
 

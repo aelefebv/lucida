@@ -847,6 +847,11 @@ async fn handle_client_inner(
                                 "ws.chunk_cancel"
                             );
                         }
+                        // Every chunk is still served decoded, which a
+                        // client that declares codecs reads as well.
+                        ChunkMessage::ChunkCodecs { codecs } => {
+                            tracing::debug!(client_id = %id, ?codecs, "ws.chunk_codecs");
+                        }
                     }
                     continue;
                 }
@@ -1719,6 +1724,7 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "chunk_request",
     "chunk_fetch",
     "chunk_cancel",
+    "chunk_codecs",
 ];
 
 async fn send_generated_chunk_status(

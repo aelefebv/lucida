@@ -21,6 +21,7 @@ import {
   type FetchSourceWire,
 } from "./manifestTypes.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
+import { levelChunkBytes } from "./pipeline/fetch/contentSource.ts";
 import { readCacheKnobs, subscribeCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
 import { pageDeviceBudgets } from "./deviceBudget.ts";
 import type {
@@ -881,17 +882,25 @@ export class SessionController {
 
     let registeredImages = 0;
     if ("Proxied" in fetchDesc) {
+      const multiscales = new Map(manifest.images.map((image) => [image.image_id, image.multiscale]));
       for (const spec of fetchDesc.Proxied.images) {
-        this.contentSource.registerImage(spec.image_id, spec.wire_format);
+        const multiscale = multiscales.get(spec.image_id);
+        this.contentSource.registerImage(
+          spec.image_id,
+          spec.wire_format,
+          multiscale && levelChunkBytes(multiscale),
+        );
         registeredImages++;
       }
       // Labels carry their own image (distinct id, integer dtype) outside
       // `images`, so register them for label overlay fetches. Wire format
       // comes from the label's declared dtype (e.g. Uint32).
       for (const label of manifest.labels ?? []) {
-        this.contentSource.registerImage(label.image.image_id, {
-          Raw: { data_type: label.image.multiscale.data_type },
-        });
+        this.contentSource.registerImage(
+          label.image.image_id,
+          { Raw: { data_type: label.image.multiscale.data_type } },
+          levelChunkBytes(label.image.multiscale),
+        );
         registeredImages++;
       }
     } else {
@@ -1120,8 +1129,8 @@ export class SessionController {
       },
       onAck: () => {},
       onCommandRejected: (reason) => this.deps.events.onCommandRejected(reason),
-      onBinary: (key, data) => {
-        this.contentSource.handleBinary(key, data);
+      onBinary: (key, data, codecs) => {
+        this.contentSource.handleBinary(key, data, codecs);
       },
       onPeerJoined: (clientId, presence) => {
         const next = new Map(this.peers);

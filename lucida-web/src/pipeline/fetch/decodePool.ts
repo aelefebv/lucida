@@ -70,8 +70,10 @@ export class DecodePool {
   }
 
   /**
-   * Decode raw wire-format bytes. Returns data in its native format (uint8
-   * stays uint8).
+   * Decode wire-format bytes. Returns data in its native format (uint8
+   * stays uint8). `codecs` is the codec list of bytes still in the codecs
+   * the chunk was stored in, and `decodedBytes` the size its level's
+   * metadata gives, which encoded bytes must decode to exactly.
    *
    * `traceRow` correlates the decode with the chunk that asked for it. The
    * `decode` phase is the whole round trip — postMessage out to onmessage in,
@@ -79,7 +81,13 @@ export class DecodePool {
    * mistakes it for worker CPU time. Nothing in the worker timestamps itself;
    * both ends are read on the main thread off one clock.
    */
-  decode(bytes: ArrayBuffer, wireFormat: WireFormat, traceRow = -1): Promise<ArrayBuffer> {
+  decode(
+    bytes: ArrayBuffer,
+    wireFormat: WireFormat,
+    traceRow = -1,
+    codecs?: Uint8Array,
+    decodedBytes?: number,
+  ): Promise<ArrayBuffer> {
     if (this.pool.length === 0) {
       return Promise.reject(new Error("DecodePool terminated"));
     }
@@ -94,7 +102,7 @@ export class DecodePool {
       // Dispatch itself is below the platform's clock floor, so it is counted
       // rather than timed.
       traceRecorder.countPhase(CountedPhaseIndex.WorkerDispatch);
-      best.worker.postMessage({ id, bytes, wireFormat }, [bytes]);
+      best.worker.postMessage({ id, bytes, wireFormat, codecs, decodedBytes }, [bytes]);
     });
   }
 

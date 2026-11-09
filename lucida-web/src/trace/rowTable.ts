@@ -106,6 +106,7 @@ class RowBlock {
   readonly rids: Uint32Array;
   readonly connectionGenerations: Uint32Array;
   readonly bytes: Uint32Array;
+  readonly wireBytes: Uint32Array;
   readonly tiers: Uint8Array;
   readonly lanes: Uint8Array;
   readonly outcomes: Uint8Array;
@@ -142,6 +143,7 @@ class RowBlock {
     this.rids = words(1);
     this.connectionGenerations = words(1);
     this.bytes = words(1);
+    this.wireBytes = words(1);
     this.tiers = octets();
     this.lanes = octets();
     this.outcomes = octets();
@@ -150,7 +152,7 @@ class RowBlock {
 }
 
 /** The columns a block holds per row: the row width less the identity index, which lives outside the blocks. */
-const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 4;
+const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 2) * 4 + 4;
 
 /** The ids the pool gave an entity and the image its rows last carried. */
 interface EntityIds {
@@ -162,12 +164,13 @@ interface EntityIds {
 export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
-   * label + the bytes the wire delivered, all uint32, plus four bytes: tier,
+   * label + the bytes the wire delivered, decoded and as carried, all
+   * uint32, plus four bytes: tier,
    * lane, outcome, last boundary. Plus the identity index: one int32 per row
    * linking it to the previous row of the same chunk, and two int32 slots
    * per row of capacity in the open-addressing table that finds the newest.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 4 + 4 + 2 * 4;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 2) * 4 + 4 + 4 + 2 * 4;
 
   private readonly strings = new StringPool();
 
@@ -328,6 +331,7 @@ export class RowTable {
     block.rids[at] = NO_RID;
     block.connectionGenerations[at] = NO_CONNECTION;
     block.bytes[at] = 0;
+    block.wireBytes[at] = 0;
 
     const c = at * COORDS_PER_ROW;
     const coords = block.coords;
@@ -606,10 +610,11 @@ export class RowTable {
     this.enter(boundary);
   }
 
-  /** The payload bytes the wire delivered for this row. */
-  setBytes(index: number, bytes: number): void {
+  /** The payload bytes the wire delivered for this row, decoded and as carried. */
+  setBytes(index: number, bytes: number, wireBytes: number = bytes): void {
     const block = this.blockOf(index);
     block.bytes[index - block.first] = bytes;
+    block.wireBytes[index - block.first] = wireBytes;
   }
 
   stampAt(index: number, boundary: number): number {
@@ -713,6 +718,7 @@ export class RowTable {
       x,
       chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
       bytes: block.bytes[at],
+      wireBytes: block.wireBytes[at],
       outcome: ROW_OUTCOME_NAMES[block.outcomes[at]],
       phases,
     };

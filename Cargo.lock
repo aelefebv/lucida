@@ -1624,14 +1624,19 @@ name = "lucida-core"
 version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
+ "crc32c",
  "flate2",
  "indexmap",
  "lucida-content",
  "lucida-protocol",
+ "lz4_flex",
  "miniz_oxide 0.9.1",
+ "ruzstd",
  "serde",
  "serde_json",
+ "thiserror",
  "wasm-bindgen",
+ "zstd",
 ]
 
 [[package]]
@@ -1641,6 +1646,7 @@ dependencies = [
  "lucida-content",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2670,6 +2676,15 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "ryu"

@@ -47,6 +47,7 @@ use lucida_core::scene::{
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, RenderMode,
 };
 use lucida_core::view::ViewState;
+use lucida_protocol::codec::ChunkCodec;
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
@@ -323,6 +324,7 @@ fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
         // here if a producer ever appears.
         ChunkMessage::ChunkFetch { .. } => &[],
         ChunkMessage::ChunkCancel { .. } => &["session/chunk_cancel.json"],
+        ChunkMessage::ChunkCodecs { .. } => &["session/chunk_codecs.json"],
     }
 }
 
@@ -2327,7 +2329,11 @@ const GENERATED_FILES: &[&str] = &[
     "generated/availability_delta.json",
 ];
 
-const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/chunk_cancel.json"];
+const REQUEST_FILES: &[&str] = &[
+    "session/chunk_request.json",
+    "session/chunk_cancel.json",
+    "session/chunk_codecs.json",
+];
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
@@ -2397,6 +2403,25 @@ fn request_envelopes_match_goldens() {
         "session/chunk_cancel.json",
         &cancel,
         &req("", &["/type", "/rids"]),
+        &mut failures,
+    );
+
+    // What the page declares on every connection: each codec it decodes.
+    let codecs = ChunkMessage::ChunkCodecs {
+        codecs: vec![
+            ChunkCodec::Gzip,
+            ChunkCodec::Zlib,
+            ChunkCodec::Zstd,
+            ChunkCodec::Lz4,
+            ChunkCodec::Blosc,
+            ChunkCodec::Crc32c,
+        ],
+    };
+    assert!(chunk_message_fixture_paths(&codecs).contains(&"session/chunk_codecs.json"));
+    check(
+        "session/chunk_codecs.json",
+        &codecs,
+        &req("", &["/type", "/codecs"]),
         &mut failures,
     );
 

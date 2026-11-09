@@ -47,7 +47,8 @@ the N runs, followed by half their range when they differ.
 | first frame | `load.firstFrameMs` |
 | settle | `load.settleMs`: the view has its wanted set drawn, prefetch left out |
 | prefetch | `load.prefetchMs`: the last prefetched chunk decoded |
-| fetched, chunks | `load.received.bytes`, `load.received.requests` |
+| fetched, chunks | `load.received.bytes`, `load.received.requests`: the chunks' bytes decoded |
+| wire | `load.received.wireBytes`: what the wire carried, less than fetched for chunks sent still encoded |
 | evicted | the `evictions` entry of `coverage.notHealthSignals` |
 | short | `load.coverageLossChunks`: wanted chunks not resident at the close |
 | top limiter | `attribution.cause` and `.confidence` |
