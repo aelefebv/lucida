@@ -1,0 +1,11 @@
+{
+  "description": "zoom the volume view in by 8 about its center, leave it alone for 4 s, then orbit and pan it at a person's pace",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "steps": [
+    { "kind": "zoom", "factor": 8, "durationMs": 1500 },
+    { "kind": "hold", "ms": 4000 },
+    { "kind": "orbit", "theta": 60, "phi": 0, "durationMs": 2000 },
+    { "kind": "pan", "dx": -300, "dy": -100, "durationMs": 1500 }
+  ]
+}

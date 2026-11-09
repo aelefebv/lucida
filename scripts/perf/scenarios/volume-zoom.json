@@ -1,13 +1,11 @@
 {
-  "description": "zoom the volume view in by 2 three times about its center, leave it alone for 4 s, then orbit and pan",
+  "description": "zoom the volume view in by 2 three times about its center, then leave it alone for 4 s",
   "requires": ["volume"],
   "camera": "arcball",
   "steps": [
     { "kind": "zoom", "factor": 2, "durationMs": 500 },
     { "kind": "zoom", "factor": 2, "durationMs": 500 },
     { "kind": "zoom", "factor": 2, "durationMs": 500 },
-    { "kind": "hold", "ms": 4000 },
-    { "kind": "orbit", "theta": 60, "phi": 0, "durationMs": 2000 },
-    { "kind": "pan", "dx": -300, "dy": -100, "durationMs": 1500 }
+    { "kind": "hold", "ms": 4000 }
   ]
 }
