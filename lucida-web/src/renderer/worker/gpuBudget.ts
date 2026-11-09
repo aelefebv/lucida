@@ -127,11 +127,13 @@ export function postGpuMemoryIfChanged(ctx: WorkerCtx): void {
 export function measureGpuCapacity(ctx: WorkerCtx, memory: GpuMemoryReport = measureGpuMemory(ctx.state)): GpuCapacityReport {
   const state = ctx.state;
   const pools: GpuPoolCapacity[] = [];
+  const limits = getDeviceLimits(ctx.device);
+  const reservedBytes = memory.bytes - memory.chunkBytes;
   if (state.volumeAtlases.size + state.sliceAtlases.size === 0) {
-    return { budgetBytes: state.gpuTotalBytes, reservedBytes: memory.bytes - memory.chunkBytes, pools };
+    return { budgetBytes: state.gpuTotalBytes, reservedBytes, pools, limits };
   }
   // A halved total lowers what a pool made before it may grow to.
-  const cap = poolCapBytes(getDeviceLimits(ctx.device), state.gpuTotalBytes);
+  const cap = poolCapBytes(limits, state.gpuTotalBytes);
   for (const [poolKey, atlas] of state.volumeAtlases) {
     const slotBytes = atlas.chunkX * atlas.chunkY * atlas.chunkZ * bytesPerTexel(atlas.format);
     pools.push({
@@ -154,7 +156,7 @@ export function measureGpuCapacity(ctx: WorkerCtx, memory: GpuMemoryReport = mea
       maxSlots: Math.max(atlas.totalSlots, Math.min(atlas.slotsX * atlas.maxSlotsY, Math.floor(cap / slotBytes))),
     });
   }
-  return { budgetBytes: state.gpuTotalBytes, reservedBytes: memory.bytes - memory.chunkBytes, pools };
+  return { budgetBytes: state.gpuTotalBytes, reservedBytes, pools, limits };
 }
 
 /** Bytes the total has left, negative when it is overspent. */
