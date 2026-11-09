@@ -4,8 +4,8 @@
 # dependencies = []
 # ///
 """Run `lucida trace` over a matrix of datasets, scenarios, device pixel
-ratios and source throttles, and print one table of what each run's
-diagnostic says.
+ratios and networks, and print one table of what each run's diagnostic
+says.
 
     uv run scripts/perf.py                          # the quick suite
     uv run scripts/perf.py --suite full
@@ -63,8 +63,23 @@ TRAITS = ("volume", "time", "channels", "collection")
 CAMERAS = ("slice", "arcball")
 SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "steps"}
 DEFAULT_SUITE = "quick"
-# The server's source throttle profiles; `local` reads at the source's own speed.
-NETWORKS = ("local", "object-store", "remote")
+# Each network is the server's source throttle profile, on its reads, and its
+# link throttle profile, on the session socket to the page; `local` is neither.
+# The numbers behind each profile, and their sources, are in the server's
+# `source_throttle.rs` and `link_throttle.rs`.
+NETWORKS = {
+    "local": ("local", "local"),
+    # A server beside its object store, and the page on the same machine.
+    "object-store": ("object-store", "local"),
+    # A server across a continent from its store, and the page on a typical
+    # office or home link to the server.
+    "remote": ("remote", "broadband"),
+    # A deployed viewer: a server beside its store, and the page on a typical
+    # office or home link to the server.
+    "deployed": ("object-store", "broadband"),
+}
+# The settings a network replaces, and the runner otherwise passes through.
+THROTTLE_SETTINGS = ("LUCIDA_SOURCE_THROTTLE", "LUCIDA_LINK_THROTTLE")
 # How an add or remove step names a catalog dataset, whose location only the
 # runner knows.
 DATASET_REF = "dataset:"
@@ -127,7 +142,7 @@ class Suite:
     datasets: tuple[str, ...]
     scenarios: tuple[str, ...]
     ratios: tuple[float, ...]
-    # Source throttle profiles; none leaves the server's sources as the caller's environment sets them.
+    # Networks; none leaves the server's throttles as the caller's environment sets them.
     networks: tuple[str, ...] = ()
 
 
@@ -277,8 +292,8 @@ class Case:
     scenario: Scenario
     ratio: float
     repeat: int
-    # The source throttle profile the runner starts its server under; None
-    # leaves the server as it is.
+    # The network the runner starts its server under; None leaves the
+    # server as it is.
     network: str | None = None
 
     @property
@@ -774,12 +789,12 @@ def stop_everything() -> None:
 def _scrubbed_env(**overrides: str) -> dict[str, str]:
     """The caller's environment without its lucida settings, so a run never
     reaches the caller's own server, config, token or database. The browser
-    choice is kept, since it says which Chrome this machine has, and so is the
-    source throttle, a condition every run file records."""
+    choice is kept, since it says which Chrome this machine has, and so are
+    the source and link throttles, conditions every run file records."""
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith("LUCIDA_") or k == "LUCIDA_BROWSER" or k.startswith("LUCIDA_SOURCE_THROTTLE")
+        if not k.startswith("LUCIDA_") or k == "LUCIDA_BROWSER" or k.startswith(THROTTLE_SETTINGS)
     }
     env.update(overrides)
     return env
@@ -810,10 +825,11 @@ def existing_server(url: str) -> str:
 
 def throttled(network: str | None) -> bool:
     """Whether the server the runner starts for `network` reads its sources
-    through a throttle: a profile other than local, or with none named, a
-    throttle the caller's environment sets."""
+    through a throttle: a source profile other than local, or with no network
+    named, a throttle the caller's environment sets. The link throttle has no
+    part in it, since a warm server still sends every chunk over the link."""
     if network is not None:
-        return network != "local"
+        return NETWORKS[network][0] != "local"
     settings = [v for k, v in os.environ.items() if k.startswith("LUCIDA_SOURCE_THROTTLE")]
     return any(v not in ("", "0", "local") for v in settings)
 
@@ -821,8 +837,8 @@ def throttled(network: str | None) -> bool:
 def start_server(
     built: Build, out_dir: Path, port: int, network: str | None = None, log_name: str = "server.log"
 ) -> tuple[ProcessTree, str]:
-    """Start the server, under the source throttle profile `network` when one
-    is named. Each network's server has a directory and database of its own."""
+    """Start the server, under the throttles of `network` when one is named.
+    Each network's server has a directory and database of its own."""
     assert built.server is not None and built.web_dist is not None
     # The server keeps its database in its working directory.
     server_dir = out_dir / (f"server-{network}" if network else "server")
@@ -837,10 +853,10 @@ def start_server(
         LUCIDA_GENERATED_COARSE_CACHE_DIR=str(server_dir / "generated-coarse"),
     )
     if network:
-        # The profile alone: a caller's latency or bandwidth would quietly
-        # turn it into another throttle.
-        env = {k: v for k, v in env.items() if not k.startswith("LUCIDA_SOURCE_THROTTLE")}
-        env["LUCIDA_SOURCE_THROTTLE"] = network
+        # The profiles alone: a caller's latency or bandwidth would quietly
+        # turn one into another throttle.
+        env = {k: v for k, v in env.items() if not k.startswith(THROTTLE_SETTINGS)}
+        env["LUCIDA_SOURCE_THROTTLE"], env["LUCIDA_LINK_THROTTLE"] = NETWORKS[network]
     tree = ProcessTree([str(built.server)], server_dir / log_name, server_dir, env)
     url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 30
@@ -1045,6 +1061,7 @@ def read_run(path: Path) -> dict[str, Any]:
         "adapter": run.get("gpu"),
         "adapterKind": (run.get("adapterKind") or {}).get("label"),
         "sourceThrottle": header.get("sourceThrottle"),
+        "linkThrottle": header.get("linkThrottle"),
         **_lag(diagnostic.get("lag")),
         "errors": _errors(errors),
         "steps": [
@@ -1186,11 +1203,12 @@ class Stats:
 UNRECORDED = "unrecorded"
 
 
-def throttle_of(fields: dict[str, Any]) -> Any:
-    """The source throttle a run's server reported: its settings, None when it
-    read sources unthrottled, or UNRECORDED when the run file does not say."""
-    record = fields.get("sourceThrottle")
-    return record.get("settings") if isinstance(record, dict) else UNRECORDED
+def throttle_of(fields: dict[str, Any], record: str = "sourceThrottle") -> Any:
+    """A throttle a run's server reported, the source throttle or with
+    `linkThrottle` the link throttle: its settings, None when it had none, or
+    UNRECORDED when the run file does not say."""
+    value = fields.get(record)
+    return value.get("settings") if isinstance(value, dict) else UNRECORDED
 
 
 def _numbers(records: list[dict[str, Any]], name: str) -> Stats | None:
@@ -1212,23 +1230,29 @@ class Cell:
     @property
     def key(self) -> str:
         # A throttled cell is a cell of its own, so a baseline never compares
-        # it with the same cell read at the source's own speed.
+        # it with the same cell measured without that throttle.
         mark = self.throttle_mark()
         return f"{self.dataset}.{self.scenario}" + (f"@{mark}" if mark else "")
 
-    def throttle(self) -> Any:
+    def throttle(self, record: str = "sourceThrottle") -> Any:
         """The throttle every measured run reported, or UNRECORDED when one
         did not say or they disagree."""
-        reported = [throttle_of(f) for f in self.measured()]
+        reported = [throttle_of(f, record) for f in self.measured()]
         return reported[0] if reported and all(t == reported[0] for t in reported) else UNRECORDED
 
     def throttle_mark(self) -> str:
-        """The throttle's name, empty when sources read unthrottled: the
-        profile the runs reported, custom for values of no profile, or the
-        network asked for when no run got far enough to report one."""
-        if not self.measured():
-            return "" if self.network in (None, "local") else self.network
-        settings = self.throttle()
+        """The throttles' names, empty when neither slowed the runs: the
+        source profile the runs reported, then the link profile after
+        `link-`, custom for values of no profile, or the network's profiles
+        when no run got far enough to report them."""
+        if self.measured():
+            source, link = self._profile(self.throttle()), self._profile(self.throttle("linkThrottle"))
+        else:
+            source, link = ("" if p == "local" else p for p in NETWORKS[self.network or "local"])
+        return "+".join(filter(None, [source, link and f"link-{link}"]))
+
+    @staticmethod
+    def _profile(settings: Any) -> str:
         if settings is None:
             return ""
         return UNRECORDED if settings == UNRECORDED else settings.get("profile") or "custom"
@@ -1464,10 +1488,10 @@ def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison
 
     Speed on one adapter says nothing about speed on another, so a baseline
     is found by adapter and a file recorded on another adapter is refused.
-    Nor does speed under one source throttle say anything about speed under
-    another, so a cell whose throttle differs from its baseline's is not
-    compared; an entry saved before runs recorded a throttle was read
-    unthrottled.
+    Nor does speed under one source or link throttle say anything about
+    speed under another, so a cell whose throttles differ from its
+    baseline's is not compared; an entry saved before runs recorded a
+    throttle ran without it.
     """
     comparison = Comparison(root)
     adapters = {a for cell in cells if (a := cell.adapter())}
@@ -1509,7 +1533,10 @@ def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison
             entry = baseline["cells"].get(cell.key) if cell.ratio == ratio else None
             if entry is None:
                 continue
-            if cell.measured() and cell.throttle() != entry.get("sourceThrottle"):
+            if cell.measured() and (
+                cell.throttle() != entry.get("sourceThrottle")
+                or cell.throttle("linkThrottle") != entry.get("linkThrottle")
+            ):
                 throttled_otherwise.append(cell.key)
                 continue
             entries.append(entry)
@@ -1517,7 +1544,7 @@ def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison
         comparison.notes.append(f"dpr {dpr}: baseline {path}, from {_provenance(entries) or 'no matching cell'}")
         if throttled_otherwise:
             comparison.notes.append(
-                f"dpr {dpr}: not compared, because the source throttle differs from the baseline's: "
+                f"dpr {dpr}: not compared, because a throttle differs from the baseline's: "
                 + ", ".join(throttled_otherwise)
             )
         theirs = ", ".join(sorted({_knobs_text(e.get("knobs")) for e in entries} - {_knobs_text(knobs)}))
@@ -1530,7 +1557,7 @@ def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tu
     """Write each clean cell into the baseline of its adapter and ratio,
     replacing that cell and keeping the rest. A cell with a failed run is
     left out, so a broken run never becomes the reference, and so is one
-    whose runs do not say whether its sources were throttled."""
+    whose runs do not say whether they were throttled."""
     notes: list[str] = []
     groups: dict[tuple[str, float], list[Cell]] = {}
     left_out = []
@@ -1540,7 +1567,7 @@ def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tu
         if adapter is None or any(row.error is not None for row in cell.rows):
             left_out.append(f"{cell.key} dpr {format_ratio(cell.ratio)}")
             continue
-        if cell.throttle() == UNRECORDED:
+        if UNRECORDED in (cell.throttle(), cell.throttle("linkThrottle")):
             unthrottled_unknown.append(f"{cell.key} dpr {format_ratio(cell.ratio)}")
             continue
         groups.setdefault((adapter, cell.ratio), []).append(cell)
@@ -1557,6 +1584,7 @@ def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tu
                 "savedAt": meta.get("startedAt"),
                 "knobs": list(knobs),
                 "sourceThrottle": cell.throttle(),
+                "linkThrottle": cell.throttle("linkThrottle"),
             }
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(path.name + ".partial")
@@ -1567,7 +1595,7 @@ def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tu
         notes.append(f"not saved, because a run failed: {', '.join(left_out)}")
     if unthrottled_unknown:
         notes.append(
-            f"not saved, because the runs do not say whether sources were throttled: {', '.join(unthrottled_unknown)}"
+            f"not saved, because the runs do not say whether they were throttled: {', '.join(unthrottled_unknown)}"
         )
     return notes
 
@@ -1584,7 +1612,12 @@ def render_markdown(rows: list[Row], out_dir: Path, comparison: Comparison | Non
     cells = group_cells(rows)
     lines = [f"adapter: {', '.join(sorted({a for r in rows if (a := adapter_of(r.fields))})) or 'not recorded'}"]
     throttled = sorted(
-        {r.fields["sourceThrottle"]["summary"] for r in rows if (r.fields.get("sourceThrottle") or {}).get("settings")}
+        {
+            r.fields[record]["summary"]
+            for r in rows
+            for record in ("sourceThrottle", "linkThrottle")
+            if (r.fields.get(record) or {}).get("settings")
+        }
     )
     if throttled:
         lines.append(f"throttle: {'; '.join(throttled)}")
@@ -1608,12 +1641,12 @@ def render_markdown(rows: list[Row], out_dir: Path, comparison: Comparison | Non
     return "\n".join(lines) + "\n"
 
 
-def source_throttle(rows: list[Row]) -> Any:
-    """The server's source throttle as the runs recorded it: the one record
-    they share, every distinct one if they differ, or None if none recorded it."""
+def throttle_record(rows: list[Row], name: str) -> Any:
+    """A server throttle as the runs recorded it: the one record they share,
+    every distinct one if they differ, or None if none recorded it."""
     records: list[Any] = []
     for row in rows:
-        record = row.fields.get("sourceThrottle")
+        record = row.fields.get(name)
         if record is not None and record not in records:
             records.append(record)
     if not records:
@@ -1626,7 +1659,8 @@ def summary_json(
 ) -> dict[str, Any]:
     summary = {
         **meta,
-        "sourceThrottle": source_throttle(rows),
+        "sourceThrottle": throttle_record(rows, "sourceThrottle"),
+        "linkThrottle": throttle_record(rows, "linkThrottle"),
         "rows": [
             {
                 "dataset": row.case.dataset.name,
@@ -1741,8 +1775,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--network",
         action="append",
-        help=f"start the server under each of these source throttle profiles in turn, comma-separated or "
-        f"repeated: {', '.join(NETWORKS)}",
+        help=f"start the server under each of these networks' source and link throttles in turn, "
+        f"comma-separated or repeated: {', '.join(NETWORKS)}",
     )
     parser.add_argument("--cli", type=Path, metavar="PATH", help="run this built lucida CLI instead of building one")
     parser.add_argument(
@@ -1860,7 +1894,13 @@ def main(argv: list[str]) -> int:
                 server, server_url = start_server(built, out_dir, args.port or free_port(), case.network, log_name)
             if new_network:
                 servers.append({"url": server_url, "network": case.network, "perRun": per_run})
-                profile = f" with the {case.network} source throttle profile" if case.network else ""
+                profile = (
+                    " on the {} network (source throttle {}, link throttle {})".format(
+                        case.network, *NETWORKS[case.network]
+                    )
+                    if case.network
+                    else ""
+                )
                 fresh = ", a fresh one for each run" if per_run else ""
                 print(f"server {server_url}{profile}{fresh}, runs in {out_dir}", flush=True)
             assert server_url is not None

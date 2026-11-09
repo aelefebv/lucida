@@ -22,12 +22,23 @@ and `summary.json` go to `target/perf/runs/<time>/` beside the run files, and
 Speed numbers need a GPU. CI renders with SwiftShader, which shows whether a view settles
 but not how fast. The table's first line names the adapter.
 
-`--network local,remote` starts a server under each source throttle profile in turn, so a
-local dataset loads the way a remote one does; the `full` suite runs both. Without it the
-runner passes `LUCIDA_SOURCE_THROTTLE` and its companions through to its server, and with
-`--server` each run records whatever throttle that server reports. A throttled table says so
-on its second line and in its throttle column, and `summary.json` records the throttle as
-`sourceThrottle`.
+`--network local,remote` starts a server under each network in turn. A network sets two
+server throttles: the source throttle on the server's reads, so a local dataset loads the way
+a remote one does, and the link throttle on the session socket, so the page waits for its
+chunks the way a page across a network does.
+
+| network | source throttle | link throttle | models |
+| --- | --- | --- | --- |
+| `local` | off | off | the server, its data and the page on one machine |
+| `object-store` | `object-store` | off | a server beside its object store, the page beside it |
+| `remote` | `remote` | `broadband` | a server across a continent from its store, the page on an office or home link |
+| `deployed` | `object-store` | `broadband` | a deployed viewer: a server beside its store, the page on an office or home link |
+
+The `full` suite runs `local` and `remote`. Without `--network` the runner passes
+`LUCIDA_SOURCE_THROTTLE`, `LUCIDA_LINK_THROTTLE` and their companions through to its server,
+and with `--server` each run records whatever throttles that server reports. A throttled
+table says so on its second line and in its throttle column, and `summary.json` records the
+throttles as `sourceThrottle` and `linkThrottle`.
 
 ## The table
 
@@ -37,7 +48,7 @@ the N runs, followed by half their range when they differ.
 
 | column | field |
 | --- | --- |
-| throttle | the profile in `header.sourceThrottle`; `-` when unthrottled |
+| throttle | the profile in `header.sourceThrottle`, then `link-` and the one in `header.linkThrottle`; `-` when neither |
 | first frame | `load.firstFrameMs` |
 | settle | `load.settleMs` |
 | fetched, chunks | `load.received.bytes`, `load.received.requests` |
@@ -56,9 +67,10 @@ leaves out. A step with no verdict says why, and the table lists it underneath.
 
 `--save-baseline` keeps the results as the baseline for their adapter and device pixel
 ratio, cell by cell; a cell with a failed run is not kept. A throttled cell has a key of its
-own, such as `volume.orbit@remote`, and is never compared with an entry saved under another
-throttle. Baselines live in `perf-baselines/` in the clone's git directory, which every
-worktree shares and `cargo clean` leaves alone. `--baseline DIR` keeps them elsewhere.
+own, such as `volume.orbit@remote+link-broadband`, and is never compared with an entry saved
+under other throttles. Baselines live in `perf-baselines/` in the clone's git directory,
+which every worktree shares and `cargo clean` leaves alone. `--baseline DIR` keeps them
+elsewhere.
 
 Every invocation compares against its adapter's baseline, if one was saved. A `vs baseline`
 column names what moved by more than the noise allowance in `METRICS` in `scripts/perf.py`,
@@ -110,9 +122,10 @@ and the web bundle when the files git sees in their sources, or the built output
 differ from what it last built. A failed build stops the invocation before any run.
 
 The server stays up for the whole invocation, or for each network in turn, so only a
-dataset's first run meets a cold server. Under a throttled network every run gets a server of
-its own, since a warm source cache would serve the later runs past the throttle. Every browser
-starts cold. Each run file's `header.serverWarmth` says which case it was.
+dataset's first run meets a cold server. Under a network with a source throttle every run
+gets a server of its own, since a warm source cache would serve the later runs past the
+throttle. Every browser starts cold. Each run file's `header.serverWarmth` says which case
+it was.
 
 `--cli` runs a CLI that is already built, and `--server` drives a running server instead of
 starting one. With both, the runner builds nothing. The server opens datasets by the path

@@ -236,7 +236,9 @@ def test_networks_from_a_flag_replace_the_suites_and_a_given_server_keeps_its_ow
     cases, _ = plan(networks=["remote"])
     assert {case.dataset.name for case in cases} == set(SUITES["quick"].datasets)
     assert {case.network for case in cases} == {"remote"}
-    with pytest.raises(perf.PerfError, match="no network called lan; the networks are local, object-store, remote"):
+    with pytest.raises(
+        perf.PerfError, match="no network called lan; the networks are local, object-store, remote, deployed"
+    ):
         perf.parse_network("lan")
 
 
@@ -260,22 +262,28 @@ def test_a_network_starts_the_server_under_that_profile_alone(tmp_path: Path, mo
     monkeypatch.setattr(perf, "_answers", lambda url, timeout: True)
     monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE", "object-store")
     monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE_LATENCY_MS", "40")
+    monkeypatch.setenv("LUCIDA_LINK_THROTTLE_BYTES_PER_SEC", "9000000")
     built = perf.Build(tmp_path / "lucida", tmp_path / "lucida-server", tmp_path / "dist")
     perf.start_server(built, tmp_path, 9888, "remote")
+    perf.start_server(built, tmp_path, 9888, "local")
     perf.start_server(built, tmp_path, 9888)
-    (remote_dir, remote), (plain_dir, plain) = started
-    assert remote["LUCIDA_SOURCE_THROTTLE"] == "remote"
+    (remote_dir, remote), (_, local), (plain_dir, plain) = started
+    assert (remote["LUCIDA_SOURCE_THROTTLE"], remote["LUCIDA_LINK_THROTTLE"]) == ("remote", "broadband")
     assert "LUCIDA_SOURCE_THROTTLE_LATENCY_MS" not in remote
+    assert "LUCIDA_LINK_THROTTLE_BYTES_PER_SEC" not in remote
     assert remote_dir != plain_dir
-    # With no network the caller's own throttle stands.
+    # Every network names both throttles, so the local one turns both off.
+    assert (local["LUCIDA_SOURCE_THROTTLE"], local["LUCIDA_LINK_THROTTLE"]) == ("local", "local")
+    # With no network the caller's own throttles stand.
     assert plain["LUCIDA_SOURCE_THROTTLE"] == "object-store"
     assert plain["LUCIDA_SOURCE_THROTTLE_LATENCY_MS"] == "40"
+    assert plain["LUCIDA_LINK_THROTTLE_BYTES_PER_SEC"] == "9000000"
 
 
 def test_a_throttled_server_is_one_the_network_or_the_environment_slows(monkeypatch) -> None:
     for name in [k for k in perf.os.environ if k.startswith("LUCIDA_SOURCE_THROTTLE")]:
         monkeypatch.delenv(name)
-    assert perf.throttled("remote") and perf.throttled("object-store")
+    assert perf.throttled("remote") and perf.throttled("object-store") and perf.throttled("deployed")
     assert not perf.throttled("local") and not perf.throttled(None)
     monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE", "local")
     assert not perf.throttled(None)
@@ -400,12 +408,14 @@ def test_failed_runs_are_named_and_annotated_in_github_actions(tmp_path: Path, c
 # -- reading runs and the table ----------------------------------------------
 
 
-def run_file(tmp_path: Path, diagnostic, script=None, throttle=None) -> Path:
+def run_file(tmp_path: Path, diagnostic, script=None, throttle=None, link=None) -> Path:
     header = {"settled": True}
     if script is not None:
         header["script"] = {"steps": script}
     if throttle is not None:
         header["sourceThrottle"] = throttle
+    if link is not None:
+        header["linkThrottle"] = link
     return write(tmp_path / "run.json", {"fileVersion": 1, "header": header, "diagnostic": diagnostic, "trace": {}})
 
 
@@ -510,7 +520,7 @@ def table_rows(markdown: str) -> list[dict[str, str]]:
 
 
 def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path) -> None:
-    path = run_file(tmp_path, DIAGNOSTIC, throttle=UNTHROTTLED)
+    path = run_file(tmp_path, DIAGNOSTIC, throttle=UNTHROTTLED, link=LINK_UNTHROTTLED)
     ok = perf.Row(perf.Case(CATALOG["image"], SCENARIOS["cold-open"], 1.0, 1), path, tmp_path / "a.txt", 0)
     ok.fields = perf.read_run(path)
     (tmp_path / "b.txt").write_text("error: the server refused | the open\n", encoding="utf-8")
@@ -537,8 +547,14 @@ REMOTE = {
 }
 
 
+BROADBAND = {
+    "settings": {"profile": "broadband", "latency_ms": 40, "bytes_per_sec": 12_500_000},
+    "summary": "session socket throttled on the server: broadband: 40 ms round trip, 100 Mbit/s to each client",
+}
+
+
 def test_a_throttled_server_says_so_in_the_table_and_the_summary(tmp_path: Path) -> None:
-    path = run_file(tmp_path, DIAGNOSTIC, throttle=REMOTE)
+    path = run_file(tmp_path, DIAGNOSTIC, throttle=REMOTE, link=LINK_UNTHROTTLED)
     row = perf.Row(perf.Case(CATALOG["image"], SCENARIOS["cold-open"], 1.0, 1), path, tmp_path / "a.txt", 0)
     row.fields = perf.read_run(path)
     assert perf.render_markdown([row], tmp_path).splitlines()[1] == f"throttle: {REMOTE['summary']}"
@@ -546,11 +562,20 @@ def test_a_throttled_server_says_so_in_the_table_and_the_summary(tmp_path: Path)
 
     assert dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))["throttle"] == "remote"
 
-    unthrottled = run_file(tmp_path, DIAGNOSTIC, throttle=UNTHROTTLED)
+    unthrottled = run_file(tmp_path, DIAGNOSTIC, throttle=UNTHROTTLED, link=LINK_UNTHROTTLED)
     row.fields = perf.read_run(unthrottled)
     assert perf.summary_json([row], tmp_path, {})["sourceThrottle"] == UNTHROTTLED
     assert not perf.render_markdown([row], tmp_path).splitlines()[1].startswith("throttle:")
     assert dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))["throttle"] == "-"
+
+    both = run_file(tmp_path, DIAGNOSTIC, throttle=REMOTE, link=BROADBAND)
+    row.fields = perf.read_run(both)
+    assert perf.summary_json([row], tmp_path, {})["linkThrottle"] == BROADBAND
+    assert perf.render_markdown([row], tmp_path).splitlines()[1] == (
+        f"throttle: {BROADBAND['summary']}; {REMOTE['summary']}"
+    )
+    throttle = dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))["throttle"]
+    assert throttle == "remote+link-broadband"
 
 
 def test_a_scripted_scenario_shows_a_row_for_each_step_under_its_own(tmp_path: Path) -> None:
@@ -565,7 +590,9 @@ def test_a_scripted_scenario_shows_a_row_for_each_step_under_its_own(tmp_path: P
             "durationUs": 1_000_000 + n * 200_000,
             "lag": lag(30.0, 75, 3),
         }
-        path = run_file(tmp_path, {**DIAGNOSTIC, "lag": lag(30.0, 75, 3)}, [orbit, tilt], throttle=UNTHROTTLED)
+        path = run_file(
+            tmp_path, {**DIAGNOSTIC, "lag": lag(30.0, 75, 3)}, [orbit, tilt], throttle=UNTHROTTLED, link=LINK_UNTHROTTLED
+        )
         path = path.rename(tmp_path / f"run-{n}.json")
         row = perf.Row(perf.Case(CATALOG["volume"], SCENARIOS["orbit-sustained"], 1.0, n), path, path, 0)
         row.fields = perf.read_run(path)
@@ -597,13 +624,16 @@ def test_a_step_that_opened_no_run_has_no_verdict_and_is_never_clear() -> None:
 
 
 UNTHROTTLED = {"summary": "source reads unthrottled"}
+LINK_UNTHROTTLED = {"summary": "session socket unthrottled"}
 
 
-def test_the_server_keeps_the_callers_source_throttle(monkeypatch) -> None:
+def test_the_server_keeps_the_callers_throttles(monkeypatch) -> None:
     monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE", "remote")
+    monkeypatch.setenv("LUCIDA_LINK_THROTTLE", "broadband")
     monkeypatch.setenv("LUCIDA_DB_URL", "sqlite://elsewhere.db")
     env = perf._scrubbed_env()
     assert env["LUCIDA_SOURCE_THROTTLE"] == "remote"
+    assert env["LUCIDA_LINK_THROTTLE"] == "broadband"
     assert "LUCIDA_DB_URL" not in env
 
 
@@ -632,6 +662,7 @@ def measured(
             "chunksFetched": 80,
             "chunksEvicted": 0,
             "sourceThrottle": UNTHROTTLED,
+            "linkThrottle": LINK_UNTHROTTLED,
             **fields,
         }
     return row
@@ -815,8 +846,34 @@ def test_a_cell_whose_throttle_differs_from_its_baseline_entry_is_not_compared(t
     assert cell.key == "volume.cold-open@remote"
     assert comparison.found(cell) is None and not comparison.regressed(cell)
     assert comparison.notes[-1] == (
-        "dpr 1: not compared, because the source throttle differs from the baseline's: volume.cold-open@remote"
+        "dpr 1: not compared, because a throttle differs from the baseline's: volume.cold-open@remote"
     )
+
+
+def test_a_link_throttled_cell_is_kept_and_compared_apart(tmp_path: Path) -> None:
+    deployed = {"network": "deployed", "sourceThrottle": REMOTE, "linkThrottle": BROADBAND}
+    root = saved(tmp_path, [measured(tmp_path, "volume.cold-open", settleMs=9000.0, **deployed)])
+    cells = json.loads((root / ADAPTER_DIR / "dpr1.json").read_text(encoding="utf-8"))["cells"]
+    assert sorted(cells) == ["volume.cold-open@remote+link-broadband"]
+    assert cells["volume.cold-open@remote+link-broadband"]["linkThrottle"] == BROADBAND["settings"]
+
+    # The same key under other link numbers is not compared.
+    slower = {**BROADBAND, "settings": {**BROADBAND["settings"], "latency_ms": 80}}
+    later = measured(tmp_path, "volume.cold-open", settleMs=12000.0, **{**deployed, "linkThrottle": slower})
+    [cell], comparison = compared([later], root)
+    assert cell.key == "volume.cold-open@remote+link-broadband"
+    assert comparison.found(cell) is None
+    assert comparison.notes[-1].startswith("dpr 1: not compared, because a throttle differs")
+
+    # An entry saved before runs recorded the link throttle ran without one.
+    path = root / ADAPTER_DIR / "dpr1.json"
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    entry = baseline["cells"].pop("volume.cold-open@remote+link-broadband")
+    entry.pop("linkThrottle")
+    baseline["cells"]["volume.cold-open@remote"] = entry
+    path.write_text(json.dumps(baseline), encoding="utf-8")
+    [cell], comparison = compared([measured(tmp_path, "volume.cold-open", sourceThrottle=REMOTE)], root)
+    assert comparison.found(cell) is not None
 
 
 def test_runs_that_do_not_say_whether_they_were_throttled_are_never_kept_or_compared(tmp_path: Path) -> None:
@@ -824,15 +881,22 @@ def test_runs_that_do_not_say_whether_they_were_throttled_are_never_kept_or_comp
     unsaid = measured(tmp_path, "image.cold-open", sourceThrottle=None)
     notes = perf.save_baseline(perf.group_cells([unsaid]), root, {}, ())
     assert notes == [
-        "not saved, because the runs do not say whether sources were throttled: image.cold-open@unrecorded dpr 1"
+        "not saved, because the runs do not say whether they were throttled: image.cold-open@unrecorded dpr 1"
     ]
     [cell], comparison = compared([unsaid], root)
     assert comparison.found(cell) is None
+    no_link = measured(tmp_path, "image.cold-open", linkThrottle=None)
+    notes = perf.save_baseline(perf.group_cells([no_link]), root, {}, ())
+    assert notes == [
+        "not saved, because the runs do not say whether they were throttled: image.cold-open@link-unrecorded dpr 1"
+    ]
 
 
 def test_a_failed_throttled_run_keeps_the_network_it_asked_for(tmp_path: Path) -> None:
     [cell] = perf.group_cells([measured(tmp_path, "volume.cold-open", network="remote", error="timed out")])
-    assert cell.key == "volume.cold-open@remote"
+    assert cell.key == "volume.cold-open@remote+link-broadband"
+    [cell] = perf.group_cells([measured(tmp_path, "volume.cold-open", network="object-store", error="timed out")])
+    assert cell.key == "volume.cold-open@object-store"
     [cell] = perf.group_cells([measured(tmp_path, "volume.cold-open", network="local", error="timed out")])
     assert cell.key == "volume.cold-open"
 
