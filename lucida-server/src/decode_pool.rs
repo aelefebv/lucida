@@ -314,11 +314,19 @@ mod tests {
         let pool = Arc::new(DecodePool::new(1));
         let (release, gate) = mpsc::channel::<()>();
         let ran = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
 
         let busy = {
-            let pool = Arc::clone(&pool);
-            tokio::spawn(async move { pool.run(CLIENT, move || gate.recv().unwrap()).await })
+            let (pool, started) = (Arc::clone(&pool), Arc::clone(&started));
+            tokio::spawn(async move {
+                pool.run(CLIENT, move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    gate.recv().unwrap();
+                })
+                .await
+            })
         };
+        until(|| started.load(Ordering::SeqCst) == 1).await;
         let queued = {
             let (pool, ran) = (Arc::clone(&pool), Arc::clone(&ran));
             tokio::spawn(async move {
@@ -354,15 +362,19 @@ mod tests {
         let pool = Arc::new(DecodePool::new(1));
         let (release, gate) = mpsc::channel::<()>();
         let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
 
         let busy = {
-            let pool = Arc::clone(&pool);
+            let (pool, started) = (Arc::clone(&pool), Arc::clone(&started));
             tokio::spawn(async move {
-                pool.run(ReaderId::UNATTRIBUTED, move || gate.recv().unwrap())
-                    .await
+                pool.run(ReaderId::UNATTRIBUTED, move || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    gate.recv().unwrap();
+                })
+                .await
             })
         };
-        until(|| pool.queued() == 0).await;
+        until(|| started.load(Ordering::SeqCst) == 1).await;
         let mut serves = Vec::new();
         for reader in [CLIENT, CLIENT, CLIENT, ReaderId(2)] {
             let (serving, order) = (Arc::clone(&pool), Arc::clone(&order));
