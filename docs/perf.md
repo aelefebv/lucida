@@ -127,10 +127,12 @@ The traits are `volume`, `time`, `channels` and `collection`.
 `scripts/perf/scenarios/` holds one file per interaction. A file has `steps` in the trace
 script format, the `camera` that frames the dataset, the traits it `requires`, and an
 optional `width` and `height`. `"mobile": true` drives the page as a phone, with a mobile
-layout, touch input and a mobile user agent (`lucida trace --mobile`); `phone-cold-open` does,
-and the `phone` suite runs it at ratio 3. The runner hands the file to `lucida trace --script`
-unchanged, except that an add or remove step's `"url": "dataset:<name>"` becomes that
-catalog dataset's location. A scenario never runs on the dataset it adds.
+layout, touch input and a mobile user agent (`lucida trace --mobile`). `"fullUi": true` loads
+the full viewer page instead of the chrome-free capture surface (`lucida trace --full-ui`), so
+the run also checks that the top bar and a phone's bottom sheet sit wholly on screen. The
+`phone` suite runs `phone-cold-open` and `phone-full-ui` at ratio 3. The runner hands the file
+to `lucida trace --script` unchanged, except that an add or remove step's
+`"url": "dataset:<name>"` becomes that catalog dataset's location. A scenario never runs on the dataset it adds.
 
 Keep a scenario to a few steps. The recorder drops its oldest runs to stay under its memory
 cap, so a long script on a large volume can lose an early step's run before the export.

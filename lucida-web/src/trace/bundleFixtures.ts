@@ -107,6 +107,8 @@ export function fixtureContext(overrides: Partial<BundleContext> = {}): BundleCo
     origin: "https://lucida.example",
     devicePixelRatio: 2,
     deviceMemoryGib: 4,
+    pageSize: { cssWidth: 1440, cssHeight: 900 },
+    mobile: false,
     // Rejects by default, so a test that reaches the fallback path without
     // saying what the screenshot decodes to gets the frame carried unchecked
     // rather than a verdict on a guessed picture.
