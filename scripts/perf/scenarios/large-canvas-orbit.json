@@ -1,0 +1,13 @@
+{
+  "description": "in a 1674x921 window, a 3348x1842 canvas at ratio 2, zoom the volume view in by 4 about its center, leave it alone for 4 s, then orbit and pan it at a person's pace",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "width": 1674,
+  "height": 921,
+  "steps": [
+    { "kind": "zoom", "factor": 4, "durationMs": 1000 },
+    { "kind": "hold", "ms": 4000 },
+    { "kind": "orbit", "theta": 60, "phi": 20, "durationMs": 2000 },
+    { "kind": "pan", "dx": -400, "dy": -100, "durationMs": 1500 }
+  ]
+}

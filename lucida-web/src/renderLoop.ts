@@ -117,6 +117,8 @@ export class RenderLoop implements TraceEnvironment {
   private settleUnsub: () => void;
 
   private _renderScale = 1.0;
+  /** The render scale of the last frame drawn. */
+  private drawnRenderScale = 1.0;
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
@@ -617,9 +619,15 @@ export class RenderLoop implements TraceEnvironment {
     if (listener) this.setDirty("residency", "auto_contrast_listener");
   }
 
+  /**
+   * Only a scale above the last frame's asks for a frame. Lowering it waits
+   * for the next frame something else asks for: redrawing a view that has
+   * not moved would only blur it, and a press lowers the scale before the
+   * drag that moves anything, or before a click that moves nothing.
+   */
   setRenderScale(s: number): void {
     this._renderScale = s;
-    this.setDirty("interactive", "render_scale");
+    if (s > this.drawnRenderScale) this.setDirty("interactive", "render_scale");
   }
 
   setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {
@@ -791,6 +799,7 @@ export class RenderLoop implements TraceEnvironment {
     this.lastFrameTimeUs = (performance.now() - now) * 1000;
 
     if (shouldRender) {
+      this.drawnRenderScale = ctx.renderScale;
       this.publishRenderedCaptureReady();
     }
 

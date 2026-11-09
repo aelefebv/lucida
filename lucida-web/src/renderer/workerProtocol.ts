@@ -233,6 +233,11 @@ export interface VolumeRenderMultiPassMessage {
   clipMode?: number;
   /** See {@link SliceRenderMultiPassMessage.pixelRatio}. */
   pixelRatio?: number;
+  /**
+   * How many of its sampled level's steps each ray-march step takes: above
+   * 1 while a gesture is drawn at a reduced scale, 1 for every other frame.
+   */
+  marchStepScale?: number;
   /** Echoed in the frame's {@link FrameDoneMessage}. */
   frameSeq?: number;
 }

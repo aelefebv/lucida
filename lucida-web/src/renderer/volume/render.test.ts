@@ -82,6 +82,7 @@ interface MockRenderer {
   setTierAtlases: ReturnType<typeof vi.fn>;
   setRenderMode: ReturnType<typeof vi.fn>;
   setPixelRatio: ReturnType<typeof vi.fn>;
+  setMarchStepScale: ReturnType<typeof vi.fn>;
   setMatrices: ReturnType<typeof vi.fn>;
   setLabelColorBuffer: ReturnType<typeof vi.fn>;
   setDescriptorBinding: ReturnType<typeof vi.fn>;
@@ -97,6 +98,7 @@ function makeRenderer(): MockRenderer {
     setTierAtlases: vi.fn(),
     setRenderMode: vi.fn(),
     setPixelRatio: vi.fn(),
+    setMarchStepScale: vi.fn(),
     setMatrices: vi.fn(),
     setLabelColorBuffer: vi.fn(),
     setDescriptorBinding: vi.fn(),
@@ -242,6 +244,28 @@ describe("handleVolumeRenderMultiPass", () => {
     const submit = vi.mocked(device.queue.submit);
     const lastSubmit = submit.mock.invocationCallOrder[submit.mock.invocationCallOrder.length - 1];
     expect(capture.mock.invocationCallOrder[0]).toBeGreaterThan(lastSubmit);
+  });
+
+  it("marches coarser for the frame that asks, and hands the renderer back at full quality", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: null } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+
+    await handleVolumeRenderMultiPass(ctx, { ...msgFor([{ memberId: "img-a", entityIndex: 0 }]), marchStepScale: 2 });
+    expect(renderer.setMarchStepScale.mock.calls).toEqual([[2], [1]]);
+    const [setCoarse, setFull] = renderer.setMarchStepScale.mock.invocationCallOrder;
+    const submits = vi.mocked(device.queue.submit).mock.invocationCallOrder;
+    expect(setCoarse).toBeLessThan(submits[0]);
+    expect(setFull).toBeGreaterThan(submits[submits.length - 1]);
+
+    renderer.setMarchStepScale.mockClear();
+    await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
+    expect(renderer.setMarchStepScale.mock.calls).toEqual([[1], [1]]);
   });
 
   it("does not advance first-layer state for skipped non-renderable layers", async () => {

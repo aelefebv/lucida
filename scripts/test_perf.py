@@ -156,6 +156,7 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "volume-zoomed-orbit",
         "slice-zoom",
         "slice-zoomed-pan",
+        "large-canvas-orbit",
     }
 
 

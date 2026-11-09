@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FramePacer, MAX_INTERACTIVE_FRAMES_IN_FLIGHT } from "./framePacing.ts";
+import { DISPLAY_FRAME_MS, FramePacer, MAX_INTERACTIVE_FRAMES_IN_FLIGHT } from "./framePacing.ts";
 
 describe("FramePacer", () => {
   it("lets a view change queue one frame behind the one drawing, and no more", () => {
@@ -7,6 +7,16 @@ describe("FramePacer", () => {
     expect(pacer.mayDrawInteractive(0)).toBe(true);
     expect(pacer.mayDrawInteractive(MAX_INTERACTIVE_FRAMES_IN_FLIGHT - 1)).toBe(true);
     expect(pacer.mayDrawInteractive(MAX_INTERACTIVE_FRAMES_IN_FLIGHT)).toBe(false);
+  });
+
+  it("queues no view change behind a frame that ran longer than a display frame", () => {
+    const pacer = new FramePacer();
+    pacer.noteFrameDone(DISPLAY_FRAME_MS + 10, 1000);
+    expect(pacer.mayDrawInteractive(0)).toBe(true);
+    expect(pacer.mayDrawInteractive(1)).toBe(false);
+    // Once frames keep up again, one may queue behind the one drawing.
+    pacer.noteFrameDone(DISPLAY_FRAME_MS - 6, 1100);
+    expect(pacer.mayDrawInteractive(1)).toBe(true);
   });
 
   it("holds a frame for new chunks while any frame is still drawing", () => {
