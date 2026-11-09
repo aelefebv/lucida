@@ -1549,24 +1549,21 @@ async fn serve_chunk_from_store(
             let buf = if let Some((stored, chain)) = fetched.relayable(codecs) {
                 encode_chunk_frame(client_id, &dataset, &image, key, chain, stored)
             } else {
-                let read = match fetched.decode(Some(&mut probe)) {
-                    Ok(read) => read,
-                    Err(error) => return Some((error, probe)),
-                };
-                // An absent chunk's fill is the server's own making, so it
-                // crosses the link compressed, as a generated chunk does.
-                let made = matches!(read, ChunkRead::Absent { .. });
-                let bytes = read.into_bytes();
-                match made.then(|| compress_produced(codecs, &bytes)).flatten() {
-                    Some(compressed) => encode_chunk_frame(
+                match fetched.decode(Some(&mut probe)) {
+                    Ok(ChunkRead::Present(bytes)) => {
+                        encode_chunk_frame(client_id, &dataset, &image, key, &[], &bytes)
+                    }
+                    // An absent chunk's fill is the server's own making, so
+                    // it crosses the link as a generated chunk does.
+                    Ok(absent) => produced_frame(
                         client_id,
                         &dataset,
                         &image,
                         key,
-                        &[PRODUCED_CODEC],
-                        &compressed,
+                        codecs,
+                        &absent.into_bytes(),
                     ),
-                    None => encode_chunk_frame(client_id, &dataset, &image, key, &[], &bytes),
+                    Err(error) => return Some((error, probe)),
                 }
             };
             probe.mark(ServerPhase::SliceEncode);
@@ -1619,17 +1616,7 @@ async fn serve_generated_chunk_request(
             );
             slot.run(move || {
                 probe.mark(ServerPhase::DecodeWait);
-                let buf = match compress_produced(codecs, &bytes) {
-                    Some(compressed) => encode_chunk_frame(
-                        client_id,
-                        &dataset,
-                        &image,
-                        key,
-                        &[PRODUCED_CODEC],
-                        &compressed,
-                    ),
-                    None => encode_chunk_frame(client_id, &dataset, &image, key, &[], &bytes),
-                };
+                let buf = produced_frame(client_id, &dataset, &image, key, codecs, &bytes);
                 probe.mark(ServerPhase::SliceEncode);
                 hand_off(&client_queue, buf, probe);
             })
@@ -1818,6 +1805,29 @@ fn send_generated_chunk_status(
     };
     let json = serde_json::to_string(&msg).unwrap();
     let _ = client.send(Message::Text(json.into()));
+}
+
+/// A frame for a chunk the server made itself, compressed for a client that
+/// decodes [`PRODUCED_CODEC`] when that saves enough.
+fn produced_frame(
+    client_id: ClientId,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
+    chunk_key: impl std::fmt::Display,
+    codecs: CodecSet,
+    bytes: &[u8],
+) -> Vec<u8> {
+    match compress_produced(codecs, bytes) {
+        Some(compressed) => encode_chunk_frame(
+            client_id,
+            dataset_id,
+            image_id,
+            chunk_key,
+            &[PRODUCED_CODEC],
+            &compressed,
+        ),
+        None => encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &[], bytes),
+    }
 }
 
 /// A chunk frame for `bytes`, still in `codecs` when there are any; see
