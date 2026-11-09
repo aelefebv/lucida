@@ -201,6 +201,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
         ("cache_lookup", &batch.cache_lookup_us),
         ("permit_wait", &batch.permit_wait_us),
         ("backend_read", &batch.backend_read_us),
+        ("decode_wait", &batch.decode_wait_us),
         ("decompress", &batch.decompress_us),
         ("slice_encode", &batch.slice_encode_us),
         ("handoff", &batch.handoff_us),

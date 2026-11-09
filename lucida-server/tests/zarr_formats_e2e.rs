@@ -69,7 +69,6 @@ async fn served(imported: &Imported, image_id: &ImageId, key: &str) -> ChunkRead
         &key.parse::<ChunkKey>().unwrap(),
         ReaderId(1),
         RequestLabel(1),
-        None,
     )
     .await
     .unwrap_or_else(|e| panic!("{image_id}/{key}: {e}"))
