@@ -236,3 +236,22 @@ describe("an arrival only the prefetch lane wants", () => {
     expect(wakes).not.toHaveBeenCalled();
   });
 });
+
+describe("a label's planes", () => {
+  // Requested under the label's own image id, which the active set never names.
+  const label = (overrides: Partial<ChunkRequest>) => request({ entityId: "lbl", imageId: "lbl", ...overrides });
+  const LABEL = "ds/lbl/0/0/0/0/0/0";
+
+  it("keep their fetch through a step the band holds, and a jump out of the chunk cancels it and the whole chunk", () => {
+    const { source, submit } = setup();
+    submit(label({ plane: 1, planes: [0, 3] }));
+    submit(label({ plane: 2, planes: [0, 4] }), label({ lane: "prefetch", priority: 300 }));
+    expect(source.waiting(`${LABEL}#0:3`)).toBe(true);
+    expect(source.waiting(LABEL)).toBe(true);
+
+    submit(label({ z: 1, chunkKey: "0/0/0/1/0/0", plane: 1, planes: [0, 3] }));
+    expect(source.waiting(`${LABEL}#0:3`)).toBe(false);
+    expect(source.waiting(LABEL)).toBe(false);
+    expect(source.waiting("ds/lbl/0/0/0/1/0/0#0:3")).toBe(true);
+  });
+});
