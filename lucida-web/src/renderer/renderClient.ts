@@ -655,9 +655,16 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage({ type: "minimapInit", canvas: offscreen }, [offscreen]);
   }
 
-  minimapRender(layers: MinimapLayerParams[], invViewProj: Float32Array, eye: Float32Array, canvasW: number, canvasH: number) {
+  minimapRender(
+    layers: MinimapLayerParams[],
+    invViewProj: Float32Array,
+    viewProj: Float32Array,
+    eye: Float32Array,
+    canvasW: number,
+    canvasH: number,
+  ) {
     this.worker.postMessage({
-      type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH, pixelRatio: pagePixelRatio(),
+      type: "minimapRender", layers, invViewProj, viewProj, eye, canvasW, canvasH, pixelRatio: pagePixelRatio(),
     } satisfies MinimapRenderMessage);
   }
 
@@ -669,6 +676,7 @@ export class RenderClient implements UploadClient {
   thumbnailRender(
     layers: MinimapLayerParams[],
     invViewProj: Float32Array,
+    viewProj: Float32Array,
     eye: Float32Array,
     size: number,
   ): Promise<ImageBitmap | null> {
@@ -682,7 +690,7 @@ export class RenderClient implements UploadClient {
     return new Promise<ImageBitmap | null>((resolve) => {
       this.thumbnailPending.set(id, resolve);
       this.worker.postMessage({
-        type: "thumbnailRender", id, layers, invViewProj, eye, size, pixelRatio: pagePixelRatio(),
+        type: "thumbnailRender", id, layers, invViewProj, viewProj, eye, size, pixelRatio: pagePixelRatio(),
       } satisfies ThumbnailRenderMessage);
     });
   }

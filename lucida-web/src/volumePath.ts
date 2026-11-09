@@ -140,18 +140,20 @@ function uploadAndRenderVolume(
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
+    // The descriptor holds the model matrix, but the CPU needs it too for
+    // the scissor projection, which every channel of a member shares.
+    const scissors = members.map((m) => computeScissorRect(
+      m.modelMatrix ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId)), viewProj, canvasW, canvasH,
+    ));
+
     // A layer past the scene's t draws its clamped timepoint, which the plan
     // already asked for.
     for (const ch of resolved.channels) {
-      for (const m of members) {
-        const compKey = compositeKey(m.imageId, ch.channel);
-        // The descriptor holds the model matrix, but the CPU needs it too
-        // for the scissor projection.
-        const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
-
-        const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
+      for (const [i, m] of members.entries()) {
+        const scissorRect = scissors[i];
         if (!scissorRect) continue; // group fully off-screen
 
+        const compKey = compositeKey(m.imageId, ch.channel);
         const entityIndex = indexByMember.get(compKey);
         if (entityIndex === undefined) continue;
 
