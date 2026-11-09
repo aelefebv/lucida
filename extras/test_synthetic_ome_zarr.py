@@ -130,6 +130,41 @@ def test_time_and_channel_axes_appear_when_larger_than_one(tmp_path: Path) -> No
     assert ms["datasets"][1]["coordinateTransformations"][0]["scale"] == [1.0, 1.0, 2.0, 2.0, 2.0]
 
 
+def test_labels_write_a_uint32_label_image_on_the_image_s_levels_without_its_channel_axis(tmp_path: Path) -> None:
+    out = generate(
+        tmp_path, "labeled.ome.zarr",
+        "--size", "40,96,80", "--channels", "2", "--timepoints", "2", "--levels", "2", "--chunk", "16", "--labels",
+    )
+    assert read_json(out / "labels" / "zarr.json")["attributes"]["ome"]["labels"] == ["balls"]
+    label = out / "labels" / "balls"
+    attributes = read_json(label / "zarr.json")["attributes"]["ome"]
+    assert attributes["image-label"]["source"]["image"] == "../../"
+    ms = attributes["multiscales"][0]
+    assert [a["name"] for a in ms["axes"]] == ["t", "z", "y", "x"]
+    assert ms["datasets"][1]["coordinateTransformations"][0]["scale"] == [1.0, 2.0, 2.0, 2.0]
+    for level, shape in enumerate([[2, 40, 96, 80], [2, 20, 48, 40]]):
+        meta = read_json(label / str(level) / "zarr.json")
+        assert (meta["shape"], meta["data_type"]) == (shape, "uint32")
+        assert meta["chunk_grid"]["configuration"]["chunk_shape"] == [1, 16, 16, 16]
+    fine, coarse = level_array(label, 0), level_array(label, 1)
+    # One ball per 32 samples along each axis: 2 x 3 x 3 of them, ids from 1.
+    assert set(np.unique(fine)) == {0, *range(1, 2 * 3 * 3 + 1)}
+    np.testing.assert_array_equal(fine[0], fine[1])
+    # The ball at the centre of each cube carries that cube's id at every level.
+    assert fine[0, 16, 48, 16] == coarse[0, 8, 24, 8] == 1 + 1 * 3
+    assert fine[0, 0, 0, 0] == 0
+
+
+def test_labels_on_zarr_v2_list_the_label_at_the_top_of_zattrs(tmp_path: Path) -> None:
+    out = generate(tmp_path, "v2-labeled.ome.zarr", "--size", "32,32", "--levels", "1", "--chunk", "16", "--zarr-version", "2", "--labels")
+    assert read_json(out / "labels" / ".zattrs") == {"labels": ["balls"]}
+    attributes = read_json(out / "labels" / "balls" / ".zattrs")
+    assert attributes["image-label"] == {"version": "0.4", "source": {"image": "../../"}}
+    assert [a["name"] for a in attributes["multiscales"][0]["axes"]] == ["y", "x"]
+    assert read_json(out / "labels" / "balls" / "0" / ".zarray")["dtype"] == "<u4"
+    assert level_array(out / "labels" / "balls", 0)[16, 16] == 1
+
+
 def test_unsharded_codec_chain_is_bytes_then_zstd(tmp_path: Path) -> None:
     out = generate(tmp_path, "flat.ome.zarr", "--size", "16,16", "--levels", "1", "--chunk", "8")
     codecs = read_json(out / "0" / "zarr.json")["codecs"]
@@ -373,6 +408,7 @@ def test_parse_args_reads_every_option() -> None:
             "--sparse",
             "--unwritten-level", "3",
             "--unwritten-level", "1",
+            "--labels",
             "--level-index",
             "--dtype", "float32",
             "--range=-2.5,10",
@@ -393,6 +429,7 @@ def test_parse_args_reads_every_option() -> None:
     assert opts.shard == (8, 8, 8)
     assert opts.sparse is True
     assert opts.unwritten_levels == (1, 3)
+    assert opts.labels is True
     assert opts.level_index is True
     assert opts.dtype == "float32"
     assert opts.value_range == (-2.5, 10.0)
@@ -412,6 +449,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
     assert opts.shard is None
     assert opts.sparse is False
     assert opts.unwritten_levels == ()
+    assert opts.labels is False
     assert opts.level_index is False
     assert opts.dtype == "uint16"
     assert opts.value_range == (0.0, 60000.0)

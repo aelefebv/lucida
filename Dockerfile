@@ -56,7 +56,7 @@ RUN rustup target add wasm32-unknown-unknown
 # run fine on this glibc (bookworm) builder. Release downloads can return 504s
 # for long stretches, so a build of the same version from crates.io backs the
 # download up.
-ARG WASM_PACK_VERSION=v0.15.0
+ARG WASM_PACK_VERSION=v0.15.1
 RUN set -eux; \
     arch="$(uname -m)"; \
     case "$arch" in \

@@ -3,6 +3,7 @@
   "runId": "local-healthy",
   "planning": {
     "prefetchDepth": 2,
+    "sliceBandPlanes": 2,
     "importanceWeight": 500,
     "distanceWeight": 10,
     "depthBiasView": 0,

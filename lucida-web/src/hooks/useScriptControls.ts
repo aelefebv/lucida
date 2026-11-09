@@ -39,6 +39,8 @@ export interface ScriptControlInputs {
   /** The handlers the layer panel's channel and layer checkboxes call. */
   setChannelVisible(datasetId: string, channel: number, visible: boolean): void;
   setLayerVisible(datasetId: string, visible: boolean): void;
+  /** The handler the layer panel's label checkboxes call. */
+  setLabelVisible(datasetId: string, label: number, visible: boolean): void;
   /** The handler the layer panel's contrast limits call. */
   setChannelContrast(datasetId: string, channel: number, min: number, max: number): void;
   /** The handler the add-data dialog calls with a source URL. */
@@ -64,6 +66,7 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     setSolo,
     setChannelVisible,
     setLayerVisible,
+    setLabelVisible,
     setChannelContrast,
     openDataset,
     removeDataset,
@@ -107,7 +110,18 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         }
         const datasetId = selectDataset(selectedDatasetId, open);
         if (datasetId === null) {
-          return { applied: false, reason: "no dataset is in hand for a channel select" };
+          return { applied: false, reason: "no dataset is in hand for a channel or label select" };
+        }
+        if ("label" in target) {
+          const labels = datasetsRef.current?.get(datasetId)?.manifest?.labels?.length ?? 0;
+          if (target.label >= labels) {
+            return {
+              applied: false,
+              reason: `${datasetId} has ${labels} label(s), so there is no label ${target.label}`,
+            };
+          }
+          setLabelVisible(datasetId, target.label, visible);
+          return { applied: true, reason: null };
         }
         const channels = channelCountOf(datasetId);
         if (target.channel >= channels) {
@@ -169,7 +183,7 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     return () => setScriptControls(null);
   }, [
     z, t, dimZ, dimT, viewMode, resolvedLayers,
-    setZ, setT, setSolo, setChannelVisible, setLayerVisible,
+    setZ, setT, setSolo, setChannelVisible, setLayerVisible, setLabelVisible,
     setChannelContrast, openDataset, removeDataset, datasetHealth,
     captureView, selectedDatasetId, datasetsRef,
   ]);

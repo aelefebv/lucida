@@ -17,8 +17,11 @@ import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";
 export type ScrubAxis = "z" | "t" | "c";
 export const SCRUB_AXES: readonly ScrubAxis[] = ["z", "t", "c"];
 
-/** What a select shows or hides: a channel of the dataset in hand, or a layer by dataset id. */
-export type SelectTarget = { channel: number } | { layer: string };
+/**
+ * What a select shows or hides: a channel of the dataset in hand, a layer by
+ * dataset id, or a label of the dataset in hand by its index among the labels.
+ */
+export type SelectTarget = { channel: number } | { layer: string } | { label: number };
 
 export interface StepOutcome {
   /** Whether the handler ran. False when the page had nothing to apply the step to. */
@@ -33,7 +36,7 @@ export interface ScriptControls {
   view(): SavedView | null;
   /** Move a selector by `count` positions through the handler the dimension control calls. */
   scrub(axis: ScrubAxis, count: number): StepOutcome;
-  /** Show or hide a channel or a layer through the handler the layer panel calls. */
+  /** Show or hide a channel, a layer or a label through the handler the layer panel calls. */
   select(target: SelectTarget, visible: boolean): StepOutcome;
   /** Set a channel's contrast window through the handler the layer panel's limits call. */
   contrast(channel: number, min: number, max: number): StepOutcome;

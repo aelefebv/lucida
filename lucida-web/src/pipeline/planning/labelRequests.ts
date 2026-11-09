@@ -19,6 +19,8 @@ import type {
   LabelSpec,
   LevelGeometry,
 } from "../../manifestTypes.ts";
+import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
+import { slicePlaneIn, type SlicePlane } from "./emit.ts";
 import type { ChunkRequest } from "./types.ts";
 
 /** Cap on the chosen level's per-plane chunk count in slice mode. */
@@ -453,12 +455,25 @@ export interface LabelRequestArgs {
    * stop anywhere along a ray.
    */
   mode?: "slice" | "volume";
+  /**
+   * The planning knobs the slice view's planes follow: the band fetched
+   * around the plane drawn, and the prefetch lane's priority. Defaults to
+   * {@link DEFAULT_PLANNING_CONFIG}'s.
+   */
+  config?: Pick<PlanningConfig, "sliceBandPlanes" | "prefetchLaneOffset">;
+  /**
+   * Whether the selection stepped along Z since the previous plan
+   * (`isZStep`). The slice view then also prefetches whole each chunk whose
+   * plane it draws, so the steps after it cost nothing.
+   */
+  zStep?: boolean;
 }
 
 /**
  * Chunk requests for the dataset's visible labels ({@link resolveVisibleLabels}):
- * every (y, x) chunk of the mapped plane in slice mode, every (z, y, x) chunk
- * of the chosen level in volume mode.
+ * every (y, x) chunk of the mapped plane in slice mode, each asking for the
+ * plane it draws and fetching a band around it as the image's detail chunks
+ * do, and every (z, y, x) chunk of the chosen level, whole, in volume mode.
  */
 export function computeLabelChunkRequests(args: LabelRequestArgs): ChunkRequest[] {
   const resolvedList = resolveVisibleLabels(args.manifest, args.labelSettings, {
@@ -524,8 +539,15 @@ function appendLabelChunkRequests(
   const gx = grid1D(lvl.shape[Axis.X], lvl.chunk_shape[Axis.X]);
   const c = 0; // labels carry no channel dimension
 
-  const pushChunk = (z: number, y: number, x: number): void => {
-    requests.push({
+  const pushChunk = (
+    z: number,
+    y: number,
+    x: number,
+    slice: SlicePlane | null = null,
+    lane: "detail" | "prefetch" = "detail",
+    priority = 0,
+  ): void => {
+    const req: ChunkRequest = {
       datasetId: args.datasetId,
       // Route + scope under the label's own image id (distinct from any
       // intensity entity), so label fetches never perturb image eviction.
@@ -537,11 +559,16 @@ function appendLabelChunkRequests(
       z,
       y,
       x,
-      lane: "detail",
+      lane,
       tier: "detail",
-      priority: 0,
+      priority,
       chunkKey: `${levelIdx}/${targetChunkT}/${c}/${z}/${y}/${x}`,
-    });
+    };
+    if (slice) {
+      req.plane = slice.plane;
+      req.planes = slice.planes;
+    }
+    requests.push(req);
   };
 
   if (volume) {
@@ -557,11 +584,26 @@ function appendLabelChunkRequests(
     return;
   }
 
-  // Slice: the single Z-plane the current view needs.
+  // Slice: the single Z-plane the current view needs, and the band around
+  // it. A label's levels are all stored, never generated, so the server cuts
+  // planes from any of its chunks. A level one plane deep, or one whose band
+  // would cover the chunk, is fetched whole.
+  const config = args.config ?? DEFAULT_PLANNING_CONFIG;
   const targetChunkZ = at.z ?? 0;
+  const slice = at.plane === null
+    ? null
+    : slicePlaneIn(at.plane, lvl.shape[Axis.Z], lvl.chunk_shape[Axis.Z], config.sliceBandPlanes);
   for (let y = 0; y < gy; y++) {
     for (let x = 0; x < gx; x++) {
-      pushChunk(targetChunkZ, y, x);
+      pushChunk(targetChunkZ, y, x, slice);
+    }
+  }
+  // After a step along Z the chunks come whole as well, in the prefetch
+  // lane, as the image's do.
+  if (slice === null || !args.zStep) return;
+  for (let y = 0; y < gy; y++) {
+    for (let x = 0; x < gx; x++) {
+      pushChunk(targetChunkZ, y, x, null, "prefetch", config.prefetchLaneOffset);
     }
   }
 }

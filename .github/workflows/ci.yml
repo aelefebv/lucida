@@ -15,7 +15,7 @@ concurrency:
 env:
   # Keep in lockstep with the wasm-pack pin in Dockerfile, so the image's
   # lucida-core pkg comes from the same wasm-pack that CI's vitest resolves.
-  WASM_PACK_VERSION: 0.15.0
+  WASM_PACK_VERSION: 0.15.1
 
 jobs:
   rust:
@@ -454,9 +454,9 @@ jobs:
             exit 1
           fi
 
-      # kubeconform validates k8s manifests against bundled OpenAPI
-      # schemas — fully offline, no apiserver round-trip required.
-      # `kubectl apply --dry-run=client` doesn't work for offline CI
+      # kubeconform validates k8s manifests against JSON schemas it fetches
+      # from raw.githubusercontent.com, so no apiserver is needed.
+      # `kubectl apply --dry-run=client` doesn't work without a cluster
       # because even with --validate=false it tries to look up resource
       # types via REST mapping (hits localhost:8080).
       #
@@ -466,14 +466,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ASSET: kubeconform-linux-amd64.tar.gz
-          KUBECONFORM_VERSION: 0.6.7
+          KUBECONFORM_VERSION: 0.8.0
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
           gh release download "v$KUBECONFORM_VERSION" -R yannh/kubeconform -p "$ASSET" --clobber \
             || curl -fsSL --retry 5 --retry-all-errors -o "$ASSET" \
                  "https://github.com/yannh/kubeconform/releases/download/v$KUBECONFORM_VERSION/$ASSET"
-          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  $ASSET" | sha256sum -c -
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  $ASSET" | sha256sum -c -
           tar -xzf "$ASSET" -C /usr/local/bin kubeconform
 
       - name: kubeconform validation
