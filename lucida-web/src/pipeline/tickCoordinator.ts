@@ -390,6 +390,11 @@ export class TickCoordinator {
   private pendingDeferredRebuild = false;
   /** The coalescing window the owed rebuild waits out, from {@link lastRebuildAt}. */
   private deferredRebuildIntervalMs = 0;
+  /** The owed rebuild waits out its window from the last view move instead. */
+  private deferredUntilStill = false;
+  /** The view epoch the last tick read, and when it last moved. */
+  private lastSeenViewEpoch: number | null = null;
+  private lastViewMoveAt = Number.NEGATIVE_INFINITY;
   /**
    * Scene scalars captured at the last full rebuild, for the fast-path
    * proofs. The z-range lives per dataset in {@link DatasetRebuildSignature}
@@ -563,6 +568,10 @@ export class TickCoordinator {
       selection: rawEpochs.selection,
       request: this.requestEpoch,
     };
+    if (currentEpochs.view !== this.lastSeenViewEpoch) {
+      this.lastSeenViewEpoch = currentEpochs.view;
+      this.lastViewMoveAt = tickStart;
+    }
 
     // Diff against last epochs — drives both the cache-hit decision and
     // per-epoch cause attribution published to coldState telemetry.
@@ -597,13 +606,19 @@ export class TickCoordinator {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
           : VIEW_REPLAN_INTERVAL_MS;
-        if (tickStart - this.lastRebuildAt < interval) {
+        // A plan the budgets already cut short admits a different part of
+        // the view at every move, evicting chunks the frame draws for ones
+        // that land after the view has moved on. So a moving view replans
+        // only once it holds still.
+        const untilStill = causes.every((c) => c === "view") && (this.lastAdmission?.short ?? 0) > 0;
+        if (tickStart - this.deferredRebuildAnchor(untilStill) < interval) {
           coalescedSkip = true;
           // Leave `lastEpochs` stale so the change is re-detected next
           // tick, and flag the deferral so the render loop ticks again
           // once the window elapses and the trailing rebuild lands.
           this.pendingDeferredRebuild = true;
           this.deferredRebuildIntervalMs = interval;
+          this.deferredUntilStill = untilStill;
         }
       }
     }
@@ -1550,6 +1565,11 @@ export class TickCoordinator {
    */
   msUntilPendingRebuild(now: number): number | null {
     if (!this.pendingDeferredRebuild) return null;
-    return Math.max(0, this.lastRebuildAt + this.deferredRebuildIntervalMs - now);
+    return Math.max(0, this.deferredRebuildAnchor(this.deferredUntilStill) + this.deferredRebuildIntervalMs - now);
+  }
+
+  /** When an owed rebuild's window starts: the last rebuild, or the last view move after it. */
+  private deferredRebuildAnchor(untilStill: boolean): number {
+    return untilStill ? Math.max(this.lastRebuildAt, this.lastViewMoveAt) : this.lastRebuildAt;
   }
 }

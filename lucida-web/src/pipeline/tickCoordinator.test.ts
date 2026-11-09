@@ -641,6 +641,58 @@ describe("epoch caching", () => {
     }
   });
 
+  it("replans a view the budgets cut short only once it stops moving", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const view = (epoch: number) => createMockScene({ epochs: { content: 1, layout: 1, view: epoch, selection: 1 } });
+      const slotBytes = 256 * 256 * 2;
+      const limits = {
+        maxTextureDimension2D: 8192,
+        maxTextureDimension3D: 2048,
+        maxStorageBufferBindingSize: 128 * 1024 * 1024,
+        maxBufferSize: 256 * 1024 * 1024,
+      };
+      // The chunk pools have room for one chunk, so every plan falls short.
+      const report: GpuCapacityReport = { budgetBytes: 64 * slotBytes, reservedBytes: 63 * slotBytes, pools: [], limits };
+      const short = (scene: unknown) => {
+        const ctx = makeCtx(scene, datasets);
+        Object.assign(ctx.client, { gpuCapacity: () => report });
+        return ctx;
+      };
+      const orch = makeOrch();
+      orch.planAndFetch(short(view(1)), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+
+      // Long past the window from that plan, a move still waits, and so
+      // does every move after it while the view keeps moving.
+      vi.advanceTimersByTime(500);
+      for (let epoch = 2; epoch <= 6; epoch++) {
+        orch.planAndFetch(short(view(epoch)), emptyMinimap);
+        expect(orch.msUntilPendingRebuild(performance.now())).toBe(200);
+        vi.advanceTimersByTime(100);
+      }
+      expect(planSpy).toHaveBeenCalledTimes(1);
+
+      // Held still for the window, it replans.
+      vi.advanceTimersByTime(100);
+      expect(orch.msUntilPendingRebuild(performance.now())).toBe(0);
+      orch.planAndFetch(short(view(6)), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(2);
+      expect(orch.hasPendingRebuild()).toBe(false);
+
+      // A view with room for all it wants replans at the first move.
+      const roomy = makeOrch();
+      roomy.planAndFetch(makeCtx(view(1), datasets), emptyMinimap);
+      vi.advanceTimersByTime(500);
+      roomy.planAndFetch(makeCtx(view(2), datasets), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(4);
+      expect(roomy.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps coalescing when a single rebuild runs longer than the window", () => {
     // The coalescing anchor is stamped at rebuild completion, so a rebuild
     // longer than the window (routine on a wide collection) must still
@@ -2189,6 +2241,9 @@ describe("incremental delta fold", () => {
 
       submit.mockClear();
       vi.advanceTimersByTime(500);
+      tick(2);
+      // A view the budgets cut short replans once it holds still.
+      vi.advanceTimersByTime(200);
       tick(2);
 
       const next = submit.mock.calls[0][0];
