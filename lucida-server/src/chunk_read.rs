@@ -1,12 +1,15 @@
 //! The one path a source chunk takes from its key to the bytes one wire
 //! request is served.
 //!
-//! [`read_chunk`] resolves the location, reads it through the cached store
-//! (whole, or out of its shard), decodes, fills an absent chunk, and slices
-//! out the wire timepoint and channel. On a regridded level it assembles the
-//! declared chunk from the stored chunks under it. The chunk handler and
-//! coarse generation both call it and do none of these steps themselves.
+//! [`fetch_chunk`] resolves the location and reads it through the cached
+//! store, whole or out of its shard. [`FetchedChunk::decode`] decodes, fills
+//! an absent chunk, and slices out the wire timepoint and channel. On a
+//! regridded level it assembles the declared chunk from the stored chunks
+//! under it. [`read_chunk`] does both, the decode on the [`DecodePool`]. The
+//! chunk handler and coarse generation go through these and do none of the
+//! steps themselves.
 
+use bytes::Bytes;
 use lucida_content::{ChunkKey, ImageId};
 use lucida_protocol::{ChunkFailureKind, ServerPhase};
 use lucida_store::cache::{CachedStore, SourceReadTiming, TimedRead};
@@ -17,6 +20,7 @@ use lucida_store::source_limiter::{ReaderId, RequestLabel};
 
 use crate::binding::{ChunkLocation, ChunkResolver, LevelInfo};
 use crate::decode::{DecodeError, decode_storage_bytes};
+use crate::decode_pool::DecodePool;
 use crate::open_diagnostics::is_not_found;
 use crate::timing::RequestProbe;
 
@@ -81,16 +85,59 @@ impl ChunkReadError {
     }
 }
 
-/// Read the wire chunk for `chunk_key` of `image_id`.
+/// A source chunk read from the object store and not yet decoded.
 ///
-/// `reader` is the fairness class the backend read is charged to, and
-/// `label` attributes a wait behind the source-read cap to a request, not
-/// only a client.
-///
-/// `probe` is the timing row of the request this read serves, if any. The
-/// read marks its dispatch, read, and decompress phases itself, because
-/// only the store knows how the read stretch was spent. A read with no
-/// browser bracket, such as generation, passes `None`.
+/// Reading is I/O and decoding is CPU work, so the two come apart here and
+/// the caller chooses the thread the decode runs on.
+pub struct FetchedChunk(Fetched);
+
+enum Fetched {
+    /// The chunk reads as fill, so there is nothing to decode.
+    Absent { len: usize, fill: FillValue },
+    Stored {
+        bytes: Bytes,
+        level: LevelInfo,
+        key: ChunkKey,
+    },
+    /// The stored chunks one declared chunk of a regridded level overlaps,
+    /// with `None` for a stored chunk that was never written.
+    Regridded {
+        plan: RegridPlan,
+        stored: LevelInfo,
+        reads: Vec<(StoredSource, Option<Bytes>)>,
+        len: usize,
+        fill: FillValue,
+    },
+}
+
+impl FetchedChunk {
+    /// The bytes one wire request for the key is served, or why there are
+    /// none. `probe` gets the decompress phase when there was anything to
+    /// decompress.
+    pub fn decode(self, probe: Option<&mut RequestProbe>) -> Result<ChunkRead, ChunkReadError> {
+        let decoded = match self.0 {
+            Fetched::Absent { len, fill } => return Ok(ChunkRead::Absent { len, fill }),
+            Fetched::Stored { bytes, level, key } => {
+                decode_wire_chunk(&bytes, &level, &key).map(ChunkRead::Present)
+            }
+            Fetched::Regridded {
+                plan,
+                stored,
+                reads,
+                len,
+                fill,
+            } => assemble_regridded_chunk(&plan, &stored, &reads, len, fill),
+        };
+        if let Some(probe) = probe {
+            probe.mark(ServerPhase::Decompress);
+        }
+        decoded
+    }
+}
+
+/// Read and decode the wire chunk for `chunk_key` of `image_id`, the decode
+/// on the [`DecodePool`] with a slot charged to `reader`. For `label`, see
+/// [`fetch_chunk`].
 pub async fn read_chunk(
     resolver: &ChunkResolver,
     store: &CachedStore,
@@ -98,8 +145,34 @@ pub async fn read_chunk(
     chunk_key: &ChunkKey,
     reader: ReaderId,
     label: RequestLabel,
-    mut probe: Option<&mut RequestProbe>,
 ) -> Result<ChunkRead, ChunkReadError> {
+    let fetched = fetch_chunk(resolver, store, image_id, chunk_key, reader, label, None).await?;
+    DecodePool::global()
+        .acquire(reader)
+        .await
+        .run(move || fetched.decode(None))
+        .await
+}
+
+/// Read the stored bytes behind `chunk_key` of `image_id`.
+///
+/// `reader` is the fairness class the backend read is charged to, and
+/// `label` attributes a wait behind the source-read cap to a request, not
+/// only a client.
+///
+/// `probe` is the timing row of the request this read serves, if any. The
+/// read marks its dispatch and read phases itself, because only the store
+/// knows how the read stretch was spent. A read with no browser bracket,
+/// such as generation, passes `None`.
+pub async fn fetch_chunk(
+    resolver: &ChunkResolver,
+    store: &CachedStore,
+    image_id: &ImageId,
+    chunk_key: &ChunkKey,
+    reader: ReaderId,
+    label: RequestLabel,
+    mut probe: Option<&mut RequestProbe>,
+) -> Result<FetchedChunk, ChunkReadError> {
     let Some(level_info) = resolver.level_info(image_id, chunk_key.level) else {
         return Err(if resolver.axes_names(image_id).is_some() {
             ChunkReadError::UnknownLevel {
@@ -111,7 +184,7 @@ pub async fn read_chunk(
         });
     };
     if let Some(regrid) = &level_info.regrid {
-        return read_regridded_chunk(
+        return fetch_regridded_chunk(
             resolver,
             store,
             image_id,
@@ -133,27 +206,24 @@ pub async fn read_chunk(
         probe.mark(ServerPhase::Dispatch);
     }
     let read = read_location(resolver, store, &location, &level_info, reader, label).await;
-    if let Some(probe) = probe.as_deref_mut() {
+    if let Some(probe) = probe {
         // The cached store owns this stretch of the row: only it knows whether
         // this request led the single flight or waited on someone else's read.
         probe.record_read(read.timing);
     }
-    let storage_bytes = match read.result {
-        Ok(bytes) => bytes,
-        Err(e) if is_not_found(&e) => {
-            return Ok(ChunkRead::Absent {
-                len: level_info.chunk_byte_layout.canonical_byte_size,
-                fill: level_info.fill_value,
-            });
-        }
+    let fetched = match read.result {
+        Ok(bytes) => Fetched::Stored {
+            bytes,
+            level: level_info,
+            key: *chunk_key,
+        },
+        Err(e) if is_not_found(&e) => Fetched::Absent {
+            len: level_info.chunk_byte_layout.canonical_byte_size,
+            fill: level_info.fill_value,
+        },
         Err(e) => return Err(ChunkReadError::ObjectStore(e)),
     };
-
-    let wire = decode_wire_chunk(&storage_bytes, &level_info, chunk_key);
-    if let Some(probe) = probe {
-        probe.mark(ServerPhase::Decompress);
-    }
-    Ok(ChunkRead::Present(wire?))
+    Ok(FetchedChunk(fetched))
 }
 
 /// `level` is the stored level the location is in. A whole stored chunk
@@ -222,11 +292,11 @@ fn decode_wire_chunk(
     ))
 }
 
-/// One declared chunk of a regridded level, assembled from the stored chunks
-/// it overlaps. The part past the stored level is fill, and so is any stored
-/// chunk that was never written.
+/// The stored chunks one declared chunk of a regridded level overlaps. The
+/// part past the stored level is fill, and so is any stored chunk that was
+/// never written.
 #[allow(clippy::too_many_arguments)]
-async fn read_regridded_chunk(
+async fn fetch_regridded_chunk(
     resolver: &ChunkResolver,
     store: &CachedStore,
     image_id: &ImageId,
@@ -236,17 +306,14 @@ async fn read_regridded_chunk(
     reader: ReaderId,
     label: RequestLabel,
     mut probe: Option<&mut RequestProbe>,
-) -> Result<ChunkRead, ChunkReadError> {
-    let served_len = regrid.chunk_byte_layout.canonical_byte_size;
+) -> Result<FetchedChunk, ChunkReadError> {
+    let len = regrid.chunk_byte_layout.canonical_byte_size;
     let fill = stored.fill_value;
     let axes = resolver
         .axes_names(image_id)
         .ok_or_else(|| ChunkReadError::UnknownImage(image_id.clone()))?;
     let Some(plan) = RegridPlan::new(*chunk_key, axes, stored, regrid) else {
-        return Ok(ChunkRead::Absent {
-            len: served_len,
-            fill,
-        });
+        return Ok(FetchedChunk(Fetched::Absent { len, fill }));
     };
 
     if let Some(probe) = probe.as_deref_mut() {
@@ -266,7 +333,7 @@ async fn read_regridded_chunk(
             .map(|location| read_location(resolver, store, location, stored, reader, label)),
     )
     .await;
-    if let Some(probe) = probe.as_deref_mut() {
+    if let Some(probe) = probe {
         // Every stored read was this request's, so all of them go on its row.
         let timing = reads
             .iter()
@@ -276,28 +343,45 @@ async fn read_regridded_chunk(
         probe.record_read(timing);
     }
 
-    let mut out = fill.bytes(served_len);
-    let mut any_present = false;
-    for (source, read) in sources.iter().zip(reads) {
-        let storage_bytes = match read.result {
-            Ok(bytes) => bytes,
-            Err(e) if is_not_found(&e) => continue,
+    let mut stored_reads = Vec::with_capacity(sources.len());
+    for (source, read) in sources.into_iter().zip(reads) {
+        let bytes = match read.result {
+            Ok(bytes) => Some(bytes),
+            Err(e) if is_not_found(&e) => None,
             Err(e) => return Err(ChunkReadError::ObjectStore(e)),
         };
-        let wire = decode_wire_chunk(&storage_bytes, stored, &source.key)?;
+        stored_reads.push((source, bytes));
+    }
+    Ok(FetchedChunk(Fetched::Regridded {
+        plan,
+        stored: stored.clone(),
+        reads: stored_reads,
+        len,
+        fill,
+    }))
+}
+
+/// One declared chunk of a regridded level, assembled from the stored chunks
+/// it overlaps.
+fn assemble_regridded_chunk(
+    plan: &RegridPlan,
+    stored: &LevelInfo,
+    reads: &[(StoredSource, Option<Bytes>)],
+    len: usize,
+    fill: FillValue,
+) -> Result<ChunkRead, ChunkReadError> {
+    let mut out = fill.bytes(len);
+    let mut any_present = false;
+    for (source, bytes) in reads {
+        let Some(bytes) = bytes else { continue };
+        let wire = decode_wire_chunk(bytes, stored, &source.key)?;
         plan.copy(source, &wire, &mut out);
         any_present = true;
-    }
-    if let Some(probe) = probe {
-        probe.mark(ServerPhase::Decompress);
     }
     Ok(if any_present {
         ChunkRead::Present(out)
     } else {
-        ChunkRead::Absent {
-            len: served_len,
-            fill,
-        }
+        ChunkRead::Absent { len, fill }
     })
 }
 
@@ -587,7 +671,6 @@ mod tests {
             &self::key(key),
             ReaderId::UNATTRIBUTED,
             RequestLabel::UNATTRIBUTED,
-            None,
         )
         .await
     }
@@ -831,7 +914,7 @@ mod tests {
             Instant::now(),
             Arc::clone(&buffer),
         );
-        let _ = read_chunk(
+        if let Ok(fetched) = fetch_chunk(
             resolver,
             store,
             &image_id(),
@@ -840,7 +923,10 @@ mod tests {
             RequestLabel::UNATTRIBUTED,
             Some(&mut probe),
         )
-        .await;
+        .await
+        {
+            let _ = fetched.decode(Some(&mut probe));
+        }
         probe.finish(TimingRowOutcome::Delivered);
         buffer.take_batch().expect("the read filed a row")
     }

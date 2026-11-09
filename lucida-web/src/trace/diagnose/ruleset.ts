@@ -17,7 +17,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 9;
+export const RULESET_VERSION = 10;
 
 export interface AbsoluteRule {
   id: string;
@@ -269,6 +269,7 @@ export const PHASE_CLASSES: Record<string, PhaseClass> = {
   "server.permit-wait": "queue",
   "server.backend-read": "io",
   "server.coalesced-wait": "queue",
+  "server.decode-wait": "queue",
   "server.decompress": "compute",
   "server.slice-encode": "compute",
   "server.handoff": "compute",

@@ -185,7 +185,6 @@ async fn five_channels_per_chunk_resolve_and_slice_independently() {
             &canonical_key.parse::<lucida_content::ChunkKey>().unwrap(),
             ReaderId::UNATTRIBUTED,
             RequestLabel::UNATTRIBUTED,
-            None,
         )
         .await
         .unwrap();

@@ -104,7 +104,6 @@ async fn served_bytes(twin: &Twin, key: &str) -> Vec<u8> {
         &key.parse::<lucida_content::ChunkKey>().unwrap(),
         READER,
         LABEL,
-        None,
     )
     .await
     .unwrap()

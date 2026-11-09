@@ -31,9 +31,10 @@ on its second line and in its throttle column, and `summary.json` records the th
 `sourceThrottle`.
 
 `--server-env KEY=VALUE`, repeated for more, starts the runner's server with those
-settings, such as `LUCIDA_SOURCE_READ_CONCURRENCY=64`. It never passes the caller's own
-`LUCIDA_` settings otherwise. The table names them on a line of their own, and
-`summary.json` records them as `selection.serverEnv`.
+settings, such as `LUCIDA_SOURCE_READ_CONCURRENCY=64`. `TOKIO_WORKER_THREADS=2` and
+`LUCIDA_DECODE_THREADS=2` give it the async workers and decode threads of a two-core
+machine. It never passes the caller's own `LUCIDA_` settings otherwise. The table names
+them on a line of their own, and `summary.json` records them as `selection.serverEnv`.
 
 ## The table
 

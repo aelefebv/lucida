@@ -25,6 +25,7 @@ function batch(overrides: Partial<ServerTimingBatch> = {}): ServerTimingBatch {
     permit_wait_us: [900, PHASE_UNSET],
     backend_read_us: [60, PHASE_UNSET],
     coalesced_wait_us: [PHASE_UNSET, PHASE_UNSET],
+    decode_wait_us: [2, PHASE_UNSET],
     decompress_us: [20, PHASE_UNSET],
     slice_encode_us: [4, PHASE_UNSET],
     handoff_us: [3, 9],
@@ -61,6 +62,7 @@ describe("ServerRowTable", () => {
           "cache-lookup": 1,
           "permit-wait": 900,
           "backend-read": 60,
+          "decode-wait": 2,
           decompress: 20,
           "slice-encode": 4,
           handoff: 3,
@@ -93,7 +95,7 @@ describe("ServerRowTable", () => {
     const table = new ServerRowTable();
     ingest(table, batch(), 1);
     const [chunk, notReady] = table.serialise();
-    expect(serverRowTotalUs(chunk.phases)).toBe(10 + 5 + 7 + 1 + 900 + 60 + 20 + 4 + 3);
+    expect(serverRowTotalUs(chunk.phases)).toBe(10 + 5 + 7 + 1 + 900 + 60 + 2 + 20 + 4 + 3);
     expect(serverRowTotalUs(notReady.phases)).toBe(20 + 6 + 8 + 2 + 9);
   });
 
@@ -111,6 +113,7 @@ describe("ServerRowTable", () => {
         permit_wait_us: [PHASE_UNSET],
         backend_read_us: [PHASE_UNSET],
         coalesced_wait_us: [400_000],
+        decode_wait_us: [PHASE_UNSET],
         decompress_us: [10],
         slice_encode_us: [1],
         handoff_us: [1],
@@ -149,6 +152,7 @@ describe("ServerRowTable", () => {
         permit_wait_us: [1],
         backend_read_us: [1],
         coalesced_wait_us: [PHASE_UNSET],
+        decode_wait_us: [1],
         decompress_us: [1],
         slice_encode_us: [1],
         handoff_us: [1],
