@@ -1,0 +1,9 @@
+{
+  "description": "show the first label, then play Z forward 70 planes, one every 50 ms",
+  "requires": ["volume", "labels"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "select", "label": 0 },
+    { "kind": "scrub", "axis": "z", "count": 70, "intervalMs": 50 }
+  ]
+}
