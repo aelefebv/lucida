@@ -1035,6 +1035,16 @@ impl CachedStore {
         }
     }
 
+    /// This store with a metadata-read cap of its own. A test that counts
+    /// round trips on a paused clock needs one: a permit another test holds
+    /// on the shared cap stalls a read in real time while the paused clock
+    /// jumps ahead, which reads as an extra round trip.
+    #[cfg(test)]
+    pub(crate) fn with_own_metadata_cap(mut self) -> Self {
+        self.metadata_read = Arc::new(Semaphore::new(DEFAULT_METADATA_READ_CONCURRENCY));
+        self
+    }
+
     /// The bytes the limiter charges a chunk read of `key` for. A range
     /// knows its length. A whole object's arrives with its body, so the read
     /// is charged `object_len`, what the caller expects it to hold, or with

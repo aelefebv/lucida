@@ -83,7 +83,20 @@ async fn import_single_image(
     // Channel display names from the OME omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(root_json);
 
-    let level_metas = parse::read_level_metas(store, format, "", &level_entries).await?;
+    // Each awaited step is a round trip to a remote store, so every read that
+    // needs only the root shares the level reads' one.
+    let (level_metas, probed, likely_origins) = tokio::join!(
+        parse::read_level_metas(store, format, "", &level_entries),
+        probe_labels_for_image(store, format, ""),
+        unwritten::probe_likely_origins(
+            store,
+            "",
+            &level_entries,
+            format.likely_chunk_key_encoding(),
+            axes_names.len(),
+        ),
+    );
+    let level_metas = level_metas?;
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
@@ -141,34 +154,31 @@ async fn import_single_image(
         },
     };
 
-    // Look for a `labels/` child group and attach any label overlays to this
-    // image. Absent labels (the common case) yield nothing; malformed ones
+    // Attach any label overlays the `labels/` probe found to this image.
+    // Absent labels (the common case) yield nothing; malformed ones
     // degrade gracefully without failing the import, but an index that
     // exists (or errors) without yielding names is surfaced as a warning so
     // possibly-incomplete discovery never passes silently.
     let mut warnings: Vec<ImportWarning> = Vec::new();
     warnings.extend(pinned_axes_warning(id, &layout.pinned));
-    warnings.extend(unwritten::warn_unwritten_levels(store, "", id, &probe_targets).await);
+    let label_index_warning = (probed.index == LabelIndexState::Unusable)
+        .then(|| unusable_label_index_warning(id, 1, &[probed.labels_prefix.as_str()]));
 
     let mut label_budget = LabelBudget::new();
-    let probed = probe_labels_for_image(store, format, "").await;
-    if probed.index == LabelIndexState::Unusable {
-        warnings.push(unusable_label_index_warning(
+    let (unwritten, labels) = tokio::join!(
+        unwritten::warn_unwritten_levels(store, "", id, &probe_targets, &likely_origins),
+        build_labels_within_budget(
+            &mut label_budget,
+            store,
+            format,
             id,
-            1,
-            &[probed.labels_prefix.as_str()],
-        ));
-    }
-    let labels = build_labels_within_budget(
-        &mut label_budget,
-        store,
-        format,
-        id,
-        &image_id,
-        &entity_id,
-        probed,
-    )
-    .await;
+            &image_id,
+            &entity_id,
+            probed,
+        ),
+    );
+    warnings.extend(unwritten);
+    warnings.extend(label_index_warning);
 
     let default_layout_id = LayoutId("source".to_string());
     let source_layout = LayoutSpec {
@@ -929,20 +939,12 @@ async fn import_collection(
 
     // Whether an export wrote a level is a property of the export, so this is
     // asked once, of the representative, not once per tile.
-    warnings.extend(
-        unwritten::warn_unwritten_levels(
-            store,
-            &geometry_tile_prefix,
-            id,
-            &build_probe_targets(
-                &level_entries,
-                &level_metas,
-                &level_bindings,
-                &representative_levels,
-                &axes_names,
-            ),
-        )
-        .await,
+    let probe_targets = build_probe_targets(
+        &level_entries,
+        &level_metas,
+        &level_bindings,
+        &representative_levels,
+        &axes_names,
     );
 
     let mut tile_prefixes: Vec<String> = Vec::new();
@@ -963,17 +965,58 @@ async fn import_collection(
         },
         scale: level_entries[0].scale,
     };
-    let stored_tiles = read_stored_tiles(
-        store,
-        format,
-        &tile_prefixes,
-        &geometry_tile_prefix,
-        &representative,
-        &axes_names,
-        data_type,
-        &layout.pinned,
-    )
-    .await;
+
+    // Discover per-tile `labels/` groups. Like the geometry reads, this must
+    // not fan out one read per tile on a wide collection: collections within
+    // LABEL_PROBE_SAMPLING_MIN_SKIPPED tiles of their own sample size probe
+    // every tile exhaustively, while wider ones sample each group's first and
+    // last tile and expand to the whole group when a sample signals labels.
+    // Tiles left unprobed are treated as label-free and the import records a
+    // warning naming the exhaustive-discovery override.
+    let mut probed_labels: Vec<Option<ProbedLabels>> =
+        (0..tile_prefixes.len()).map(|_| None).collect();
+    let samples = sample_probe_indices(&group_spans);
+    let exhaustive_labels = use_exhaustive_label_probes(
+        tile_prefixes.len(),
+        samples.len(),
+        force_exhaustive_label_discovery,
+    );
+    let first_label_probes = if exhaustive_labels {
+        (0..tile_prefixes.len()).collect()
+    } else {
+        samples
+    };
+
+    // Each awaited step is a round trip to a remote store, and these three
+    // need nothing from each other.
+    let origins_unasked = unwritten::LikelyOrigins::default();
+    let (unwritten, stored_tiles, ()) = tokio::join!(
+        unwritten::warn_unwritten_levels(
+            store,
+            &geometry_tile_prefix,
+            id,
+            &probe_targets,
+            &origins_unasked,
+        ),
+        read_stored_tiles(
+            store,
+            format,
+            &tile_prefixes,
+            &geometry_tile_prefix,
+            &representative,
+            &axes_names,
+            data_type,
+            &layout.pinned,
+        ),
+        probe_labels_for_tiles(
+            store,
+            format,
+            &tile_prefixes,
+            first_label_probes,
+            &mut probed_labels,
+        ),
+    );
+    warnings.extend(unwritten);
     let unusable: Vec<String> = tile_prefixes
         .iter()
         .zip(&stored_tiles)
@@ -1083,26 +1126,7 @@ async fn import_collection(
     let mut label_specs: Vec<LabelSpec> = Vec::new();
     let mut label_budget = LabelBudget::new();
 
-    // Discover per-tile `labels/` groups. Like the geometry reads above, this
-    // must not fan out one read per tile on a wide collection: collections
-    // within LABEL_PROBE_SAMPLING_MIN_SKIPPED tiles of their own sample size
-    // probe every tile exhaustively, while wider ones sample each group's
-    // first and last tile and expand to the whole group when a sample
-    // signals labels. Tiles left unprobed are treated as label-free and the
-    // import records a warning naming the exhaustive-discovery override.
-    let mut probed_labels: Vec<Option<ProbedLabels>> =
-        (0..tile_prefixes.len()).map(|_| None).collect();
-    let samples = sample_probe_indices(&group_spans);
-    if use_exhaustive_label_probes(
-        tile_prefixes.len(),
-        samples.len(),
-        force_exhaustive_label_discovery,
-    ) {
-        let all: Vec<usize> = (0..tile_prefixes.len()).collect();
-        probe_labels_for_tiles(store, format, &tile_prefixes, all, &mut probed_labels).await;
-    } else {
-        probe_labels_for_tiles(store, format, &tile_prefixes, samples, &mut probed_labels).await;
-
+    if !exhaustive_labels {
         // Expand every tile of a group whose samples signal labels, so a
         // labeled group's discovery stays complete. Only a clean NotFound on
         // both samples is a definitive miss.
@@ -7083,6 +7107,205 @@ mod tests {
             result.warnings
         );
         assert_eq!(result.manifest.images()[0].multiscale.levels.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What one request to [`DistantStore`] waits before it is answered.
+    const LATENCY: std::time::Duration = std::time::Duration::from_millis(100);
+
+    /// A store [`LATENCY`] away: every request, a HEAD included, waits it out.
+    /// Under paused time an import's elapsed time is then exactly its round
+    /// trips in a row.
+    #[derive(Debug)]
+    struct DistantStore {
+        inner: object_store::memory::InMemory,
+    }
+
+    impl std::fmt::Display for DistantStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "DistantStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for DistantStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            tokio::time::sleep(LATENCY).await;
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A fixture directory copied into a [`DistantStore`], read through a
+    /// cache. In memory and on a metadata cap of its own, so no read waits
+    /// on a blocking thread or on another test, neither of which the paused
+    /// clock can see.
+    async fn distant_store(dir: &std::path::Path) -> Arc<CachedStore> {
+        use object_store::ObjectStoreExt;
+        let inner = object_store::memory::InMemory::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(at) = pending.pop() {
+            for entry in fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let key = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .components()
+                    .map(|part| part.as_os_str().to_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                inner
+                    .put(&Path::from(key), fs::read(&path).unwrap().into())
+                    .await
+                    .unwrap();
+            }
+        }
+        Arc::new(
+            CachedStore::new(Arc::new(DistantStore { inner }), TEST_CACHE_BYTES)
+                .with_own_metadata_cap(),
+        )
+    }
+
+    /// How many [`LATENCY`] round trips in a row an import of `store` waits.
+    async fn round_trips(store: &Arc<CachedStore>) -> (u128, ImportResult) {
+        let started = tokio::time::Instant::now();
+        let result = import_dataset(store, "ds", "Distant").await.unwrap();
+        (started.elapsed().as_millis() / LATENCY.as_millis(), result)
+    }
+
+    /// A single image waits on its root, then on everything else at once:
+    /// the level metadata, the `labels/` probe and the unwritten-level probe.
+    /// The probe still names the bare level.
+    #[tokio::test(start_paused = true)]
+    async fn a_single_image_open_waits_on_two_round_trips() {
+        let dir = temp_dir("round_trips_single_image");
+        create_two_level_fixture(&dir, &["1"]);
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 2);
+        let warnings = unwritten_warnings(&result);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        assert!(
+            warnings[0]
+                .message
+                .contains("level 0 has no chunks written")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A level keyed other than most levels are has its origin probed once
+    /// its metadata says where, a round trip later, and is named all the same.
+    #[tokio::test(start_paused = true)]
+    async fn an_origin_keyed_unusually_is_probed_where_its_metadata_says() {
+        let dir = temp_dir("round_trips_unusual_key");
+        create_two_level_fixture(&dir, &[]);
+        for level in ["0", "1"] {
+            let meta_path = dir.join(level).join("zarr.json");
+            let mut meta: serde_json::Value =
+                serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+            meta["chunk_key_encoding"] =
+                serde_json::json!({"name": "v2", "configuration": {"separator": "."}});
+            fs::write(&meta_path, meta.to_string()).unwrap();
+        }
+        fs::write(dir.join("1").join("0.0.0.0.0"), vec![0u8; 32 * 32 * 2]).unwrap();
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 3);
+        let warnings = unwritten_warnings(&result);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        assert!(
+            warnings[0]
+                .message
+                .contains("level 0 has no chunks written")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Past the representative tile, the other tiles' geometry, the
+    /// unwritten-level probe and the label probes share their round trips:
+    /// root, groups, the representative's group and levels, then the other
+    /// tiles' groups and levels.
+    #[tokio::test(start_paused = true)]
+    async fn a_collection_open_probes_beside_the_tile_reads() {
+        let dir = temp_dir("round_trips_collection");
+        create_collection_fixture(
+            &dir,
+            "distant",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 2)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 6);
+        assert_eq!(result.manifest.images().len(), 4);
 
         let _ = fs::remove_dir_all(&dir);
     }
