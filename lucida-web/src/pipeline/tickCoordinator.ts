@@ -925,7 +925,7 @@ export class TickCoordinator {
         nextState: result.nextState,
         shortfall: result.shortfall,
         coarseLoanBytes: result.coarseLoanBytes,
-      });
+      }, chunkBytesFor(ctx.datasets.get(dsId)!.manifest));
 
       // Capture this dataset's display-only fast-path signature: the
       // display state now on the worker, plus every non-display signal a
@@ -1327,7 +1327,7 @@ export class TickCoordinator {
         nextState: p.planningState,
         shortfall: admission.shortfall,
         coarseLoanBytes: admission.borrowed,
-      });
+      }, chunkBytesFor(ctx.datasets.get(p.dsId)!.manifest));
 
       this.uploader.sendColdStateSelection({
         ctx,
