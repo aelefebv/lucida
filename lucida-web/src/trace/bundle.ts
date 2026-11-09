@@ -9,7 +9,12 @@
  * the trace and are read when the bundle is made.
  */
 
-import type { DatasetHealthReply, DatasetSourceHealth, SourceThrottleReport } from "../bridge.ts";
+import type {
+  DatasetHealthReply,
+  DatasetSourceHealth,
+  LinkThrottleReport,
+  SourceThrottleReport,
+} from "../bridge.ts";
 import type { PlanningConfig } from "../pipeline/planning/config.ts";
 import type { FrameCaptureResult } from "../renderer/workerProtocol.ts";
 import { decode } from "../savedView/encoder.ts";
@@ -182,6 +187,8 @@ export interface BundleHealth {
    * unthrottled one.
    */
   sourceThrottle: SourceThrottleReport | null;
+  /** The throttle the server put on the session socket, null when it sent at full speed. */
+  linkThrottle: LinkThrottleReport | null;
 }
 
 /** A section the bundle could not capture, with the reason, so an absence is a statement and not a gap. */
@@ -372,6 +379,7 @@ export async function exportBundle(
               ? health.datasets.filter((entry) => datasetIds.includes(entry.workspace_dataset_id))
               : health.datasets,
           sourceThrottle: health.sourceThrottle,
+          linkThrottle: health.linkThrottle,
         }
       : null,
     absent,

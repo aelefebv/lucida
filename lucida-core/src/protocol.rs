@@ -7,8 +7,8 @@ use lucida_protocol::codec::ChunkCodec;
 use lucida_protocol::{
     ChunkFailureKind, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
     DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerTimingBatch, SourceChunkStatus,
-    SourceThrottleReport,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, LinkThrottleReport, ServerTimingBatch,
+    SourceChunkStatus, SourceThrottleReport,
 };
 
 use crate::camera::{Camera, Framing, Slice};
@@ -616,6 +616,10 @@ pub enum ServerMessage {
         /// it reads sources unthrottled, which is the default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_throttle: Option<SourceThrottleReport>,
+        /// The throttle the server puts on this socket. Absent when it sends
+        /// at full speed, which is the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link_throttle: Option<LinkThrottleReport>,
     },
     /// Runtime generated-level metadata/readiness update. Server-authored and
     /// unsequenced; clients merge it into their local availability view.

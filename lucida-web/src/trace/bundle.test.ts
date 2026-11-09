@@ -323,7 +323,8 @@ describe("the callers", () => {
     const bundle = await exportBundle(
       context({
         services: services({
-          requestHealth: () => Promise.resolve({ datasets: [health("other"), health("ds")], sourceThrottle: null }),
+          requestHealth: () =>
+            Promise.resolve({ datasets: [health("other"), health("ds")], sourceThrottle: null, linkThrottle: null }),
         }),
       }),
     );
@@ -333,7 +334,8 @@ describe("the callers", () => {
       context({
         exportTrace: () => document(),
         services: services({
-          requestHealth: () => Promise.resolve({ datasets: [health("other"), health("ds")], sourceThrottle: null }),
+          requestHealth: () =>
+            Promise.resolve({ datasets: [health("other"), health("ds")], sourceThrottle: null, linkThrottle: null }),
         }),
       }),
     );

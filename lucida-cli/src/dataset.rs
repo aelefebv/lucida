@@ -9,7 +9,7 @@ use lucida_core::scene::DocumentState;
 use lucida_protocol::{
     DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
     DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic,
-    DatasetSourceHealth, SourceThrottleReport,
+    DatasetSourceHealth, LinkThrottleReport, SourceThrottleReport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -114,15 +114,18 @@ pub struct DatasetHealthOutput {
     pub datasets: Vec<DatasetSourceHealth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_throttle: Option<SourceThrottleReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_throttle: Option<LinkThrottleReport>,
 }
 
-/// One dataset health reply: each dataset's health, and the throttle the
-/// server puts on every source read, which is the server's and not any one
-/// dataset's.
+/// One dataset health reply: each dataset's health, and the throttles the
+/// server puts on every source read and on the session socket, which are
+/// the server's and not any one dataset's.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServerHealth {
     pub datasets: Vec<DatasetSourceHealth>,
     pub source_throttle: Option<SourceThrottleReport>,
+    pub link_throttle: Option<LinkThrottleReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -544,16 +547,22 @@ pub fn format_dataset_info_human(output: &DatasetInfoOutput) -> String {
 }
 
 pub fn format_dataset_health_human(output: &DatasetHealthOutput) -> String {
-    let throttle = output
-        .source_throttle
-        .as_ref()
-        .map(|throttle| {
-            format!(
-                "Source reads throttled on the server: {}\n\n",
-                throttle.label()
-            )
-        })
-        .unwrap_or_default();
+    let source = output.source_throttle.as_ref().map(|throttle| {
+        format!(
+            "Source reads throttled on the server: {}\n",
+            throttle.label()
+        )
+    });
+    let link = output.link_throttle.as_ref().map(|throttle| {
+        format!(
+            "Session socket throttled on the server: {}\n",
+            throttle.label()
+        )
+    });
+    let mut throttle: String = source.into_iter().chain(link).collect();
+    if !throttle.is_empty() {
+        throttle.push('\n');
+    }
     if output.datasets.is_empty() {
         return format!("{throttle}No datasets loaded");
     }
@@ -999,9 +1008,11 @@ where
             request_id: message_request_id,
             datasets,
             source_throttle,
+            link_throttle,
         } if message_request_id == request_id => Ok(Some(ServerHealth {
             datasets,
             source_throttle,
+            link_throttle,
         })),
         _ => Ok(None),
     })
@@ -1800,6 +1811,7 @@ mod tests {
                 import_warnings: vec![],
             }],
             source_throttle: None,
+            link_throttle: None,
         };
 
         let human = format_dataset_health_human(&output);
@@ -1824,6 +1836,22 @@ mod tests {
         assert!(human.starts_with(
             "Source reads throttled on the server: object-store: 100-200 ms per request"
         ));
+
+        let both = DatasetHealthOutput {
+            link_throttle: Some(LinkThrottleReport {
+                profile: Some("broadband".into()),
+                latency_ms: 40,
+                bytes_per_sec: Some(12_500_000),
+            }),
+            ..throttled
+        };
+        let human = format_dataset_health_human(&both);
+        assert!(
+            human.contains(
+                "no bandwidth cap\nSession socket throttled on the server: broadband: 40 ms round trip, 100 Mbit/s to each client\n\nDataset health"
+            ),
+            "{human}"
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
       "ratios": [1, 2]
     },
     "full": {
-      "description": "every dataset through every scenario that applies to it, from local disk and through the remote source throttle",
+      "description": "every dataset through every scenario that applies to it, from local disk and over the remote network",
       "datasets": "all",
       "scenarios": "all",
       "ratios": [1, 2],
