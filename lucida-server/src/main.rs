@@ -78,6 +78,11 @@ struct ServeArgs {
     /// How often the server checks for idle live workspaces.
     #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_SWEEP_SECS", default_value_t = 60)]
     workspace_idle_sweep_secs: u64,
+    /// When a page that declares the codecs it decodes is sent chunks still
+    /// encoded: `auto` (a page on another machine, or any page under a link
+    /// throttle), `always`, or `never`.
+    #[arg(long, env = "LUCIDA_CHUNK_RELAY", default_value = "auto")]
+    chunk_relay: lucida_protocol::codec::ChunkRelaySetting,
 }
 
 /// Where datasets may be opened from.
@@ -541,11 +546,13 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let workspace_runtime_config = workspace::WorkspaceRuntimeConfig {
         idle_ttl: Duration::from_secs(args.workspace_idle_ttl_secs),
         idle_sweep_interval: Duration::from_secs(args.workspace_idle_sweep_secs.max(1)),
+        chunk_relay: args.chunk_relay,
         ..workspace::WorkspaceRuntimeConfig::default()
     };
     tracing::info!(
         idle_ttl_secs = workspace_runtime_config.idle_ttl.as_secs(),
         idle_sweep_secs = workspace_runtime_config.idle_sweep_interval.as_secs(),
+        chunk_relay = ?workspace_runtime_config.chunk_relay,
         "workspace.runtime.config"
     );
     let inbox_store = storage.inbox();
@@ -727,7 +734,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .unwrap_or_else(|e| panic!("failed to bind to {bind_addr}: {e}"));
     tracing::info!(bind = %bind_addr, "server.listening");
 
-    axum::serve(listener, app).await.expect("server error");
+    // The peer address decides whether a connection is sent chunks still
+    // encoded (`wire_chunk::relays_to`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .expect("server error");
     Ok(())
 }
 
@@ -762,6 +776,25 @@ mod cli_tests {
                 .unwrap()
                 .is_none(),
             "the session socket runs at full speed unless a throttle is set"
+        );
+    }
+
+    #[test]
+    fn chunk_relay_defaults_to_auto_and_takes_only_its_three_settings() {
+        use lucida_protocol::codec::ChunkRelaySetting;
+        let relay = |argv: &[&str]| {
+            let Some(Commands::Serve(args)) = parse(argv).command else {
+                panic!("serve subcommand");
+            };
+            args.chunk_relay
+        };
+        assert_eq!(relay(&["serve"]), ChunkRelaySetting::Auto);
+        assert_eq!(
+            relay(&["serve", "--chunk-relay", "never"]),
+            ChunkRelaySetting::Never
+        );
+        assert!(
+            Cli::try_parse_from(["lucida-server", "serve", "--chunk-relay", "sometimes"]).is_err()
         );
     }
 

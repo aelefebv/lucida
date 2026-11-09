@@ -1,7 +1,9 @@
 //! Over a real socket, a connection that declares the codecs it decodes is
 //! sent a chunk still in the codecs it was stored in, and an absent chunk's
 //! fill compressed, while a connection that declares nothing is sent the
-//! decoded frames it always was. Both decode to the same bytes.
+//! decoded frames it always was. Both decode to the same bytes. Under the
+//! `auto` relay setting a connection from this machine gets decoded frames
+//! too, unless a proxy names a client on another machine.
 
 mod common;
 
@@ -15,14 +17,16 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use common::workspace_rig::WorkspaceRig;
 use lucida_core::chunk_codec::decode_relayed;
 use lucida_core::protocol::ServerMessage;
-use lucida_protocol::codec::{BytesCodec, parse_chunk_frame};
+use lucida_protocol::codec::{BytesCodec, ChunkRelayReport, ChunkRelaySetting, parse_chunk_frame};
 use lucida_server::GeneratedConfig;
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
+use lucida_server::workspace::WorkspaceRuntimeConfig;
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -115,7 +119,19 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 async fn connect(server: &WorkspaceRig) -> WsClient {
-    let (mut ws, _) = connect_async(server.ws_url()).await.expect("ws connect");
+    connect_forwarded(server, None).await
+}
+
+/// Connect as a proxy on this machine would, naming `client` as the one it
+/// forwards.
+async fn connect_forwarded(server: &WorkspaceRig, client: Option<&str>) -> WsClient {
+    let mut request = server.ws_url().into_client_request().unwrap();
+    if let Some(client) = client {
+        request
+            .headers_mut()
+            .insert("x-forwarded-for", client.parse().unwrap());
+    }
+    let (mut ws, _) = connect_async(request).await.expect("ws connect");
     loop {
         let msg = timeout(READ_TIMEOUT, ws.next())
             .await
@@ -162,13 +178,26 @@ async fn request(
     }
 }
 
-#[tokio::test]
-async fn a_client_that_declares_codecs_is_sent_chunks_encoded_and_others_decoded() {
-    let root = temp_dir("relay");
+struct Opened {
+    server: WorkspaceRig,
+    root: PathBuf,
+    dataset: String,
+    image: String,
+}
+
+async fn open(name: &str, chunk_relay: ChunkRelaySetting) -> Opened {
+    let root = temp_dir(name);
     let data = root.join("dataset.zarr");
     write_fixture(&data);
 
-    let server = WorkspaceRig::start(generated_config(&root)).await;
+    let server = WorkspaceRig::start_with(
+        generated_config(&root),
+        WorkspaceRuntimeConfig {
+            chunk_relay,
+            ..WorkspaceRuntimeConfig::default()
+        },
+    )
+    .await;
     let (progress, _progress_rx) = mpsc::unbounded_channel();
     let opened = open_dataset(
         1,
@@ -185,17 +214,63 @@ async fn a_client_that_declares_codecs_is_sent_chunks_encoded_and_others_decoded
     let DatasetOpenOutcome::Opened { opened, .. } = opened else {
         panic!("the open must complete");
     };
-    let dataset = opened.manifest.dataset_id.0.clone();
-    let image = opened.manifest.images()[0].image_id.0.clone();
+    Opened {
+        dataset: opened.manifest.dataset_id.0.clone(),
+        image: opened.manifest.images()[0].image_id.0.clone(),
+        server,
+        root,
+    }
+}
+
+async fn declare(ws: &mut WsClient) {
+    ws.send(WsMessage::Text(
+        r#"{"type":"chunk_codecs","codecs":["zstd","lz4","a-codec-from-later"]}"#.into(),
+    ))
+    .await
+    .expect("send");
+}
+
+/// The relay report a dataset health reply gives this connection.
+async fn relay_report(ws: &mut WsClient) -> Option<ChunkRelayReport> {
+    ws.send(WsMessage::Text(
+        r#"{"type":"dataset_health","request_id":"health-1"}"#.into(),
+    ))
+    .await
+    .expect("send");
+    loop {
+        let msg = timeout(READ_TIMEOUT, ws.next())
+            .await
+            .expect("the health reply arrives")
+            .expect("stream ended")
+            .expect("ws read");
+        if let WsMessage::Text(text) = msg
+            && let ServerMessage::DatasetHealth { chunk_relay, .. } =
+                serde_json::from_str(text.as_str()).unwrap()
+        {
+            return chunk_relay;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_declares_codecs_is_sent_chunks_encoded_and_others_decoded() {
+    let Opened {
+        server,
+        root,
+        dataset,
+        image,
+    } = open("relay", ChunkRelaySetting::Always).await;
 
     let mut plain = connect(&server).await;
     let mut declaring = connect(&server).await;
-    declaring
-        .send(WsMessage::Text(
-            r#"{"type":"chunk_codecs","codecs":["zstd","lz4","a-codec-from-later"]}"#.into(),
-        ))
-        .await
-        .expect("send");
+    declare(&mut declaring).await;
+    assert_eq!(
+        relay_report(&mut declaring).await,
+        Some(ChunkRelayReport {
+            setting: ChunkRelaySetting::Always,
+            relays: true,
+        })
+    );
 
     for (rid, key, stored_codecs) in [
         (0, "0/0/0/0/0/0", vec![BytesCodec::Zstd]),
@@ -225,6 +300,60 @@ async fn a_client_that_declares_codecs_is_sent_chunks_encoded_and_others_decoded
             .unwrap()
             .payload,
         samples()
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The link costs nothing over loopback, so `auto` keeps a local page's
+/// chunks decoded, where the server's zstd is the faster one.
+#[tokio::test]
+async fn auto_sends_a_page_on_this_machine_decoded_chunks() {
+    let Opened {
+        server,
+        root,
+        dataset,
+        image,
+    } = open("auto-loopback", ChunkRelaySetting::Auto).await;
+
+    let mut local = connect(&server).await;
+    declare(&mut local).await;
+    assert_eq!(
+        relay_report(&mut local).await,
+        Some(ChunkRelayReport {
+            setting: ChunkRelaySetting::Auto,
+            relays: false,
+        })
+    );
+    for (rid, key) in [(0, "0/0/0/0/0/0"), (1, "0/0/0/0/0/1")] {
+        let frame = request(&mut local, rid, &dataset, &image, key).await;
+        let frame = parse_chunk_frame(&frame).unwrap();
+        assert!(frame.codecs.is_empty(), "{key}");
+        assert_eq!(frame.payload.len(), CHUNK_BYTES, "{key}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// A proxy on this machine connects from loopback but names its client, and
+/// a client on another machine is relayed to.
+#[tokio::test]
+async fn auto_relays_to_the_remote_client_a_local_proxy_names() {
+    let Opened {
+        server,
+        root,
+        dataset,
+        image,
+    } = open("auto-proxied", ChunkRelaySetting::Auto).await;
+
+    let mut proxied = connect_forwarded(&server, Some("203.0.113.7, 10.0.0.1")).await;
+    declare(&mut proxied).await;
+    assert_eq!(
+        relay_report(&mut proxied).await.map(|report| report.relays),
+        Some(true)
+    );
+    let frame = request(&mut proxied, 0, &dataset, &image, "0/0/0/0/0/0").await;
+    assert_eq!(
+        parse_chunk_frame(&frame).unwrap().codecs,
+        [BytesCodec::Zstd]
     );
     let _ = fs::remove_dir_all(&root);
 }

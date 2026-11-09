@@ -134,11 +134,13 @@ Import reads any chain of the codecs the server decodes: `transpose`, then
 `bytes` in either byte order, then any of `gzip`, `zlib`, `zstd`, `lz4`,
 `blosc` (with `blosclz`, `lz4`, `lz4hc`, `zlib`, or `zstd` inside), and
 `crc32c`. A chunk stored as `bytes` little endian and then only these codecs,
-one timepoint and one channel per inner chunk, crosses to the viewer as
-stored, and the viewer decodes it, whenever that is at least a quarter smaller
-than the chunk decoded. The server decodes every other chunk, so a transpose,
-big-endian samples, or a bundled inner chunk keep the full decoded size on the
-link. A Zarr v2 array's filters and compressor are read as the same codecs,
+one timepoint and one channel per inner chunk, crosses to a viewer on another
+machine as stored, and the viewer decodes it, whenever that is at least a
+quarter smaller than the chunk decoded. A viewer on the server's own machine
+gets every chunk decoded, since there the server's decode is faster and the
+link costs nothing; `LUCIDA_CHUNK_RELAY=always` or `never` overrides that.
+The server decodes every other chunk, so a transpose, big-endian samples, or a
+bundled inner chunk keep the full decoded size on the link. A Zarr v2 array's filters and compressor are read as the same codecs,
 and its Fortran order as a transpose. Any other codec fails the open with an
 error that names it. Under sharding, the sharding codec is the only outer
 codec, this chain goes inside it, and the index uses `bytes` optionally

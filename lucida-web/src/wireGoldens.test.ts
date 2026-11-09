@@ -1204,6 +1204,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       datasets: DatasetSourceHealth[];
       source_throttle: SourceThrottleReport;
       link_throttle: LinkThrottleReport;
+      chunk_relay: { setting: "auto" | "always" | "never"; relays: boolean };
     };
     expect(envelope).toStrictEqual({
       type: "dataset_health",
@@ -1211,6 +1212,8 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       datasets: [expectedSourceHealth],
       source_throttle: expectedSourceThrottle,
       link_throttle: expectedLinkThrottle,
+      // Carried for the trace driver's run header; the page does not read it.
+      chunk_relay: { setting: "auto", relays: true },
     });
 
     const { bridge, ws } = openBridge();

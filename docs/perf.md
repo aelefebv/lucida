@@ -39,7 +39,10 @@ The `full` suite runs `local` and `remote`. Without `--network` the runner passe
 `LUCIDA_SOURCE_THROTTLE`, `LUCIDA_LINK_THROTTLE` and their companions through to its server,
 and with `--server` each run records whatever throttles that server reports. A throttled
 table says so on its second line and in its throttle column, and `summary.json` records the
-throttles as `sourceThrottle` and `linkThrottle`.
+throttles as `sourceThrottle` and `linkThrottle`. The run file's `header.chunkRelay` says
+whether the server sent chunks still encoded: by default only to a page on another machine,
+or to any page under a link throttle, so a throttled run measures the relay and a local one
+does not. `--server-env LUCIDA_CHUNK_RELAY=always` or `never` overrides it.
 
 `--server-env KEY=VALUE`, repeated for more, starts the runner's server with those
 settings, such as `LUCIDA_SOURCE_READ_CONCURRENCY=64`, though not a throttle's, which a

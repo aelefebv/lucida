@@ -122,6 +122,43 @@ impl FromIterator<ChunkCodec> for CodecSet {
     }
 }
 
+/// When the server sends a connection's chunks still encoded, as a server
+/// setting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkRelaySetting {
+    /// To a connection that does not come from this machine, or to any while
+    /// a link throttle stands in for a network.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl std::str::FromStr for ChunkRelaySetting {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(ChunkRelaySetting::Auto),
+            "always" => Ok(ChunkRelaySetting::Always),
+            "never" => Ok(ChunkRelaySetting::Never),
+            other => Err(format!(
+                "chunk relay {other:?} is not one of auto, always, never"
+            )),
+        }
+    }
+}
+
+/// The relay setting and what it resolved to for the connection that asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkRelayReport {
+    pub setting: ChunkRelaySetting,
+    /// Whether this connection is sent chunks still encoded once it declares
+    /// the codecs it decodes.
+    pub relays: bool,
+}
+
 /// Bit 15 of a chunk frame's key length marks an encoded frame. A key never
 /// comes near 32 KiB, so the bit is free, and a frame without it is laid out
 /// as every client has always read it.
@@ -370,6 +407,27 @@ mod tests {
         assert!(!set.decodes(&[BytesCodec::Gzip, BytesCodec::Crc32c]));
         assert!(CodecSet::default().decodes(&[]));
         assert!(!CodecSet::default().contains(ChunkCodec::Lz4));
+    }
+
+    #[test]
+    fn a_relay_setting_reads_its_three_names_and_refuses_others() {
+        for (name, setting) in [
+            ("auto", ChunkRelaySetting::Auto),
+            ("always", ChunkRelaySetting::Always),
+            ("never", ChunkRelaySetting::Never),
+        ] {
+            assert_eq!(name.parse::<ChunkRelaySetting>(), Ok(setting));
+            assert_eq!(
+                serde_json::to_string(&setting).unwrap(),
+                format!("\"{name}\"")
+            );
+        }
+        assert!(
+            "sometimes"
+                .parse::<ChunkRelaySetting>()
+                .unwrap_err()
+                .contains("sometimes")
+        );
     }
 
     #[test]

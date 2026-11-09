@@ -11,7 +11,7 @@ use lucida_core::protocol::{
     ChunkMessage, ClientId, ClientMessage, CommandRejection, MessageRejection, PeerIdentity,
     ServerMessage,
 };
-use lucida_protocol::codec::{BytesCodec, CodecSet};
+use lucida_protocol::codec::{BytesCodec, ChunkRelayReport, CodecSet};
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
@@ -52,6 +52,7 @@ pub async fn handle_workspace_client(
     live: Arc<LiveWorkspace>,
     manager: Arc<WorkspaceManager>,
     principal: AuthPrincipal,
+    relay_chunks: bool,
 ) {
     let generated_config = manager.generated_config();
     handle_client_inner(
@@ -63,6 +64,7 @@ pub async fn handle_workspace_client(
             manager,
             principal,
         },
+        relay_chunks,
     )
     .await;
 }
@@ -95,6 +97,7 @@ async fn handle_client_inner(
     ws: WebSocket,
     generated_config: GeneratedConfig,
     ctx: WorkspaceScope,
+    relay_chunks: bool,
 ) {
     let session = Arc::clone(&ctx.live.session);
     let tx = ctx.live.tx.clone();
@@ -120,8 +123,13 @@ async fn handle_client_inner(
     let timings = Arc::new(TimingBuffer::new());
     let chunk_serves = ChunkServes::new();
     // What this connection said it decodes, so a chunk can reach it still
-    // encoded. Nothing until it says.
+    // encoded. Nothing until it says, and nothing at all when the relay
+    // policy keeps this connection's chunks decoded.
     let mut chunk_codecs = CodecSet::default();
+    let chunk_relay = ChunkRelayReport {
+        setting: ctx.manager.runtime_config().chunk_relay,
+        relays: relay_chunks,
+    };
 
     // Presentational identity for this peer's cursor, authored server-side
     // from the authenticated principal so it cannot be spoofed.
@@ -512,6 +520,7 @@ async fn handle_client_inner(
                                 datasets,
                                 source_throttle: lucida_store::source_throttle::report(),
                                 link_throttle: link_throttle::report(),
+                                chunk_relay: Some(chunk_relay),
                             };
                             let senders = unicast_routes.lock().await;
                             if let Some(sender) = senders.get(&id) {
@@ -865,8 +874,15 @@ async fn handle_client_inner(
                             );
                         }
                         ChunkMessage::ChunkCodecs { codecs } => {
-                            tracing::debug!(client_id = %id, ?codecs, "ws.chunk_codecs");
-                            chunk_codecs = codecs.into_iter().collect();
+                            tracing::debug!(
+                                client_id = %id,
+                                ?codecs,
+                                relays = relay_chunks,
+                                "ws.chunk_codecs"
+                            );
+                            if relay_chunks {
+                                chunk_codecs = codecs.into_iter().collect();
+                            }
                         }
                     }
                     continue;
