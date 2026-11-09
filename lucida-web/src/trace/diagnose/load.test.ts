@@ -36,13 +36,70 @@ describe("the load reading", () => {
     expect(diagnoseRun(run).load.firstFrameMs).toBe(112);
   });
 
-  it("takes the hold off a run that closed by settling", () => {
+  it("takes the hold off the close on a document that does not date its wanted set", () => {
     const run = makeRun({
       header: { durationUs: 2_340 * MS, quiescenceHoldMs: 500, endReason: "quiescent" },
       rows: [presented(0, 0, 1)],
     });
 
     expect(diagnoseRun(run).load.settleMs).toBe(1_840);
+  });
+
+  it("dates settle by when the view had its wanted set, and prefetch by its last decode", () => {
+    const prefetched = makeRow(
+      {
+        startUs: 300 * MS,
+        durations: { plan: 1 * MS, queue: 1 * MS, wire: 400 * MS, decode: 8 * MS, upload: 2_000 * MS },
+        lane: "prefetch",
+      },
+      1,
+    );
+    const run = makeRun({
+      header: { durationUs: 1_300 * MS, quiescenceHoldMs: 500, endReason: "quiescent", wantedSetMetAtUs: 320 * MS },
+      rows: [presented(0, 0, 1), prefetched],
+    });
+
+    const load = diagnoseRun(run).load;
+    expect(load.settleMs).toBe(320);
+    expect(load.prefetchMs).toBe(710);
+  });
+
+  it("settles once the frame drawing the last wanted chunk lands, which a prefetched one's does not move", () => {
+    const drawnLate = presented(304 * MS, 1, 1);
+    const prefetchShown = makeRow(
+      {
+        startUs: 300 * MS,
+        durations: { plan: 1 * MS, queue: 1 * MS, wire: 10 * MS, decode: 1 * MS, upload: 300 * MS, present: 6 * MS },
+        lane: "prefetch",
+      },
+      2,
+    );
+    const run = makeRun({
+      header: { durationUs: 1_300 * MS, quiescenceHoldMs: 500, endReason: "quiescent", wantedSetMetAtUs: 320 * MS },
+      rows: [presented(0, 0, 1), drawnLate, prefetchShown],
+    });
+
+    expect(diagnoseRun(run).load.settleMs).toBe(324);
+  });
+
+  it("has no prefetch time on a run that prefetched nothing", () => {
+    expect(diagnoseRun(makeRun({ rows: [presented(0, 0, 1)] })).load.prefetchMs).toBeNull();
+  });
+
+  it("counts the wanted chunks not resident at the close, both tiers together", () => {
+    const run = makeRun({
+      header: {
+        outstandingAtSettle: {
+          ...makeRun().header.outstandingAtSettle,
+          desiredDetailChunks: 1_024,
+          residentDetailChunks: 512,
+          desiredCoarseChunks: 4,
+          residentCoarseChunks: 3,
+        },
+      },
+    });
+
+    expect(diagnoseRun(run).load.coverageLossChunks).toBe(513);
   });
 
   it("has no settle time on a run that did not settle", () => {
