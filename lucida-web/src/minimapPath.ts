@@ -460,13 +460,11 @@ function issueMinimapRender(
   client: TickContext["client"],
   renderLayers: MinimapRenderLayerGeometry[],
   resolved: ResolvedLayers,
-  invViewProj: Float32Array,
-  eye: Float32Array,
-  backingSize: number,
+  camera: Pick<MinimapCamera, "invViewProj" | "viewProj" | "eye" | "backingSize">,
 ): void {
   const layers = overviewLayerParams(renderLayers, resolved);
   if (layers.length > 0) {
-    client.minimapRender(layers, invViewProj, eye, backingSize, backingSize);
+    client.minimapRender(layers, camera.invViewProj, camera.viewProj, camera.eye, camera.backingSize, camera.backingSize);
   }
 }
 
@@ -476,14 +474,7 @@ function updateMinimapDisplay(
   cache: MinimapOverviewCache,
   resolved: ResolvedLayers,
 ): void {
-  issueMinimapRender(
-    client,
-    cache.renderLayers,
-    resolved,
-    cache.invViewProj,
-    cache.eye,
-    cache.backingSize,
-  );
+  issueMinimapRender(client, cache.renderLayers, resolved, cache);
 }
 
 /**
@@ -557,7 +548,7 @@ function updateMinimapCamera(
   cache.eye = cam.eye;
   cache.backingSize = cam.backingSize;
   cache.topDown = cam.topDown;
-  issueMinimapRender(client, cache.renderLayers, resolved, cache.invViewProj, cache.eye, cache.backingSize);
+  issueMinimapRender(client, cache.renderLayers, resolved, cache);
 }
 
 /**
@@ -642,7 +633,7 @@ function buildMinimapOverview(
     });
   }
 
-  issueMinimapRender(client, renderLayers, resolved, invViewProj, eye, backingSize);
+  issueMinimapRender(client, renderLayers, resolved, { invViewProj, viewProj, eye, backingSize });
 
   // All members of a dataset share one tile shape. One pass over the datasets
   // builds the lookup; scanning per overlay layer would be quadratic.

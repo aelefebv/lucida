@@ -63,6 +63,7 @@ export function buildRoster(args: {
     };
     if (!cached) tileMatrixCache?.set(r.entityId, matrices);
     matricesByEntity.set(r.entityId, matrices);
+    r.modelMatrix = matrices.model;
   }
 
   return { entries, matricesByEntity };

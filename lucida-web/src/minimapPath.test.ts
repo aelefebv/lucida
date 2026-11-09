@@ -588,7 +588,7 @@ describe("tickMinimap overview/overlay split", () => {
     // Capture the backing size each overview render is issued at.
     const renderSizes: number[] = [];
     const client = {
-      minimapRender: (_l: unknown, _iv: unknown, _e: unknown, w: number) => {
+      minimapRender: (_l: unknown, _iv: unknown, _vp: unknown, _e: unknown, w: number) => {
         renderSizes.push(w);
       },
     } as unknown as RenderClient;

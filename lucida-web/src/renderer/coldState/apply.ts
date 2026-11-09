@@ -10,11 +10,7 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateMessage } from "../workerProtocol.ts";
-import {
-  buildDescriptorBuffer,
-  destroyDescriptorBuffer,
-  iterateColdMembers,
-} from "../descriptorBuffer.ts";
+import { iterateColdMembers, rebuildDescriptorBuffer } from "../descriptorBuffer.ts";
 import { targetLevelOf, type EntitySource } from "../entitySources.ts";
 import {
   getOrCreateVolumePool,
@@ -182,11 +178,9 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   state.currentSourcesByDataset.set(msg.datasetId, currentSources);
 
-  // 5. Rebuild the descriptor buffer from scratch, like the sections.
-  const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
-  if (oldDesc) destroyDescriptorBuffer(oldDesc);
+  // 5. Rebuild the descriptor buffer's contents from scratch, like the sections.
   state.descriptorBuffersByDataset.set(
     msg.datasetId,
-    buildDescriptorBuffer(ctx.device, msg, currentSources),
+    rebuildDescriptorBuffer(ctx.device, state.descriptorBuffersByDataset.get(msg.datasetId), msg, currentSources),
   );
 }

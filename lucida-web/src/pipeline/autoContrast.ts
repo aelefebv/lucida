@@ -32,6 +32,29 @@ export const CHUNK_SAMPLES = 4096;
 /** Values one fit selects from at most. A wider fit thins every chunk's lattice alike. */
 const FIT_SAMPLES = 1 << 20;
 
+/**
+ * A chunk's lattice of finite samples with their smallest and largest value,
+ * kept with it, so a fit over many chunks reads each chunk's bounds once
+ * rather than every sample again.
+ */
+export interface Lattice {
+  values: Float32Array;
+  min: number;
+  max: number;
+}
+
+/** `values` as a lattice. They must be finite, as {@link chunkSamples} returns them. */
+export function lattice(values: Float32Array): Lattice {
+  let min = Infinity;
+  let max = -Infinity;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return { values, min, max };
+}
+
 export interface ValueRange {
   min: number;
   max: number;
@@ -112,32 +135,96 @@ export function chunkSamples(
  * none. Limits whose percentiles meet, as in mostly-constant data, widen to
  * the range.
  */
-export function fitValues(parts: readonly Float32Array[]): Omit<ChannelFit, "provisional"> | null {
+export function fitValues(parts: readonly Lattice[]): Omit<ChannelFit, "provisional"> | null {
   let total = 0;
   let min = Infinity;
   let max = -Infinity;
   for (const part of parts) {
-    total += part.length;
-    for (let i = 0; i < part.length; i++) {
-      const v = part[i];
-      if (v < min) min = v;
-      if (v > max) max = v;
-    }
+    if (part.values.length === 0) continue;
+    total += part.values.length;
+    if (part.min < min) min = part.min;
+    if (part.max > max) max = part.max;
   }
   if (total === 0) return null;
   const thin = Math.ceil(total / FIT_SAMPLES);
-  const values = new Float32Array(Math.ceil(total / thin) + parts.length);
   let n = 0;
-  for (const part of parts) {
-    for (let i = 0; i < part.length; i += thin) values[n++] = part[i];
-  }
-  const selected = values.subarray(0, n);
-  const low = selectNth(selected, Math.floor(LOW_QUANTILE * (n - 1)));
-  const high = selectNth(selected, Math.ceil(HIGH_QUANTILE * (n - 1)));
+  for (const part of parts) n += Math.ceil(part.values.length / thin);
+  const [low, high] = selectRanks(
+    parts.map((part) => part.values),
+    thin,
+    Math.floor(LOW_QUANTILE * (n - 1)),
+    Math.ceil(HIGH_QUANTILE * (n - 1)),
+  );
   return {
     limits: high > low ? { min: low, max: high } : { min, max },
     range: { min, max },
   };
+}
+
+/** One count per value of a sample key's top 16 bits; reused, since a fit runs to completion. */
+const keyCounts = new Uint32Array(1 << 16);
+
+/**
+ * A finite float's bits, as an unsigned key in the float's order: a positive
+ * float's bits with the sign set, a negative float's bits all flipped. Zero
+ * and negative zero get neighbouring keys, so either can stand for a rank
+ * that falls on zeros.
+ */
+function orderedKey(bits: number): number {
+  return ((bits & 0x80000000) !== 0 ? ~bits : bits | 0x80000000) >>> 0;
+}
+
+/**
+ * The values of ranks `lowRank` and `highRank`, counted from 0, among every
+ * `thin`th value of `parts`: the ones a selection from a copy of them would
+ * find. One pass counts them by their key's top 16 bits, which names the
+ * bucket each rank falls in; a second takes those buckets' values, and a
+ * selection inside each finds the rank. On a collection that is two passes
+ * over a bounded sample and a selection over a few thousand values, where a
+ * selection over the whole sample cost several times as much.
+ */
+function selectRanks(
+  parts: readonly Float32Array[],
+  thin: number,
+  lowRank: number,
+  highRank: number,
+): [number, number] {
+  const words = parts.map((part) => new Uint32Array(part.buffer, part.byteOffset, part.length));
+  keyCounts.fill(0);
+  for (const w of words) {
+    for (let i = 0; i < w.length; i += thin) keyCounts[orderedKey(w[i]) >>> 16]++;
+  }
+  let below = 0;
+  let lowBucket = -1;
+  let lowAt = 0;
+  let highBucket = -1;
+  let highAt = 0;
+  for (let bucket = 0; bucket < keyCounts.length; bucket++) {
+    const count = keyCounts[bucket];
+    if (lowBucket < 0 && lowRank < below + count) {
+      lowBucket = bucket;
+      lowAt = lowRank - below;
+    }
+    if (highRank < below + count) {
+      highBucket = bucket;
+      highAt = highRank - below;
+      break;
+    }
+    below += count;
+  }
+  const lows = new Float32Array(keyCounts[lowBucket]);
+  const highs = highBucket === lowBucket ? lows : new Float32Array(keyCounts[highBucket]);
+  let nLow = 0;
+  let nHigh = 0;
+  parts.forEach((part, p) => {
+    const w = words[p];
+    for (let i = 0; i < w.length; i += thin) {
+      const bucket = orderedKey(w[i]) >>> 16;
+      if (bucket === lowBucket) lows[nLow++] = part[i];
+      else if (bucket === highBucket) highs[nHigh++] = part[i];
+    }
+  });
+  return [selectNth(lows, lowAt), selectNth(highs, highAt)];
 }
 
 /**
@@ -264,7 +351,7 @@ interface ChannelState {
 export class AutoContrastFitter {
   private readonly chunks = new Map<string, DatasetChunks>();
   private readonly states = new Map<string, Map<number, ChannelState>>();
-  private readonly lattices = new WeakMap<ArrayBuffer, Float32Array>();
+  private readonly lattices = new WeakMap<ArrayBuffer, Lattice>();
   private readonly outstanding = emptyLaneOutstanding();
 
   update(
@@ -340,21 +427,21 @@ export class AutoContrastFitter {
     cache: FitCache,
   ): Omit<ChannelFit, "provisional"> | null {
     const images = new Map(manifest.images.map((image) => [image.image_id, image]));
-    const parts: Float32Array[] = [];
+    const parts: Lattice[] = [];
     for (const req of read) {
       const entry = cache.cachedSamples(req.entityId, req.chunkKey);
       if (!entry) continue;
-      let lattice = this.lattices.get(entry.data);
-      if (!lattice) {
+      let part = this.lattices.get(entry.data);
+      if (!part) {
         const geometry = chunkGeometry(images.get(req.imageId), req);
         try {
-          lattice = chunkSamples(decodedValues(entry.data, entry.dataType), geometry.chunk, geometry.extent);
+          part = lattice(chunkSamples(decodedValues(entry.data, entry.dataType), geometry.chunk, geometry.extent));
         } catch {
           continue;
         }
-        this.lattices.set(entry.data, lattice);
+        this.lattices.set(entry.data, part);
       }
-      parts.push(lattice);
+      parts.push(part);
     }
     return fitValues(parts);
   }

@@ -48,6 +48,17 @@ interface CollectionSelectorProps {
   visible?: boolean;
 }
 
+type Placements = { entity_id: string; position: [number, number] }[];
+type CollectionData = { collectionKind: CollectionKind; members: PlacedMember[] };
+
+/**
+ * Each manifest's last answer, with the placements it was for. The viewer
+ * asks on every render, which every display edit causes, and the answer
+ * walks every member. Manifests and placements are replaced, never edited,
+ * so their identity says when the answer holds.
+ */
+const collectionDataByManifest = new WeakMap<DatasetManifest, { placements: Placements | null; data: CollectionData | null }>();
+
 /**
  * Extract CollectionKind and positioned members from a DatasetManifest.
  *
@@ -62,8 +73,17 @@ interface CollectionSelectorProps {
 // eslint-disable-next-line react-refresh/only-export-components
 export function extractCollectionData(
   manifest: DatasetManifest,
-  activeLayoutPlacements?: { entity_id: string; position: [number, number] }[] | null,
-): { collectionKind: CollectionKind; members: PlacedMember[] } | null {
+  activeLayoutPlacements?: Placements | null,
+): CollectionData | null {
+  const placements = activeLayoutPlacements ?? null;
+  const held = collectionDataByManifest.get(manifest);
+  if (held && held.placements === placements) return held.data;
+  const data = buildCollectionData(manifest, placements);
+  collectionDataByManifest.set(manifest, { placements, data });
+  return data;
+}
+
+function buildCollectionData(manifest: DatasetManifest, activeLayoutPlacements: Placements | null): CollectionData | null {
   if (manifest.kind === "Single") return null;
   if (typeof manifest.kind !== "object" || !("Collection" in manifest.kind)) return null;
 

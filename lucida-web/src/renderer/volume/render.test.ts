@@ -16,7 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { EntityDescriptorIndex, MemberSourceBinding } from "../descriptorBuffer.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { UNTIMED } from "../passTiming.ts";
-import type { VolumePoolBinding } from "../volumeRenderer.ts";
+import type { VolumeMemberDraw, VolumePoolBinding } from "../volumeRenderer.ts";
 import type { VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
@@ -86,6 +86,8 @@ interface MockRenderer {
   setLabelColorBuffer: ReturnType<typeof vi.fn>;
   setDescriptorBinding: ReturnType<typeof vi.fn>;
   renderTo: ReturnType<typeof vi.fn>;
+  prepareMembers: ReturnType<typeof vi.fn>;
+  renderMembers: ReturnType<typeof vi.fn>;
   compiled: Promise<void>;
 }
 
@@ -99,8 +101,15 @@ function makeRenderer(): MockRenderer {
     setLabelColorBuffer: vi.fn(),
     setDescriptorBinding: vi.fn(),
     renderTo: vi.fn(),
+    prepareMembers: vi.fn(),
+    renderMembers: vi.fn(),
     compiled: Promise.resolve(),
   };
+}
+
+/** The draws the frame prepared. */
+function preparedDraws(renderer: MockRenderer): VolumeMemberDraw[] {
+  return renderer.prepareMembers.mock.calls.at(-1)![1];
 }
 
 /** A compile the test finishes by hand. */
@@ -151,7 +160,12 @@ function makeCtx(opts: {
 
 const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
-function msgFor(layers: Array<{ memberId: string; entityIndex: number; blendMode?: "alpha" | "additive" }>): VolumeRenderMultiPassMessage {
+function msgFor(layers: Array<{
+  memberId: string;
+  entityIndex: number;
+  blendMode?: "alpha" | "additive";
+  scissorRect?: [number, number, number, number];
+}>): VolumeRenderMultiPassMessage {
   return {
     type: "volumeRenderMultiPass",
     epochs: EPOCHS,
@@ -161,6 +175,7 @@ function msgFor(layers: Array<{ memberId: string; entityIndex: number; blendMode
       entityIndex: l.entityIndex,
       blendMode: l.blendMode ?? "alpha",
       renderMode: "translucent" as const,
+      scissorRect: l.scissorRect,
     })),
     invViewProj: new Float32Array(16),
     eye: new Float32Array(3),
@@ -266,11 +281,14 @@ describe("handleVolumeRenderMultiPass", () => {
       { memberId: "img-b", entityIndex: 1 },
     ]));
 
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.renderTo.mock.calls[0][3]).toBe(true);
+    expect(renderer.renderMembers).toHaveBeenCalledTimes(1);
+    // The one drawn layer clears the depth and the canvas.
+    expect(renderer.renderMembers.mock.calls[0][1]).toEqual([0]);
+    expect(renderer.renderMembers.mock.calls[0][6]).toBe(true);
     expect(composite).toHaveBeenCalledTimes(1);
     expect(composite.mock.calls[0][3]).toBe(true);
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith([bindingOf(atlas)], null);
+    expect(preparedDraws(renderer)).toHaveLength(1);
+    expect(preparedDraws(renderer)[0]).toMatchObject({ levels: [bindingOf(atlas)], coarse: null, entityIndex: 1 });
   });
 
   it("renders a layer backed only by a resident coarse chunk tier", async () => {
@@ -307,8 +325,8 @@ describe("handleVolumeRenderMultiPass", () => {
 
     await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
 
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith([], bindingOf(coarseAtlas));
+    expect(renderer.renderMembers).toHaveBeenCalledTimes(1);
+    expect(preparedDraws(renderer)[0]).toMatchObject({ levels: [], coarse: bindingOf(coarseAtlas) });
     expect(composite).toHaveBeenCalledTimes(1);
   });
 
@@ -347,15 +365,57 @@ describe("handleVolumeRenderMultiPass", () => {
 
     await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
 
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith(
-      [bindingOf(finePool), bindingOf(smallChunkPool)],
-      bindingOf(coarsePool),
-    );
+    expect(renderer.renderMembers).toHaveBeenCalledTimes(1);
+    expect(preparedDraws(renderer)[0]).toMatchObject({
+      levels: [bindingOf(finePool), bindingOf(smallChunkPool)],
+      coarse: bindingOf(coarsePool),
+    });
     // Every bound pool's indirection is flushed before the draw.
     expect(finePool.indirectionDirty).toBe(false);
     expect(smallChunkPool.indirectionDirty).toBe(false);
     expect(coarsePool.indirectionDirty).toBe(false);
   });
 
+  it("draws side-by-side members a channel to a pass and a composite, all in one submit", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const stub = { device, state } as unknown as WorkerCtx;
+    const pool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, 0, "u16");
+    pool.indirectionDirty = false;
+    // Three members side by side, each shown in two channels.
+    const members = ["a0", "a1", "b0", "b1", "c0", "c1"];
+    for (const id of members) {
+      pool.entityMetas.set(id, [{
+        level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0,
+      }]);
+    }
+    const descIndex = makeDescIndex(members, {
+      sourceBindingByMember: bindings(Object.fromEntries(
+        members.map((id) => [id, { levelPoolKeys: [], coarsePoolKey: "ds-0:16x16x16:coarse" }]),
+      )),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const column = (i: number): [number, number, number, number] => [Math.floor(i / 2) * 21, 0, 20, 64];
+
+    await handleVolumeRenderMultiPass(ctx, msgFor(members.map((memberId, i) => ({
+      memberId,
+      entityIndex: i,
+      blendMode: "additive" as const,
+      scissorRect: column(i),
+    }))));
+
+    expect(renderer.prepareMembers).toHaveBeenCalledOnce();
+    expect(preparedDraws(renderer).map((d) => d.scissor)).toEqual(members.map((_, i) => column(i)));
+    expect(renderer.renderMembers.mock.calls.map((call) => [call[1], call[6]])).toEqual([
+      [[0, 2, 4], true],
+      [[1, 3, 5], false],
+    ]);
+    expect(composite.mock.calls.map((call) => [call[1][0].blendMode, call[3]])).toEqual([
+      ["additive", true],
+      ["additive", false],
+    ]);
+    expect(device.queue.submit).toHaveBeenCalledOnce();
+  });
 });
