@@ -39,7 +39,13 @@ export class DecodePool {
   private pool: PoolWorker[];
   private nextId = 0;
 
-  constructor(poolSize?: number) {
+  /**
+   * `compileCodecModule` compiles the WASM module once for the page. Each
+   * worker is handed the result and instantiates it on its first encoded
+   * chunk; without it, or before it arrives, a worker loads and compiles the
+   * module itself.
+   */
+  constructor(poolSize?: number, compileCodecModule?: () => Promise<WebAssembly.Module>) {
     const size = poolSize ?? defaultPoolSize();
     this.pool = Array.from({ length: size }, () => {
       const w = new Worker(new URL("./decode.worker.ts", import.meta.url), {
@@ -67,6 +73,13 @@ export class DecodePool {
       };
       return entry;
     });
+    void compileCodecModule?.().then(
+      (module) => {
+        for (const entry of this.pool) entry.worker.postMessage({ module });
+      },
+      // The workers compile their own, as they would with no module at all.
+      () => {},
+    );
   }
 
   /**

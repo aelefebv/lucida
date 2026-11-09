@@ -38,14 +38,19 @@ const ZSTD_CODECS = new Uint8Array([3]);
 const LZ4_CODECS = new Uint8Array([4]);
 
 let core: Promise<typeof Core> | null = null;
+/** The module the page compiled for its workers, once it has arrived. */
+let compiled: WebAssembly.Module | null = null;
 
 /**
  * The WASM module's decoders, instantiated in this worker on the first
- * encoded chunk, so a page served only decoded frames never loads them here.
+ * encoded chunk, so a page served only decoded frames never instantiates
+ * them here. From the page's compiled module when it came first, which is
+ * the usual order; otherwise loaded and compiled here.
  */
 function codecModule(): Promise<typeof Core> {
   core ??= import("lucida-core").then(async (module) => {
-    await module.default();
+    if (compiled) module.initSync({ module: compiled });
+    else await module.default();
     return module;
   });
   return core;
@@ -242,7 +247,11 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
   }
 }
 
-self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
+self.onmessage = async (e: MessageEvent<DecodeRequest | { module: WebAssembly.Module }>) => {
+  if ("module" in e.data) {
+    compiled = e.data.module;
+    return;
+  }
   const { id, wireFormat } = e.data;
   try {
     const decompressed = await decompress(e.data);
