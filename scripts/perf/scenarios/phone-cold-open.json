@@ -1,0 +1,8 @@
+{
+  "description": "cold-open on a phone: a 390x844 window laid out as a mobile browser lays it out, with touch input and a mobile user agent; the phone suite runs it at ratio 3",
+  "camera": "slice",
+  "width": 390,
+  "height": 844,
+  "mobile": true,
+  "steps": []
+}

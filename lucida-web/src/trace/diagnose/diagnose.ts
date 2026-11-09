@@ -19,6 +19,7 @@ import {
   type CoverageGap,
   type FrameReading,
   type PageError,
+  type PageScrollReading,
   type TraceCoverage,
   type TraceDocument,
   type TracePointEvent,
@@ -220,6 +221,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     // The frame is read once the run has closed, so it is about the run's
     // end, which only a reading of the whole run reaches.
     frame: window.whole ? (run.frame ?? null) : null,
+    pageScroll: window.whole ? (run.pageScroll ?? null) : null,
     baseline: options.baseline ?? null,
   });
   const worst = worstRowSelector(run, phases, findings);
@@ -654,6 +656,8 @@ interface FindingsInput {
   errors: PageError[];
   /** The frame the run settled on, when someone read it. */
   frame: FrameReading | null;
+  /** The page's scroll once the run closed, when someone read it. */
+  pageScroll: PageScrollReading | null;
   baseline: DiagnosticDocument | null;
 }
 
@@ -727,6 +731,22 @@ function blankFrameFinding(frame: FrameReading | null): RawFinding | null {
     subject: "settled frame",
     observed: { colour: frame.flatColour, width: frame.width, height: frame.height },
     threshold: { kind: "colours", value: 1, why: RULESET.blankFrame.why },
+  };
+}
+
+/** The page under the viewer was scrolled, or its document overflows the viewport. */
+function pageScrollFinding(reading: PageScrollReading | null): RawFinding | null {
+  if (!reading) return null;
+  const scrolled = reading.scrollX !== 0 || reading.scrollY !== 0;
+  const overflows =
+    reading.scrollWidth > reading.viewportWidth || reading.scrollHeight > reading.viewportHeight;
+  if (!scrolled && !overflows) return null;
+  return {
+    severity: "stall",
+    rule: RULESET.pageScroll.id,
+    subject: "page scroll",
+    observed: { scroll: { ...reading } },
+    threshold: { kind: "px", value: 0, why: RULESET.pageScroll.why },
   };
 }
 
@@ -816,6 +836,7 @@ const OFF_PATH_RULES = new Set([
   RULESET.gpuError.id,
   RULESET.pageError.id,
   RULESET.blankFrame.id,
+  RULESET.pageScroll.id,
   RULESET.lag.id,
 ]);
 
@@ -962,6 +983,8 @@ function rankFindings(input: FindingsInput): Finding[] {
   if (pageError) raw.push(pageError);
   const blankFrame = blankFrameFinding(input.frame);
   if (blankFrame) raw.push(blankFrame);
+  const pageScroll = pageScrollFinding(input.pageScroll);
+  if (pageScroll) raw.push(pageScroll);
   const lag = lagFinding(input);
   if (lag) raw.push(lag);
 
@@ -973,11 +996,14 @@ function rankFindings(input: FindingsInput): Finding[] {
         // A GPU error leads the stalls, since it can explain the rest, and a
         // page error can explain all but that. A blank frame follows them,
         // since either can be its cause. A held chunk comes next: a slow phase
-        // cost time, while a held chunk is data the view settled without.
+        // cost time, while a held chunk is data the view settled without. A
+        // scrolled page follows: the view may be whole, but part of the page
+        // around it is off the screen.
         Number(b.rule === RULESET.gpuError.id) - Number(a.rule === RULESET.gpuError.id) ||
         Number(b.rule === RULESET.pageError.id) - Number(a.rule === RULESET.pageError.id) ||
         Number(b.rule === RULESET.blankFrame.id) - Number(a.rule === RULESET.blankFrame.id) ||
         Number(b.rule === RULESET.held.id) - Number(a.rule === RULESET.held.id) ||
+        Number(b.rule === RULESET.pageScroll.id) - Number(a.rule === RULESET.pageScroll.id) ||
         (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
         (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
     )
@@ -991,8 +1017,9 @@ function rankFindings(input: FindingsInput): Finding[] {
   // The attribution is the run's answer to "what was this waiting on", so it
   // rides the leading finding about the run. A steady-state finding is about
   // the interval after the run and carries the ruleset's rationale instead.
-  // A held chunk, an error, a blank frame or a lag finding is not about the
-  // critical path, so the attribution rides the first finding after them.
+  // A held chunk, an error, a blank frame, a scrolled page or a lag finding is
+  // not about the critical path, so the attribution rides the first finding
+  // after them.
   const leader = ranked.findIndex(
     (finding) => finding.severity !== "steady-state" && !OFF_PATH_RULES.has(finding.rule),
   );
@@ -1145,6 +1172,14 @@ function buildVerdict(
     };
   }
 
+  if (lead.rule === RULESET.pageScroll.id) {
+    return {
+      kind: "stall",
+      text: `${describePageScroll(lead)}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
   if (lead.rule === RULESET.lag.id) {
     return {
       kind: "stall",
@@ -1238,6 +1273,22 @@ export function describePageErrors(finding: Finding): string {
 export function describeBlankFrame(finding: Finding): string {
   const { colour, width, height } = finding.observed;
   return `the settled frame was one flat colour, ${colour}, across all ${width}x${height} pixels of the canvas`;
+}
+
+export function describePageScroll(finding: Finding): string {
+  const scroll = finding.observed.scroll;
+  if (!scroll) return "the page under the viewer scrolled";
+  const parts: string[] = [];
+  if (scroll.scrollX !== 0 || scroll.scrollY !== 0) {
+    parts.push(`the page was scrolled to ${scroll.scrollX},${scroll.scrollY}`);
+  }
+  if (scroll.scrollWidth > scroll.viewportWidth || scroll.scrollHeight > scroll.viewportHeight) {
+    parts.push(
+      `its document is ${scroll.scrollWidth}x${scroll.scrollHeight} CSS pixels in a ` +
+        `${scroll.viewportWidth}x${scroll.viewportHeight} viewport`,
+    );
+  }
+  return `${parts.join(" and ")}; the page under the viewer should neither scroll nor overflow`;
 }
 
 function describeFirstPaint(finding: Finding): string {

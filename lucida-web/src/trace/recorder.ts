@@ -77,6 +77,7 @@ import {
   type Outstanding,
   type PageError,
   type PageErrorSource,
+  type PageScrollReading,
   type Phase,
   type PointEventIndex,
   type PointEventReason,
@@ -291,6 +292,8 @@ interface ClosedInterval {
   errorsDropped: number;
   /** Read after the interval closed, which is when its frame is the settled one. */
   frame: FrameReading | null;
+  /** Read with the frame. */
+  pageScroll: PageScrollReading | null;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
@@ -1586,6 +1589,12 @@ export class TraceRecorder {
     if (interval) interval.frame = reading;
   }
 
+  /** Record the page's scroll once run `runId` closed, on the same terms as {@link noteFrame}. */
+  notePageScroll(runId: string, reading: PageScrollReading): void {
+    const interval = this.closed.find((candidate) => candidate.header.runId === runId);
+    if (interval) interval.pageScroll = reading;
+  }
+
   /**
    * The trace seam's payload. Exporting closes the run in progress: end
    * reason is required on every run, and asking for the document is an
@@ -1745,6 +1754,7 @@ export class TraceRecorder {
       errors: run.errors,
       errorsDropped: run.errorsDropped,
       frame: null,
+      pageScroll: null,
       header: {
         ...run.environment.captureConditions(),
         cacheWarmth: run.cacheWarmth,
@@ -1868,6 +1878,7 @@ export class TraceRecorder {
       errors: interval.errors.map((error) => ({ ...error })),
       errorsDropped: interval.errorsDropped,
       ...(interval.frame ? { frame: interval.frame } : {}),
+      ...(interval.pageScroll ? { pageScroll: interval.pageScroll } : {}),
       ...(interval.lag ? { lag: interval.lag.serialise(interval.startedAtMs) } : {}),
     };
   }

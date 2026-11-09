@@ -443,11 +443,15 @@ function headlineOf(finding: Finding): string {
   // neither a duration nor a share to lead with. Its sentence comes from the
   // derivation, so the page and the agent text say the same thing.
   if (finding.severity === "steady-state") return describeSteadyStateFinding(finding);
-  // An error or a blank frame has no duration either: what it said, or the
-  // colour it was, is the actionable part.
+  // An error, a blank frame or a scrolled page has no duration either: what
+  // it said, the colour it was, or where the page sat is the actionable part.
   const firstError = observed.errors?.[0];
   if (firstError) return `${finding.subject} — ${firstError.message}`;
   if (observed.colour) return `${finding.subject} — one flat colour, ${observed.colour}`;
+  if (observed.scroll) {
+    const { scrollX, scrollY, scrollWidth, scrollHeight, viewportWidth, viewportHeight } = observed.scroll;
+    return `${finding.subject} — at ${scrollX},${scrollY}, ${scrollWidth}x${scrollHeight} in ${viewportWidth}x${viewportHeight}`;
+  }
   if (observed.pending != null) {
     return `${finding.subject} held ${formatCount(observed.pending)} behind a cap of ${observed.inFlightCap ?? 0}`;
   }

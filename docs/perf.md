@@ -10,6 +10,7 @@ uv run scripts/perf.py --dataset volume --scenario orbit,z-scrub --ratio 2 --rep
 uv run scripts/perf.py --list               # datasets, scenarios, suites
 uv run scripts/perf.py --suite full --dry-run
 uv run scripts/perf.py --network remote --scenario pan-sustained
+uv run scripts/perf.py --suite phone        # cold opens on a 390x844 phone at ratio 3
 uv run scripts/perf.py --repeat 3 --save-baseline   # keep these results as the reference
 ```
 
@@ -125,7 +126,9 @@ The traits are `volume`, `time`, `channels` and `collection`.
 
 `scripts/perf/scenarios/` holds one file per interaction. A file has `steps` in the trace
 script format, the `camera` that frames the dataset, the traits it `requires`, and an
-optional `width` and `height`. The runner hands the file to `lucida trace --script`
+optional `width` and `height`. `"mobile": true` drives the page as a phone, with a mobile
+layout, touch input and a mobile user agent (`lucida trace --mobile`); `phone-cold-open` does,
+and the `phone` suite runs it at ratio 3. The runner hands the file to `lucida trace --script`
 unchanged, except that an add or remove step's `"url": "dataset:<name>"` becomes that
 catalog dataset's location. A scenario never runs on the dataset it adds.
 

@@ -18,6 +18,12 @@
       "datasets": ["image", "volume", "collection", "single-level"],
       "scenarios": ["cold-open", "volume-open-small"],
       "ratios": [1, 2]
+    },
+    "phone": {
+      "description": "a large 2D image and a 3D volume opened cold on a phone, at its ratio of 3",
+      "datasets": ["large-image", "volume"],
+      "scenarios": ["phone-cold-open"],
+      "ratios": [3]
     }
   }
 }

@@ -1177,6 +1177,12 @@ struct TraceRunArgs {
     /// Device pixel ratio to drive the page at
     #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
     device_pixel_ratio: f64,
+    /// Drive the page as a phone: laid out as a mobile browser lays it out,
+    /// with touch input and a mobile user agent. The size and ratio stay the
+    /// other flags', so a phone is `--width 390 --height 844
+    /// --device-pixel-ratio 3 --mobile`
+    #[arg(long)]
+    mobile: bool,
     /// Drive the page as a device that reports this much memory, so it fits
     /// its memory budgets to it, as `navigator.deviceMemory` does
     #[arg(long, value_name = "GIB", value_parser = trace::parse_device_memory)]
@@ -4249,6 +4255,7 @@ async fn run_trace(
         device_memory_gib: args.device_memory,
         cores: args.cores,
         camera: composed_camera,
+        mobile: args.mobile,
     };
 
     let facts = trace::DriverFacts {
@@ -4264,7 +4271,8 @@ async fn run_trace(
         knobs: knobs.clone(),
         replay: None,
     };
-    let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
+    let viewport =
+        Viewport::new(args.width, args.height, args.device_pixel_ratio).with_mobile(args.mobile);
     let sidecars = RunSidecars {
         output: output_path.as_deref(),
         perfetto: perfetto.as_deref(),
@@ -4394,6 +4402,7 @@ async fn run_replay(
             device_memory_gib: plan.device_memory_gib,
             cores: None,
             camera: None,
+            mobile: false,
         },
         server_warmth: warmth,
         source_throttle,
@@ -6507,8 +6516,9 @@ mod tests {
         // The planning knobs replay through the header's planning
         // configuration. The cache knobs have no header field, so a replay
         // runs the cache at its own values. The page reports no core count,
-        // so a replay runs on the replaying machine's cores.
-        let mut not_in_header = vec!["cores"];
+        // so a replay runs on the replaying machine's cores, and no phone
+        // emulation, so a replay drives a desktop page at the same size.
+        let mut not_in_header = vec!["cores", "mobile"];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {

@@ -1279,6 +1279,23 @@ export interface FrameReading {
 }
 
 /**
+ * Where the page under the viewer was scrolled once a run closed, and how
+ * far it could scroll, in CSS pixels. The viewer fills the visible viewport,
+ * so a correct page reads zero offsets and a scroll size no larger than its
+ * viewport.
+ */
+export interface PageScrollReading {
+  scrollX: number;
+  scrollY: number;
+  /** The document's scroll size. */
+  scrollWidth: number;
+  scrollHeight: number;
+  /** The viewport the document scrolls in, less any scrollbar. */
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+/**
  * The kinds of hole a run can have. A closed enum, because a reader deciding
  * whether to trust a verdict needs to know the list is exhaustive.
  *
@@ -1431,6 +1448,8 @@ export interface TraceRun {
   errorsDropped?: number;
   /** The frame the run settled on, when someone read it: the trace driver reads every run it waits for. */
   frame?: FrameReading;
+  /** The page's scroll once the run closed, read when its frame is. */
+  pageScroll?: PageScrollReading;
   /** How the view kept up with input. Absent from an interval that took no input. */
   lag?: TraceLag;
 }

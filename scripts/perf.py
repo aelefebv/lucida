@@ -61,7 +61,7 @@ EXE = ".exe" if os.name == "nt" else ""
 # What a scenario can require of a dataset.
 TRAITS = ("volume", "time", "channels", "collection")
 CAMERAS = ("slice", "arcball")
-SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "steps"}
+SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "mobile", "steps"}
 DEFAULT_SUITE = "quick"
 # Each network is the server's source throttle profile, on its reads, and its
 # link throttle profile, on the session socket to the page; `local` is neither.
@@ -115,6 +115,9 @@ class Scenario:
     path: Path
     width: int | None = None
     height: int | None = None
+    # Drive the page as a phone: a mobile layout, touch input, and a mobile
+    # user agent, at the scenario's width and height.
+    mobile: bool = False
 
     @property
     def adds(self) -> tuple[str, ...]:
@@ -219,6 +222,8 @@ def load_scenario(path: Path) -> Scenario:
     for key in ("width", "height"):
         if key in entry and not (isinstance(entry[key], int) and entry[key] > 0):
             raise PerfError(f"{where}: {key} is a positive whole number of CSS pixels")
+    if not isinstance(entry.get("mobile", False), bool):
+        raise PerfError(f"{where}: mobile is true or false")
     return Scenario(
         name=path.stem,
         description=entry.get("description", ""),
@@ -228,6 +233,7 @@ def load_scenario(path: Path) -> Scenario:
         path=path,
         width=entry.get("width"),
         height=entry.get("height"),
+        mobile=entry.get("mobile", False),
     )
 
 
@@ -953,6 +959,19 @@ def script_file(scenario: Scenario, locations: dict[str, str], runs_dir: Path) -
     return path
 
 
+def viewport_args(scenario: Scenario) -> list[str]:
+    """The `lucida trace` flags for the window a scenario asks for; none
+    leaves the CLI's default desktop window."""
+    argv = []
+    if scenario.width is not None:
+        argv += ["--width", str(scenario.width)]
+    if scenario.height is not None:
+        argv += ["--height", str(scenario.height)]
+    if scenario.mobile:
+        argv.append("--mobile")
+    return argv
+
+
 def run_case(
     case: Case,
     built: Build,
@@ -1010,10 +1029,7 @@ def run_case(
         "--output",
         str(row.run_file),
     ]
-    if scenario.width is not None:
-        argv += ["--width", str(scenario.width)]
-    if scenario.height is not None:
-        argv += ["--height", str(scenario.height)]
+    argv += viewport_args(scenario)
     if gate:
         argv.append("--gate")
     if bundle:

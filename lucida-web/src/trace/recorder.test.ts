@@ -1675,4 +1675,17 @@ describe("errors the page raised", () => {
     expect(document.runs[0].frame).toEqual(reading);
     expect(document.steadyState.every((interval) => interval.frame === undefined)).toBe(true);
   });
+
+  it("puts the page's scroll onto the closed run it names, and nothing onto one it no longer holds", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.closeRun("quiescent");
+    const runId = recorder.concludedRuns.lastId ?? "";
+    const reading = { scrollX: 0, scrollY: 80, scrollWidth: 390, scrollHeight: 924, viewportWidth: 390, viewportHeight: 844 };
+    recorder.notePageScroll(runId, reading);
+    recorder.notePageScroll("run-that-never-was", { ...reading, scrollY: 0 });
+    const document = recorder.exportDocument();
+    expect(document.runs[0].pageScroll).toEqual(reading);
+    expect(document.steadyState.every((interval) => interval.pageScroll === undefined)).toBe(true);
+  });
 });
