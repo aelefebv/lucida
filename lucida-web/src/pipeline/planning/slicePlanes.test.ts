@@ -107,12 +107,12 @@ describe("a step along Z", () => {
   it("is a move of a few planes in the slice view, and not a jump or the first plan", () => {
     const at = (z: number, renderMode: SelectionState["renderMode"] = "slice") =>
       ({ t: 0, z, visibleChannels: [0], renderMode, interactionState: "idle" }) as SelectionState;
-    expect(isZStep(10, at(11))).toBe(true);
-    expect(isZStep(10, at(10 - SLICE_BAND_PLANES))).toBe(true);
-    expect(isZStep(10, at(10 + SLICE_BAND_PLANES + 1))).toBe(false);
-    expect(isZStep(10, at(10))).toBe(false);
-    expect(isZStep(null, at(11))).toBe(false);
-    expect(isZStep(10, at(11, "volume"))).toBe(false);
+    expect(isZStep(10, at(11), SLICE_BAND_PLANES)).toBe(true);
+    expect(isZStep(10, at(10 - SLICE_BAND_PLANES), SLICE_BAND_PLANES)).toBe(true);
+    expect(isZStep(10, at(10 + SLICE_BAND_PLANES + 1), SLICE_BAND_PLANES)).toBe(false);
+    expect(isZStep(10, at(10), SLICE_BAND_PLANES)).toBe(false);
+    expect(isZStep(null, at(11), SLICE_BAND_PLANES)).toBe(false);
+    expect(isZStep(10, at(11, "volume"), SLICE_BAND_PLANES)).toBe(false);
   });
 
   it("prefetches the whole chunks the plane lies in, ahead of every other prefetch", () => {
@@ -135,5 +135,18 @@ describe("a step along Z", () => {
 
     const jumped = plan(snapshot({ z: 90 }), stepped.nextState, noPrefetch);
     expect(lane(jumped.requests, "prefetch")).toHaveLength(0);
+  });
+  it("follows the band's width in the planning config, which is also how far a step goes", () => {
+    const wide = mergeConfig({ prefetchDepth: 0, sliceBandPlanes: 5 });
+    const opened = plan(snapshot({ z: 40 }), createSyntheticState(), wide);
+    expect(lane(opened.requests, "detail")[0]).toMatchObject({ plane: 8, planes: [3, 14] });
+    const stepped = plan(snapshot({ z: 45 }), opened.nextState, wide);
+    expect(lane(stepped.requests, "prefetch")).toHaveLength(4);
+
+    // With no band, the view fetches only its plane, and every move is a jump.
+    const none = mergeConfig({ prefetchDepth: 0, sliceBandPlanes: 0 });
+    const alone = plan(snapshot({ z: 40 }), createSyntheticState(), none);
+    expect(lane(alone.requests, "detail")[0]).toMatchObject({ plane: 8, planes: [8, 9] });
+    expect(lane(plan(snapshot({ z: 41 }), alone.nextState, none).requests, "prefetch")).toHaveLength(0);
   });
 });

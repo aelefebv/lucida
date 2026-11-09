@@ -167,7 +167,9 @@ export function dispatchChunkDelivery(
  * whole chunk would starve them of upload budget.
  *
  * Posts nothing, and says why, when geometry is missing or the chunk covers
- * a different Z-chunk than the current view.
+ * a different Z-chunk than the current view. A delivery of some planes of a
+ * chunk that lacks the plane is `other-plane`: the plan asks for the plane
+ * again.
  */
 export function dispatchLabelChunkDelivery(
   client: UploadClient,
@@ -187,7 +189,10 @@ export function dispatchLabelChunkDelivery(
   // This chunk covers a different Z-chunk than the current view — the right
   // one is requested separately; drop this stale plane.
   if (delivery.z !== Math.floor(levelZ / cz)) return "other-plane";
-  const plane = cutPlane(delivery.data, delivery.dataType, levelZ - delivery.z * cz, chunkY * chunkX);
+  const localZ = levelZ - delivery.z * cz;
+  const held = delivery.planes;
+  if (held && (localZ < held[0] || localZ >= held[1])) return "other-plane";
+  const plane = cutPlane(delivery.data, delivery.dataType, localZ, chunkY * chunkX, held?.[0]);
   if (!plane) return "no-meta";
   const memberId = delivery.imageId;
   const bytes = plane.byteLength;
@@ -230,6 +235,9 @@ export function dispatchLabelVolumeChunkDelivery(
 ): Dispatched | DispatchSkip {
   const levelMeta = meta.levels[delivery.level];
   if (!levelMeta) return "no-meta";
+  // As for the image's volume view: planes left over from the slice view are
+  // not a chunk.
+  if (delivery.planes) return "other-plane";
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
   const memberId = delivery.imageId;

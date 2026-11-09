@@ -15,11 +15,14 @@ import { noteDatasetOpened, noteDatasetOpenFailed, scriptControls } from "../tra
 import type { DatasetState } from "../types.ts";
 import { useScriptControls, type ScriptControlInputs } from "./useScriptControls.ts";
 
-/** An open dataset with `channels` channels. */
-function dataset(id: string, channels = 2): DatasetState {
+/** An open dataset with `channels` channels and `labels` labels. */
+function dataset(id: string, channels = 2, labels = 1): DatasetState {
   return {
     id,
-    manifest: { images: [{ multiscale: { levels: [{ shape: [1, channels, 8, 64, 64] }] } }] },
+    manifest: {
+      images: [{ multiscale: { levels: [{ shape: [1, channels, 8, 64, 64] }] } }],
+      labels: Array.from({ length: labels }, (_, i) => ({ name: `label-${i}` })),
+    },
   } as unknown as DatasetState;
 }
 
@@ -34,6 +37,7 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
     setSolo: vi.fn(),
     setChannelVisible: vi.fn(),
     setLayerVisible: vi.fn(),
+    setLabelVisible: vi.fn(),
     setChannelContrast: vi.fn(),
     openDataset: vi.fn(),
     removeDataset: vi.fn(),
@@ -103,6 +107,19 @@ describe("useScriptControls", () => {
     unmount();
   });
 
+  it("shows a label of the dataset in hand through the panel's handler, and refuses one it lacks", () => {
+    const given = inputs();
+    const { unmount } = renderHook(() => useScriptControls(given));
+    expect(scriptControls()!.select({ label: 0 }, true)).toEqual({ applied: true, reason: null });
+    expect(given.setLabelVisible).toHaveBeenCalledWith("ds-1", 0, true);
+    expect(scriptControls()!.select({ label: 1 }, true)).toEqual({
+      applied: false,
+      reason: "ds-1 has 1 label(s), so there is no label 1",
+    });
+    expect(given.setLabelVisible).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
   it("refuses a channel or a layer the page does not have, and says which", () => {
     const given = inputs();
     const { unmount } = renderHook(() => useScriptControls(given));
@@ -129,7 +146,7 @@ describe("useScriptControls", () => {
     });
     expect(scriptControls()!.select({ channel: 0 }, true)).toEqual({
       applied: false,
-      reason: "no dataset is in hand for a channel select",
+      reason: "no dataset is in hand for a channel or label select",
     });
     rerender({ ...given, selectedDatasetId: "ds-2" });
     expect(scriptControls()!.select({ channel: 0 }, true)).toEqual({ applied: true, reason: null });

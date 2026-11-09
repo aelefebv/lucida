@@ -29,7 +29,7 @@ export {
 
 export { buildActiveSet, groupMembers } from "./activeSet.ts";
 
-export { chunkKey, compareChunkRequests, isZStep, SLICE_BAND_PLANES } from "./emit.ts";
+export { chunkKey, compareChunkRequests, isZStep, slicePlaneIn, type SlicePlane } from "./emit.ts";
 
 export { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
 
@@ -48,6 +48,7 @@ export {
   PREFETCH_DEPTH,
   PREFETCH_LANE_OFFSET,
   RENDER_RADIUS_DISABLED_VIEW,
+  SLICE_BAND_PLANES,
   mergeConfig,
   type PlanningConfig,
 } from "./config.ts";
