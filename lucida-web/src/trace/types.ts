@@ -725,6 +725,9 @@ export const METADATA_READ_PHASES: readonly MetadataReadPhase[] = [
  *                     same object. A follower's whole wait lives here, so
  *                     it is diagnosed as waiting on a read in flight rather
  *                     than as a slow backend.
+ * - `decode-wait`     queued for one of the server's decode threads, so a
+ *                     burst short of them reads as a queue rather than as
+ *                     slow decompression.
  * - `decompress`      storage codec decode.
  * - `slice-encode`    the (t, c) slice and the wire frame.
  * - `handoff`         onto the outbound queue. Terminal: socket write time
@@ -739,6 +742,7 @@ export const SERVER_PHASES = [
   "permit-wait",
   "backend-read",
   "coalesced-wait",
+  "decode-wait",
   "decompress",
   "slice-encode",
   "handoff",
@@ -762,6 +766,7 @@ export const SERVER_PHASE_WIRE_KEY: Record<ServerPhase, string> = {
   "permit-wait": "permit_wait_us",
   "backend-read": "backend_read_us",
   "coalesced-wait": "coalesced_wait_us",
+  "decode-wait": "decode_wait_us",
   decompress: "decompress_us",
   "slice-encode": "slice_encode_us",
   handoff: "handoff_us",

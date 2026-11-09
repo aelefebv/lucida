@@ -123,7 +123,6 @@ async fn level_index_pyramid_serves_each_level_at_its_own_extent() {
                 .unwrap(),
             ReaderId(1),
             RequestLabel(1),
-            None,
         )
         .await
         .unwrap()

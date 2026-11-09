@@ -751,6 +751,9 @@ mod tests {
                 "cache_lookup_us",
                 "coalesced_onto",
                 "coalesced_wait_us",
+                // This request's own wait for a decode thread, as the permit
+                // wait is its own wait for a read: how long, never behind whom.
+                "decode_wait_us",
                 "decompress_us",
                 // The metadata-read family's own columns. A read's position
                 // inside the open that asked for it, its duration, its phase

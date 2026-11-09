@@ -13,6 +13,7 @@ pub mod chunk_serves;
 pub mod connection;
 pub mod dataset_open;
 pub mod decode;
+mod decode_pool;
 pub mod deployment_theme;
 pub mod generated;
 pub mod handler;

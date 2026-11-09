@@ -267,19 +267,23 @@ pub enum ServerPhase {
     /// is the follower's whole wait, and naming it apart is what stops a
     /// coalesced 400 ms reading as a slow backend.
     CoalescedWait = 6,
+    /// Queued for one of the server's decode threads, which a burst of
+    /// requests shares. Kept apart from the decode itself so a short pool
+    /// reads as a queue, not as slow decompression.
+    DecodeWait = 7,
     /// Storage codec decode.
-    Decompress = 7,
+    Decompress = 8,
     /// Turning the stored bytes into the wire frame: the (t, c) slice and
     /// the frame envelope.
-    SliceEncode = 8,
+    SliceEncode = 9,
     /// Handing the frame to this connection's outbound queue. Terminal:
     /// socket write time happens in a separate task behind an unbounded
     /// queue and is not observable from the serve path.
-    Handoff = 9,
+    Handoff = 10,
 }
 
 /// Every phase, in the order a request passes through them.
-pub const SERVER_PHASES: [ServerPhase; 10] = [
+pub const SERVER_PHASES: [ServerPhase; 11] = [
     ServerPhase::Arrival,
     ServerPhase::BindingLookup,
     ServerPhase::Dispatch,
@@ -287,6 +291,7 @@ pub const SERVER_PHASES: [ServerPhase; 10] = [
     ServerPhase::PermitWait,
     ServerPhase::BackendRead,
     ServerPhase::CoalescedWait,
+    ServerPhase::DecodeWait,
     ServerPhase::Decompress,
     ServerPhase::SliceEncode,
     ServerPhase::Handoff,
@@ -363,6 +368,7 @@ pub struct ServerTimingBatch {
     pub permit_wait_us: Vec<u32>,
     pub backend_read_us: Vec<u32>,
     pub coalesced_wait_us: Vec<u32>,
+    pub decode_wait_us: Vec<u32>,
     pub decompress_us: Vec<u32>,
     pub slice_encode_us: Vec<u32>,
     pub handoff_us: Vec<u32>,
@@ -408,6 +414,7 @@ impl ServerTimingBatch {
             ServerPhase::PermitWait => &mut self.permit_wait_us,
             ServerPhase::BackendRead => &mut self.backend_read_us,
             ServerPhase::CoalescedWait => &mut self.coalesced_wait_us,
+            ServerPhase::DecodeWait => &mut self.decode_wait_us,
             ServerPhase::Decompress => &mut self.decompress_us,
             ServerPhase::SliceEncode => &mut self.slice_encode_us,
             ServerPhase::Handoff => &mut self.handoff_us,
@@ -424,6 +431,7 @@ impl ServerTimingBatch {
             ServerPhase::PermitWait => &self.permit_wait_us,
             ServerPhase::BackendRead => &self.backend_read_us,
             ServerPhase::CoalescedWait => &self.coalesced_wait_us,
+            ServerPhase::DecodeWait => &self.decode_wait_us,
             ServerPhase::Decompress => &self.decompress_us,
             ServerPhase::SliceEncode => &self.slice_encode_us,
             ServerPhase::Handoff => &self.handoff_us,
