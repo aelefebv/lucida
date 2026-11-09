@@ -85,6 +85,19 @@ pub const KNOBS: &[Knob] = &[
         help: "Steps the prefetch lane looks ahead; 0 leaves the prefetch lane empty",
     },
     Knob {
+        flag: "slice-band-planes",
+        label: "Slice band (planes)",
+        field: "sliceBandPlanes",
+        store: KnobStore::Planning,
+        value_name: "PLANES",
+        integer: true,
+        megabytes: false,
+        min: 0.0,
+        max: Some(32.0),
+        help: "Planes the slice view fetches on each side of the one it draws; a move along Z \
+               of up to this many planes is a step, after which its chunks come whole",
+    },
+    Knob {
         flag: "importance-weight",
         label: "Importance weight",
         field: "importanceWeight",

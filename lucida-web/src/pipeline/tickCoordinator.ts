@@ -103,6 +103,8 @@ interface PlannedDataset {
    * it. The view-move delta diffs `result.activeSet` against this.
    */
   previousActiveSet: ActiveSetEntry[];
+  /** Whether the selection stepped along Z since the previous plan ({@link isZStep}). */
+  zStep: boolean;
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -769,6 +771,7 @@ export class TickCoordinator {
       // Capture what the worker holds before `nextState` overwrites it. The
       // view-move delta diffs the fresh active set against this.
       const previousActiveSet = planningStateForDataset.previousActiveSet;
+      const zStep = isZStep(planningStateForDataset.previousZ, selection, planningConfig.sliceBandPlanes);
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
@@ -796,6 +799,7 @@ export class TickCoordinator {
         selection,
         result,
         previousActiveSet,
+        zStep,
       });
     }
 
@@ -808,7 +812,7 @@ export class TickCoordinator {
       plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
     );
     for (const [index, planned] of plannedDatasets.entries()) {
-      const { dsId, dsSettings, layer, entities, visibleRegion, selection } = planned;
+      const { dsId, dsSettings, layer, entities, visibleRegion, selection, zStep } = planned;
       const admission = admissions[index];
       const result: RequestPlan = {
         ...planned.result,
@@ -911,10 +915,11 @@ export class TickCoordinator {
       // Categorical label overlays are invisible to the WASM planner
       // (labels live outside `manifest.images`/`entities`), so their chunk
       // requests are synthesized here from the label's own geometry and
-      // merged into the fetch plan. In `slice` mode the label's mapped
-      // Z-plane is fetched; in `volume` mode the whole label volume (every
-      // z-chunk) is fetched for the 3D first-hit surface. Scoped under each
-      // label's own image id, so they never perturb intensity-chunk eviction.
+      // merged into the fetch plan. In `slice` mode the planes around the
+      // label's mapped Z-plane are fetched, as the image's are; in `volume`
+      // mode the whole label volume (every z-chunk) is fetched for the 3D
+      // first-hit surface. Scoped under each label's own image id, so they
+      // never perturb intensity-chunk eviction.
       const labelRequests = computeLabelChunkRequests({
         datasetId: dsId,
         manifest: ctx.datasets.get(dsId)!.manifest,
@@ -924,6 +929,8 @@ export class TickCoordinator {
         // eligible), so a hidden label is neither fetched nor drawn.
         labelSettings: dsSettings?.label_settings,
         mode: ctx.mode as "slice" | "volume",
+        config: planningConfig,
+        zStep,
       });
       const requestsWithLabels =
         labelRequests.length > 0
@@ -1273,6 +1280,7 @@ export class TickCoordinator {
       planningState: PlanningState;
       requests: ChunkRequest[];
       stats: PlanStats;
+      zStep: boolean;
     }
     const planned: ScrubPlanned[] = perDataset.map((pd) => {
       const visibleRegion: VisibleRegion = {
@@ -1296,13 +1304,14 @@ export class TickCoordinator {
         minimapPending: minimapPendingFetch,
       };
       const stats = emptyPlanStats();
+      const zStep = isZStep(pd.planningState.previousZ, selection, planningConfig.sliceBandPlanes);
       const requests = emitPlanRequests(
         pd.planningState.previousActiveSet,
         snapshot,
         stats,
         planningConfig,
         pd.planningState.zoomDirection,
-        isZStep(pd.planningState.previousZ, selection),
+        zStep,
       );
       return {
         dsId: pd.dsId,
@@ -1313,6 +1322,7 @@ export class TickCoordinator {
         planningState: { ...pd.planningState, previousZ: selection.z },
         requests,
         stats,
+        zStep,
       };
     });
 
@@ -1348,6 +1358,8 @@ export class TickCoordinator {
         z: p.selection.z,
         labelSettings: p.dsSettings?.label_settings,
         mode,
+        config: planningConfig,
+        zStep: p.zStep,
       });
       const requestsWithLabels =
         labelRequests.length > 0

@@ -24,6 +24,7 @@ const D = DEFAULT_PLANNING_CONFIG;
 /** The Dev controls planning knobs. */
 export const PLANNING_KNOB_PREFERENCES = {
   prefetchDepth: numberPreference("planning.prefetchDepth", D.prefetchDepth, { min: 0, max: 5 }),
+  sliceBandPlanes: numberPreference("planning.sliceBandPlanes", D.sliceBandPlanes, { min: 0, max: 32 }),
   importanceWeight: numberPreference("planning.importanceWeight", D.importanceWeight, { min: 10, max: 2000 }),
   distanceWeight: numberPreference("planning.distanceWeight", D.distanceWeight, { min: 1, max: 100 }),
   detailRenderRadiusView: numberPreference("planning.detailRenderRadiusView", D.detailRenderRadiusView, {

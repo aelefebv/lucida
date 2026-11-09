@@ -198,6 +198,69 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
   });
 });
 
+describe("label chunk flow: planes of a deeper chunk", () => {
+  // An 8-plane label in one 8-plane chunk, 2x2 samples a plane.
+  const deep: LabelSpec = {
+    name: "deep",
+    source_image_id: "img-0",
+    image: ms("img-0:label:deep", "Uint32", [1, 1, 8, 2, 2], [1, 1, 8, 2, 2], [1, 1, 1, 1, 1]),
+  };
+  const deepManifest: DatasetManifest = {
+    ...manifest,
+    images: [ms("img-0", "Uint16", [1, 1, 8, 2, 2], [1, 1, 8, 2, 2], [1, 1, 1, 1, 1])],
+    labels: [deep],
+  };
+  const meta = buildManifestByImage(
+    new Map<string, DatasetEntry>([["ds-0", { manifest: deepManifest } as unknown as DatasetEntry]]),
+  ).get("img-0:label:deep")!;
+  /** Planes 3 to 5 of the chunk, each plane's four ids its own plane index times 10, plus 0 to 3. */
+  function band(): ReadyChunkDelivery {
+    const ids = new Uint32Array(12).map((_, i) => (3 + Math.floor(i / 4)) * 10 + (i % 4));
+    return {
+      entityId: "img-0:label:deep",
+      imageId: "img-0:label:deep",
+      level: 0,
+      t: 0, c: 0, z: 0, y: 0, x: 0,
+      chunkKey: "0/0/0/0/0/0",
+      data: ids.buffer as ArrayBuffer,
+      dataType: "Uint32",
+      epochs: EPOCHS,
+      lane: "detail",
+      residencyTier: "detail",
+      planes: [3, 6],
+    };
+  }
+
+  it("asks for the plane drawn and a band around it", () => {
+    const [req] = computeLabelChunkRequests({
+      datasetId: "ds-0", manifest: deepManifest, t: 0, z: 4, labelSettings: [{ visible: true, opacity: 0.5 }],
+    });
+    expect(req).toMatchObject({ z: 0, plane: 4, planes: [2, 7] });
+  });
+
+  it("cuts the plane drawn out of a delivery of some planes, at its offset among them", () => {
+    const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
+    expect(dispatchLabelChunkDelivery(client, band(), meta, 4, EPOCHS)).toEqual({
+      memberId: "img-0:label:deep",
+      bytes: 16,
+    });
+    const chunks = vi.mocked(client.labelSliceChunkData).mock.calls[0][2];
+    expect(Array.from(new Uint32Array(chunks[0].data))).toEqual([40, 41, 42, 43]);
+  });
+
+  it("posts nothing from planes that leave out the one drawn, nor to the volume pool", () => {
+    const client = {
+      labelSliceChunkData: vi.fn(),
+      labelVolumeChunkData: vi.fn(),
+    } as unknown as UploadClient;
+    expect(dispatchLabelChunkDelivery(client, band(), meta, 6, EPOCHS)).toBe("other-plane");
+    expect(dispatchLabelChunkDelivery(client, band(), meta, 2, EPOCHS)).toBe("other-plane");
+    expect(dispatchLabelVolumeChunkDelivery(client, band(), meta, EPOCHS)).toBe("other-plane");
+    expect(client.labelSliceChunkData).not.toHaveBeenCalled();
+    expect(client.labelVolumeChunkData).not.toHaveBeenCalled();
+  });
+});
+
 describe("label chunk flow (3D): volume request → whole-chunk delivery → volume pool", () => {
   it("forwards the WHOLE 3D chunk (no plane extraction) and lands it with ids intact", () => {
     // 1. Volume-mode fetch plan: the 2x2x2 label is a single chunk. Masks are
