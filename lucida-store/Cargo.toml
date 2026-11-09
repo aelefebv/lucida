@@ -32,7 +32,7 @@ lucida-protocol = { path = "../lucida-protocol" }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["io-util"] }
+tokio = { version = "1", features = ["io-util", "test-util"] }
 
 [profile.dev.package."*"]
 opt-level = 2
