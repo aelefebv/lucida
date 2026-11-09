@@ -214,6 +214,12 @@ export class RenderLoop implements TraceEnvironment {
       this.setDirty("residency", "minimap_overviews_lost");
     };
 
+    // A plan admitted against a pool the worker had not sized yet can leave
+    // out chunks the pool turns out to hold.
+    this.client.onGpuCapacity = () => {
+      if (this.tickCoordinator.noteGpuCapacity(this.buildContext())) this.setDirty("residency", "gpu_capacity");
+    };
+
     this.gpuStatusUnsub = this.client.onGpuStatus((status) => {
       if (status.type === "gpuError") {
         // Recovering a lost device sends everything again, so the recovery
@@ -252,6 +258,7 @@ export class RenderLoop implements TraceEnvironment {
     this.client.onChunkResidency = null;
     this.client.onWantedSetDelta = null;
     this.client.onMinimapOverviewsLost = null;
+    this.client.onGpuCapacity = null;
     this.gpuStatusUnsub();
     this.cpuCacheUnsub();
     this.configStoreUnsub();
