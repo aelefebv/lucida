@@ -1514,7 +1514,6 @@ async fn serve_chunk_from_store(
     // queued from there too, so the client's bytes never wait for this task
     // to be polled again.
     let slot = DecodePool::global().acquire(ReaderId(client_id)).await;
-    probe.mark(ServerPhase::DecodeWait);
     let (dataset, image, key, client_queue) = (
         dataset_id.clone(),
         image_id.clone(),
@@ -1523,6 +1522,9 @@ async fn serve_chunk_from_store(
     );
     let failed = slot
         .run(move || {
+            // The wait ends when a decode thread takes the work, so starting
+            // that thread counts as waiting rather than as decompression.
+            probe.mark(ServerPhase::DecodeWait);
             let read = match fetched.decode(Some(&mut probe)) {
                 Ok(read) => read,
                 Err(error) => return Some((error, probe)),
@@ -1569,7 +1571,6 @@ async fn serve_generated_chunk_request(
             // Framing copies the whole chunk, so it takes a decode thread as
             // a source chunk's does.
             let slot = DecodePool::global().acquire(ReaderId(client_id)).await;
-            probe.mark(ServerPhase::DecodeWait);
             let (dataset, image, key, client_queue) = (
                 dataset_id.clone(),
                 image_id.clone(),
@@ -1577,6 +1578,7 @@ async fn serve_generated_chunk_request(
                 client.clone(),
             );
             slot.run(move || {
+                probe.mark(ServerPhase::DecodeWait);
                 let buf = encode_chunk_frame(client_id, &dataset, &image, key, &bytes);
                 probe.mark(ServerPhase::SliceEncode);
                 hand_off(&client_queue, buf, probe);
