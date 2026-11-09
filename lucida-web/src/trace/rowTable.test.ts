@@ -43,11 +43,29 @@ describe("RowTable", () => {
   it("pins the row width, because the memory caps are derived from it", () => {
     // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots + the
     // two-part wire label + the bytes column, all uint32, plus the decode
-    // work's and the wire bytes' uint16 shares, plus a residency-tier, lane,
-    // outcome and last-boundary byte, plus a 12 B identity index. The
-    // resident and per-run caps derive from this figure, so a change here
-    // changes how much of a run fits.
+    // work's, the wire bytes' and the unwanted wait's uint16 shares, plus a
+    // lane-and-tier byte and a boundary-and-outcome byte, plus a 12 B
+    // identity index. The resident and per-run caps derive from this figure,
+    // so a change here changes how much of a run fits.
     expect(RowTable.BYTES_PER_ROW).toBe(96);
+  });
+
+  it("carries the wait for the view only for a row whose upload closed", () => {
+    const table = new RowTable(4);
+    const rows = [0, 1, 2].map(() => table.append(source(), 0));
+    for (const row of rows) table.stamp(row, Boundary.UploadStart, 100_000);
+    table.stamp(rows[0], Boundary.PresentStart, 900_000);
+    table.setWantedAt(rows[0], 700_000);
+    // Wanted before it was decoded: no wait at all.
+    table.stamp(rows[1], Boundary.PresentStart, 900_000);
+    table.setWantedAt(rows[1], 50_000);
+    table.setWantedAt(rows[2], 700_000);
+
+    const [waited, early, open] = table.serialise();
+    // Within a part in 65,534 of the 800 ms upload.
+    expect(Math.abs(waited.unwantedUs! - 600_000)).toBeLessThanOrEqual(800_000 / 65_534);
+    expect(early.unwantedUs).toBe(0);
+    expect("unwantedUs" in open).toBe(false);
   });
 
   it("carries the decode worker's own time only for a row it was reported on", () => {

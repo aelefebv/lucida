@@ -47,6 +47,8 @@ export interface RowSpec {
   bytes?: number;
   /** The decode worker's own time, inside the `decode` round trip. Absent by default, as from a worker that never reported it. */
   decodeWorkUs?: number;
+  /** The wait for the view to want the chunk, at the start of `upload`. Absent by default, as for a chunk wanted when it was decoded. */
+  unwantedUs?: number;
 }
 
 export function makeRow(spec: RowSpec, index = 0): TraceRow {
@@ -77,6 +79,7 @@ export function makeRow(spec: RowSpec, index = 0): TraceRow {
     outcome: spec.outcome ?? "complete",
     phases,
     ...(spec.decodeWorkUs !== undefined ? { decodeWorkUs: spec.decodeWorkUs } : {}),
+    ...(spec.unwantedUs !== undefined ? { unwantedUs: spec.unwantedUs } : {}),
   };
 }
 

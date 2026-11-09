@@ -141,6 +141,33 @@ describe("thresholds", () => {
     expect(segments.find((s) => s.label === "browser.decode")).toMatchObject({ class: "compute", ms: 2 });
   });
 
+  it("reads a prefetched chunk's wait for the view as a queue rather than as upload", () => {
+    // A zoom whose prefetched chunks waited 690 ms for the view to reach
+    // their level, then reached the GPU in 10 ms.
+    const doc = diagnoseRun(prefetchedZoom({ uploadUs: 700 * MS, unwantedUs: 690 * MS }));
+
+    const upload = doc.phases.find((phase) => phase.id === "browser.upload");
+    const unwanted = doc.phases.find((phase) => phase.id === "browser.unwanted");
+    expect(upload?.p95Ms).toBe(12);
+    expect(unwanted).toMatchObject({ class: "queue", p95Ms: 690 });
+    expect(doc.findings.filter((f) => f.severity !== "note")).toEqual([]);
+    expect(doc.verdict.kind).toBe("clear");
+
+    const segments = doc.criticalPath.segments;
+    expect(segments.find((s) => s.label === "browser.unwanted")).toMatchObject({ class: "queue", ms: 690 });
+    expect(segments.find((s) => s.label === "browser.upload")).toMatchObject({ class: "compute", ms: 10 });
+  });
+
+  it("still stalls on a slow delivery once the view wanted the chunk", () => {
+    const doc = diagnoseRun(prefetchedZoom({ uploadUs: 400 * MS, unwantedUs: 100 * MS }));
+
+    const upload = doc.phases.find((phase) => phase.id === "browser.upload");
+    expect(upload?.p95Ms).toBe(300);
+    expect(doc.findings.some((f) => f.subject === "browser.upload" && f.severity === "stall")).toBe(true);
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("browser.upload");
+  });
+
   it("flags a queue by backlog ETA measured over the trailing second", () => {
     const doc = diagnoseRun(saturatedReopen());
     const limiter = doc.limiters[0];
@@ -1311,6 +1338,48 @@ function decodeOpen({ roundTripUs, workUs }: { roundTripUs: number; workUs: numb
     rows,
     readings: Array.from({ length: 12 }, (_, i) =>
       makeReading(30 * MS + i * 25 * MS, { queueDepth: 0, inFlight: (i % 3) + 1, frameTimeUs: 3_500 }),
+    ),
+  });
+}
+
+/**
+ * A zoom's run: 40 chunks prefetched ahead of the view, each `uploadUs` from
+ * decoded to resident, `unwantedUs` of it before the view wanted it, and ten
+ * chunks the view asked for that reached the GPU in 12 ms. The prefetched
+ * ones land last, so the critical path ends on one.
+ */
+function prefetchedZoom({ uploadUs, unwantedUs }: { uploadUs: number; unwantedUs: number }): TraceRun {
+  const wanted = Array.from({ length: 10 }, (_, i) =>
+    makeRow(
+      {
+        startUs: 20 * MS + i * 200,
+        durations: { plan: 400, queue: MS, wire: 15 * MS, decode: MS, upload: 12 * MS, present: 16 * MS },
+        rid: i,
+      },
+      i,
+    ),
+  );
+  const ahead = Array.from({ length: 40 }, (_, i) =>
+    makeRow(
+      {
+        startUs: 20 * MS + i * 200,
+        durations: { plan: 400, queue: 2 * MS, wire: 15 * MS, decode: MS, upload: uploadUs, present: 16 * MS },
+        rid: 10 + i,
+        lane: "prefetch",
+        unwantedUs,
+      },
+      10 + i,
+    ),
+  );
+  return makeRun({
+    header: {
+      runId: "prefetched-zoom",
+      durationUs: uploadUs + 400 * MS,
+      cause: interactionCause("zoom"),
+    },
+    rows: [...wanted, ...ahead],
+    readings: Array.from({ length: 30 }, (_, i) =>
+      makeReading(i * 25 * MS, { queueDepth: 0, inFlight: 2, frameTimeUs: 3_000 }),
     ),
   });
 }
