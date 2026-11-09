@@ -28,6 +28,10 @@
       "description": "collection of 12 multi-channel tiles",
       "generate": "--tiles 12 --size 512,512 --channels 2 --levels 3 --chunk 128"
     },
+    "large-collection": {
+      "description": "collection of 576 small multi-channel tiles, one per group",
+      "generate": "--tiles 576 --size 256,256 --channels 2 --levels 3 --chunk 128"
+    },
     "single-level": {
       "description": "2D image with no pyramid, so the server generates its coarse tier",
       "generate": "--size 4096,4096 --levels 1 --chunk 512"
