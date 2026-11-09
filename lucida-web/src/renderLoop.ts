@@ -533,7 +533,7 @@ export class RenderLoop implements TraceEnvironment {
   markInput(input: InputKind, atMs?: number): void {
     if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
     settleSignal.restart();
-    this.resolution.noteInput();
+    this.resolution.noteInput(this.client.lastFrameSeq());
     this.setDirty("interactive", input);
   }
 
