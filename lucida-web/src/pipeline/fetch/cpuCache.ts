@@ -78,6 +78,16 @@ export const DEFAULT_MAX_BYTES_IN_FLIGHT = CEILING_BUDGETS.cpuBytesInFlight;
  * a fetch past that only waits in its queue.
  */
 export const DEFAULT_MAX_CONCURRENT_FETCHES = 128;
+/**
+ * The bytes allowed in flight before anything has landed. Each fetch that
+ * lands widens the allowance by what it carried, up to the bytes cap. Until
+ * replies come back the page cannot tell a server on this machine from one
+ * reading a store across a continent. A first wave of large chunks, sent all
+ * at once, queues behind the few cores a small server serves them from and
+ * delays every request in it, while a far link fills within a few round trips
+ * of growth. 4 MiB is about one 200 ms round trip at 18 MiB/s.
+ */
+export const INITIAL_BYTES_IN_FLIGHT = 4 * 1024 * 1024;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
 /** Consecutive chunk-delivery failures, with no delivered chunk between them,
@@ -470,6 +480,7 @@ export class CpuCache {
       {
         maxConcurrentFetches: this.config.maxConcurrentFetches,
         maxBytesInFlight: this.config.maxBytesInFlight,
+        initialBytesInFlight: INITIAL_BYTES_IN_FLIGHT,
         burstLogger: burstBackpressure,
       },
       (req) => this.inFlightKey(req),
