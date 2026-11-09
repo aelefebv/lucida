@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.28.0](https://github.com/aelefebv/lucida/compare/v0.27.1...v0.28.0) (2026-11-09)
+
+
+### Features
+
+* **trace:** drive the full viewer page, and fail a run whose chrome is off the screen ([#1444](https://github.com/aelefebv/lucida/issues/1444)) ([c6ef100](https://github.com/aelefebv/lucida/commit/c6ef100a15f37256b6ee48098af9dc4f963cfb63))
+
+
+### Bug Fixes
+
+* **trace:** keep a chunk's wait for the view out of browser.upload ([#1445](https://github.com/aelefebv/lucida/issues/1445)) ([4d25024](https://github.com/aelefebv/lucida/commit/4d25024095ef844b1fbdb79f0bb254d3e700051d))
+* **web:** a gesture's resolution leaves out the frames before it ([#1442](https://github.com/aelefebv/lucida/issues/1442)) ([5ae570e](https://github.com/aelefebv/lucida/commit/5ae570e019ad7c38c1e832f40a4ac4e893ceb3f8))
+* **web:** cancel a label overlay's fetches the plan drops ([#1452](https://github.com/aelefebv/lucida/issues/1452)) ([0df34b2](https://github.com/aelefebv/lucida/commit/0df34b2cadda179aac3102bcfb14aedf79de6442))
+* **web:** stop redrawing an unchanged view while a deferred replan waits ([#1454](https://github.com/aelefebv/lucida/issues/1454)) ([f697691](https://github.com/aelefebv/lucida/commit/f6976916e04983d58782013df935e12c99e39eae))
+
+
+### Performance
+
+* **server:** read local files and decode chunks off tokio's blocking pool ([#1453](https://github.com/aelefebv/lucida/issues/1453)) ([b33837d](https://github.com/aelefebv/lucida/commit/b33837d968b2a28c0943f238af2c96550112440e))
+* **web:** hold uploads while a short volume view moves, and grow pools without stalling ([#1458](https://github.com/aelefebv/lucida/issues/1458)) ([40b86d9](https://github.com/aelefebv/lucida/commit/40b86d97e5066bd3f597ba473d3ba6bffffe05cf))
+* **web:** keep a gesture's volume frames within a display frame ([#1455](https://github.com/aelefebv/lucida/issues/1455)) ([b1a2515](https://github.com/aelefebv/lucida/commit/b1a2515b5e566c69d521c1b01a030ed3ed733ab1))
+* **web:** label overlays fetch the planes the slice view draws, and the band width is a knob ([#1443](https://github.com/aelefebv/lucida/issues/1443)) ([0c4a64f](https://github.com/aelefebv/lucida/commit/0c4a64f375769dd2ebc33e4a93abb054d07835a6))
+* **web:** re-ingest only what a view move changed in the render worker ([#1449](https://github.com/aelefebv/lucida/issues/1449)) ([68b87a2](https://github.com/aelefebv/lucida/commit/68b87a2f30ea2ae4058e41fd043367782b249651))
+* **web:** stop walking every cached chunk and member outline on each 3D frame ([#1450](https://github.com/aelefebv/lucida/issues/1450)) ([5dbf580](https://github.com/aelefebv/lucida/commit/5dbf580e424cf12448ccfe837d823e51c2280022))
+
 ## [0.27.1](https://github.com/aelefebv/lucida/compare/v0.27.0...v0.27.1) (2026-11-09)
 
 
