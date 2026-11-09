@@ -39,18 +39,21 @@ the N runs, followed by half their range when they differ.
 | --- | --- |
 | throttle | the profile in `header.sourceThrottle`; `-` when unthrottled |
 | first frame | `load.firstFrameMs` |
-| settle | `load.settleMs` |
+| settle | `load.settleMs`: the view has its wanted set drawn, prefetch left out |
+| prefetch | `load.prefetchMs`: the last prefetched chunk decoded |
 | fetched, chunks | `load.received.bytes`, `load.received.requests` |
 | evicted | the `evictions` entry of `coverage.notHealthSignals` |
+| short | `load.coverageLossChunks`: wanted chunks not resident at the close |
 | top limiter | `attribution.cause` and `.confidence` |
 | input to frame p95, longest task, dropped | `lag.inputToFrame.p95Ms`, `lag.longTasks.longestMs`, `lag.frames.dropped` |
 | errors | the `header.errors` the allow list does not name, repeats counted |
 | verdict | `verdict.kind` |
 
 Times count from the run's start. A scenario with steps reports the run its last step
-opened, and a row for each step follows, from its record in `header.script.steps`. Its
-`duration` is the step run's `durationUs`, which includes the quiescence hold that settle
-leaves out. A step with no verdict says why, and the table lists it underneath.
+opened, and a row for each step follows, from its record in `header.script.steps`, which
+carries that run's own load reading, attribution and lag. Its `duration` is the step run's
+`durationUs`, which includes the quiescence hold that settle leaves out. A step with no
+verdict says why, and the table lists it underneath.
 
 ## Baselines
 
