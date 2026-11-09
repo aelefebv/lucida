@@ -198,6 +198,9 @@ pub async fn open_permitted(
                 None => open(location),
             }
         }
+        // The server reads chunks in bursts, which object_store's own local
+        // reads queue behind a lock the async workers share.
+        LocationScheme::Local => local_store(location).map(crate::local_reads::on_read_threads),
         _ => open(location),
     }?;
     Ok(crate::source_throttle::throttled(store))
@@ -211,10 +214,7 @@ pub async fn open_permitted(
 pub fn open(location: &DatasetLocation) -> Result<Arc<dyn ObjectStore>, StoreError> {
     let url = location.as_str();
     match location.scheme() {
-        LocationScheme::Local => {
-            let store = LocalFileSystem::new_with_prefix(url).map_err(StoreError::LocalPath)?;
-            Ok(Arc::new(store))
-        }
+        LocationScheme::Local => Ok(Arc::new(local_store(location)?)),
         LocationScheme::Gcs => {
             // `from_env()` iterates `GOOGLE_*` env vars (incl.
             // `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT*`) — mirrors
@@ -242,6 +242,10 @@ pub fn open(location: &DatasetLocation) -> Result<Arc<dyn ObjectStore>, StoreErr
             http_store(url, scheme == LocationScheme::Http, None)
         }
     }
+}
+
+fn local_store(location: &DatasetLocation) -> Result<LocalFileSystem, StoreError> {
+    LocalFileSystem::new_with_prefix(location.as_str()).map_err(StoreError::LocalPath)
 }
 
 pub(crate) fn http_store(

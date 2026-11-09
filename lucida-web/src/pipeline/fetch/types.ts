@@ -148,6 +148,13 @@ export interface CacheEntry {
    */
   traceRow?: number;
   /**
+   * For a chunk decoded before the view wanted it, as a prefetched one is:
+   * NaN until a plan wants it, then when one first did, so its row's
+   * `upload` can leave out the wait for the view. Absent for a chunk the
+   * view wanted as it was decoded.
+   */
+  wantedAtMs?: number;
+  /**
    * The planes `data` holds, half-open along the chunk's Z: what a request
    * for some planes fetched. Absent when it holds the whole chunk. One entry
    * per chunk either way, so a whole chunk that arrives replaces its planes.

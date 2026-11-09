@@ -1561,15 +1561,14 @@ async fn serve_chunk_from_store(
     // to be polled again.
     let cut = planes
         .and_then(|planes| PlaneCut::new(planes, resolver.chunk_depth(image_id, chunk_key.level)?));
-    let slot = DecodePool::global().acquire(ReaderId(client_id)).await;
     let (dataset, image, key, client_queue) = (
         dataset_id.clone(),
         image_id.clone(),
         *chunk_key,
         client.clone(),
     );
-    let failed = slot
-        .run(move || {
+    let failed = DecodePool::global()
+        .run(ReaderId(client_id), move || {
             // The wait ends when a decode thread takes the work, so starting
             // that thread counts as waiting rather than as decompression.
             probe.mark(ServerPhase::DecodeWait);
@@ -1640,20 +1639,21 @@ async fn serve_generated_chunk_request(
         DerivedChunkLookup::Ready(bytes) => {
             // Framing copies the whole chunk, so it takes a decode thread as
             // a source chunk's does.
-            let slot = DecodePool::global().acquire(ReaderId(client_id)).await;
             let (dataset, image, key, client_queue) = (
                 dataset_id.clone(),
                 image_id.clone(),
                 chunk_key.to_string(),
                 client.clone(),
             );
-            slot.run(move || {
-                probe.mark(ServerPhase::DecodeWait);
-                let buf = produced_frame(client_id, &dataset, &image, key, None, codecs, &bytes);
-                probe.mark(ServerPhase::SliceEncode);
-                hand_off(&client_queue, buf, probe);
-            })
-            .await;
+            DecodePool::global()
+                .run(ReaderId(client_id), move || {
+                    probe.mark(ServerPhase::DecodeWait);
+                    let buf =
+                        produced_frame(client_id, &dataset, &image, key, None, codecs, &bytes);
+                    probe.mark(ServerPhase::SliceEncode);
+                    hand_off(&client_queue, buf, probe);
+                })
+                .await;
         }
         DerivedChunkLookup::Status { status, message } => {
             send_generated_chunk_status(dataset_id, image_id, chunk_key, status, message, client);

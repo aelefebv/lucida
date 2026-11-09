@@ -41,7 +41,10 @@ export const TRACE_SCHEMA_VERSION = 3;
  *            the CPU cache for a delivery tick, the per-frame upload budget,
  *            and the worker's own texture write; residency is established by
  *            message ordering (the worker is FIFO, so a chunk posted before
- *            a render has been written by the time that render runs).
+ *            a render has been written by the time that render runs). A
+ *            chunk decoded before the view wanted it waits for the view
+ *            first, so the row also carries that wait
+ *            ({@link TraceRow.unwantedUs}) and the diagnostic splits it off.
  * - `present` resident → drawn in a frame, bounded by the following frame's
  *            dispatch.
  */
@@ -954,6 +957,12 @@ export interface TraceRow extends WireLabel {
    * worker never reported one.
    */
   decodeWorkUs?: number;
+  /**
+   * How long the chunk sat decoded before the view wanted it, held at the
+   * start of its `upload`: a prefetched chunk waits there for the view to
+   * reach it. Absent when the view wanted it as it was decoded.
+   */
+  unwantedUs?: number;
 }
 
 /**

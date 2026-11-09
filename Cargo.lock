@@ -1718,6 +1718,7 @@ dependencies = [
  "bytes",
  "clap",
  "crc32c",
+ "futures-executor",
  "futures-util",
  "ipnet",
  "lru",
