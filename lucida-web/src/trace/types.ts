@@ -436,6 +436,15 @@ export interface RunHeader extends RunConditions {
   timeoutMs: number;
   outstandingAtSettle: Outstanding;
   /**
+   * Microseconds from run start at which the view last came to have its
+   * wanted set, and kept it to the close: no input left to draw, and every
+   * wanted chunk resident, short of room or failed for good. Prefetch is no part of the wanted
+   * set, so neither its arrivals nor the redraws they wake move this, though
+   * they hold the close off. Null when the view did not have it at the close;
+   * absent on a document from before the field.
+   */
+  wantedSetMetAtUs?: number | null;
+  /**
    * Every socket this interval spanned, oldest first. Empty before the page
    * has ever connected.
    */

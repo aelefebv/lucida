@@ -414,7 +414,13 @@ DIAGNOSTIC = {
     "verdict": {"kind": "clear", "text": "settled"},
     "run": {"gpu": "nvidia ampere", "adapterKind": {"kind": "hardware", "label": "hardware adapter"}},
     "attribution": {"cause": "fetch.wire", "confidence": "attributed"},
-    "load": {"firstFrameMs": 212.4, "settleMs": 1840.0, "received": {"bytes": 12_400_000, "requests": 96}},
+    "load": {
+        "firstFrameMs": 212.4,
+        "settleMs": 1840.0,
+        "prefetchMs": 2410.0,
+        "coverageLossChunks": 512,
+        "received": {"bytes": 12_400_000, "requests": 96},
+    },
     "coverage": {"notHealthSignals": [{"metric": "retries", "value": 0}, {"metric": "evictions", "value": 7}]},
 }
 
@@ -444,8 +450,17 @@ def page_error(step, count=1, allowed=None) -> dict:
 
 
 def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
+    mode_load = {"firstFrameMs": 61.0, "settleMs": 412.5, "coverageLossChunks": 0, "received": {"bytes": 4_500_000}}
     script = [
-        {"kind": "mode", "to": "3d", "runId": "run-2", "verdict": {"kind": "clear"}, "durationUs": 1_650_400},
+        {
+            "kind": "mode",
+            "to": "3d",
+            "runId": "run-2",
+            "verdict": {"kind": "clear"},
+            "durationUs": 1_650_400,
+            "load": mode_load,
+            "attribution": {"cause": "browser.upload", "confidence": "partial"},
+        },
         {"kind": "orbit", "theta": 30, "runId": "run-3", "verdict": {"kind": "stall"}, "lag": lag(28.4, 61, 2)},
         {"kind": "wait", "runId": None},
     ]
@@ -455,9 +470,11 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
     fields = perf.read_run(write(path, run))
     assert fields["firstFrameMs"] == 212.4
     assert fields["settleMs"] == 1840.0
+    assert fields["prefetchMs"] == 2410.0
     assert fields["bytesFetched"] == 12_400_000
     assert fields["chunksFetched"] == 96
     assert fields["chunksEvicted"] == 7
+    assert fields["chunksShort"] == 512
     assert fields["topLimiter"] == "fetch.wire"
     assert fields["verdict"] == "clear"
     assert fields["sourceThrottle"] == REMOTE
@@ -465,6 +482,10 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
     # Every error the allow list does not name, repeats included, wherever it fell.
     assert fields["errors"] == 4
     no_lag = {"inputToFrameP95Ms": None, "longestTaskMs": None, "droppedFrames": None}
+    no_load = dict.fromkeys(
+        ("firstFrameMs", "settleMs", "prefetchMs", "bytesFetched", "chunksFetched", "chunksShort", "topLimiter")
+    )
+    no_load["confidence"] = None
     assert fields["steps"] == [
         {
             "kind": "mode",
@@ -472,6 +493,15 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
             "runId": "run-2",
             "verdict": "clear",
             "durationMs": 1650.4,
+            # Each step's own load reading and attribution, as its record carries them.
+            "firstFrameMs": 61.0,
+            "settleMs": 412.5,
+            "prefetchMs": None,
+            "bytesFetched": 4_500_000,
+            "chunksFetched": None,
+            "chunksShort": 0,
+            "topLimiter": "browser.upload",
+            "confidence": "partial",
             **no_lag,
             "errors": 0,
         },
@@ -481,12 +511,22 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
             "runId": "run-3",
             "verdict": "stall",
             "durationMs": None,
+            **no_load,
             "inputToFrameP95Ms": 28.4,
             "longestTaskMs": 61,
             "droppedFrames": 2,
             "errors": 3,
         },
-        {"kind": "wait", "label": "wait", "runId": None, "verdict": None, "durationMs": None, **no_lag, "errors": 0},
+        {
+            "kind": "wait",
+            "label": "wait",
+            "runId": None,
+            "verdict": None,
+            "durationMs": None,
+            **no_load,
+            **no_lag,
+            "errors": 0,
+        },
     ]
 
 
@@ -495,7 +535,8 @@ def test_a_field_the_diagnostic_lacks_is_a_dash_not_a_number(tmp_path: Path) -> 
     case = perf.Case(CATALOG["image"], SCENARIOS["cold-open"], 2.0, 1)
     row = perf.Row(case, path, tmp_path / "run.txt", exit_code=0, fields=perf.read_run(path))
     cells = dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))
-    assert cells["first frame"] == cells["settle"] == cells["fetched"] == cells["top limiter"] == "-"
+    assert cells["first frame"] == cells["settle"] == cells["prefetch"] == cells["fetched"] == "-"
+    assert cells["short"] == cells["top limiter"] == "-"
     # A run that took no input has no lag reading, not one of zeros.
     assert cells["input to frame p95"] == cells["longest task"] == cells["dropped"] == "-"
     assert cells["errors"] == "0"
@@ -522,8 +563,8 @@ def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path
     lines = markdown.splitlines()
     assert lines[0] == "adapter: nvidia ampere (hardware adapter)"
     assert (
-        "| image | cold-open | 1 | - | 212 ms | 1,840 ms | - | 12.4 MB | 96 | 7 | fetch.wire (attributed) "
-        "| - | - | - | 0 | clear |"
+        "| image | cold-open | 1 | - | 212 ms | 1,840 ms | 2,410 ms | - | 12.4 MB | 96 | 7 | 512 "
+        "| fetch.wire (attributed) | - | - | - | 0 | clear |"
     ) in markdown
     assert "| error: the server refused \\| the open |" in markdown
     # The header, its rule, and one row per run.
@@ -557,7 +598,13 @@ def test_a_scripted_scenario_shows_a_row_for_each_step_under_its_own(tmp_path: P
     def run(n: int, first_exported: bool) -> perf.Row:
         orbit = {"kind": "orbit", "runId": f"run-{n}a"}
         if first_exported:
-            orbit.update(verdict={"kind": "clear"}, durationUs=4_000_000, lag=lag(26.0, 0, 0))
+            orbit.update(
+                verdict={"kind": "clear"},
+                durationUs=4_000_000,
+                lag=lag(26.0, 0, 0),
+                load={"firstFrameMs": None, "settleMs": 3_480.0, "coverageLossChunks": 0, "received": {"bytes": 0}},
+                attribution={"cause": None, "confidence": "unattributed"},
+            )
         tilt = {
             "kind": "orbit",
             "runId": f"run-{n}b",
@@ -582,8 +629,11 @@ def test_a_scripted_scenario_shows_a_row_for_each_step_under_its_own(tmp_path: P
     assert first["verdict"] == "clear ×1, no verdict: run not exported ×1"
     assert second["scenario"] == "↳ 2 orbit"
     assert (second["duration"], second["dropped"], second["verdict"]) == ("1,300 ms ±100 ms", "3", "clear")
+    assert (first["settle"], first["fetched"], first["short"]) == ("3,480 ms", "0 B", "0")
+    # A repeat whose record has no load reading is left out of the median, not read as zero.
+    assert second["settle"] == second["short"] == second["top limiter"] == "-"
     # The columns a step record does not carry stay empty rather than read as absent.
-    assert first["settle"] == first["fetched"] == first["dataset"] == ""
+    assert first["evicted"] == first["dataset"] == ""
 
     lines = perf.render_markdown(rows, tmp_path).splitlines()
     assert lines[-2] == "1 step(s) have no verdict, so the table does not call them clear:"

@@ -1226,6 +1226,14 @@ pub struct StepRecord {
     /// the run took no input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lag: Option<Value>,
+    /// The load reading of the run the step opened, as the page's diagnostic
+    /// states it: first frame, settle, prefetch, what the wire delivered,
+    /// and the wanted chunks it went without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<Value>,
+    /// What the run the step opened waited on, and how sure the page is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<Value>,
     /// Whether the driver's deadline passed while waiting for this step: for
     /// a wait, for quiescence; for a gesture, for its run to conclude.
     pub timed_out: bool,
@@ -1538,6 +1546,8 @@ async fn run_step(
         duration_us: None,
         verdict: None,
         lag: None,
+        load: None,
+        attribution: None,
         timed_out,
         view_changed: before.signature != after.signature,
         view_before: before.view,
@@ -2605,6 +2615,8 @@ mod tests {
                 text: "fine".to_string(),
             }),
             lag: None,
+            load: None,
+            attribution: None,
             timed_out: false,
             view_before: Value::Null,
             view_after: Value::Null,
@@ -2778,6 +2790,32 @@ mod tests {
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_step_keeps_its_runs_load_reading_and_attribution() {
+        let mut add = record(
+            ScriptStep::Add {
+                url: "/data/image.ome.zarr".to_string(),
+            },
+            Some("run-6"),
+            true,
+        );
+        add.load = Some(json!({
+            "firstFrameMs": 61.0,
+            "settleMs": 412.5,
+            "prefetchMs": null,
+            "coverageLossChunks": 0,
+            "received": { "bytes": 4_500_000, "requests": 34 }
+        }));
+        add.attribution = Some(json!({ "cause": "browser.upload", "confidence": "partial" }));
+        let json = serde_json::to_value(&add).unwrap();
+        assert_eq!(json["load"]["settleMs"], 412.5);
+        assert_eq!(json["attribution"]["cause"], "browser.upload");
+        let back: StepRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back, add);
+        let wait = serde_json::to_value(record(ScriptStep::Wait, None, false)).unwrap();
+        assert!(wait.get("load").is_none() && wait.get("attribution").is_none());
     }
 
     #[test]

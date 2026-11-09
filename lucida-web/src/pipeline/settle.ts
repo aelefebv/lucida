@@ -135,6 +135,24 @@ function settleReason(i: SettleInputs): string {
   if (i.interactiveDirty) return "interactive_dirty";
   if (i.residencyDirty) return "residency_dirty";
   if (i.frameInFlight) return "frame_in_flight";
+  return wantedSetReason(i);
+}
+
+/**
+ * Whether the view has what it wants: no input left to draw, and every
+ * wanted chunk resident, short of room or failed for good, with nothing it
+ * asked for queued, in flight or unanswered. The predicate less its residency tick and frame,
+ * which any chunk's arrival wakes, a prefetched one's too: a run's load
+ * reading dates its settle by this, so prefetch arriving after the view has
+ * what it wants does not count as loading it.
+ */
+export function wantedSetMet(i: SettleInputs): boolean {
+  if (i.interactiveDirty) return false;
+  const reason = wantedSetReason(i);
+  return reason === "quiescent" || reason === "coverage_limited";
+}
+
+function wantedSetReason(i: CacheSettleInputs): string {
   if (i.pendingUnclassified) return "pending_unclassified";
   if (i.inFlight > 0) return "chunks_in_flight";
   if (i.pending > 0) return "chunks_pending";
