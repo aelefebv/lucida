@@ -120,6 +120,7 @@ export class RenderLoop implements TraceEnvironment {
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
+  private trailingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly framePacer = new FramePacer();
   /** The last tick left decoded chunks undelivered for want of upload budget. */
@@ -255,6 +256,10 @@ export class RenderLoop implements TraceEnvironment {
     if (this.resolutionRestoreTimer !== null) {
       clearTimeout(this.resolutionRestoreTimer);
       this.resolutionRestoreTimer = null;
+    }
+    if (this.trailingRebuildTimer !== null) {
+      clearTimeout(this.trailingRebuildTimer);
+      this.trailingRebuildTimer = null;
     }
     if (this.minimapDisplayTimer !== null) {
       clearTimeout(this.minimapDisplayTimer);
@@ -402,7 +407,8 @@ export class RenderLoop implements TraceEnvironment {
   private evaluateAndPublishSettle(): SettleState {
     const state = this.settleState;
     this.session.cpuCache.settleInputs(state);
-    state.interactiveDirty = this.interactiveDirty;
+    // A view change the planner deferred has not reached the wanted set yet.
+    state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild();
     state.residencyDirty = this.residencyDirty;
     // A frame the worker is still drawing counts: until it lands, the canvas
     // does not show what the view settled on, and a capture would catch it.
@@ -554,6 +560,25 @@ export class RenderLoop implements TraceEnvironment {
       this.resolutionRestoreTimer = null;
       if (this.resolution.restoreIfIdle()) this.setDirty("interactive", "resolution_restored");
       else this.adaptResolution();
+    }, wait);
+  }
+
+  /**
+   * Tick once more when a coalesced view or selection change's rebuild falls
+   * due, so the change reaches the wanted set after input stops. Only then:
+   * the frames before it would redraw a view already on the canvas, and at a
+   * volume's finest level each of those is a full ray-march.
+   */
+  private scheduleTrailingRebuild(): void {
+    const wait = this.tickCoordinator.msUntilPendingRebuild(performance.now());
+    if (wait === null || this.trailingRebuildTimer !== null) return;
+    this.trailingRebuildTimer = setTimeout(() => {
+      this.trailingRebuildTimer = null;
+      // A rebuild during the wait moved the window, or settled what was owed.
+      const due = this.tickCoordinator.msUntilPendingRebuild(performance.now());
+      if (due === null) return;
+      if (due > 0) this.scheduleTrailingRebuild();
+      else this.setDirty("interactive", "pending_residency_rebuild");
     }, wait);
   }
 
@@ -759,12 +784,7 @@ export class RenderLoop implements TraceEnvironment {
       if (this.deliveryBacklogged) this.setDirty("residency", "tick_volume_continuation");
     }
 
-    // A coalesced view/selection change still owes a trailing rebuild. Mark
-    // interactive so it renders once the coalescing window elapses;
-    // otherwise the change is lost when the user stops moving.
-    if (this.tickCoordinator.hasPendingRebuild()) {
-      this.setDirty("interactive", "pending_residency_rebuild");
-    }
+    this.scheduleTrailingRebuild();
 
     // Recording is unconditional, and one subtraction is not a cost worth
     // gating.

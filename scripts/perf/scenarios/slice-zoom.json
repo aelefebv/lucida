@@ -1,0 +1,12 @@
+{
+  "description": "zoom the slice view in by 2 three times about its center, leave it alone for 4 s, then pan",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "zoom", "factor": 2, "durationMs": 500 },
+    { "kind": "zoom", "factor": 2, "durationMs": 500 },
+    { "kind": "zoom", "factor": 2, "durationMs": 500 },
+    { "kind": "hold", "ms": 4000 },
+    { "kind": "pan", "dx": -600, "dy": -200, "durationMs": 2000 }
+  ]
+}

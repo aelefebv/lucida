@@ -434,6 +434,35 @@ describe("a three-channel volume on a GPU slower than the frame clock", () => {
   }
 });
 
+describe("a gesture over a view that already has what it wants", () => {
+  // Nothing new comes into view, and the stand-in GPU answers each frame at
+  // once, so after the last input the view owes a frame for that input and
+  // one for the replan the gesture deferred, and nothing more.
+  const volume = describeScenario({
+    name: "orbit over a resident volume",
+    mode: "volume",
+    dataset: singleImage({
+      id: "resident-volume",
+      pyramid: { shape: [1, 1, 64, 256, 256], chunk: [64, 64, 64], levels: 2, downsampleZ: true },
+    }),
+    steps: [{ gesture: { orbit: [0.05, 0.02] }, moves: 6 }],
+  });
+  const slice = describeScenario({
+    name: "pan over a resident image",
+    dataset: singleImage({ id: "resident-image", pyramid: IMAGE_1024 }),
+    steps: [{ gesture: { pan: [4, 2] }, moves: 6 }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    for (const scenario of [volume, slice]) {
+      it(`stops drawing after the ${scenario.name} once its replan lands, at device pixel ratio ${dpr}`, async () => {
+        const run = await runScenario(scenario, { dpr });
+        expectSettled(run);
+        expect(run.phases[1].framesDrawn, run.report).toBeLessThanOrEqual(2);
+      });
+    }
+  }
+});
+
 describe("a zoom and pan across a collection", () => {
   settles(describeScenario({
     name: "collection moves",

@@ -387,6 +387,35 @@ describe("epoch caching", () => {
     expect(result2).toBe(result1);
   });
 
+  it("says when an owed rebuild falls due, from the rebuild before it", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const orch = makeOrch();
+
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+      expect(orch.msUntilPendingRebuild(performance.now())).toBeNull();
+
+      vi.advanceTimersByTime(50);
+      const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(orch.msUntilPendingRebuild(performance.now())).toBe(150);
+
+      // A selection change waits out the shorter selection window.
+      const scene3 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 2 } });
+      orch.planAndFetch(makeCtx(scene3, datasets), emptyMinimap);
+      expect(orch.msUntilPendingRebuild(performance.now())).toBe(100);
+
+      vi.advanceTimersByTime(100);
+      expect(orch.msUntilPendingRebuild(performance.now())).toBe(0);
+      orch.planAndFetch(makeCtx(scene3, datasets), emptyMinimap);
+      expect(orch.msUntilPendingRebuild(performance.now())).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("coalesces rapid view changes and re-plans once the view settles", () => {
     // A camera move (viewEpoch) does not pay the O(visible-entities)
     // rebuild every frame: the render pass reflects the fresh camera from
