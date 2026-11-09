@@ -34,7 +34,7 @@ export const MIN_ADMISSION_WINDOW = 64;
  */
 export const ADMISSION_WINDOW_CONCURRENCY_MULTIPLE = 4;
 
-export interface SchedulerConfig {
+export interface SchedulerConfig<Req extends SchedulableRequest = SchedulableRequest> {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   /**
@@ -51,6 +51,14 @@ export interface SchedulerConfig {
    * retained and drained in order, but untimestamped until promoted.
    */
   admissionWindow?: number;
+  /**
+   * Which requests are speculative, and the bytes they may hold in flight
+   * between them. A move the speculation did not foresee waits on the link
+   * behind whatever is already in flight, so speculation keeps to this
+   * share of it and the requests queued behind it go ahead. Absent,
+   * speculative requests share the whole allowance.
+   */
+  speculative?: { is: (req: Req) => boolean; maxBytesInFlight: number };
 }
 
 export interface InFlightEntry<Req extends SchedulableRequest> {
@@ -107,12 +115,12 @@ export class Scheduler<Req extends SchedulableRequest> {
 
   private admissionWindow: number;
 
-  private readonly config: SchedulerConfig;
+  private readonly config: SchedulerConfig<Req>;
   private readonly keyFn: (req: Req) => string;
   private readonly startFn: StartFn<Req>;
 
   constructor(
-    config: SchedulerConfig,
+    config: SchedulerConfig<Req>,
     keyFn: (req: Req) => string,
     startFn: StartFn<Req>,
   ) {
@@ -264,12 +272,24 @@ export class Scheduler<Req extends SchedulableRequest> {
    * burstLogger fires its rate-limited backpressure summary.
    */
   drain(estimateBytes: (req: Req) => number, now: number = performance.now()): void {
-    while (this.pending.length > 0 && this.canStartMore()) {
-      const req = this.pending.shift()!;
+    const speculative = this.config.speculative;
+    let speculativeBytes = speculative ? this.speculativeBytesInFlight(speculative.is) : 0;
+    let at = 0;
+    while (at < this.pending.length && this.canStartMore()) {
+      const req = this.pending[at];
+      const isSpeculative = speculative?.is(req) ?? false;
+      if (isSpeculative && speculativeBytes >= speculative!.maxBytesInFlight) {
+        // Pass it over for a request behind it, within the window only, so
+        // a deep backlog of speculation costs a bounded scan.
+        if (++at >= this.admissionWindow) break;
+        continue;
+      }
+      this.pending.splice(at, 1);
       const key = this.keyFn(req);
       const admittedAtMs = this.enqueuedAt.get(key);
       this.enqueuedAt.delete(key);
       const estimate = estimateBytes(req);
+      if (isSpeculative) speculativeBytes += estimate;
       this.startInFlight(req, key, estimate, admittedAtMs, now);
       this.promoteIntoWindow(now);
     }
@@ -287,6 +307,14 @@ export class Scheduler<Req extends SchedulableRequest> {
         }),
       );
     }
+  }
+
+  private speculativeBytesInFlight(is: (req: Req) => boolean): number {
+    let bytes = 0;
+    for (const entry of this.inFlight.values()) {
+      if (is(entry.request)) bytes += entry.estimatedBytes;
+    }
+    return bytes;
   }
 
   /**

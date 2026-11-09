@@ -88,6 +88,14 @@ export const DEFAULT_MAX_CONCURRENT_FETCHES = 128;
  * of growth. 4 MiB is about one 200 ms round trip at 18 MiB/s.
  */
 export const INITIAL_BYTES_IN_FLIGHT = 4 * 1024 * 1024;
+/**
+ * The bytes the prefetch lane may hold in flight. A move the prefetch did not
+ * foresee, such as a jump away from a scrub whose whole chunks are still
+ * coming, waits on the link behind what is already in flight. So prefetch
+ * holds about one round trip of a far link, as the allowance starts with,
+ * and the view's requests queued behind it go ahead.
+ */
+export const PREFETCH_BYTES_IN_FLIGHT = INITIAL_BYTES_IN_FLIGHT;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
 /** Consecutive chunk-delivery failures, with no delivered chunk between them,
@@ -482,6 +490,7 @@ export class CpuCache {
         maxBytesInFlight: this.config.maxBytesInFlight,
         initialBytesInFlight: INITIAL_BYTES_IN_FLIGHT,
         burstLogger: burstBackpressure,
+        speculative: { is: (req) => req.lane === "prefetch", maxBytesInFlight: PREFETCH_BYTES_IN_FLIGHT },
       },
       (req) => this.inFlightKey(req),
       (req, controller, _estimate, key, admittedAtMs, startedAtMs) => {

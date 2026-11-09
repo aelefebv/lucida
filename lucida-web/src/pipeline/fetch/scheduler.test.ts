@@ -883,3 +883,42 @@ describe("Scheduler.setCaps", () => {
     expect(scheduler.admittedSize).toBe(8);
   });
 });
+
+// Speculative requests
+
+describe("Scheduler speculative bytes", () => {
+  function speculativeScheduler(admissionWindow?: number) {
+    const started: string[] = [];
+    const scheduler = new Scheduler<TestRequest>(
+      {
+        maxConcurrentFetches: 10,
+        maxBytesInFlight: 1_000,
+        admissionWindow,
+        speculative: { is: (r) => r.chunkKey.startsWith("spec"), maxBytesInFlight: 200 },
+      },
+      keyOf,
+      (r) => started.push(r.chunkKey),
+    );
+    return { scheduler, started };
+  }
+
+  it("keeps speculation to its share and lets the requests behind it go ahead", () => {
+    const { scheduler, started } = speculativeScheduler();
+    scheduler.enqueue(["spec-a", "spec-b", "spec-c", "view-a", "view-b"].map((chunkKey) => req({ chunkKey })));
+    scheduler.drain(() => 100);
+    expect(started).toEqual(["spec-a", "spec-b", "view-a", "view-b"]);
+    expect(scheduler.pendingSnapshot().map((r) => r.chunkKey)).toEqual(["spec-c"]);
+
+    // A speculative fetch landing makes room for the next.
+    scheduler.markInFlightDone("e-1/spec-a");
+    scheduler.drain(() => 100);
+    expect(started.at(-1)).toBe("spec-c");
+  });
+
+  it("looks no further than the admission window past speculation that has no room", () => {
+    const { scheduler, started } = speculativeScheduler(2);
+    scheduler.enqueue(["spec-a", "spec-b", "spec-c", "spec-d", "view-a"].map((chunkKey) => req({ chunkKey })));
+    scheduler.drain(() => 100);
+    expect(started).toEqual(["spec-a", "spec-b"]);
+  });
+});
