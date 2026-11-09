@@ -111,20 +111,24 @@ interface PlanResult {
 
 
 /**
- * Upload+render phase: deliver decoded chunks via Uploader, build layer
- * params, and render. Returns true if more work remains.
+ * Upload+render phase: deliver decoded chunks via Uploader, unless uploads
+ * are held, build layer params, and render. Returns true if more work
+ * remains.
  */
 function uploadAndRenderVolume(
   ctx: TickContext,
   uploader: Uploader,
   plan: PlanResult,
-  shouldRender: boolean = true,
+  shouldRender: boolean,
+  holdUploads: boolean,
 ): boolean {
   const { scene, client, datasets } = ctx;
   const { memberRoster, settings, layers: resolvedLayers, eye, canvasW, canvasH, fullW, fullH, entityIndexByDataset } = plan;
   const { layerOrder, allSettings } = settings;
 
-  const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
+  let budgetExhausted = false;
+  if (holdUploads) uploader.holdDelivery();
+  else budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
 
   if (!shouldRender) return budgetExhausted;
 
@@ -239,8 +243,9 @@ export function tickVolume(
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
-  const result = uploadAndRenderVolume(ctx, uploader, planResult, shouldRender);
-  return result;
+  // Read after the plan, which notes whether the view moved.
+  const holdUploads = tickCoordinator.msUntilUploadsResume(performance.now()) !== null;
+  return uploadAndRenderVolume(ctx, uploader, planResult, shouldRender, holdUploads);
 }
 
 export function clearVolumeForDataset(_state: VolumeState, _dsId: string): void {}

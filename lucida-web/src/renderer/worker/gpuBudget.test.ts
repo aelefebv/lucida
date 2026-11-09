@@ -12,7 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ChunkResidencyMessage, WorkerToMainMessage } from "../workerProtocol.ts";
-import { getOrCreateVolumePool, volumeLayerBytes, type AtlasState } from "../volume/atlas.ts";
+import { getOrCreateVolumePool, growVolumePoolWithin, volumeLayerBytes, type AtlasState } from "../volume/atlas.ts";
 import { handleLabelVolumeChunkData } from "../volume/upload.ts";
 import { handleMinimapUploadOverviewChunks, MINIMAP_OVERVIEW_SHARE, removeMinimapResources } from "../minimapHandlers.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
@@ -147,6 +147,36 @@ describe("when the GPU total is reached", () => {
     expect(posts).toContainEqual({
       type: "chunkResidency", memberId: "label", tier: "detail", change: "refused", keys: ["0/0/0/0/0/0"], reason: "atlas-policy",
     });
+  });
+});
+
+describe("a full pool", () => {
+  it("grows straight to the layers that hold every chunk the planner wants", () => {
+    const { ctx, copies } = makeCtx();
+    const { atlas, keys } = heldPool(ctx, "ds1:ch0:32x32x32:detail", "imgA", 1);
+    const layer = atlas.slotsX * atlas.slotsY;
+    const wanted = Array.from({ length: layer * 5 }, (_, i) => `0/0/0/${Math.floor(i / 64)}/${Math.floor(i / 8) % 8}/${i % 8}`);
+    want(ctx, "imgA", wanted);
+    copies.length = 0;
+
+    expect(growVolumePoolWithin(ctx, "ds1:ch0:32x32x32:detail", atlas, false)).toBe(true);
+
+    expect(atlas.slotsZ).toBe(5);
+    expect(copies).toHaveLength(1);
+    expect(atlas.slots.size).toBe(keys.length);
+    // Zeroing a new pool by a clear needs a render attachment's usage.
+    const usage = vi.mocked(ctx.device.createTexture).mock.calls.at(-1)![0].usage;
+    expect(usage & GPUTextureUsage.RENDER_ATTACHMENT).toBeTruthy();
+  });
+
+  it("doubles when what the planner wants already fits", () => {
+    const { ctx } = makeCtx();
+    const { atlas, keys } = heldPool(ctx, "ds1:ch0:32x32x32:detail", "imgA", 2);
+    want(ctx, "imgA", keys.slice(0, 10));
+
+    expect(growVolumePoolWithin(ctx, "ds1:ch0:32x32x32:detail", atlas, false)).toBe(true);
+
+    expect(atlas.slotsZ).toBe(4);
   });
 });
 

@@ -23,7 +23,7 @@ import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTyp
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { LABEL_TIER, postChunkResidency, postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
-import { grantGrowth, handleGpuOutOfMemory, reserveGpuBytes } from "../worker/gpuBudget.ts";
+import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
 import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
 
 /**
@@ -332,8 +332,7 @@ function createSliceAtlasTexture(
   return device.createTexture({
     size: [slotsX * chunkX, slotsY * chunkY],
     format: atlasTextureFormat(format),
-    // COPY_SRC so a pool that grows or shrinks can copy its chunks into the new texture.
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    usage: chunkPoolUsage(),
   });
 }
 
@@ -459,8 +458,9 @@ export function growSliceAtlasWatched(
 }
 
 /**
- * Grow a full pool as far as the GPU total has room for, at most doubling its
- * rows. With `reclaim`, grow by one row even when the total has none, if
+ * Grow a full pool as far as the GPU total has room for, toward the rows
+ * that hold every chunk the planner wants, or double its rows if that is
+ * more. With `reclaim`, grow by one row even when the total has none, if
  * other pools can give it back from chunks the planner doesn't want.
  */
 export function growSlicePoolWithin(
@@ -469,7 +469,8 @@ export function growSlicePoolWithin(
   atlas: SliceAtlasState,
   reclaim: boolean,
 ): boolean {
-  const maxSteps = Math.min(atlas.maxSlotsY, atlas.slotsY * 2) - atlas.slotsY;
+  const wantedRows = Math.ceil(wantedSlotsOf(ctx.state, poolKey, atlas) / atlas.slotsX);
+  const maxSteps = Math.min(atlas.maxSlotsY, Math.max(atlas.slotsY * 2, wantedRows)) - atlas.slotsY;
   const steps = grantGrowth(ctx, atlas, sliceRowBytes(atlas), maxSteps, reclaim);
   return steps > 0 && growSliceAtlasWatched(ctx, poolKey, atlas, atlas.slotsY + steps);
 }

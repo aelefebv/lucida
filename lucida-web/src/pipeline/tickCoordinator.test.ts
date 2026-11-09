@@ -8,7 +8,7 @@ import type { TickContext } from "../renderLoopTypes.ts";
 
 import type { ColdStateDeltaMessage, ColdStateMessage, GpuCapacityReport } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
-import { TickCoordinator, type MinimapChunkCoord } from "./tickCoordinator.ts";
+import { TickCoordinator, VIEW_STILL_MS, type MinimapChunkCoord } from "./tickCoordinator.ts";
 import { Uploader } from "./upload/uploader.ts";
 import { plan } from "./planning/index.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
@@ -636,6 +636,59 @@ describe("epoch caching", () => {
       // With nothing short, no report owes a plan.
       report = { ...report };
       expect(orch.noteGpuCapacity(ctx)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds uploads while a view the budgets cut short moves, until it holds still", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const view = (epoch: number) => createMockScene({ epochs: { content: 1, layout: 1, view: epoch, selection: 1 } });
+      const slotBytes = 256 * 256 * 2;
+      const limits = {
+        maxTextureDimension2D: 8192,
+        maxTextureDimension3D: 2048,
+        maxStorageBufferBindingSize: 128 * 1024 * 1024,
+        maxBufferSize: 256 * 1024 * 1024,
+      };
+      // The chunk pools have room for one chunk, so every plan falls short.
+      const report: GpuCapacityReport = { budgetBytes: 64 * slotBytes, reservedBytes: 63 * slotBytes, pools: [], limits };
+      const short = (scene: unknown) => {
+        const ctx = makeCtx(scene, datasets);
+        Object.assign(ctx.client, { gpuCapacity: () => report });
+        return ctx;
+      };
+      const orch = makeOrch();
+      orch.planAndFetch(short(view(1)), emptyMinimap);
+      // Past the replan window, so the first move plans.
+      vi.advanceTimersByTime(200);
+      expect(orch.msUntilUploadsResume(performance.now())).toBeNull();
+
+      // Each move, planned or coalesced, restarts the wait.
+      for (let epoch = 2; epoch <= 4; epoch++) {
+        orch.planAndFetch(short(view(epoch)), emptyMinimap);
+        expect(orch.msUntilUploadsResume(performance.now())).toBe(VIEW_STILL_MS);
+        vi.advanceTimersByTime(16);
+      }
+      // A tick with the view still does not.
+      orch.planAndFetch(short(view(4)), emptyMinimap);
+      expect(orch.msUntilUploadsResume(performance.now())).toBe(VIEW_STILL_MS - 16);
+      // Its owed replan falls due as it stops, short of the window.
+      expect(orch.msUntilPendingRebuild(performance.now())).toBe(VIEW_STILL_MS - 16);
+      vi.advanceTimersByTime(VIEW_STILL_MS - 16);
+      expect(orch.msUntilUploadsResume(performance.now())).toBeNull();
+      const plans = planSpy.mock.calls.length;
+      orch.planAndFetch(short(view(4)), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(plans + 1);
+      expect(orch.hasPendingRebuild()).toBe(false);
+
+      // A view with room for all it wants uploads as it moves.
+      const roomy = makeOrch();
+      roomy.planAndFetch(makeCtx(view(1), datasets), emptyMinimap);
+      roomy.planAndFetch(makeCtx(view(2), datasets), emptyMinimap);
+      expect(roomy.msUntilUploadsResume(performance.now())).toBeNull();
     } finally {
       vi.useRealTimers();
     }

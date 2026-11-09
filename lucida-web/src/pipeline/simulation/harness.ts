@@ -184,6 +184,8 @@ export interface PhaseOutcome {
   chunksSent: number;
   /** Distinct chunks among them; equal to `chunksSent` when none went twice. */
   distinctChunksSent: number;
+  /** Chunks the page sent the worker from a gesture's first input to its last, before the phase. */
+  chunksSentDuringInput: number;
   /** The bytes of chunk data the page sent the worker in this phase. */
   bytesSent: number;
   quiescence: string;
@@ -311,6 +313,8 @@ class Simulation {
   /** Every chunk the uploader's progress guard held, in order. */
   private readonly held: string[] = [];
   private framesRun = 0;
+  /** Chunks sent between the last gesture's first input and its last. */
+  private sentDuringInput = 0;
   private readonly fits: ContrastFitRecord[] = [];
 
   constructor(scenario: Scenario, dpr: number) {
@@ -484,12 +488,21 @@ class Simulation {
 
   /** Perform a step, a gesture one input a frame, and name it for the report. */
   async perform(step: ScenarioStep): Promise<string> {
+    this.sentDuringInput = 0;
     if (!("gesture" in step)) return this.apply(step);
+    const sentBefore = this.chunksSentSoFar();
     for (let move = 1; move < step.moves; move++) {
       this.apply(step.gesture);
       await this.step();
     }
+    this.sentDuringInput = this.chunksSentSoFar() - sentBefore;
     return `${this.apply(step.gesture)}, ${step.moves} times`;
+  }
+
+  private chunksSentSoFar(): number {
+    let sent = 0;
+    for (const { count } of this.worker.deliveries.values()) sent += count;
+    return sent;
   }
 
   /** Apply a move the way its control does, and name it for the report. */
@@ -655,6 +668,7 @@ class Simulation {
       framesDrawn: this.worker.framesDispatched - drawnBefore,
       chunksSent,
       distinctChunksSent,
+      chunksSentDuringInput: this.sentDuringInput,
       bytesSent,
       quiescence: page.reason,
       coverage: page.coverage,

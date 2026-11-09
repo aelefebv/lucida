@@ -6,6 +6,13 @@
 /** Per-frame upload budget for the main view (slice + volume). */
 export const MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8 * 1024 * 1024; // 8 MB per frame
 
+/**
+ * Per-frame upload budget for chunks held back while the view moved, once it
+ * holds still. The frames these uploads delay answer no input, and the held
+ * chunks are what the stopped view waits for.
+ */
+export const HELD_UPLOAD_BUDGET_BYTES = 32 * 1024 * 1024;
+
 // Cold-state rebuild telemetry
 /** Rolling-window size for hit/rebuild rates and cause attribution. */
 export const COLD_STATE_WINDOW_MS = 1000;

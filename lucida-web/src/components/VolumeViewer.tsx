@@ -24,6 +24,7 @@ import { frameClock } from "../frameClock.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CameraMode } from "../sceneStore.ts";
 import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
+import { RESTORE_AFTER_MS } from "../renderResolution.ts";
 
 interface Props {
   session: Session;
@@ -63,7 +64,15 @@ interface Props {
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
 const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
+/** After a press ends, the gesture is over. */
 const SCALE_RESTORE_DELAY_MS = 50;
+/**
+ * A wheel or a touch gesture sends nothing when it ends, so its scale holds
+ * until input has been quiet as long as the adaptive resolution waits before
+ * it counts a gesture over. A slow wheel's notches are then one gesture, not
+ * a full-resolution frame between each.
+ */
+const GESTURE_RESTORE_DELAY_MS = RESTORE_AFTER_MS;
 
 function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, cameraMode, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
@@ -211,14 +220,14 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
     clearTimeout(scaleTimerRef.current);
     loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
   }, []);
-  const scheduleFullRes = useCallback(() => {
+  const scheduleFullRes = useCallback((delayMs: number = SCALE_RESTORE_DELAY_MS) => {
     clearTimeout(scaleTimerRef.current);
     // Same reasoning as the inline callback above: deferred write inside
     // a debounced callback, not a render-phase mutation.
     // eslint-disable-next-line react-hooks/immutability
     scaleTimerRef.current = window.setTimeout(() => {
       loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
-    }, SCALE_RESTORE_DELAY_MS);
+    }, delayMs);
   }, []);
   useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
 
@@ -485,7 +494,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
     emitPresence();
     loopRef.current?.markInput(input);
     setLowRes();
-    scheduleFullRes();
+    scheduleFullRes(GESTURE_RESTORE_DELAY_MS);
   };
 
   const sendTouchCursor = (g: { x: number; y: number }) => {
@@ -555,7 +564,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       emitPresence();
       loopRef.current?.markInput("zoom", e.timeStamp);
       setLowRes();
-      scheduleFullRes();
+      scheduleFullRes(GESTURE_RESTORE_DELAY_MS);
     },
     [scene, emitPresence, breakFollow, setLowRes, scheduleFullRes],
   );

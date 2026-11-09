@@ -14,7 +14,7 @@ import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTyp
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
-import { grantGrowth, handleGpuOutOfMemory, reserveGpuBytes } from "../worker/gpuBudget.ts";
+import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
 import { setGpuLedgerLine } from "../worker/gpuLedger.ts";
 import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
@@ -631,8 +631,7 @@ function createAtlasTexture(
     size: [slotsX * chunkX, slotsY * chunkY, slotsZ * chunkZ],
     format: atlasTextureFormat(format),
     dimension: "3d",
-    // COPY_SRC so a growing pool can copy its chunks into the larger texture.
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    usage: chunkPoolUsage(),
   });
 }
 
@@ -864,8 +863,9 @@ export function growVolumeAtlasWatched(
 }
 
 /**
- * Grow a full pool as far as the GPU total has room for, at most doubling its
- * layers. With `reclaim`, grow by one layer even when the total has none, if
+ * Grow a full pool as far as the GPU total has room for, toward the layers
+ * that hold every chunk the planner wants, or double its layers if that is
+ * more. With `reclaim`, grow by one layer even when the total has none, if
  * other pools can give it back from chunks the planner doesn't want.
  */
 export function growVolumePoolWithin(
@@ -874,7 +874,8 @@ export function growVolumePoolWithin(
   atlas: AtlasState,
   reclaim: boolean,
 ): boolean {
-  const maxSteps = Math.min(atlas.maxSlotsZ, atlas.slotsZ * 2) - atlas.slotsZ;
+  const wantedLayers = Math.ceil(wantedSlotsOf(ctx.state, poolKey, atlas) / (atlas.slotsX * atlas.slotsY));
+  const maxSteps = Math.min(atlas.maxSlotsZ, Math.max(atlas.slotsZ * 2, wantedLayers)) - atlas.slotsZ;
   const steps = grantGrowth(ctx, atlas, volumeLayerBytes(atlas), maxSteps, reclaim);
   return steps > 0 && growVolumeAtlasWatched(ctx, poolKey, atlas, atlas.slotsZ + steps);
 }
