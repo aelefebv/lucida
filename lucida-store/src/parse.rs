@@ -14,6 +14,7 @@ use serde::Deserialize;
 use lucida_content::normalize::normalize_f64_to_5d;
 use lucida_content::{ChannelInfo, LabelColor, LabelName};
 
+use crate::ChunkKeyEncoding;
 use crate::backend::StoreError;
 use crate::cache::CachedStore;
 use crate::zarr_v2;
@@ -102,6 +103,15 @@ impl ZarrFormat {
             ZarrFormat::V3 { .. } => "zarr.json",
         };
         join(prefix, name)
+    }
+
+    /// The chunk key encoding a level most likely uses, before its own
+    /// metadata says: v3's default, or the nested keys OME-Zarr writes in v2.
+    pub(crate) fn likely_chunk_key_encoding(&self) -> ChunkKeyEncoding {
+        match self {
+            ZarrFormat::V2 { .. } => ChunkKeyEncoding::V2 { separator: '/' },
+            ZarrFormat::V3 { .. } => ChunkKeyEncoding::default(),
+        }
     }
 
     /// A group's metadata, as its v3 `zarr.json` would say it.
