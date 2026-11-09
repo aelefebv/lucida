@@ -7,7 +7,9 @@ import type {
   ThumbnailRenderMessage,
 } from "./workerProtocol.ts";
 import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
-import type { CompositeLayer } from "./layerCompositor.ts";
+import { batchLayers } from "./layerBatches.ts";
+import type { VolumeMemberDraw } from "./volumeRenderer.ts";
+import { computeScissorRect } from "../pipeline/upload/scissor.ts";
 import { atlasTexels, atlasTextureFormat, bytesPerTexel, type SampleFormat } from "./dataTypeUtil.ts";
 import { allocateWatched } from "./worker/gpuErrors.ts";
 import { handleGpuOutOfMemory, reserveGpuBytes } from "./worker/gpuBudget.ts";
@@ -201,48 +203,98 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
   const comp = ctx.getCompositor();
   ensureMinimapOffscreenPool(ctx, 1, msg.canvasW, msg.canvasH);
   const minimapView = minimapContext.getCurrentTexture().createView();
-  const drawn = drawOverviewLayers(ctx, msg, minimapView, minimapOffscreenPool[0], msg.canvasW, msg.canvasH);
+  const encoder = ctx.device.createCommandEncoder();
+  const drawn = drawOverviewLayers(
+    ctx, MINIMAP_DRAWS, msg, minimapView, minimapOffscreenPool[0], msg.canvasW, msg.canvasH, encoder,
+  );
 
   // Drawn even with no overview resident, so the minimap shows the canvas
   // background rather than whatever it last held.
-  const compEncoder = ctx.device.createCommandEncoder();
-  if (drawn === 0) comp.composite(minimapView, [], compEncoder);
-  comp.underlayBackground(minimapView, compEncoder);
-  ctx.device.queue.submit([compEncoder.finish()]);
+  if (drawn === 0) comp.composite(minimapView, [], encoder);
+  comp.underlayBackground(minimapView, encoder);
+  ctx.device.queue.submit([encoder.finish()]);
 }
 
+/** The volume renderer's member draw sets the minimap and the thumbnails draw through. */
+const MINIMAP_DRAWS = "minimap";
+const THUMBNAIL_DRAWS = "thumbnail";
+
 /**
- * Draw each layer's overview into `scratch`, then composite it over `view`
- * before the next layer reuses it, clearing `view` under the first. A
- * collection draws one layer per member and channel, so a target per layer
- * would hold GPU memory in proportion to the member count. Returns how many
- * layers had an overview to draw.
+ * Draw the layers' overviews into `scratch` and composite them over `view`,
+ * clearing `view` under the first. Layers whose places on the canvas do not
+ * meet share one pass and one composite (`layerBatches.ts`), so a collection
+ * costs a few passes, not two per member and channel, and one target serves
+ * them all. Each overview binds as a level laid out in place, with its failed
+ * chunks marked, and a descriptor carrying the layer's placement and
+ * contrast. Returns how many layers had an overview to draw.
  */
 function drawOverviewLayers(
   ctx: WorkerCtx,
-  msg: Pick<MinimapRenderMessage, "layers" | "invViewProj" | "eye" | "pixelRatio">,
+  drawSet: string,
+  msg: Pick<MinimapRenderMessage, "layers" | "invViewProj" | "viewProj" | "eye" | "pixelRatio">,
   view: GPUTextureView,
   scratch: GPUTexture,
   width: number,
   height: number,
+  encoder: GPUCommandEncoder,
 ): number {
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
-  let drawn = 0;
+  const shown: Array<{ layer: MinimapLayerParams; overview: MinimapOverviewEntry }> = [];
   for (const layer of msg.layers) {
     const overview = minimapOverviewPerDataset.get(layer.datasetId);
     if (!overview) continue;
-    bindOverviewLayer(ctx, overview, layer, msg.invViewProj, msg.eye, msg.pixelRatio);
-    // One submit per layer: each draw's uniforms and descriptor are written
-    // to the renderer's one buffer ahead of it.
-    const encoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(scratch.createView(), encoder, undefined, undefined, width, height);
-    const composited: CompositeLayer = { view: scratch.createView(), blendMode: layer.blendMode };
-    comp.composite(view, [composited], encoder, drawn === 0);
-    ctx.device.queue.submit([encoder.finish()]);
-    drawn++;
+    markOverviewFailed(ctx, overview);
+    shown.push({ layer, overview });
   }
-  return drawn;
+  if (shown.length === 0) return 0;
+
+  renderer.setMatrices(msg.invViewProj, msg.eye);
+  renderer.setPixelRatio(msg.pixelRatio);
+  const descriptors = renderer.writeDescriptorTable(drawSet, shown.map(({ layer, overview }) => ({
+    modelMatrix: layer.modelMatrix,
+    invModelMatrix: layer.invModelMatrix,
+    volumeDims: [overview.width, overview.height, overview.depth],
+    contrastMin: layer.contrastMin,
+    contrastMax: layer.contrastMax,
+    gamma: layer.gamma,
+    // Opacity is 1: the minimap shows every layer at full strength.
+    opacity: 1,
+    sampleFormat: overview.format,
+    chunkGrid: {
+      gridDims: [overview.grid.x, overview.grid.y, overview.grid.z],
+      chunkDims: overview.chunkDims,
+    },
+  })));
+  const draws: VolumeMemberDraw[] = shown.map(({ layer, overview }, i) => ({
+    levels: [{
+      texture: overview.texture,
+      indirectionBuf: overview.indirectionBuf,
+      slotsX: overview.grid.x,
+      slotsY: overview.grid.y,
+      slotsZ: overview.grid.z,
+    }],
+    coarse: null,
+    colormap: ctx.getOrCreateLUT(layer.colormap),
+    descriptorBuffer: descriptors,
+    entityIndex: i,
+    // A layer off the canvas draws nothing, as its rays would miss.
+    scissor: computeScissorRect(layer.modelMatrix, msg.viewProj, width, height) ?? [0, 0, 0, 0],
+  }));
+  renderer.prepareMembers(drawSet, draws);
+
+  const scratchView = scratch.createView();
+  const depthView = renderer.transientDepthView(width, height);
+  const batches = batchLayers(
+    shown.map(({ layer }, i) => ({ rect: draws[i].scissor, blendMode: layer.blendMode })),
+    width,
+    height,
+  );
+  batches.forEach((batch, i) => {
+    renderer.renderMembers(drawSet, batch.layers, scratchView, width, height, depthView, true, encoder);
+    comp.composite(view, [{ view: scratchView, blendMode: batch.blendMode }], encoder, i === 0);
+  });
+  return shown.length;
 }
 
 /**
@@ -283,10 +335,10 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
   }
 
   const thumbnailView = thumbnailContext.getCurrentTexture().createView();
-  drawOverviewLayers(ctx, msg, thumbnailView, thumbnailOffscreenPool[0], size, size);
-  const compEncoder = ctx.device.createCommandEncoder();
-  comp.underlayBackground(thumbnailView, compEncoder);
-  ctx.device.queue.submit([compEncoder.finish()]);
+  const encoder = ctx.device.createCommandEncoder();
+  drawOverviewLayers(ctx, THUMBNAIL_DRAWS, msg, thumbnailView, thumbnailOffscreenPool[0], size, size, encoder);
+  comp.underlayBackground(thumbnailView, encoder);
+  ctx.device.queue.submit([encoder.finish()]);
 
   // The canvas is reused for the next thumbnail, so snapshot it rather than
   // transfer the canvas itself. The next render clears what this empties.
@@ -373,47 +425,6 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
     entry.uploaded.add(chunk.key);
   }
   ctx.device.queue.writeBuffer(entry.indirectionBuf, 0, entry.indirection);
-}
-
-/**
- * Bind one overview for a minimap or thumbnail draw: this channel's LUT, the
- * overview as a level laid out in place with its failed chunks marked, and a
- * transient descriptor carrying the layer's placement and contrast. The LUT
- * goes first, because binding the atlas rebuilds the bind group from it.
- */
-function bindOverviewLayer(
-  ctx: WorkerCtx,
-  overview: MinimapOverviewEntry,
-  layer: MinimapLayerParams,
-  invViewProj: Float32Array,
-  eye: Float32Array,
-  pixelRatio: number,
-): void {
-  markOverviewFailed(ctx, overview);
-  const renderer = ctx.getVolumeRenderer();
-  renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
-  renderer.setTierAtlases(
-    [{
-      texture: overview.texture,
-      indirectionBuf: overview.indirectionBuf,
-      slotsX: overview.grid.x,
-      slotsY: overview.grid.y,
-      slotsZ: overview.grid.z,
-    }],
-    null,
-  );
-  renderer.setMatrices(invViewProj, eye);
-  renderer.setPixelRatio(pixelRatio);
-  // Opacity is 1: the minimap shows every layer at full strength.
-  renderer.setTransientDescriptor(
-    layer.modelMatrix, layer.invModelMatrix,
-    [overview.width, overview.height, overview.depth],
-    layer.contrastMin, layer.contrastMax, layer.gamma, 1.0, overview.format,
-    {
-      gridDims: [overview.grid.x, overview.grid.y, overview.grid.z],
-      chunkDims: overview.chunkDims,
-    },
-  );
 }
 
 /** Mark the overview's chunks that failed for good, as the page last listed them. */
