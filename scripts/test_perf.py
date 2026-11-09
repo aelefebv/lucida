@@ -246,6 +246,54 @@ def test_a_network_is_for_a_server_the_runner_starts() -> None:
     assert perf.parse_args(["--network", "remote", "--port", "9888"]).network == ["remote"]
 
 
+def test_server_settings_are_sorted_key_value_pairs_the_runner_does_not_own() -> None:
+    assert perf.parse_server_env(["LUCIDA_SOURCE_READ_CONCURRENCY=64", "LUCIDA_CACHE_MB=512"]) == (
+        "LUCIDA_CACHE_MB=512",
+        "LUCIDA_SOURCE_READ_CONCURRENCY=64",
+    )
+    assert perf.parse_server_env(["RUST_LOG=lucida_store=debug"]) == ("RUST_LOG=lucida_store=debug",)
+    for texts, message in [
+        (["LUCIDA_SOURCE_READ_CONCURRENCY"], "a server setting is KEY=VALUE"),
+        (["--x=1"], "a server setting is KEY=VALUE"),
+        (["LUCIDA_BIND=127.0.0.1:1"], "the runner sets LUCIDA_BIND"),
+        (["LUCIDA_SOURCE_THROTTLE=remote"], "choose a profile with --network"),
+        (["A=1", "A=2"], "names A twice"),
+    ]:
+        with pytest.raises(perf.PerfError, match=message):
+            perf.parse_server_env(texts)
+    cases, _ = plan(datasets=["image"], scenarios=["cold-open"], server_env=("A=1",), networks=["local", "remote"])
+    assert {case.server_env for case in cases} == {("A=1",)}
+
+
+def test_server_settings_are_for_a_server_the_runner_starts() -> None:
+    with pytest.raises(SystemExit):
+        perf.parse_args(["--server-env", "A=1", "--server", "http://127.0.0.1:9876"])
+    assert perf.parse_args(["--server-env", "A=1", "--server-env", "B=2"]).server_env == ["A=1", "B=2"]
+
+
+def test_the_server_starts_with_the_settings_it_was_given(tmp_path: Path, monkeypatch) -> None:
+    started = []
+
+    class Started:
+        def __init__(self, argv, log, cwd, env) -> None:
+            started.append(env)
+
+        def wait(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(perf, "ProcessTree", Started)
+    monkeypatch.setattr(perf, "_answers", lambda url, timeout: True)
+    monkeypatch.setenv("LUCIDA_SOURCE_READ_CONCURRENCY", "8")
+    built = perf.Build(tmp_path / "lucida", tmp_path / "lucida-server", tmp_path / "dist")
+    perf.start_server(built, tmp_path, 9888, "remote", server_env=("LUCIDA_SOURCE_READ_CONCURRENCY=64",))
+    perf.start_server(built, tmp_path, 9888)
+    given, plain = started
+    assert given["LUCIDA_SOURCE_READ_CONCURRENCY"] == "64"
+    assert given["LUCIDA_SOURCE_THROTTLE"] == "remote"
+    # The caller's own setting never reaches a server the runner starts.
+    assert "LUCIDA_SOURCE_READ_CONCURRENCY" not in plain
+
+
 def test_a_network_starts_the_server_under_that_profile_alone(tmp_path: Path, monkeypatch) -> None:
     started = []
 
@@ -664,12 +712,19 @@ ADAPTER_DIR = "nvidia-ampere-hardware-adapter"
 
 
 def measured(
-    tmp_path: Path, name: str, ratio: float = 1.0, repeat: int = 1, error=None, network=None, **fields
+    tmp_path: Path,
+    name: str,
+    ratio: float = 1.0,
+    repeat: int = 1,
+    error=None,
+    network=None,
+    server_env=(),
+    **fields,
 ) -> perf.Row:
     """A run of `name` ("dataset.scenario") whose diagnostic read as `fields`
     over a settled, unthrottled default."""
     dataset, scenario = name.split(".")
-    case = perf.Case(CATALOG[dataset], SCENARIOS[scenario], ratio, repeat, network)
+    case = perf.Case(CATALOG[dataset], SCENARIOS[scenario], ratio, repeat, network, server_env)
     row = perf.Row(case, tmp_path / f"{case.id}.json", tmp_path / f"{case.id}.txt", 0 if error is None else 1, error)
     if error is None:
         row.fields = {
@@ -878,6 +933,29 @@ def test_runs_that_do_not_say_whether_they_were_throttled_are_never_kept_or_comp
     ]
     [cell], comparison = compared([unsaid], root)
     assert comparison.found(cell) is None
+
+
+def test_a_cell_under_server_settings_is_kept_and_compared_apart_from_one_without(tmp_path: Path) -> None:
+    settings = ("LUCIDA_SOURCE_READ_CONCURRENCY=64",)
+    root = saved(tmp_path, [measured(tmp_path, "collection.cold-open", network="remote", sourceThrottle=REMOTE)])
+    faster = measured(
+        tmp_path, "collection.cold-open", network="remote", server_env=settings, settleMs=200.0, sourceThrottle=REMOTE
+    )
+    [cell], comparison = compared([faster], root)
+    assert cell.key == "collection.cold-open@remote[LUCIDA_SOURCE_READ_CONCURRENCY=64]"
+    assert comparison.found(cell) is None
+    markdown = perf.render_markdown([faster], tmp_path, comparison)
+    assert "server settings: LUCIDA_SOURCE_READ_CONCURRENCY=64" in markdown.splitlines()
+    summary = perf.summary_json([faster], tmp_path, {}, comparison)
+    assert summary["cells"][0]["key"] == cell.key
+
+    saved(tmp_path, [faster])
+    cells = json.loads((root / ADAPTER_DIR / "dpr1.json").read_text(encoding="utf-8"))["cells"]
+    assert cells[cell.key]["serverEnv"] == list(settings)
+    assert cells["collection.cold-open@remote"]["serverEnv"] == []
+    # Saved under the settings, it is compared with runs under the same ones.
+    [again], comparison = compared([faster], root)
+    assert comparison.describe(again) == "within noise"
 
 
 def test_a_failed_throttled_run_keeps_the_network_it_asked_for(tmp_path: Path) -> None:
