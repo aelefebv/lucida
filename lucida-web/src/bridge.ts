@@ -94,13 +94,24 @@ export interface SourceThrottleReport {
   bytes_per_sec?: number | null;
 }
 
+/** Mirror of `lucida_protocol::LinkThrottleReport`. */
+export interface LinkThrottleReport {
+  /** Absent when the values are not a named profile's. */
+  profile?: string | null;
+  /** Added to every round trip on the session socket, half each way. */
+  latency_ms: number;
+  /** The cap on what the server sends one connection. Absent when uncapped. */
+  bytes_per_sec?: number | null;
+}
+
 /**
- * One dataset health reply. The throttle is the server's, on every source
- * read, and null when it reads sources unthrottled.
+ * One dataset health reply. The throttles are the server's, on every source
+ * read and on the session socket, each null when the server has none.
  */
 export interface DatasetHealthReply {
   datasets: DatasetSourceHealth[];
   sourceThrottle: SourceThrottleReport | null;
+  linkThrottle: LinkThrottleReport | null;
 }
 
 export interface DatasetImportWarning {
@@ -881,7 +892,12 @@ export class Bridge {
   }
 
   private handleDatasetHealth(msg: unknown) {
-    const obj = msg as { request_id?: unknown; datasets?: unknown; source_throttle?: unknown };
+    const obj = msg as {
+      request_id?: unknown;
+      datasets?: unknown;
+      source_throttle?: unknown;
+      link_throttle?: unknown;
+    };
     const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
     if (!requestId) return;
 
@@ -897,11 +913,15 @@ export class Bridge {
       typeof obj.source_throttle === "object" && obj.source_throttle !== null
         ? (obj.source_throttle as SourceThrottleReport)
         : null;
+    const linkThrottle =
+      typeof obj.link_throttle === "object" && obj.link_throttle !== null
+        ? (obj.link_throttle as LinkThrottleReport)
+        : null;
     bridgeLog("dataset_health.received", {
       requestId,
       datasetCount: datasets.length,
     }, this.ws?.readyState);
-    pending.resolve({ datasets, sourceThrottle });
+    pending.resolve({ datasets, sourceThrottle, linkThrottle });
   }
 
   /**

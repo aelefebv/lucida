@@ -24,6 +24,7 @@ import {
   type DatasetOpenProgressDiagnostic,
   type DatasetOpenStage,
   type DatasetSourceHealth,
+  type LinkThrottleReport,
   type MessageRejection,
   type PresenceState,
   type SourceThrottleReport,
@@ -805,6 +806,12 @@ const expectedSourceThrottle: SourceThrottleReport = {
   bytes_per_sec: 18874368,
 };
 
+const expectedLinkThrottle: LinkThrottleReport = {
+  profile: "broadband",
+  latency_ms: 40,
+  bytes_per_sec: 12500000,
+};
+
 const expectedSourceHealth: DatasetSourceHealth = {
   workspace_dataset_id: "wds-0f3a",
   name: "kidney-multiplex.zarr",
@@ -1196,12 +1203,14 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       request_id: string;
       datasets: DatasetSourceHealth[];
       source_throttle: SourceThrottleReport;
+      link_throttle: LinkThrottleReport;
     };
     expect(envelope).toStrictEqual({
       type: "dataset_health",
       request_id: "web-health-55e0",
       datasets: [expectedSourceHealth],
       source_throttle: expectedSourceThrottle,
+      link_throttle: expectedLinkThrottle,
     });
 
     const { bridge, ws } = openBridge();
@@ -1218,6 +1227,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     await expect(reply).resolves.toStrictEqual({
       datasets: [expectedSourceHealth],
       sourceThrottle: expectedSourceThrottle,
+      linkThrottle: expectedLinkThrottle,
     });
   });
 
@@ -1431,6 +1441,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         permit_wait_us: [3100000, PHASE_UNSET, PHASE_UNSET],
         backend_read_us: [211400, PHASE_UNSET, PHASE_UNSET],
         coalesced_wait_us: [PHASE_UNSET, PHASE_UNSET, PHASE_UNSET],
+        decode_wait_us: [1730, PHASE_UNSET, PHASE_UNSET],
         decompress_us: [4512, PHASE_UNSET, PHASE_UNSET],
         slice_encode_us: [903, PHASE_UNSET, PHASE_UNSET],
         handoff_us: [61, 55, PHASE_UNSET],
@@ -1466,7 +1477,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
           row.backendBytes,
         ]),
     ).toEqual([
-      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61, 0, null, null, 131072],
+      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 1730 + 4512 + 903 + 61, 0, null, null, 131072],
       [2559, "chunk", 96 + 41 + 74 + 3 + 55, 0, null, null, null],
       // The metadata read keys on the open, not on a correlation label, and
       // its span is in its own column rather than in any phase.

@@ -22,11 +22,13 @@ use lucida_protocol::{
 };
 use lucida_store::cache::CachedStore;
 use lucida_store::fill::FillValue;
+use lucida_store::source_limiter::ReaderId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
 use crate::BroadcastItem;
 use crate::binding::ChunkResolver;
+use crate::decode_pool::DecodePool;
 use crate::sample_histogram::SampleHistogram;
 use crate::session::Session;
 use crate::source_region::{RegionReadError, VolumeRegion, fetch_volume_region};
@@ -2774,31 +2776,37 @@ async fn generate_chunk_from_source_level(
     .await?;
     let owned = owned_source_region(source_dims, output_dims, level, coords)
         .map_err(GeneratedChunkBuildError::Downsample)?;
-    let samples = region_histogram(
-        &source_data,
-        image.multiscale.data_type,
-        source_region,
-        region_dims,
-        owned,
-    )
-    .map_err(GeneratedChunkBuildError::Downsample)?;
     let fill = resolver
         .level_info(&image.image_id, source_level_index as u32)
         .map(|info| info.fill_value)
         .unwrap_or_default();
-    let bytes = downsample_region_to_generated_chunk(
-        &source_data,
-        image.multiscale.data_type,
-        source_region,
-        region_dims,
-        source_dims,
-        output_dims,
-        level,
-        coords,
-        fill,
-    )
-    .map_err(GeneratedChunkBuildError::Downsample)?;
-    Ok((bytes, samples))
+    let data_type = image.multiscale.data_type;
+    let level = level.clone();
+    // Counting and pooling visit every source sample of the region, CPU work
+    // that would hold an async worker every chunk serve needs, so it takes a
+    // decode thread. Generation is one reader there, as it is for reads.
+    DecodePool::global()
+        .acquire(ReaderId::UNATTRIBUTED)
+        .await
+        .run(move || {
+            let samples =
+                region_histogram(&source_data, data_type, source_region, region_dims, owned)
+                    .map_err(GeneratedChunkBuildError::Downsample)?;
+            let bytes = downsample_region_to_generated_chunk(
+                &source_data,
+                data_type,
+                source_region,
+                region_dims,
+                source_dims,
+                output_dims,
+                &level,
+                coords,
+                fill,
+            )
+            .map_err(GeneratedChunkBuildError::Downsample)?;
+            Ok((bytes, samples))
+        })
+        .await
 }
 
 fn spatial_dims_u32(shape: [u64; 5]) -> Result<[u32; 3], &'static str> {

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.25.1](https://github.com/aelefebv/lucida/compare/v0.25.0...v0.25.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **fetch:** fetches in flight no longer follow the decode worker count ([#1412](https://github.com/aelefebv/lucida/issues/1412)) ([17c2998](https://github.com/aelefebv/lucida/commit/17c29982dde1c280dc24e5557488e9c7ceceb337))
+
+
+### Performance
+
+* **server:** decode and frame chunks off the async workers ([#1418](https://github.com/aelefebv/lucida/issues/1418)) ([e850a2d](https://github.com/aelefebv/lucida/commit/e850a2df79c96d3b3d75fc7e85214ecece1b4528))
+* **store:** read a collection's metadata 256 wide and build its labels side by side ([#1413](https://github.com/aelefebv/lucida/issues/1413)) ([d1e9fac](https://github.com/aelefebv/lucida/commit/d1e9fac49ac90a2adc2b0c1b58df87af7121daa6))
+
 ## [0.25.0](https://github.com/aelefebv/lucida/compare/v0.24.0...v0.25.0) (2026-11-09)
 
 

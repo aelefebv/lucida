@@ -56,8 +56,8 @@ use lucida_protocol::{
     DirectFetchDescriptor, DirectImageSpec, FetchSource, GeneratedAvailabilityDelta,
     GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
     GeneratedLevelAvailability, GeneratedLevelHistogram, GeneratedLevelSummary, HistogramBin,
-    LABEL_NONE, LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET,
-    ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus,
+    LABEL_NONE, LevelAddress, LinkThrottleReport, LocalFetchDescriptor, MetadataReadPhase,
+    PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus,
     SourceThrottleReport, TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
@@ -1660,6 +1660,11 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     jitter_ms: 100,
                     bytes_per_sec: Some(18 * 1024 * 1024),
                 }),
+                link_throttle: Some(LinkThrottleReport {
+                    profile: Some("broadband".into()),
+                    latency_ms: 40,
+                    bytes_per_sec: Some(12_500_000),
+                }),
             },
             {
                 let mut keys = req(
@@ -1670,6 +1675,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                         "/datasets",
                         "/source_throttle/latency_ms",
                         "/source_throttle/jitter_ms",
+                        "/link_throttle/latency_ms",
                     ],
                 );
                 keys.extend(req("/datasets/0", SOURCE_HEALTH_REQUIRED));
@@ -1796,6 +1802,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     permit_wait_us: vec![3_100_000, PHASE_UNSET, PHASE_UNSET],
                     backend_read_us: vec![211_400, PHASE_UNSET, PHASE_UNSET],
                     coalesced_wait_us: vec![PHASE_UNSET, PHASE_UNSET, PHASE_UNSET],
+                    decode_wait_us: vec![1_730, PHASE_UNSET, PHASE_UNSET],
                     decompress_us: vec![4_512, PHASE_UNSET, PHASE_UNSET],
                     slice_encode_us: vec![903, PHASE_UNSET, PHASE_UNSET],
                     handoff_us: vec![61, 55, PHASE_UNSET],
@@ -1828,6 +1835,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/batch/permit_wait_us",
                     "/batch/backend_read_us",
                     "/batch/coalesced_wait_us",
+                    "/batch/decode_wait_us",
                     "/batch/decompress_us",
                     "/batch/slice_encode_us",
                     "/batch/handoff_us",
