@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
-use lucida_protocol::codec::ChunkCodec;
+use lucida_protocol::codec::{ChunkCodec, ChunkRelayReport};
 use lucida_protocol::{
     ChunkFailureKind, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
     DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
@@ -620,6 +620,10 @@ pub enum ServerMessage {
         /// at full speed, which is the default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link_throttle: Option<LinkThrottleReport>,
+        /// Whether the server sends this socket chunks still encoded, and by
+        /// which setting. Absent from servers that predate the relay.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chunk_relay: Option<ChunkRelayReport>,
     },
     /// Runtime generated-level metadata/readiness update. Server-authored and
     /// unsequenced; clients merge it into their local availability view.

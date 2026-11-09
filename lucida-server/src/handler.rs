@@ -11,6 +11,7 @@ use lucida_core::protocol::{
     ChunkMessage, ClientId, ClientMessage, CommandRejection, MessageRejection, PeerIdentity,
     ServerMessage,
 };
+use lucida_protocol::codec::{BytesCodec, ChunkRelayReport, CodecSet};
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
@@ -24,7 +25,7 @@ use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::binding::ChunkResolver;
-use crate::chunk_read::{ChunkReadError, fetch_chunk};
+use crate::chunk_read::{ChunkRead, ChunkReadError, fetch_chunk};
 use crate::chunk_serves::ChunkServes;
 use crate::connection::{ClientSender, CloseSignal, client_queue};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
@@ -40,6 +41,7 @@ use crate::open_diagnostics::{
 };
 use crate::session::Session;
 use crate::timing::{FLUSH_INTERVAL, MetadataReadSink, RequestProbe, TimingBuffer};
+use crate::wire_chunk::{PRODUCED_CODEC, compress_produced};
 use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
 use crate::{BroadcastItem, GeneratedConfig, UnicastRoutes};
 
@@ -50,6 +52,7 @@ pub async fn handle_workspace_client(
     live: Arc<LiveWorkspace>,
     manager: Arc<WorkspaceManager>,
     principal: AuthPrincipal,
+    relay_chunks: bool,
 ) {
     let generated_config = manager.generated_config();
     handle_client_inner(
@@ -61,6 +64,7 @@ pub async fn handle_workspace_client(
             manager,
             principal,
         },
+        relay_chunks,
     )
     .await;
 }
@@ -93,6 +97,7 @@ async fn handle_client_inner(
     ws: WebSocket,
     generated_config: GeneratedConfig,
     ctx: WorkspaceScope,
+    relay_chunks: bool,
 ) {
     let session = Arc::clone(&ctx.live.session);
     let tx = ctx.live.tx.clone();
@@ -117,6 +122,14 @@ async fn handle_client_inner(
     // peer dataset identities.
     let timings = Arc::new(TimingBuffer::new());
     let chunk_serves = ChunkServes::new();
+    // What this connection said it decodes, so a chunk can reach it still
+    // encoded. Nothing until it says, and nothing at all when the relay
+    // policy keeps this connection's chunks decoded.
+    let mut chunk_codecs = CodecSet::default();
+    let chunk_relay = ChunkRelayReport {
+        setting: ctx.manager.runtime_config().chunk_relay,
+        relays: relay_chunks,
+    };
 
     // Presentational identity for this peer's cursor, authored server-side
     // from the authenticated principal so it cannot be spoofed.
@@ -507,6 +520,7 @@ async fn handle_client_inner(
                                 datasets,
                                 source_throttle: lucida_store::source_throttle::report(),
                                 link_throttle: link_throttle::report(),
+                                chunk_relay: Some(chunk_relay),
                             };
                             let senders = unicast_routes.lock().await;
                             if let Some(sender) = senders.get(&id) {
@@ -793,6 +807,7 @@ async fn handle_client_inner(
                                             &resolver,
                                             &cache,
                                             &client,
+                                            chunk_codecs,
                                             probe,
                                         )
                                         .await;
@@ -816,6 +831,7 @@ async fn handle_client_inner(
                                             &key,
                                             &derived_chunks,
                                             &client,
+                                            chunk_codecs,
                                             probe,
                                         )
                                         .await;
@@ -857,10 +873,16 @@ async fn handle_client_inner(
                                 "ws.chunk_cancel"
                             );
                         }
-                        // Every chunk is still served decoded, which a
-                        // client that declares codecs reads as well.
                         ChunkMessage::ChunkCodecs { codecs } => {
-                            tracing::debug!(client_id = %id, ?codecs, "ws.chunk_codecs");
+                            tracing::debug!(
+                                client_id = %id,
+                                ?codecs,
+                                relays = relay_chunks,
+                                "ws.chunk_codecs"
+                            );
+                            if relay_chunks {
+                                chunk_codecs = codecs.into_iter().collect();
+                            }
                         }
                     }
                     continue;
@@ -1490,6 +1512,7 @@ async fn serve_chunk_from_store(
     resolver: &ChunkResolver,
     cache: &CachedStore,
     client: &ClientSender,
+    codecs: CodecSet,
     mut probe: RequestProbe,
 ) {
     let fail = |error: ChunkReadError, probe: RequestProbe| async move {
@@ -1539,11 +1562,26 @@ async fn serve_chunk_from_store(
             // The wait ends when a decode thread takes the work, so starting
             // that thread counts as waiting rather than as decompression.
             probe.mark(ServerPhase::DecodeWait);
-            let read = match fetched.decode(Some(&mut probe)) {
-                Ok(read) => read,
-                Err(error) => return Some((error, probe)),
+            let buf = if let Some((stored, chain)) = fetched.relayable(codecs) {
+                encode_chunk_frame(client_id, &dataset, &image, key, chain, stored)
+            } else {
+                match fetched.decode(Some(&mut probe)) {
+                    Ok(ChunkRead::Present(bytes)) => {
+                        encode_chunk_frame(client_id, &dataset, &image, key, &[], &bytes)
+                    }
+                    // An absent chunk's fill is the server's own making, so
+                    // it crosses the link as a generated chunk does.
+                    Ok(absent) => produced_frame(
+                        client_id,
+                        &dataset,
+                        &image,
+                        key,
+                        codecs,
+                        &absent.into_bytes(),
+                    ),
+                    Err(error) => return Some((error, probe)),
+                }
             };
-            let buf = encode_chunk_frame(client_id, &dataset, &image, key, &read.into_bytes());
             probe.mark(ServerPhase::SliceEncode);
             hand_off(&client_queue, buf, probe);
             None
@@ -1573,6 +1611,7 @@ async fn serve_generated_chunk_request(
     chunk_key: &str,
     derived_chunks: &Arc<DerivedChunkCache>,
     client: &ClientSender,
+    codecs: CodecSet,
     mut probe: RequestProbe,
 ) {
     // A generated chunk never touches the source store, so its permit,
@@ -1593,7 +1632,7 @@ async fn serve_generated_chunk_request(
             );
             slot.run(move || {
                 probe.mark(ServerPhase::DecodeWait);
-                let buf = encode_chunk_frame(client_id, &dataset, &image, key, &bytes);
+                let buf = produced_frame(client_id, &dataset, &image, key, codecs, &bytes);
                 probe.mark(ServerPhase::SliceEncode);
                 hand_off(&client_queue, buf, probe);
             })
@@ -1784,25 +1823,41 @@ fn send_generated_chunk_status(
     let _ = client.send(Message::Text(json.into()));
 }
 
+/// A frame for a chunk the server made itself, compressed for a client that
+/// decodes [`PRODUCED_CODEC`] when that saves enough.
+fn produced_frame(
+    client_id: ClientId,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
+    chunk_key: impl std::fmt::Display,
+    codecs: CodecSet,
+    bytes: &[u8],
+) -> Vec<u8> {
+    match compress_produced(codecs, bytes) {
+        Some(compressed) => encode_chunk_frame(
+            client_id,
+            dataset_id,
+            image_id,
+            chunk_key,
+            &[PRODUCED_CODEC],
+            &compressed,
+        ),
+        None => encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &[], bytes),
+    }
+}
+
+/// A chunk frame for `bytes`, still in `codecs` when there are any; see
+/// [`lucida_protocol::codec::encode_chunk_frame`] for the layout.
 fn encode_chunk_frame(
     client_id: ClientId,
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: impl std::fmt::Display,
+    codecs: &[BytesCodec],
     bytes: &[u8],
 ) -> Vec<u8> {
-    // Binary response: [client_id: u32 LE][key_len: u16 LE][key][data].
-    // The composite key is "{dataset_id}/{image_id}/{chunk_key}".
     let composite_key = format!("{dataset_id}/{image_id}/{chunk_key}");
-    let key_bytes = composite_key.as_bytes();
-    let key_len = key_bytes.len() as u16;
-
-    let mut buf = Vec::with_capacity(4 + 2 + key_bytes.len() + bytes.len());
-    buf.extend_from_slice(&(client_id as u32).to_le_bytes());
-    buf.extend_from_slice(&key_len.to_le_bytes());
-    buf.extend_from_slice(key_bytes);
-    buf.extend_from_slice(bytes);
-    buf
+    lucida_protocol::codec::encode_chunk_frame(client_id as u32, &composite_key, codecs, bytes)
 }
 
 async fn send_open_progress(
@@ -2280,7 +2335,7 @@ mod tests {
     fn encode_chunk_frame_uses_normal_chunk_key_envelope() {
         let dataset_id = DatasetId("ds1".into());
         let image_id = ImageId("img1".into());
-        let buf = encode_chunk_frame(9, &dataset_id, &image_id, "2/0/0/0/0/0", &[1, 2, 3]);
+        let buf = encode_chunk_frame(9, &dataset_id, &image_id, "2/0/0/0/0/0", &[], &[1, 2, 3]);
 
         let client_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(client_id, 9);
@@ -2306,6 +2361,7 @@ mod tests {
             &tiny_resolver(),
             &cache,
             &tx,
+            CodecSet::default(),
             test_probe(1, &timings),
         )
         .await;
@@ -2347,6 +2403,7 @@ mod tests {
             resolver,
             &cache,
             &tx,
+            CodecSet::default(),
             test_probe(1, &timings),
         )
         .await;
@@ -2510,6 +2567,7 @@ mod tests {
             &tiny_resolver(),
             &cache,
             &tx,
+            CodecSet::default(),
             test_probe(1, &timings),
         )
         .await;
@@ -2553,6 +2611,7 @@ mod tests {
             &resolver,
             &cache,
             &tx,
+            CodecSet::default(),
             test_probe(1, &timings),
         )
         .await;
@@ -2625,6 +2684,7 @@ mod tests {
             "2/0/0/0/0/0",
             &cache,
             &tx,
+            CodecSet::default(),
             test_probe(1, &timings),
         )
         .await;
@@ -2648,6 +2708,51 @@ mod tests {
         assert_eq!(&buf[6 + key_len..], &[9, 8, 7, 6]);
     }
 
+    /// A generated chunk is the server's own making, so it crosses the link
+    /// compressed for a client that decodes lz4, and decodes to what it was.
+    #[tokio::test]
+    async fn a_generated_chunk_crosses_compressed_to_a_client_that_decodes_lz4() {
+        let (tx, mut rx) = client_queue();
+        let cache = Arc::new(DerivedChunkCache::default());
+        let samples: Vec<u8> = (0..4096u32).map(|i| (i / 64) as u8).collect();
+        cache.seed_ready_chunk(
+            ImageId("img1".into()),
+            2,
+            "2/0/0/0/0/0".into(),
+            samples.clone(),
+        );
+
+        let timings = Arc::new(TimingBuffer::new());
+        serve_generated_chunk_request(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("img1".into()),
+            2,
+            "2/0/0/0/0/0",
+            &cache,
+            &tx,
+            [lucida_protocol::codec::ChunkCodec::Lz4]
+                .into_iter()
+                .collect(),
+            test_probe(1, &timings),
+        )
+        .await;
+
+        assert_eq!(sole_outcome(&timings), TimingRowOutcome::Delivered);
+        let Message::Binary(buf) = rx.recv().await.expect("message") else {
+            panic!("expected binary chunk frame");
+        };
+        let frame = lucida_protocol::codec::parse_chunk_frame(&buf).unwrap();
+        assert_eq!(frame.composite_key, "ds1/img1/2/0/0/0/0/0");
+        assert_eq!(frame.codecs, [PRODUCED_CODEC]);
+        assert!(frame.payload.len() < samples.len() / 4);
+        assert_eq!(
+            lucida_core::chunk_codec::decode_relayed(&frame.codecs, frame.payload, samples.len())
+                .unwrap(),
+            samples
+        );
+    }
+
     /// The generated-chunk asymmetry: the server answers with a status, no
     /// binary frame ever arrives, and the requester's bracket stays open. The
     /// row has to say so — read as an ordinary unfinished serve it would look
@@ -2667,6 +2772,7 @@ mod tests {
             "2/0/0/0/0/0",
             &cache,
             &tx,
+            CodecSet::default(),
             test_probe(1, &timings),
         )
         .await;
@@ -2825,6 +2931,7 @@ mod tests {
                     &resolver,
                     &cache,
                     &busy_tx,
+                    CodecSet::default(),
                     test_probe(1, &Arc::new(TimingBuffer::new())),
                 )
                 .await;
@@ -2850,6 +2957,7 @@ mod tests {
                     &resolver,
                     &cache,
                     &newcomer_tx,
+                    CodecSet::default(),
                     test_probe(2, &Arc::new(TimingBuffer::new())),
                 )
                 .await;

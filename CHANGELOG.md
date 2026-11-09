@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.26.0](https://github.com/aelefebv/lucida/compare/v0.25.1...v0.26.0) (2026-11-09)
+
+
+### Features
+
+* **server:** a dev-only link throttle on the session socket, set by the perf networks ([#1409](https://github.com/aelefebv/lucida/issues/1409)) ([c31b9d9](https://github.com/aelefebv/lucida/commit/c31b9d9c203366a8165f6357c7231e00f8766332))
+* the page declares the codecs it decodes and decodes encoded chunk frames ([#1421](https://github.com/aelefebv/lucida/issues/1421)) ([8328f03](https://github.com/aelefebv/lucida/commit/8328f03fcb916ffc1d7cca5f484ffedc4a650f16))
+
+
+### Bug Fixes
+
+* **trace:** judge browser.decode on the decode worker's own time ([#1424](https://github.com/aelefebv/lucida/issues/1424)) ([f44ac32](https://github.com/aelefebv/lucida/commit/f44ac3287efcba8f0a9551693431878efab20991))
+* **trace:** judge browser.decode on the worker's own time ([f44ac32](https://github.com/aelefebv/lucida/commit/f44ac3287efcba8f0a9551693431878efab20991))
+
+
+### Performance
+
+* **server:** relay chunks still encoded to a remote page that decodes their codecs ([#1425](https://github.com/aelefebv/lucida/issues/1425)) ([d79b68a](https://github.com/aelefebv/lucida/commit/d79b68a7e0bb56158340b33db9cfbb0de0d82bb1))
+* **web:** keep a collection's pan and zoom from costing every tile ([#1422](https://github.com/aelefebv/lucida/issues/1422)) ([b66a8bc](https://github.com/aelefebv/lucida/commit/b66a8bca128175c1416ec52d80a0b3673d5e10d5))
+
 ## [0.25.1](https://github.com/aelefebv/lucida/compare/v0.25.0...v0.25.1) (2026-11-09)
 
 

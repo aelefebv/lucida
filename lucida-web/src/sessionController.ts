@@ -22,6 +22,7 @@ import {
 } from "./manifestTypes.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import { levelChunkBytes } from "./pipeline/fetch/contentSource.ts";
+import { compileCodecModule } from "./pipeline/fetch/codecModule.ts";
 import { readCacheKnobs, subscribeCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
 import { pageDeviceBudgets } from "./deviceBudget.ts";
 import type {
@@ -287,7 +288,7 @@ export class SessionController {
 
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
-    const decodePool = new DecodePool();
+    const decodePool = new DecodePool(undefined, compileCodecModule);
     this.contentSource = new ProxiedContentSource(
       (json) => this.session?.bridge.send(json),
     );

@@ -74,5 +74,9 @@
     "profile": "broadband",
     "latency_ms": 40,
     "bytes_per_sec": 12500000
+  },
+  "chunk_relay": {
+    "setting": "auto",
+    "relays": true
   }
 }

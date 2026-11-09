@@ -47,7 +47,7 @@ use lucida_core::scene::{
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, RenderMode,
 };
 use lucida_core::view::ViewState;
-use lucida_protocol::codec::ChunkCodec;
+use lucida_protocol::codec::{ChunkCodec, ChunkRelayReport, ChunkRelaySetting};
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
@@ -1667,6 +1667,12 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     latency_ms: 40,
                     bytes_per_sec: Some(12_500_000),
                 }),
+                // A link throttle makes `auto` relay even to a page on this
+                // machine.
+                chunk_relay: Some(ChunkRelayReport {
+                    setting: ChunkRelaySetting::Auto,
+                    relays: true,
+                }),
             },
             {
                 let mut keys = req(
@@ -1678,6 +1684,8 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                         "/source_throttle/latency_ms",
                         "/source_throttle/jitter_ms",
                         "/link_throttle/latency_ms",
+                        "/chunk_relay/setting",
+                        "/chunk_relay/relays",
                     ],
                 );
                 keys.extend(req("/datasets/0", SOURCE_HEALTH_REQUIRED));

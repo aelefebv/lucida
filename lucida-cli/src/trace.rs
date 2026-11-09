@@ -16,6 +16,7 @@ use lucida_core::DatasetId;
 use lucida_core::camera::{Camera, Framing};
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{Colormap, DatasetDisplaySettings, DocumentState, RenderMode, Scene};
+use lucida_protocol::codec::ChunkRelayReport;
 use lucida_protocol::{
     DatasetSourceCacheStats, DatasetSourceHealth, LinkThrottleReport, SourceThrottleReport,
 };
@@ -557,6 +558,13 @@ pub struct TraceRunHeader {
     /// file written before the driver recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_throttle: Option<LinkThrottleRecord>,
+    /// Whether the server sent chunks still encoded, and by which setting, as
+    /// it answered the driver. The driver and the page it launches connect
+    /// from one machine, so the page's connection resolved the same way.
+    /// Absent from a run file written before the relay, and from a server
+    /// that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_relay: Option<ChunkRelayReport>,
     pub server_url: String,
     pub workspace_id: String,
     /// The settled frame, when the caller asked for one: a PNG of the page
@@ -2698,6 +2706,7 @@ pub struct DriverFacts {
     pub server_warmth: ServerWarmth,
     pub source_throttle: SourceThrottleRecord,
     pub link_throttle: LinkThrottleRecord,
+    pub chunk_relay: Option<ChunkRelayReport>,
     pub server_url: String,
     pub workspace_id: String,
     /// Where to write the settled frame, when the caller wants one.
@@ -2733,6 +2742,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             server_warmth: facts.server_warmth.clone(),
             source_throttle: Some(facts.source_throttle.clone()),
             link_throttle: Some(facts.link_throttle.clone()),
+            chunk_relay: facts.chunk_relay,
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
             screenshot: facts.screenshot.clone(),
@@ -3065,6 +3075,7 @@ mod tests {
             server_warmth: cold(),
             source_throttle: SourceThrottleRecord::from_report(None),
             link_throttle: LinkThrottleRecord::from_report(None),
+            chunk_relay: None,
             server_url: "http://host".to_string(),
             workspace_id: "ws".to_string(),
             screenshot: None,
@@ -3087,6 +3098,7 @@ mod tests {
                 server_warmth: cold(),
                 source_throttle: Some(SourceThrottleRecord::from_report(None)),
                 link_throttle: Some(LinkThrottleRecord::from_report(None)),
+                chunk_relay: None,
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
                 screenshot: None,
