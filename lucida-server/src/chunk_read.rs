@@ -5,14 +5,17 @@
 //! store, whole or out of its shard. [`FetchedChunk::decode`] decodes, fills
 //! an absent chunk, and slices out the wire timepoint and channel. On a
 //! regridded level it assembles the declared chunk from the stored chunks
-//! under it. [`read_chunk`] does both, the decode on the [`DecodePool`]. The
-//! chunk handler and coarse generation go through these and do none of the
-//! steps themselves.
+//! under it. [`read_chunk`] does both, the decode on the [`DecodePool`]. For
+//! a client that decodes the stored codecs itself, [`FetchedChunk::relayable`]
+//! hands over the stored bytes instead. The chunk handler and coarse
+//! generation go through these and do none of the steps themselves.
 
 use bytes::Bytes;
 use lucida_content::{ChunkKey, ImageId};
+use lucida_protocol::codec::{BytesCodec, CodecSet};
 use lucida_protocol::{ChunkFailureKind, ServerPhase};
 use lucida_store::cache::{CachedStore, SourceReadTiming, TimedRead};
+use lucida_store::codec::{ByteOrder, StorageCompression};
 use lucida_store::fill::FillValue;
 use lucida_store::import_types::Regrid;
 use lucida_store::layout::ChunkByteLayout;
@@ -23,6 +26,7 @@ use crate::decode::{DecodeError, decode_storage_bytes};
 use crate::decode_pool::DecodePool;
 use crate::open_diagnostics::is_not_found;
 use crate::timing::RequestProbe;
+use crate::wire_chunk::saves_enough;
 
 /// What one chunk key reads as.
 #[derive(Debug, PartialEq, Eq)]
@@ -111,6 +115,30 @@ enum Fetched {
 }
 
 impl FetchedChunk {
+    /// The stored bytes and the codecs they are in, when a client that
+    /// decodes `codecs` can be sent them as they are. The client decodes them
+    /// against its level's chunk size, so the stored chunk must be exactly one
+    /// wire chunk, and the chain must leave its samples little-endian and in C
+    /// order, as the wire carries them. A chunk that bundles timepoints or
+    /// channels, a regridded one, a transposed or big-endian one, or one that
+    /// saves too little of the link is `None`: decode it.
+    pub fn relayable(&self, codecs: CodecSet) -> Option<(&[u8], &[BytesCodec])> {
+        let Fetched::Stored { bytes, level, .. } = &self.0 else {
+            return None;
+        };
+        let StorageCompression::Codecs(chain) = &level.compression else {
+            return None;
+        };
+        let layout = &level.chunk_byte_layout;
+        let samples_as_wired = chain.array_to_array.is_empty()
+            && (chain.byte_order == ByteOrder::Little || chain.sample_size <= 1);
+        (samples_as_wired
+            && layout.on_disk_byte_size == layout.canonical_byte_size
+            && codecs.decodes(&chain.bytes_to_bytes)
+            && saves_enough(bytes.len(), layout.canonical_byte_size))
+        .then_some((bytes.as_ref(), chain.bytes_to_bytes.as_slice()))
+    }
+
     /// The bytes one wire request for the key is served, or why there are
     /// none. `probe` gets the decompress phase when there was anything to
     /// decompress.
@@ -1201,5 +1229,130 @@ mod tests {
             ),
             "{long:?}"
         );
+    }
+
+    /// 64 one-byte samples per chunk, stored behind `codecs`.
+    fn compressed_level(chain: StorageCompression) -> LevelInfo {
+        LevelInfo {
+            compression: chain,
+            chunk_shape: vec![1, 1, 1, 8, 8],
+            chunk_byte_layout: ChunkByteLayout {
+                canonical_byte_size: 64,
+                on_disk_byte_size: 64,
+                ..four_byte_level().chunk_byte_layout
+            },
+            ..four_byte_level()
+        }
+    }
+
+    fn zstd(raw: &[u8]) -> Vec<u8> {
+        zstd::encode_all(raw, 3).unwrap()
+    }
+
+    fn codecs(names: &[lucida_protocol::codec::ChunkCodec]) -> CodecSet {
+        names.iter().copied().collect()
+    }
+
+    /// What `relayable` hands over for `stored` at `level`, for a client that
+    /// decodes `declared`.
+    async fn relayed(
+        level: LevelInfo,
+        stored: &[u8],
+        declared: CodecSet,
+    ) -> Option<(Vec<u8>, Vec<BytesCodec>)> {
+        let resolver = resolver_with(vec![level]);
+        let store = object_store::memory::InMemory::new();
+        put_chunk(&store, &resolver, "0/0/0/0/0/0", stored).await;
+        let fetched = fetch_chunk(
+            &resolver,
+            &cached(store),
+            &image_id(),
+            &key("0/0/0/0/0/0"),
+            ReaderId::UNATTRIBUTED,
+            RequestLabel::UNATTRIBUTED,
+            None,
+        )
+        .await
+        .unwrap();
+        fetched
+            .relayable(declared)
+            .map(|(bytes, chain)| (bytes.to_vec(), chain.to_vec()))
+    }
+
+    use lucida_protocol::codec::ChunkCodec;
+
+    #[tokio::test]
+    async fn a_chunk_is_relayed_as_stored_to_a_client_that_decodes_its_codecs() {
+        let stored = zstd(&[0u8; 64]);
+        let level = compressed_level(StorageCompression::compressed(BytesCodec::Zstd, 1));
+        assert_eq!(
+            relayed(level.clone(), &stored, codecs(&[ChunkCodec::Zstd])).await,
+            Some((stored.clone(), vec![BytesCodec::Zstd]))
+        );
+        assert_eq!(
+            relayed(level.clone(), &stored, CodecSet::default()).await,
+            None
+        );
+        assert_eq!(
+            relayed(level, &stored, codecs(&[ChunkCodec::Gzip])).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_that_saves_too_little_of_the_link_is_decoded() {
+        let mut x = 0x2545_f491_u32;
+        let noise: Vec<u8> = (0..64)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        let level = compressed_level(StorageCompression::compressed(BytesCodec::Zstd, 1));
+        assert_eq!(
+            relayed(level, &zstd(&noise), codecs(&[ChunkCodec::Zstd])).await,
+            None
+        );
+    }
+
+    /// The client decodes a relayed chunk to its level's chunk size with its
+    /// samples as the wire carries them, so anything the server would still
+    /// have to rearrange is decoded here.
+    #[tokio::test]
+    async fn a_chunk_the_wire_would_need_rearranged_is_decoded() {
+        let every = codecs(&[ChunkCodec::Zstd, ChunkCodec::Crc32c]);
+        let chain = |byte_order, sample_size, array_to_array| {
+            StorageCompression::Codecs(lucida_store::codec::CodecChain {
+                array_to_array,
+                byte_order,
+                sample_size,
+                bytes_to_bytes: vec![BytesCodec::Zstd],
+            })
+        };
+        let big_endian = compressed_level(chain(ByteOrder::Big, 2, Vec::new()));
+        assert_eq!(relayed(big_endian, &zstd(&[0; 64]), every).await, None);
+        let one_byte_big_endian = compressed_level(chain(ByteOrder::Big, 1, Vec::new()));
+        assert!(
+            relayed(one_byte_big_endian, &zstd(&[0; 64]), every)
+                .await
+                .is_some()
+        );
+        let transposed = compressed_level(chain(
+            ByteOrder::Little,
+            1,
+            vec![lucida_store::codec::ArrayCodec::Transpose(vec![
+                0, 1, 2, 4, 3,
+            ])],
+        ));
+        assert_eq!(relayed(transposed, &zstd(&[0; 64]), every).await, None);
+        let bundled = LevelInfo {
+            compression: StorageCompression::compressed(BytesCodec::Zstd, 1),
+            ..channel_bundled_level()
+        };
+        assert_eq!(relayed(bundled, &zstd(&[0; 8]), every).await, None);
+        let uncompressed = compressed_level(StorageCompression::None);
+        assert_eq!(relayed(uncompressed, &[0; 64], every).await, None);
     }
 }

@@ -45,14 +45,14 @@ class FakeWorker {
   onmessage:
     | ((e: { data: Partial<DecodeTiming> & { id: number; data?: ArrayBuffer; error?: string } }) => void)
     | null = null;
-  posted: { id: number; bytes: ArrayBuffer }[] = [];
+  posted: { id: number; bytes: ArrayBuffer; codecs?: Uint8Array; decodedBytes?: number; module?: unknown }[] = [];
   terminated = false;
 
   constructor() {
     FakeWorker.instances.push(this);
   }
 
-  postMessage(msg: { id: number; bytes: ArrayBuffer }): void {
+  postMessage(msg: FakeWorker["posted"][number]): void {
     this.posted.push(msg);
   }
 
@@ -145,6 +145,23 @@ describe("DecodePool", () => {
 
     await expect(promise).resolves.toBe(decoded);
     expect(pool.activeCount()).toBe(0);
+  });
+
+  it("hands every worker the page's compiled module, so none compiles its own", async () => {
+    const module = { compiled: true } as unknown as WebAssembly.Module;
+    const pool = new DecodePool(3, () => Promise.resolve(module));
+    await Promise.resolve();
+    expect(FakeWorker.instances.map((w) => w.posted)).toEqual([[{ module }], [{ module }], [{ module }]]);
+    pool.terminate();
+  });
+
+  it("carries an encoded chunk's codec list and decoded size to its worker", async () => {
+    const pool = new DecodePool(1, () => Promise.reject(new Error("no module here")));
+    const codecs = new Uint8Array([3]);
+    const pending = pool.decode(new ArrayBuffer(8), wireFormat, -1, codecs, 4096);
+    expect(FakeWorker.instances[0].posted[0]).toMatchObject({ codecs, decodedBytes: 4096 });
+    pool.terminate();
+    await expect(pending).rejects.toThrow("DecodePool terminated");
   });
 
   it("brackets each decode's round trip against the row that asked for it", async () => {

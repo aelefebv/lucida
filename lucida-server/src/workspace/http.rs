@@ -3,12 +3,13 @@
 //! request/response DTOs, and the handlers. Handlers stay thin — they read
 //! the `AuthPrincipal` extension and delegate to [`WorkspaceManager`].
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::header::LOCATION;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, patch, post};
 use axum::{Extension, Router};
@@ -838,8 +839,20 @@ async fn workspace_ws(
     State(state): State<WorkspacesState>,
     Extension(principal): Extension<AuthPrincipal>,
     Path(workspace_id): Path<String>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let relay_chunks = crate::wire_chunk::relays_to(
+        state.manager.runtime_config().chunk_relay,
+        peer.map(|Extension(ConnectInfo(addr))| addr.ip()),
+        crate::wire_chunk::forwarded_client(
+            headers
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok()),
+        ),
+        crate::link_throttle::report().is_some(),
+    );
     let live = match state
         .manager
         .live_workspace(&workspace_id, &principal)
@@ -852,7 +865,8 @@ async fn workspace_ws(
     crate::connection::limit_inbound(ws).on_upgrade(move |socket| async move {
         let client_id = crate::connection::next_client_id();
         tracing::info!(client_id, workspace_id = %live.workspace_id, "ws.workspace_client_connected");
-        handler::handle_workspace_client(client_id, socket, live, manager, principal).await;
+        handler::handle_workspace_client(client_id, socket, live, manager, principal, relay_chunks)
+            .await;
     })
     .into_response()
 }

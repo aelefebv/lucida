@@ -17,6 +17,7 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, CommandRejection, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
+use lucida_protocol::codec::ChunkRelaySetting;
 use lucida_store::source_policy::SourcePolicy;
 use serde_json::json;
 use thiserror::Error;
@@ -165,6 +166,9 @@ pub struct WorkspaceRuntimeConfig {
     /// connection that falls further behind than this skips ahead and is
     /// repaired with a fresh snapshot.
     pub broadcast_capacity: usize,
+    /// When a connection is sent chunks still encoded; see
+    /// [`crate::wire_chunk::relays_to`].
+    pub chunk_relay: ChunkRelaySetting,
 }
 
 impl Default for WorkspaceRuntimeConfig {
@@ -173,6 +177,7 @@ impl Default for WorkspaceRuntimeConfig {
             idle_ttl: Duration::from_secs(60 * 60),
             idle_sweep_interval: Duration::from_secs(60),
             broadcast_capacity: 256,
+            chunk_relay: ChunkRelaySetting::Auto,
         }
     }
 }

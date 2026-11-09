@@ -6,6 +6,7 @@ use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_core::scene::DocumentState;
+use lucida_protocol::codec::ChunkRelayReport;
 use lucida_protocol::{
     DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
     DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic,
@@ -116,6 +117,8 @@ pub struct DatasetHealthOutput {
     pub source_throttle: Option<SourceThrottleReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_throttle: Option<LinkThrottleReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_relay: Option<ChunkRelayReport>,
 }
 
 /// One dataset health reply: each dataset's health, and the throttles the
@@ -126,6 +129,8 @@ pub struct ServerHealth {
     pub datasets: Vec<DatasetSourceHealth>,
     pub source_throttle: Option<SourceThrottleReport>,
     pub link_throttle: Option<LinkThrottleReport>,
+    /// Whether the server sends this connection chunks still encoded.
+    pub chunk_relay: Option<ChunkRelayReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1009,10 +1014,12 @@ where
             datasets,
             source_throttle,
             link_throttle,
+            chunk_relay,
         } if message_request_id == request_id => Ok(Some(ServerHealth {
             datasets,
             source_throttle,
             link_throttle,
+            chunk_relay,
         })),
         _ => Ok(None),
     })
@@ -1812,6 +1819,7 @@ mod tests {
             }],
             source_throttle: None,
             link_throttle: None,
+            chunk_relay: None,
         };
 
         let human = format_dataset_health_human(&output);

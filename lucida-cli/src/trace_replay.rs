@@ -533,6 +533,7 @@ mod tests {
                 },
                 source_throttle: None,
                 link_throttle: None,
+                chunk_relay: None,
                 server_url: "https://lucida.example".to_string(),
                 workspace_id: "ws-1".to_string(),
                 screenshot: None,
