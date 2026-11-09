@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.1](https://github.com/aelefebv/lucida/compare/v0.27.0...v0.27.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **web:** keep the viewer's page from scrolling on a phone, and fail a trace on a scrolled page ([#1437](https://github.com/aelefebv/lucida/issues/1437)) ([2a8842a](https://github.com/aelefebv/lucida/commit/2a8842a7c8955bbb8ae416beaa50867849849025))
+
 ## [0.27.0](https://github.com/aelefebv/lucida/compare/v0.26.0...v0.27.0) (2026-11-09)
 
 
