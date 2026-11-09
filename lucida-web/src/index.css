@@ -40,11 +40,15 @@ a:hover {
   color: var(--lc-accent-hover);
 }
 
+/* At least the visible height, never 100vh alone: a phone's 100vh is the
+   height with its address bar hidden, so while the bar shows, a body that
+   tall overflows the screen by the bar. */
 body {
   margin: 0;
   display: flex;
   min-width: 320px;
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 /* iOS zooms the page into a focused field whose text is under 16px, so under

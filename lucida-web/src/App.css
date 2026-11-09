@@ -7,6 +7,14 @@
   min-width: 0;
 }
 
+/* The shell is the visible viewport, so the page under it must not scroll:
+   a scrolled page carries the top bar off the screen. The dashboard and the
+   sign-in screens mount no shell and still scroll. */
+html:has(> body > #root > .lc-shell),
+body:has(> #root > .lc-shell) {
+  overflow: hidden;
+}
+
 .lc-shell {
   display: flex;
   flex-direction: column;
@@ -57,9 +65,8 @@
   background: var(--lc-canvas-bg);
 }
 
-/* A capture can be narrower than the page's floor for a person, and a
-   scrollbar would land in the frame and shift the canvas off center. */
+/* A capture can be narrower than the page's floor for a person, and the
+   overflow would shift the canvas off center. */
 body:has(> #root > .lc-shell[data-capture]) {
   min-width: 0;
-  overflow: hidden;
 }

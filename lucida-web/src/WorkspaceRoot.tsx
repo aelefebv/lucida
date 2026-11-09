@@ -75,6 +75,10 @@ export function WorkspaceRoot() {
     } else {
       window.history.pushState({}, "", nextPath);
     }
+    // A new route starts at the top. The browser resets scroll only on a
+    // document load, so the dashboard's scroll would otherwise carry into
+    // the viewer.
+    window.scrollTo(0, 0);
     setPath(nextPath);
   }, []);
 
