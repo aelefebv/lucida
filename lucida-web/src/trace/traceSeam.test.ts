@@ -651,6 +651,7 @@ describe("the trace seam", () => {
       expect(seam.scrub("t", 3)).toEqual({ applied: true, reason: null });
       expect(seam.select({ channel: 1 }, false)).toEqual({ applied: true, reason: null });
       expect(seam.select({ layer: "ds-2" })).toEqual({ applied: true, reason: null });
+      expect(seam.select({ label: 0 }, false)).toEqual({ applied: true, reason: null });
       expect(seam.contrast(0, 10, 200)).toEqual({ applied: true, reason: null });
       await expect(seam.addDataset("/data/b.zarr", 5000)).resolves.toEqual({ applied: true, reason: null });
       await expect(seam.addDataset("/data/c.zarr")).resolves.toEqual({ applied: true, reason: null });
@@ -659,6 +660,7 @@ describe("the trace seam", () => {
         ["scrub", "t", 3],
         ["select", { channel: 1 }, false],
         ["select", { layer: "ds-2" }, true],
+        ["select", { label: 0 }, false],
         ["contrast", 0, 10, 200],
         ["add", "/data/b.zarr", 5000],
         ["add", "/data/c.zarr", 60_000],
@@ -706,7 +708,11 @@ describe("the trace seam", () => {
       expect(seam.scrub("q" as never, 1)).toEqual({ applied: false, reason: "no selector is called q" });
       expect(seam.select({} as never)).toEqual({
         applied: false,
-        reason: "a select names a channel index or a layer id",
+        reason: "a select names a channel index, a layer id or a label index",
+      });
+      expect(seam.select({ label: 0.5 })).toEqual({
+        applied: false,
+        reason: "a label is a whole number from 0, not 0.5",
       });
       expect(seam.select({ channel: -1 })).toEqual({
         applied: false,
