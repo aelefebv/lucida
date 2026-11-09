@@ -523,9 +523,9 @@ export class CpuCache {
 
   /**
    * Submit the current request plan. Re-submitting an unchanged plan is a
-   * no-op. In-flight work for active entities that left the new plan is
-   * preempted, so scrubbed-away T/Z/channel work does not hold scheduler
-   * slots ahead of current requests.
+   * no-op. In-flight work for active or requested entities that left the
+   * new plan is preempted, so scrubbed-away T/Z/channel work does not hold
+   * scheduler slots ahead of current requests.
    *
    * `chunkBytes` gives what each of the plan's chunks decodes to. A plan is
    * one dataset's, so it stands for that dataset's fetches from then on.
@@ -546,6 +546,17 @@ export class CpuCache {
       if (entry.kind === "tile" && entry.detailLevels.length > 0) {
         this.targetLevelByEntity.set(entry.entityId, entry.detailLevels[0]);
       }
+    }
+    // A label overlay's chunks are requested under the label's own image id,
+    // which no active set entry names. The plan holds the dataset's whole
+    // wanted set, so it is as authoritative for those entities as for the
+    // ones it holds active.
+    let lastEntityId: string | undefined;
+    for (const req of plan.requests) {
+      if (req.entityId === lastEntityId) continue;
+      lastEntityId = req.entityId;
+      newActiveIds.add(req.entityId);
+      this.activeEntityIdsThisRebuild.add(req.entityId);
     }
 
     // One pass derives every key and tier exactly once. `submit` receives the
@@ -830,10 +841,10 @@ export class CpuCache {
    * Abort a still-active entity's in-flight chunks that its newest plan no
    * longer wants, so they release their concurrency slots now instead of at
    * the transfer timeout. `submit` runs once per dataset with that dataset's
-   * complete request set, so for an entity in this submit's active set the
-   * plan is authoritative. Entities outside it may belong to a dataset
-   * submitted separately this rebuild; {@link onPlanRebuildStart} handles
-   * entities that left the view.
+   * complete request set, so for an entity in this submit's active set, or
+   * one it requests, the plan is authoritative. Other entities may belong to
+   * a dataset submitted separately this rebuild; {@link onPlanRebuildStart}
+   * handles entities that left the view.
    *
    * Only in-flight work is cancelled. `submit` replaces the pending queue
    * wholesale right after, so filtering it would change nothing.

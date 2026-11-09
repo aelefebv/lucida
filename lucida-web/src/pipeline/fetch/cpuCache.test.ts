@@ -830,6 +830,48 @@ describe("CpuCache", () => {
       expect(cache.telemetry().inFlightCount).toBe(1);
     });
 
+    // A label overlay's chunks are requested under the label's own image id,
+    // which the plan's active set never names.
+    const labelAt = (z: number) => makeRequest({
+      entityId: "label-1", imageId: "label-1", z, chunkKey: `0/0/0/${z}/0/0`,
+    });
+
+    it("cancels a label's in-flight chunk the next plan drops, and keeps the one it still wants", () => {
+      const { cache, source } = createTestCache();
+      const image = makeRequest({ chunkKey: "0/0/0/0/0/0" });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image, labelAt(0), labelAt(1)]));
+      expect(cache.telemetry().inFlightCount).toBe(3);
+
+      // The view moved on past z 0; z 1 is still wanted.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image, labelAt(1), labelAt(2)]));
+
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/0/0/0")).toBe(false);
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/1/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/2/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(source.fetchCount).toBe(4);
+      expect(cache.telemetry().inFlightCount).toBe(3);
+    });
+
+    it("cancels a hidden label's in-flight chunks once a rebuild goes without it", () => {
+      const { cache, source } = createTestCache();
+      const image = makeRequest({ chunkKey: "0/0/0/0/0/0" });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image, labelAt(0)]));
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image]));
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image]));
+
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/0/0/0")).toBe(false);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+    });
+
     it("re-enqueues a returned entity's chunk after its scrolled-away in-flight was cancelled", async () => {
       const { cache, source } = createTestCache();
       const req = makeRequest({
