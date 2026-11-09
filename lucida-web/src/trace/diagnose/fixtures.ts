@@ -45,6 +45,8 @@ export interface RowSpec {
   outcome?: TraceRow["outcome"];
   /** The bytes the wire delivered. Zero by default, as for a row whose wire never closed. */
   bytes?: number;
+  /** The decode worker's own time, inside the `decode` round trip. Absent by default, as from a worker that never reported it. */
+  decodeWorkUs?: number;
 }
 
 export function makeRow(spec: RowSpec, index = 0): TraceRow {
@@ -74,6 +76,7 @@ export function makeRow(spec: RowSpec, index = 0): TraceRow {
     bytes: spec.bytes ?? 0,
     outcome: spec.outcome ?? "complete",
     phases,
+    ...(spec.decodeWorkUs !== undefined ? { decodeWorkUs: spec.decodeWorkUs } : {}),
   };
 }
 
@@ -326,6 +329,7 @@ export function healthyLocalOpen(): TraceRun {
             present: 2 * MS,
           },
           rid: i,
+          decodeWorkUs: 300,
         },
         i,
       ),

@@ -14,6 +14,7 @@ import { formatCount } from "../../formatCount.ts";
 import { labelKey } from "../merge.ts";
 import { PHASES, SERVER_PHASES, type Phase, type ServerPhase, type TraceRow, type TraceRun } from "../types.ts";
 import { chunkIdentity } from "./chunkStates.ts";
+import { DECODE_WAIT } from "./phaseRollup.ts";
 import { lastBoundaryUs, rowSpanUs, rowState } from "./rowState.ts";
 import type { DiagnosticWindow, WindowRequest } from "./types.ts";
 import { clipSpan, describeWindow, resolveWindow, windowLabel } from "./window.ts";
@@ -96,7 +97,8 @@ export function selectChunks(
     }
     statement = `${countPhrase(identities.size)} with a row active during ${label}${fromRows(rows, identities.size)}`;
   } else if (parsed.side === "browser") {
-    const name = parsed.name as Phase;
+    // The decode wait is part of a row's `decode` round trip, not a row phase of its own.
+    const name = (`browser.${parsed.name}` === DECODE_WAIT ? "decode" : parsed.name) as Phase;
     if (!PHASES.includes(name)) {
       unknownPhase("browser phase");
     } else {

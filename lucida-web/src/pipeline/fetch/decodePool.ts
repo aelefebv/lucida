@@ -8,7 +8,8 @@
 import type { WireFormat } from "../../manifestTypes.ts";
 import { takeWorkerError } from "../../pageErrors.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { Boundary, CountedPhaseIndex } from "../../trace/types.ts";
+import { CountedPhaseIndex } from "../../trace/types.ts";
+import type { DecodeTiming } from "./decode.worker.ts";
 
 export const MIN_DECODE_WORKERS = 2;
 export const DECODE_POOL_HEADROOM = 1;
@@ -27,6 +28,27 @@ interface PendingEntry {
    * so this is what joins a decode to its chunk. -1 when no run is open.
    */
   traceRow: number;
+  /** When this thread posted the request, on its own clock. */
+  postedAtMs: number;
+}
+
+type DecodeReply = Partial<DecodeTiming> & { id: number; data?: ArrayBuffer; error?: string };
+
+/**
+ * The worker's own time on one decode, on this thread's clock, or null when
+ * the reply carries no timing. Held between the post and the reply, so a skew
+ * between the two contexts' time origins can never make the work longer than
+ * the round trip this thread saw.
+ */
+export function decodeWorkMs(
+  postedAtMs: number,
+  heardAtMs: number,
+  reply: Partial<DecodeTiming>,
+): number | null {
+  if (reply.startedAtMs === undefined || reply.doneAtMs === undefined) return null;
+  const startMs = Math.max(postedAtMs, reply.startedAtMs - performance.timeOrigin);
+  const endMs = Math.min(heardAtMs, reply.doneAtMs - performance.timeOrigin);
+  return Math.max(0, endMs - startMs);
 }
 
 interface PoolWorker {
@@ -53,17 +75,16 @@ export class DecodePool {
       });
       const pending = new Map<number, PendingEntry>();
       const entry: PoolWorker = { worker: w, pending, activeCount: 0 };
-      w.onmessage = (e: MessageEvent<{ id: number; data?: ArrayBuffer; error?: string }>) => {
+      w.onmessage = (e: MessageEvent<DecodeReply>) => {
         if (takeWorkerError(e.data)) return;
         const { id, data, error } = e.data;
         const p = pending.get(id);
         if (p) {
           pending.delete(id);
           entry.activeCount--;
-          // Closes `decode` and opens `upload` — adjacent phases share the
-          // boundary between them. Stamped for a failed decode too: the round
-          // trip happened, and the caller retires the row.
-          traceRecorder.stamp(p.traceRow, Boundary.UploadStart);
+          // Closes `decode` and opens `upload`, for a failed decode too: the
+          // round trip happened, and the caller retires the row.
+          traceRecorder.noteDecoded(p.traceRow, decodeWorkMs(p.postedAtMs, performance.now(), e.data));
           if (error) {
             p.reject(new Error(error));
           } else {
@@ -89,10 +110,9 @@ export class DecodePool {
    * metadata gives, which encoded bytes must decode to exactly.
    *
    * `traceRow` correlates the decode with the chunk that asked for it. The
-   * `decode` phase is the whole round trip — postMessage out to onmessage in,
-   * queue wait included — and is named for the round trip so no reader
-   * mistakes it for worker CPU time. Nothing in the worker timestamps itself;
-   * both ends are read on the main thread off one clock.
+   * row's `decode` phase is the whole round trip, postMessage out to
+   * onmessage in, and the worker's own start and end split it into the
+   * decode and the wait for a worker or for this thread.
    */
   decode(
     bytes: ArrayBuffer,
@@ -110,7 +130,7 @@ export class DecodePool {
       for (let i = 1; i < this.pool.length; i++) {
         if (this.pool[i].activeCount < best.activeCount) best = this.pool[i];
       }
-      best.pending.set(id, { resolve, reject, traceRow });
+      best.pending.set(id, { resolve, reject, traceRow, postedAtMs: performance.now() });
       best.activeCount++;
       // Dispatch itself is below the platform's clock floor, so it is counted
       // rather than timed.

@@ -18,16 +18,30 @@ interface DecodeRequest {
   decodedBytes?: number;
 }
 
-interface DecodeResponse {
+/**
+ * When this worker took the request up and when it finished, as
+ * `performance.timeOrigin + performance.now()`: a clock the page shares, so
+ * the page can tell the decode itself from the wait around it.
+ */
+interface DecodeTiming {
+  startedAtMs: number;
+  doneAtMs: number;
+}
+
+interface DecodeResponse extends DecodeTiming {
   id: number;
   data: ArrayBuffer;
   error?: undefined;
 }
 
-interface DecodeError {
+interface DecodeError extends DecodeTiming {
   id: number;
   data?: undefined;
   error: string;
+}
+
+function sharedNow(): number {
+  return performance.timeOrigin + performance.now();
 }
 
 /**
@@ -62,11 +76,12 @@ function codecModule(): Promise<typeof Core> {
  * decode to anything would let a hostile source make the page allocate
  * without limit.
  */
-async function decodeCodecs(
+function decodeCodecs(
+  core: typeof Core,
   bytes: ArrayBuffer,
   codecs: Uint8Array,
   decodedBytes: number | undefined,
-): Promise<ArrayBuffer> {
+): ArrayBuffer {
   // The module takes the size as a 32-bit length, so one past that would
   // wrap rather than bound anything.
   if (
@@ -77,19 +92,34 @@ async function decodeCodecs(
   ) {
     throw new Error("an encoded chunk whose level gives no decoded size");
   }
-  const { decode_chunk } = await codecModule();
-  const out = decode_chunk(codecs, new Uint8Array(bytes), decodedBytes);
+  const out = core.decode_chunk(codecs, new Uint8Array(bytes), decodedBytes);
   return out.byteOffset === 0 && out.byteLength === out.buffer.byteLength
     ? (out.buffer as ArrayBuffer)
     : (out.slice().buffer as ArrayBuffer);
 }
 
-function decompress(request: DecodeRequest): ArrayBuffer | Promise<ArrayBuffer> {
-  const { bytes, wireFormat, codecs, decodedBytes } = request;
-  if (codecs) return decodeCodecs(bytes, codecs, decodedBytes);
-  if ("Lz4" in wireFormat) return decodeCodecs(bytes, LZ4_CODECS, decodedBytes);
-  if ("Zstd" in wireFormat) return decodeCodecs(bytes, ZSTD_CODECS, decodedBytes);
-  return bytes;
+/** The codecs a request's bytes are still in, or null for decoded bytes. */
+function codecsOf({ wireFormat, codecs }: DecodeRequest): Uint8Array | null {
+  if (codecs) return codecs;
+  if ("Lz4" in wireFormat) return LZ4_CODECS;
+  if ("Zstd" in wireFormat) return ZSTD_CODECS;
+  return null;
+}
+
+/**
+ * The request's bytes with their codecs undone. `core` is the loaded module,
+ * which bytes still in codecs need.
+ */
+function decompress(request: DecodeRequest, core: typeof Core | null): ArrayBuffer {
+  const codecs = codecsOf(request);
+  if (!codecs) return request.bytes;
+  if (!core) throw new Error("the codec module is not loaded");
+  return decodeCodecs(core, request.bytes, codecs, request.decodedBytes);
+}
+
+/** {@link decompress}, loading the module first when the bytes need it. */
+async function decode(request: DecodeRequest): Promise<ArrayBuffer> {
+  return decompress(request, codecsOf(request) ? await codecModule() : null);
 }
 
 /** The float32 NaN every decoded NaN becomes. */
@@ -252,17 +282,28 @@ self.onmessage = async (e: MessageEvent<DecodeRequest | { module: WebAssembly.Mo
     compiled = e.data.module;
     return;
   }
-  const { id, wireFormat } = e.data;
+  let startedAtMs = sharedNow();
+  const request = e.data;
+  const { id, wireFormat } = request;
   try {
-    const decompressed = await decompress(e.data);
+    // Loading the module is setup, not decoding, so the decode starts once
+    // it is in hand: a worker's first encoded chunk would otherwise carry it.
+    const core = codecsOf(request) ? await codecModule() : null;
+    startedAtMs = sharedNow();
+    const decompressed = decompress(request, core);
     const data = normalize(decompressed, extractDataType(wireFormat));
-    (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
+    (self as unknown as Worker).postMessage(
+      { id, data, startedAtMs, doneAtMs: sharedNow() } satisfies DecodeResponse,
+      [data],
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    (self as unknown as Worker).postMessage({ id, error: message } satisfies DecodeError);
+    (self as unknown as Worker).postMessage(
+      { id, error: message, startedAtMs, doneAtMs: sharedNow() } satisfies DecodeError,
+    );
   }
 };
 
 // Re-exported for direct testing (imported as a module, not a worker).
-export { decompress, normalize };
-export type { DecodeRequest, DecodeResponse, DecodeError };
+export { decode, normalize };
+export type { DecodeRequest, DecodeResponse, DecodeError, DecodeTiming };

@@ -25,8 +25,7 @@ export const TRACE_SCHEMA_VERSION = 3;
  * {@link TraceDocument.instrumentedPhases} states which phases were
  * measured, so a reader never mistakes a reserved slot for a measured zero.
  *
- * The boundaries are all main-thread observations. No worker timestamps
- * itself and no clock is reconciled across contexts, so each phase is
+ * The boundaries are all main-thread observations, so each phase is
  * bracketed where the main thread can see both ends:
  *
  * - `plan`   the tick's wanted-set computation, including its synchronous
@@ -34,9 +33,10 @@ export const TRACE_SCHEMA_VERSION = 3;
  *            scheduler, on the same recorder clock as every other phase.
  * - `queue`  admitted to the scheduler → fetch dispatched.
  * - `wire`   request sent → bytes in hand. The bracket server rows nest in.
- * - `decode` the worker round trip: postMessage out → onmessage in. Named
- *            for the round trip, not for CPU time, because it includes the
- *            wait for a free worker and that is usually the larger half.
+ * - `decode` the worker round trip: postMessage out → onmessage in. It
+ *            includes the wait for a free worker and for the main thread to
+ *            take the result, so the row also carries the worker's own time
+ *            ({@link TraceRow.decodeWorkUs}) and the diagnostic judges that.
  * - `upload` bytes decoded → the chunk is on the GPU. Covers the wait in
  *            the CPU cache for a delivery tick, the per-frame upload budget,
  *            and the worker's own texture write; residency is established by
@@ -948,6 +948,12 @@ export interface TraceRow extends WireLabel {
   wireBytes?: number;
   outcome: RowOutcomeName;
   phases: Partial<Record<Phase, PhaseTiming>>;
+  /**
+   * The decode worker's own time on this chunk, from taking the request up to
+   * posting the result, held inside the `decode` round trip. Absent when the
+   * worker never reported one.
+   */
+  decodeWorkUs?: number;
 }
 
 /**
