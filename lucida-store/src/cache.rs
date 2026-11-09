@@ -93,9 +93,9 @@ pub const DEFAULT_SOURCE_CACHE_BYTES: usize = 512 * 1024 * 1024;
 pub const SOURCE_CACHE_BYTES_ENV: &str = "LUCIDA_SOURCE_CACHE_BYTES";
 
 /// Cap on concurrent backend reads of *metadata* objects, which are bounded
-/// separately from chunk reads. Not operator-tunable: unlike the chunk cap it
-/// has no pressure to relieve — it is the import pipeline's fan-out too
-/// (`METADATA_FETCH_CONCURRENCY`), so the two move together.
+/// separately from chunk reads, unless [`METADATA_READ_CONCURRENCY_ENV`] sets
+/// another. An import fans out to the same number, read from its store
+/// ([`CachedStore::metadata_read_concurrency`]), so the two move together.
 ///
 /// A metadata object is a few kilobytes of JSON and an open reads hundreds of
 /// them back to back, so the cost profile is round trips, not bytes: the two
@@ -112,7 +112,18 @@ pub const SOURCE_CACHE_BYTES_ENV: &str = "LUCIDA_SOURCE_CACHE_BYTES";
 ///   16 ->  46.4      64 -> 167.3     256 -> 442.8
 ///   32 ->  90.0     128 -> 275.3
 /// ```
+///
+/// The risk is a store in the same region, at 20-30 ms a request, where 256
+/// in flight is thousands of requests a second during a large open. A store
+/// that throttles at that rate answers 429 or 503, a read gets only the
+/// retries [`crate::backend::source_retry_config`] allows, and the open can
+/// fail. The setting exists so an operator can turn the cap down for it.
 pub(crate) const DEFAULT_METADATA_READ_CONCURRENCY: usize = 256;
+
+/// Environment variable an operator can set to override
+/// [`DEFAULT_METADATA_READ_CONCURRENCY`]. Read once, the first time a store
+/// is built.
+const METADATA_READ_CONCURRENCY_ENV: &str = "LUCIDA_METADATA_READ_CONCURRENCY";
 
 /// How many known-absent object paths
 /// [`CachedStore::get_optional_metadata_bytes`] remembers. Each entry is a
@@ -149,10 +160,22 @@ fn global_source_read_limiter() -> &'static Arc<SourceReadLimiter> {
 }
 
 /// The process-global limiter for metadata reads, the counterpart to
-/// [`global_source_read_limiter`] for the other read class.
-fn global_metadata_read_limiter() -> &'static Arc<Semaphore> {
-    static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    LIMITER.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_METADATA_READ_CONCURRENCY)))
+/// [`global_source_read_limiter`] for the other read class, and its size.
+fn global_metadata_read_limiter() -> &'static (Arc<Semaphore>, usize) {
+    static LIMITER: OnceLock<(Arc<Semaphore>, usize)> = OnceLock::new();
+    LIMITER.get_or_init(|| {
+        let permits = metadata_read_concurrency_from(
+            std::env::var(METADATA_READ_CONCURRENCY_ENV).ok().as_deref(),
+        );
+        (Arc::new(Semaphore::new(permits)), permits)
+    })
+}
+
+/// The metadata-read cap an operator's `raw` setting asks for. A non-numeric
+/// or zero value is ignored in favour of the default, as for the chunk-read
+/// bounds, so a typo can never wedge an open.
+fn metadata_read_concurrency_from(raw: Option<&str>) -> usize {
+    parse_positive(raw).unwrap_or(DEFAULT_METADATA_READ_CONCURRENCY)
 }
 
 /// Resolve the source-read bounds from the operator overrides, falling back
@@ -171,9 +194,11 @@ fn configured_source_read_bounds() -> SourceReadBounds {
 }
 
 fn positive_env(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
+    parse_positive(std::env::var(name).ok().as_deref())
+}
+
+fn parse_positive(raw: Option<&str>) -> Option<usize> {
+    raw.and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
 }
 
@@ -660,6 +685,8 @@ pub struct CachedStore {
     /// Caps concurrent backend metadata reads, independently of chunk reads
     /// (see [`DEFAULT_METADATA_READ_CONCURRENCY`]).
     metadata_read: Arc<Semaphore>,
+    /// How many permits `metadata_read` holds.
+    metadata_read_permits: usize,
 }
 
 #[derive(Default)]
@@ -1041,8 +1068,15 @@ impl CachedStore {
                 std::num::NonZeroUsize::new(ABSENT_MEMO_CAPACITY).expect("capacity is non-zero"),
             )),
             source_read,
-            metadata_read: global_metadata_read_limiter().clone(),
+            metadata_read: global_metadata_read_limiter().0.clone(),
+            metadata_read_permits: global_metadata_read_limiter().1,
         }
+    }
+
+    /// How many metadata reads this store lets run at once. An import fans
+    /// out this wide: any wider would only queue on the cap.
+    pub fn metadata_read_concurrency(&self) -> usize {
+        self.metadata_read_permits
     }
 
     /// This store with a metadata-read cap of its own. A test that counts
@@ -1050,8 +1084,9 @@ impl CachedStore {
     /// on the shared cap stalls a read in real time while the paused clock
     /// jumps ahead, which reads as an extra round trip.
     #[cfg(test)]
-    pub(crate) fn with_own_metadata_cap(mut self) -> Self {
-        self.metadata_read = Arc::new(Semaphore::new(DEFAULT_METADATA_READ_CONCURRENCY));
+    pub(crate) fn with_own_metadata_cap(mut self, permits: usize) -> Self {
+        self.metadata_read = Arc::new(Semaphore::new(permits));
+        self.metadata_read_permits = permits;
         self
     }
 
@@ -3266,6 +3301,24 @@ mod tests {
             watcher.phases().is_empty(),
             "a range read is not a metadata read and must not appear in the open's rows",
         );
+    }
+
+    #[test]
+    fn metadata_read_concurrency_defaults_and_overrides() {
+        assert_eq!(
+            metadata_read_concurrency_from(None),
+            DEFAULT_METADATA_READ_CONCURRENCY
+        );
+        assert_eq!(metadata_read_concurrency_from(Some("32")), 32);
+        assert_eq!(metadata_read_concurrency_from(Some(" 8 ")), 8);
+        // Garbage and zero fall back to the default rather than wedging opens.
+        for unusable in ["0", "", "wide", "-4"] {
+            assert_eq!(
+                metadata_read_concurrency_from(Some(unusable)),
+                DEFAULT_METADATA_READ_CONCURRENCY,
+                "{unusable:?}"
+            );
+        }
     }
 
     #[test]

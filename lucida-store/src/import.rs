@@ -230,11 +230,6 @@ async fn import_single_image(
     })
 }
 
-/// Maximum number of metadata object-store GETs kept in flight while importing
-/// a collection: the metadata-read cap, so the fan-out fills it and a wider
-/// one would only queue.
-const METADATA_FETCH_CONCURRENCY: usize = crate::cache::DEFAULT_METADATA_READ_CONCURRENCY;
-
 /// Sampled label discovery engages only when it would skip at least this
 /// many per-tile probes. Sampling probes each group's first and last tile,
 /// and the rest only when a sample signals labels, so discovery traffic
@@ -443,7 +438,7 @@ async fn read_tile_geometry(
 /// stays O(groups). The first candidate is read
 /// alone, so a healthy collection reads one tile. Only when it is
 /// unreadable are the rest fanned out with bounded concurrency
-/// ([`METADATA_FETCH_CONCURRENCY`]) and reduced in declared order, so a
+/// ([`CachedStore::metadata_read_concurrency`]) and reduced in declared order, so a
 /// corrupt leading group falls forward without one serial round trip per
 /// candidate.
 ///
@@ -480,7 +475,7 @@ async fn select_shared_tile_geometry(
             (prefix, outcome)
         }
     }))
-    .buffered(METADATA_FETCH_CONCURRENCY);
+    .buffered(store.metadata_read_concurrency());
     while let Some((prefix, outcome)) = stream.next().await {
         match outcome {
             Ok(geometry) => return (Some(geometry), unreadable),
@@ -522,7 +517,7 @@ fn unusable_tile_geometry_warning(
 ///
 /// Every tile is read, not one per group, because a tile the import does not
 /// read is bound as if stored like another and its differences go unnamed.
-/// Reads fan out with bounded concurrency ([`METADATA_FETCH_CONCURRENCY`]).
+/// Reads fan out with bounded concurrency ([`CachedStore::metadata_read_concurrency`]).
 /// Each read owns its inputs so the future borrows nothing and stays `Send`.
 #[allow(clippy::too_many_arguments)]
 async fn read_stored_tiles(
@@ -555,7 +550,7 @@ async fn read_stored_tiles(
         })
         .collect();
     futures_util::stream::iter(reads)
-        .buffered(METADATA_FETCH_CONCURRENCY)
+        .buffered(store.metadata_read_concurrency())
         .collect()
         .await
 }
@@ -831,7 +826,7 @@ async fn import_collection(
                     (index, outcome)
                 }
             }))
-            .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+            .buffer_unordered(store.metadata_read_concurrency());
         while let Some((index, outcome)) = stream.next().await {
             slots[index] = Some(outcome);
         }
@@ -1874,7 +1869,7 @@ async fn probe_labels_for_tiles(
             (index, probed)
         }
     }))
-    .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+    .buffer_unordered(store.metadata_read_concurrency());
     while let Some((index, probed)) = probe_stream.next().await {
         probed_labels[index] = Some(probed);
     }
@@ -1923,7 +1918,7 @@ struct PendingLabel {
 ///
 /// A build is two round trips, the label's group and then its levels, and a
 /// collection can carry a label on every tile, so builds overlap, up to
-/// [`METADATA_FETCH_CONCURRENCY`]. Results are still charged in declared
+/// [`CachedStore::metadata_read_concurrency`]. Results are still charged in declared
 /// order, so the labels, colors and names kept are the ones a build at a time
 /// would keep. No more builds are in flight than the budget has labels left,
 /// so a label past the budget is never read, and label reads and memory track
@@ -1970,7 +1965,10 @@ async fn build_labels_in_order(
     loop {
         // A build in flight takes at most one label from the budget, so this
         // never starts one the budget could not keep.
-        while in_flight.len() < METADATA_FETCH_CONCURRENCY.min(budget.labels_remaining)
+        while in_flight.len()
+            < store
+                .metadata_read_concurrency()
+                .min(budget.labels_remaining)
             && let Some(label) = pending.next()
         {
             let store = store.clone();
@@ -7315,6 +7313,18 @@ mod tests {
     async fn distant_store(dir: &std::path::Path) -> Arc<CachedStore> {
         use object_store::ObjectStoreExt;
         let inner = object_store::memory::InMemory::new();
+        for (key, bytes) in files_under(dir) {
+            inner.put(&Path::from(key), bytes.into()).await.unwrap();
+        }
+        Arc::new(
+            CachedStore::new(Arc::new(DistantStore { inner }), TEST_CACHE_BYTES)
+                .with_own_metadata_cap(crate::cache::DEFAULT_METADATA_READ_CONCURRENCY),
+        )
+    }
+
+    /// Every file under `dir`, keyed by its object path relative to `dir`.
+    fn files_under(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
         let mut pending = vec![dir.to_path_buf()];
         while let Some(at) = pending.pop() {
             for entry in fs::read_dir(&at).unwrap() {
@@ -7330,16 +7340,52 @@ mod tests {
                     .map(|part| part.as_os_str().to_str().unwrap())
                     .collect::<Vec<_>>()
                     .join("/");
-                inner
-                    .put(&Path::from(key), fs::read(&path).unwrap().into())
-                    .await
-                    .unwrap();
+                files.push((key, fs::read(&path).unwrap()));
             }
         }
-        Arc::new(
-            CachedStore::new(Arc::new(DistantStore { inner }), TEST_CACHE_BYTES)
-                .with_own_metadata_cap(),
-        )
+        files
+    }
+
+    /// The store's metadata-read cap bounds an import: a collection whose
+    /// tiles could all be read at once never has more reads in flight than
+    /// the cap, and keeps it full.
+    #[tokio::test]
+    async fn an_import_reads_no_wider_than_its_stores_metadata_cap() {
+        let dir = temp_dir("metadata_cap_bounds_import");
+        create_collection_fixture(
+            &dir,
+            "capped",
+            &["A", "B"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 3),
+                ("A", "2", 0, 1, 3),
+                ("B", "1", 1, 0, 3),
+                ("B", "2", 1, 1, 3),
+            ],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        // Every read waits a little, so reads let through together are seen
+        // together.
+        let backend = Arc::new(crate::test_support::CountingStore::new(20));
+        for (key, bytes) in files_under(&dir) {
+            backend.seed(&key, bytes).await;
+        }
+        let store =
+            Arc::new(CachedStore::new(backend.clone(), TEST_CACHE_BYTES).with_own_metadata_cap(3));
+        assert_eq!(store.metadata_read_concurrency(), 3);
+
+        let result = import_dataset(&store, "ds", "Capped").await.unwrap();
+
+        assert_eq!(result.manifest.images().len(), 12);
+        assert_eq!(
+            backend.max_active.load(std::sync::atomic::Ordering::SeqCst),
+            3
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// How many [`LATENCY`] round trips in a row an import of `store` waits.
