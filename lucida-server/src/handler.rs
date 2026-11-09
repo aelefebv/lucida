@@ -24,10 +24,11 @@ use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::binding::ChunkResolver;
-use crate::chunk_read::read_chunk;
+use crate::chunk_read::{ChunkReadError, fetch_chunk};
 use crate::chunk_serves::ChunkServes;
-use crate::connection::{CloseSignal, client_queue};
+use crate::connection::{ClientSender, CloseSignal, client_queue};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
+use crate::decode_pool::DecodePool;
 use crate::generated::{
     DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
     GeneratedCoarseService,
@@ -737,7 +738,7 @@ async fn handle_client_inner(
                                 dataset_id: &dataset_id,
                                 image_id: &image_id,
                                 key: &key,
-                                unicast_routes: &unicast_routes,
+                                client: &unicast_tx,
                             };
                             let chunk_key = match ChunkKey::parse(&key) {
                                 Ok(chunk_key) => chunk_key,
@@ -773,7 +774,7 @@ async fn handle_client_inner(
                             probe.mark(ServerPhase::BindingLookup);
                             match dispatch {
                                 Some(ChunkDispatch::Source { resolver, cache }) => {
-                                    let unicast_routes_clone = Arc::clone(&unicast_routes);
+                                    let client = unicast_tx.clone();
                                     chunk_serves.spawn(rid, async move {
                                         serve_chunk_from_store(
                                             id,
@@ -782,7 +783,7 @@ async fn handle_client_inner(
                                             &chunk_key,
                                             &resolver,
                                             &cache,
-                                            &unicast_routes_clone,
+                                            &client,
                                             probe,
                                         )
                                         .await;
@@ -793,7 +794,7 @@ async fn handle_client_inner(
                                     derived_chunks,
                                     generated_service,
                                 }) => {
-                                    let unicast_routes_clone = Arc::clone(&unicast_routes);
+                                    let client = unicast_tx.clone();
                                     chunk_serves.spawn(rid, async move {
                                         generated_service
                                             .enqueue_chunk_request(id, &image_id, level, &key)
@@ -805,7 +806,7 @@ async fn handle_client_inner(
                                             level,
                                             &key,
                                             &derived_chunks,
-                                            &unicast_routes_clone,
+                                            &client,
                                             probe,
                                         )
                                         .await;
@@ -1479,14 +1480,25 @@ async fn serve_chunk_from_store(
     chunk_key: &ChunkKey,
     resolver: &ChunkResolver,
     cache: &CachedStore,
-    unicast_routes: &UnicastRoutes,
+    client: &ClientSender,
     mut probe: RequestProbe,
 ) {
+    let fail = |error: ChunkReadError, probe: RequestProbe| async move {
+        SourceChunkFailure {
+            client_id,
+            dataset_id,
+            image_id,
+            key: &chunk_key.to_string(),
+            client,
+        }
+        .send(error.failure_kind(), &error, probe)
+        .await;
+    };
     // Charged to the requesting client, so one client's collection-sized
     // backlog cannot delay another client's first chunk, and labelled
     // with the request, so a wait behind the source-read cap is attributable
     // to it rather than only to a client.
-    let read = read_chunk(
+    let fetched = match fetch_chunk(
         resolver,
         cache,
         image_id,
@@ -1495,30 +1507,47 @@ async fn serve_chunk_from_store(
         RequestLabel(probe.rid()),
         Some(&mut probe),
     )
-    .await;
-    let bytes = match read {
-        Ok(read) => read.into_bytes(),
-        Err(error) => {
-            SourceChunkFailure {
-                client_id,
-                dataset_id,
-                image_id,
-                key: &chunk_key.to_string(),
-                unicast_routes,
-            }
-            .send(error.failure_kind(), &error, probe)
-            .await;
-            return;
-        }
+    .await
+    {
+        Ok(fetched) => fetched,
+        Err(error) => return fail(error, probe).await,
     };
 
-    let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
-    probe.mark(ServerPhase::SliceEncode);
-
-    let senders = unicast_routes.lock().await;
-    if let Some(sender) = senders.get(&client_id) {
-        let _ = sender.send(Message::Binary(buf.into()));
+    // Decoding and framing are CPU work. On an async worker, a burst of them
+    // holds up every other task on the runtime, other requests' dispatch
+    // among them, so they wait for a decode thread instead. The frame is
+    // queued from there too, so the client's bytes never wait for this task
+    // to be polled again.
+    let slot = DecodePool::global().acquire(ReaderId(client_id)).await;
+    let (dataset, image, key, client_queue) = (
+        dataset_id.clone(),
+        image_id.clone(),
+        *chunk_key,
+        client.clone(),
+    );
+    let failed = slot
+        .run(move || {
+            // The wait ends when a decode thread takes the work, so starting
+            // that thread counts as waiting rather than as decompression.
+            probe.mark(ServerPhase::DecodeWait);
+            let read = match fetched.decode(Some(&mut probe)) {
+                Ok(read) => read,
+                Err(error) => return Some((error, probe)),
+            };
+            let buf = encode_chunk_frame(client_id, &dataset, &image, key, &read.into_bytes());
+            probe.mark(ServerPhase::SliceEncode);
+            hand_off(&client_queue, buf, probe);
+            None
+        })
+        .await;
+    if let Some((error, probe)) = failed {
+        fail(error, probe).await;
     }
+}
+
+/// Queue a chunk frame for its client and file the row as delivered.
+fn hand_off(client: &ClientSender, frame: Vec<u8>, mut probe: RequestProbe) {
+    let _ = client.send(Message::Binary(frame.into()));
     // Handoff is terminal: the socket write happens in another task behind
     // an unbounded queue and is not observable from here.
     probe.mark(ServerPhase::Handoff);
@@ -1534,7 +1563,7 @@ async fn serve_generated_chunk_request(
     level: u32,
     chunk_key: &str,
     derived_chunks: &Arc<DerivedChunkCache>,
-    unicast_routes: &UnicastRoutes,
+    client: &ClientSender,
     mut probe: RequestProbe,
 ) {
     // A generated chunk never touches the source store, so its permit,
@@ -1544,26 +1573,25 @@ async fn serve_generated_chunk_request(
     probe.mark(ServerPhase::CacheLookup);
     match lookup {
         DerivedChunkLookup::Ready(bytes) => {
-            let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
-            probe.mark(ServerPhase::SliceEncode);
-            let senders = unicast_routes.lock().await;
-            if let Some(sender) = senders.get(&client_id) {
-                let _ = sender.send(Message::Binary(buf.into()));
-            }
-            probe.mark(ServerPhase::Handoff);
-            probe.finish(TimingRowOutcome::Delivered);
+            // Framing copies the whole chunk, so it takes a decode thread as
+            // a source chunk's does.
+            let slot = DecodePool::global().acquire(ReaderId(client_id)).await;
+            let (dataset, image, key, client_queue) = (
+                dataset_id.clone(),
+                image_id.clone(),
+                chunk_key.to_string(),
+                client.clone(),
+            );
+            slot.run(move || {
+                probe.mark(ServerPhase::DecodeWait);
+                let buf = encode_chunk_frame(client_id, &dataset, &image, key, &bytes);
+                probe.mark(ServerPhase::SliceEncode);
+                hand_off(&client_queue, buf, probe);
+            })
+            .await;
         }
         DerivedChunkLookup::Status { status, message } => {
-            send_generated_chunk_status(
-                client_id,
-                dataset_id,
-                image_id,
-                chunk_key,
-                status,
-                message,
-                unicast_routes,
-            )
-            .await;
+            send_generated_chunk_status(dataset_id, image_id, chunk_key, status, message, client);
             // The row ends honestly and no chunk ever arrives, so this
             // label's browser row terminates without a delivery. `NotReady`
             // is what stops a reader charging that open bracket to the
@@ -1582,7 +1610,7 @@ struct SourceChunkFailure<'a> {
     /// The key as the request spelled it, which is what the client matches
     /// the reply against.
     key: &'a str,
-    unicast_routes: &'a UnicastRoutes,
+    client: &'a ClientSender,
 }
 
 impl SourceChunkFailure<'_> {
@@ -1618,7 +1646,8 @@ impl SourceChunkFailure<'_> {
             kind: Some(kind),
             message: Some(error.to_string()),
         };
-        send_to_client(self.client_id, msg, self.unicast_routes).await;
+        let json = serde_json::to_string(&msg).unwrap();
+        let _ = self.client.send(Message::Text(json.into()));
         probe.mark(ServerPhase::Handoff);
         probe.finish(TimingRowOutcome::Failed);
     }
@@ -1727,14 +1756,13 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "chunk_codecs",
 ];
 
-async fn send_generated_chunk_status(
-    client_id: ClientId,
+fn send_generated_chunk_status(
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: &str,
     status: GeneratedChunkStatus,
     message: Option<String>,
-    unicast_routes: &UnicastRoutes,
+    client: &ClientSender,
 ) {
     let msg = ServerMessage::GeneratedChunkStatus {
         dataset_id: dataset_id.clone(),
@@ -1744,10 +1772,7 @@ async fn send_generated_chunk_status(
         message,
     };
     let json = serde_json::to_string(&msg).unwrap();
-    let senders = unicast_routes.lock().await;
-    if let Some(sender) = senders.get(&client_id) {
-        let _ = sender.send(Message::Text(json.into()));
-    }
+    let _ = client.send(Message::Text(json.into()));
 }
 
 fn encode_chunk_frame(
@@ -1966,7 +1991,6 @@ async fn send_to_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Mutex;
 
     /// A probe wired to a buffer the test can read back, so what a serve path
     /// *declares* about its own outcome is asserted rather than assumed.
@@ -2259,9 +2283,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_source_chunk_is_served_as_zero_fill() {
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(5, tx);
         let store =
             Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let cache = Arc::new(CachedStore::new(store, 1024));
@@ -2274,7 +2296,7 @@ mod tests {
             &key("0/0/0/0/0/0"),
             &tiny_resolver(),
             &cache,
-            &routes,
+            &tx,
             test_probe(1, &timings),
         )
         .await;
@@ -2304,9 +2326,7 @@ mod tests {
         resolver: &ChunkResolver,
         store: Arc<dyn object_store::ObjectStore>,
     ) -> serde_json::Value {
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(7, tx);
         let cache = Arc::new(CachedStore::new(store, 1024));
 
         let timings = Arc::new(TimingBuffer::new());
@@ -2317,7 +2337,7 @@ mod tests {
             &self::key(key),
             resolver,
             &cache,
-            &routes,
+            &tx,
             test_probe(1, &timings),
         )
         .await;
@@ -2468,9 +2488,7 @@ mod tests {
     /// Drive `serve_chunk_from_store` against a [`FailingStore`] and return
     /// the single frame the requesting client received.
     async fn serve_against_failing_store(failure: StoreFailure) -> serde_json::Value {
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(7, tx);
         let store = Arc::new(FailingStore(failure)) as Arc<dyn object_store::ObjectStore>;
         let cache = Arc::new(CachedStore::new(store, 1024));
 
@@ -2482,7 +2500,7 @@ mod tests {
             &key("0/0/0/0/0/0"),
             &tiny_resolver(),
             &cache,
-            &routes,
+            &tx,
             test_probe(1, &timings),
         )
         .await;
@@ -2499,9 +2517,7 @@ mod tests {
 
     #[tokio::test]
     async fn present_source_chunk_is_served_as_binary_with_no_status_frame() {
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(5, tx);
         let store = object_store::memory::InMemory::new();
         let resolver = tiny_resolver();
         let location = resolver
@@ -2527,7 +2543,7 @@ mod tests {
             &key("0/0/0/0/0/0"),
             &resolver,
             &cache,
-            &routes,
+            &tx,
             test_probe(1, &timings),
         )
         .await;
@@ -2581,9 +2597,7 @@ mod tests {
 
     #[tokio::test]
     async fn generated_ready_chunk_is_served_with_normal_chunk_frame() {
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(5, tx);
 
         let cache = Arc::new(DerivedChunkCache::default());
         cache.seed_ready_chunk(
@@ -2601,7 +2615,7 @@ mod tests {
             2,
             "2/0/0/0/0/0",
             &cache,
-            &routes,
+            &tx,
             test_probe(1, &timings),
         )
         .await;
@@ -2632,9 +2646,7 @@ mod tests {
     /// job is attributing stalls to a side cannot afford.
     #[tokio::test]
     async fn a_not_ready_generated_answer_is_recorded_as_not_ready() {
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(5, tx);
         let cache = Arc::new(DerivedChunkCache::default());
 
         let timings = Arc::new(TimingBuffer::new());
@@ -2645,7 +2657,7 @@ mod tests {
             2,
             "2/0/0/0/0/0",
             &cache,
-            &routes,
+            &tx,
             test_probe(1, &timings),
         )
         .await;
@@ -2659,20 +2671,16 @@ mod tests {
 
     #[tokio::test]
     async fn generated_pending_status_is_sent_as_text() {
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(3, tx);
 
         send_generated_chunk_status(
-            3,
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             "2/0/0/0/0/0",
             GeneratedChunkStatus::Pending,
             None,
-            &routes,
-        )
-        .await;
+            &tx,
+        );
 
         let msg = rx.recv().await.expect("message");
         let Message::Text(json) = msg else {
@@ -2779,11 +2787,8 @@ mod tests {
         const PERMITS: usize = 2;
         const BACKLOG: usize = 200;
 
-        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (busy_tx, mut busy_rx) = client_queue();
         let (newcomer_tx, mut newcomer_rx) = client_queue();
-        routes.lock().await.insert(1, busy_tx);
-        routes.lock().await.insert(2, newcomer_tx);
 
         let limiter = lucida_store::source_limiter::SourceReadLimiter::new(PERMITS);
         let store = Arc::new(SlowAbsentStore {
@@ -2801,7 +2806,7 @@ mod tests {
         for index in 0..BACKLOG {
             let resolver = Arc::clone(&resolver);
             let cache = cache.clone();
-            let routes = routes.clone();
+            let busy_tx = busy_tx.clone();
             tokio::spawn(async move {
                 serve_chunk_from_store(
                     1,
@@ -2810,7 +2815,7 @@ mod tests {
                     &key(&format!("0/0/0/0/0/{index}")),
                     &resolver,
                     &cache,
-                    &routes,
+                    &busy_tx,
                     test_probe(1, &Arc::new(TimingBuffer::new())),
                 )
                 .await;
@@ -2827,7 +2832,6 @@ mod tests {
         let newcomer = tokio::spawn({
             let resolver = Arc::clone(&resolver);
             let cache = cache.clone();
-            let routes = routes.clone();
             async move {
                 serve_chunk_from_store(
                     2,
@@ -2836,7 +2840,7 @@ mod tests {
                     &key("0/0/0/0/1/0"),
                     &resolver,
                     &cache,
-                    &routes,
+                    &newcomer_tx,
                     test_probe(2, &Arc::new(TimingBuffer::new())),
                 )
                 .await;

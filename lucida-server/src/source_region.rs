@@ -134,10 +134,11 @@ pub(crate) async fn fetch_volume_region(
             // Charged to the background class, not to a client: a generated
             // chunk is built once for every client waiting on it, so there
             // is no one client whose share it should come out of. It
-            // competes for one fair share against the interactive readers,
-            // which is what it is — one background population, however many
-            // clients are waiting on it. No probe: generation has no browser
-            // bracket to nest inside, so its read timing is dropped.
+            // competes for one fair share of reads and of decode slots
+            // against the interactive readers, which is what it is — one
+            // background population, however many clients are waiting on it.
+            // Generation has no browser bracket to nest inside, so its timing
+            // is not recorded.
             let read = read_chunk(
                 resolver,
                 store,
@@ -145,7 +146,6 @@ pub(crate) async fn fetch_volume_region(
                 &key,
                 ReaderId::UNATTRIBUTED,
                 RequestLabel::UNATTRIBUTED,
-                None,
             )
             .await;
             (key, read)

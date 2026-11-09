@@ -62,7 +62,6 @@ async fn served(opened: &Opened, image: &lucida_content::ImageId, key: &str) -> 
         &key.parse::<lucida_content::ChunkKey>().unwrap(),
         READER,
         LABEL,
-        None,
     )
     .await
     .unwrap_or_else(|e| panic!("{image:?} {key}: {e}"))

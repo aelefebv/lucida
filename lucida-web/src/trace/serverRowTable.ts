@@ -93,6 +93,7 @@ export interface ServerTimingBatch {
   permit_wait_us: number[];
   backend_read_us: number[];
   coalesced_wait_us: number[];
+  decode_wait_us: number[];
   decompress_us: number[];
   slice_encode_us: number[];
   handoff_us: number[];

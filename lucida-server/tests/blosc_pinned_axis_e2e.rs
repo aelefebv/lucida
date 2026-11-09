@@ -188,7 +188,6 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
         &canonical_key.parse::<lucida_content::ChunkKey>().unwrap(),
         ReaderId::UNATTRIBUTED,
         RequestLabel::UNATTRIBUTED,
-        None,
     )
     .await
     .unwrap();
