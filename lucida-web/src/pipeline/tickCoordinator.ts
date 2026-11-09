@@ -66,6 +66,8 @@ export interface MemberRosterEntry {
   position: [number, number];
   /** Entity id from the planning active set entry that produced this roster member. */
   entityId?: string;
+  /** The member's model matrix, as the cold state carries it. */
+  modelMatrix?: Float32Array;
 }
 
 export interface TickCoordinatorResult {

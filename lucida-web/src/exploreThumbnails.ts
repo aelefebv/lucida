@@ -96,10 +96,11 @@ export function makeThumbnailRequester(opts: {
     // 35 floats: invViewProj[16] + eye[3] + viewProj[16]. Empty means the
     // camera JSON didn't parse.
     const cam = new Float32Array(camera_matrices(JSON.stringify(view.camera), size, size));
-    if (cam.length < 19) return null;
+    if (cam.length < 35) return null;
     const invViewProj = cam.subarray(0, 16);
     const eye = cam.subarray(16, 19);
+    const viewProj = cam.subarray(19, 35);
 
-    return client.thumbnailRender(layers, invViewProj, eye, size);
+    return client.thumbnailRender(layers, invViewProj, viewProj, eye, size);
   };
 }
