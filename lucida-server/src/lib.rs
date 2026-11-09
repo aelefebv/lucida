@@ -31,6 +31,7 @@ pub mod storage;
 pub(crate) mod test_fixtures;
 pub mod timing;
 pub mod watch;
+pub mod wire_chunk;
 pub mod workspace;
 
 use std::collections::HashMap;

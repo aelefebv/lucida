@@ -16,6 +16,8 @@ lucida-protocol = { path = "../lucida-protocol" }
 lucida-store = { path = "../lucida-store" }
 object_store = "0.14"
 bytes = "1"
+# Compresses the chunks the server makes itself for a client that decodes lz4.
+lz4_flex = "0.14"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
@@ -68,7 +70,6 @@ urlencoding = "2"
 tempfile = "3"
 # Writers for the storage codecs, so tests can store chunks the way a
 # dataset's writer would.
-lz4_flex = "0.14"
 zstd = "0.14"
 flate2 = "1"
 crc32c = "0.6"
