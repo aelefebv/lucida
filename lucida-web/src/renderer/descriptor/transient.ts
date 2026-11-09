@@ -62,16 +62,17 @@ export interface TransientDescriptorParams {
 }
 
 /**
- * Serialize a transient single-entity descriptor at byte 0 of `target`,
- * which must hold at least {@link DESCRIPTOR_ENTRY_SIZE} bytes. Only level
- * source 0 (pool binding 0) is valid.
+ * Serialize a transient single-entity descriptor at `byteOffset` of
+ * `target`, which must hold {@link DESCRIPTOR_ENTRY_SIZE} bytes from there.
+ * Only level source 0 (pool binding 0) is valid.
  */
 export function serializeTransientDescriptor(
   target: ArrayBuffer,
   params: TransientDescriptorParams,
+  byteOffset = 0,
 ): void {
-  const f32 = new Float32Array(target, 0, DESCRIPTOR_ENTRY_SIZE / 4);
-  const u32 = new Uint32Array(target, 0, DESCRIPTOR_ENTRY_SIZE / 4);
+  const f32 = new Float32Array(target, byteOffset, DESCRIPTOR_ENTRY_SIZE / 4);
+  const u32 = new Uint32Array(target, byteOffset, DESCRIPTOR_ENTRY_SIZE / 4);
 
   if (params.modelMatrix.length === 16) f32.set(params.modelMatrix, OFFSET_MODEL_MATRIX / 4);
   if (params.invModelMatrix.length === 16) f32.set(params.invModelMatrix, OFFSET_INV_MODEL_MATRIX / 4);
