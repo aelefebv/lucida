@@ -6,6 +6,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
 import { navigatorCardPreference } from "./canvasCards.ts";
 import { CollectionSelector, extractCollectionData } from "./CollectionSelector.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
+
+// The real button, its renders counted.
+vi.mock("../ui/UnstyledButton.tsx", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../ui/UnstyledButton.tsx")>();
+  return { UnstyledButton: vi.fn(real.UnstyledButton) };
+});
 import type { DatasetManifest, Entity, ImageSpec, TransformEdge } from "../manifestTypes.ts";
 
 beforeEach(() => {
@@ -256,6 +263,28 @@ describe("CollectionSelector current group", () => {
     center = [900, 900];
     await waitFor(() => expect(isCurrent("B1")).toBe(false));
     expect(document.querySelector(".lc-panel-header-meta")).toBeNull();
+  });
+
+  it("re-renders only the cells whose mark moved when the view crosses a group", async () => {
+    const data = extractCollectionData(collection2x2())!;
+    let center = [300, 100];
+    render(
+      createElement(CollectionSelector, {
+        collectionKind: data.collectionKind,
+        members: data.members,
+        collectionName: "collection",
+        onGroupClick: vi.fn(),
+        getViewCenter: () => center,
+      }),
+    );
+    await waitFor(() => expect(isCurrent("A2")).toBe(true));
+    const renders = vi.mocked(UnstyledButton);
+    renders.mockClear();
+
+    center = [100, 300];
+    await waitFor(() => expect(isCurrent("B1")).toBe(true));
+    const cells = renders.mock.calls.map(([props]) => props["aria-label"]).filter((name) => name !== undefined);
+    expect(cells.sort()).toEqual(["A2", "B1"]);
   });
 
   it("folds and hides through its header", () => {

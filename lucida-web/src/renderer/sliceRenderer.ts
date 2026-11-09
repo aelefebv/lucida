@@ -123,36 +123,106 @@ function buildSliceUniformData(
   borderColor: RgbaColor,
   pixelRatio: number,
 ): Float32Array<ArrayBuffer> {
-  const sx = canvasW / (dataW * zoom);
-  const sy = canvasH / (dataH * zoom);
-  const tx = -0.5 * canvasW / (dataW * zoom) + cx / dataW;
-  const ty = -0.5 * canvasH / (dataH * zoom) + cy / dataH;
+  const uniformData = new Float32Array(SLICE_UNIFORM_SIZE / 4);
+  writeSliceUniformData(
+    uniformData, new Uint32Array(uniformData.buffer), 0,
+    zoom, cx, cy, canvasW, canvasH, dataW, dataH, levelSlotDims, coarseSlotDims, borderColor, pixelRatio,
+  );
+  return uniformData;
+}
+
+/** Write one `Uniforms` block at float index `base` of `f32`, whose `u32` view shares its buffer. */
+function writeSliceUniformData(
+  f32: Float32Array,
+  u32: Uint32Array,
+  base: number,
+  zoom: number,
+  cx: number,
+  cy: number,
+  canvasW: number,
+  canvasH: number,
+  dataW: number,
+  dataH: number,
+  levelSlotDims: LevelSlotDims,
+  coarseSlotDims: [number, number],
+  borderColor: RgbaColor,
+  pixelRatio: number,
+): void {
+  f32.fill(0, base, base + SLICE_UNIFORM_SIZE / 4);
 
   // mat4x4 in column-major order
-  const uniformData = new Float32Array(SLICE_UNIFORM_SIZE / 4);
-  uniformData[0] = sx;  // col0.x
-  uniformData[5] = sy;  // col1.y
-  uniformData[10] = 1;  // col2.z
-  uniformData[12] = tx; // col3.x
-  uniformData[13] = ty; // col3.y
-  uniformData[15] = 1;  // col3.w
+  f32[base + 0] = canvasW / (dataW * zoom);  // col0.x
+  f32[base + 5] = canvasH / (dataH * zoom);  // col1.y
+  f32[base + 10] = 1;  // col2.z
+  f32[base + 12] = -0.5 * canvasW / (dataW * zoom) + cx / dataW; // col3.x
+  f32[base + 13] = -0.5 * canvasH / (dataH * zoom) + cy / dataH; // col3.y
+  f32[base + 15] = 1;  // col3.w
 
-  // Atlas params (u32 written via Uint32Array view)
-  const u32View = new Uint32Array(uniformData.buffer);
   for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
     const [sxSlots, sySlots] = levelSlotDims[i] ?? [0, 0];
-    u32View.set([sxSlots, sySlots, 0, 0], SLICE_UNIFORM_OFFSETS.levelAtlasSlotDims / 4 + i * 4);
+    const at = base + SLICE_UNIFORM_OFFSETS.levelAtlasSlotDims / 4 + i * 4;
+    u32[at] = sxSlots;
+    u32[at + 1] = sySlots;
   }
-  u32View.set([coarseSlotDims[0], coarseSlotDims[1], 0, 0], SLICE_UNIFORM_OFFSETS.coarseAtlasSlotDims / 4);
+  const coarseAt = base + SLICE_UNIFORM_OFFSETS.coarseAtlasSlotDims / 4;
+  u32[coarseAt] = coarseSlotDims[0];
+  u32[coarseAt + 1] = coarseSlotDims[1];
 
   // Layer screen-pixel size for border detection (per-member layers:
   // the member's own size; aggregate layers: the union extent, scaled
   // to each member's fraction in the vertex stage), and the pixel ratio
   // that sizes the failed hatch.
-  uniformData.set([dataW * zoom, dataH * zoom, pixelRatio, 0], SLICE_UNIFORM_OFFSETS.memberScreenSize / 4);
+  const sizeAt = base + SLICE_UNIFORM_OFFSETS.memberScreenSize / 4;
+  f32[sizeAt] = dataW * zoom;
+  f32[sizeAt + 1] = dataH * zoom;
+  f32[sizeAt + 2] = pixelRatio;
   const [r, g, b, a] = borderColor;
-  uniformData.set([r * a, g * a, b * a, a], SLICE_UNIFORM_OFFSETS.borderColor / 4);
-  return uniformData;
+  const borderAt = base + SLICE_UNIFORM_OFFSETS.borderColor / 4;
+  f32[borderAt] = r * a;
+  f32[borderAt + 1] = g * a;
+  f32[borderAt + 2] = b * a;
+  f32[borderAt + 3] = a;
+}
+
+/**
+ * Bytes between two members' blocks in the shared member buffers. A bind
+ * group may start a uniform binding only at a multiple of the device's
+ * `minUniformBufferOffsetAlignment`, which is at most 256 on every device.
+ */
+const MEMBER_BLOCK_STRIDE = 256;
+
+/**
+ * The resources a member draw's group-0 bind group names besides its uniform
+ * block, in binding order: colormap, then texture and indirection of the
+ * coarse pool and of each level pool slot.
+ */
+function poolResourcesOf(draw: MemberDraw): Array<GPUTexture | GPUBuffer | null> {
+  const out: Array<GPUTexture | GPUBuffer | null> = [
+    draw.colormap, draw.coarse?.texture ?? null, draw.coarse?.indirectionBuf ?? null,
+  ];
+  for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+    const b = draw.levels[i] ?? null;
+    out.push(b?.texture ?? null, b?.indirectionBuf ?? null);
+  }
+  return out;
+}
+
+function samePoolResources(held: ReadonlyArray<GPUTexture | GPUBuffer | null>, draw: MemberDraw): boolean {
+  if (held[0] !== draw.colormap) return false;
+  if (held[1] !== (draw.coarse?.texture ?? null) || held[2] !== (draw.coarse?.indirectionBuf ?? null)) return false;
+  for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+    const b = draw.levels[i] ?? null;
+    if (held[3 + 2 * i] !== (b?.texture ?? null) || held[4 + 2 * i] !== (b?.indirectionBuf ?? null)) return false;
+  }
+  return true;
+}
+
+/** A draw index's bind groups, and what each names that can be replaced. */
+interface MemberBindGroups {
+  pools: GPUBindGroup | null;
+  poolResources: Array<GPUTexture | GPUBuffer | null>;
+  entity: GPUBindGroup | null;
+  descriptorBuffer: GPUBuffer | null;
 }
 
 export class SliceRenderer {
@@ -181,9 +251,20 @@ export class SliceRenderer {
   private aggregateQuadBuffer: GPUBuffer | null = null;
   private aggregateQuadCapacity = 0;
   private aggregateUniformBuffers: GPUBuffer[] = [];
-  // Per-draw member resources for a group pass, pooled by draw index the same way.
-  private memberUniformBuffers: GPUBuffer[] = [];
-  private memberEntityRefBuffers: GPUBuffer[] = [];
+  // Per-draw member resources for a group pass: one block per draw index in
+  // two shared buffers, each filled by one write per pass. A draw index keeps
+  // its bind groups while the resources they name stay the same, which they
+  // do from frame to frame until a pool, colormap or descriptor buffer is
+  // replaced, so a pan creates none.
+  private memberUniformBuffer: GPUBuffer | null = null;
+  private memberEntityRefBuffer: GPUBuffer | null = null;
+  private memberCapacity = 0;
+  private memberUniformData = new Float32Array(0);
+  private memberUniformWords = new Uint32Array(0);
+  private memberRefWords = new Uint32Array(0);
+  private memberBindGroups: MemberBindGroups[] = [];
+  /** One view per texture, which lives as long as the texture does. */
+  private textureViews = new WeakMap<GPUTexture, GPUTextureView>();
 
   private levelBindings: Array<SlicePoolBinding | null> = [];
   private coarseBinding: SlicePoolBinding | null = null;
@@ -443,23 +524,32 @@ export class SliceRenderer {
     this.device.queue.writeBuffer(this.entityRefBuffer, 0, refData);
   }
 
+  private viewOf(texture: GPUTexture): GPUTextureView {
+    let view = this.textureViews.get(texture);
+    if (!view) {
+      view = texture.createView();
+      this.textureViews.set(texture, view);
+    }
+    return view;
+  }
+
   /** The group-0 bind group entries for one set of pool bindings. */
   private poolBindGroupEntries(
-    uniformBuffer: GPUBuffer,
+    uniform: GPUBufferBinding,
     levels: ReadonlyArray<SlicePoolBinding | null>,
     coarse: SlicePoolBinding | null,
     lut: GPUTexture = this.lutTexture,
   ): GPUBindGroupEntry[] {
     const entries: GPUBindGroupEntry[] = [
-      { binding: 0, resource: { buffer: uniformBuffer } },
-      { binding: 1, resource: lut.createView() },
+      { binding: 0, resource: uniform },
+      { binding: 1, resource: this.viewOf(lut) },
       { binding: 2, resource: this.lutSampler },
-      { binding: 3, resource: (coarse?.texture ?? this.dummyTexture).createView() },
+      { binding: 3, resource: this.viewOf(coarse?.texture ?? this.dummyTexture) },
       { binding: 4, resource: { buffer: coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
     ];
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       const b = levels[i] ?? null;
-      entries.push({ binding: 5 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
+      entries.push({ binding: 5 + i, resource: this.viewOf(b?.texture ?? this.dummyTexture) });
       entries.push({
         binding: 5 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
         resource: { buffer: b?.indirectionBuf ?? this.dummyIndirectionBuffer },
@@ -472,7 +562,7 @@ export class SliceRenderer {
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: this.poolBindGroupEntries(
-        this.uniformBuffer,
+        { buffer: this.uniformBuffer },
         this.levelBindings,
         this.coarseBinding,
       ),
@@ -545,7 +635,7 @@ export class SliceRenderer {
     const aggregate = group.aggregate && group.aggregate.batches.length > 0 && group.aggregate.quadData.byteLength > 0
       ? this.prepareAggregate(group.aggregate, group.canvasW, group.canvasH)
       : null;
-    const members = group.members.map((draw, i) => this.prepareMember(draw, i, group.canvasW, group.canvasH));
+    const members = this.prepareMembers(group.members, group.canvasW, group.canvasH);
     if (!aggregate && members.length === 0) return;
     const memberPipeline = requireCompiled(this.memberPipelines, "slice renderer")[group.blendMode];
     const aggregatePipeline = requireCompiled(this.aggregatePipelines, "slice renderer")[group.blendMode];
@@ -583,50 +673,84 @@ export class SliceRenderer {
     pass.end();
   }
 
-  /** The bind groups one member draw of a group pass binds, written into the `index`th pooled buffers. */
-  private prepareMember(
-    draw: MemberDraw,
-    index: number,
+  /**
+   * The bind groups each member draw of a group pass binds, with every
+   * member's uniforms and entity reference written to its block of the
+   * shared buffers.
+   */
+  private prepareMembers(
+    draws: readonly MemberDraw[],
     canvasW: number,
     canvasH: number,
-  ): { pools: GPUBindGroup; entity: GPUBindGroup } {
-    while (this.memberUniformBuffers.length <= index) {
-      this.memberUniformBuffers.push(this.device.createBuffer({
-        size: SLICE_UNIFORM_SIZE,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      }));
-      this.memberEntityRefBuffers.push(this.device.createBuffer({
-        size: ENTITY_REF_SIZE,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      }));
-    }
-    const uniformBuffer = this.memberUniformBuffers[index];
-    const entityRefBuffer = this.memberEntityRefBuffers[index];
-    this.device.queue.writeBuffer(uniformBuffer, 0, buildSliceUniformData(
-      draw.zoom, draw.cx, draw.cy, canvasW, canvasH, draw.dataW, draw.dataH,
-      levelSlotDimsOf(draw.levels),
-      draw.coarse ? [draw.coarse.slotsX, draw.coarse.slotsY] : [0, 0],
-      this.tileBorderColor,
-      this.pixelRatio,
-    ));
-    // Intensity draws carry no declared palette: count 0 over the dummy.
-    this.device.queue.writeBuffer(entityRefBuffer, 0, new Uint32Array([draw.entityIndex >>> 0, 0, 0, 0]));
-    return {
-      pools: this.device.createBindGroup({
+  ): Array<{ pools: GPUBindGroup; entity: GPUBindGroup }> {
+    if (draws.length === 0) return [];
+    this.ensureMemberCapacity(draws.length);
+    const f32 = this.memberUniformData;
+    const u32 = this.memberUniformWords;
+    const refs = this.memberRefWords;
+    const words = MEMBER_BLOCK_STRIDE / 4;
+    draws.forEach((draw, i) => {
+      writeSliceUniformData(
+        f32, u32, i * words,
+        draw.zoom, draw.cx, draw.cy, canvasW, canvasH, draw.dataW, draw.dataH,
+        levelSlotDimsOf(draw.levels),
+        draw.coarse ? [draw.coarse.slotsX, draw.coarse.slotsY] : [0, 0],
+        this.tileBorderColor,
+        this.pixelRatio,
+      );
+      // Intensity draws carry no declared palette: count 0 over the dummy.
+      refs[i * words] = draw.entityIndex >>> 0;
+      refs[i * words + 1] = 0;
+    });
+    const bytes = draws.length * MEMBER_BLOCK_STRIDE;
+    this.device.queue.writeBuffer(this.memberUniformBuffer!, 0, f32.buffer, 0, bytes);
+    this.device.queue.writeBuffer(this.memberEntityRefBuffer!, 0, refs.buffer, 0, bytes);
+    return draws.map((draw, i) => this.memberBindGroupsAt(i, draw));
+  }
+
+  /** Grow the shared member buffers to hold `count` blocks. Bind groups name the old buffers, so they go too. */
+  private ensureMemberCapacity(count: number): void {
+    if (count <= this.memberCapacity) return;
+    const capacity = Math.max(count, this.memberCapacity * 2, 64);
+    this.memberUniformBuffer?.destroy();
+    this.memberEntityRefBuffer?.destroy();
+    const usage = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
+    this.memberUniformBuffer = this.device.createBuffer({ size: capacity * MEMBER_BLOCK_STRIDE, usage });
+    this.memberEntityRefBuffer = this.device.createBuffer({ size: capacity * MEMBER_BLOCK_STRIDE, usage });
+    this.memberUniformData = new Float32Array(capacity * MEMBER_BLOCK_STRIDE / 4);
+    this.memberUniformWords = new Uint32Array(this.memberUniformData.buffer);
+    this.memberRefWords = new Uint32Array(capacity * MEMBER_BLOCK_STRIDE / 4);
+    this.memberBindGroups = [];
+    this.memberCapacity = capacity;
+  }
+
+  /** The bind groups for draw index `index`, kept from the last frame when they name the same resources. */
+  private memberBindGroupsAt(index: number, draw: MemberDraw): { pools: GPUBindGroup; entity: GPUBindGroup } {
+    const offset = index * MEMBER_BLOCK_STRIDE;
+    const held = this.memberBindGroups[index]
+      ?? (this.memberBindGroups[index] = { pools: null, poolResources: [], entity: null, descriptorBuffer: null });
+    if (!held.pools || !samePoolResources(held.poolResources, draw)) {
+      held.pools = this.device.createBindGroup({
         layout: this.bindGroupLayout,
         entries: this.poolBindGroupEntries(
-          uniformBuffer, draw.levels, draw.coarse, draw.colormap,
+          { buffer: this.memberUniformBuffer!, offset, size: SLICE_UNIFORM_SIZE },
+          draw.levels, draw.coarse, draw.colormap,
         ),
-      }),
-      entity: this.device.createBindGroup({
+      });
+      held.poolResources = poolResourcesOf(draw);
+    }
+    if (!held.entity || held.descriptorBuffer !== draw.descriptorBuffer) {
+      held.entity = this.device.createBindGroup({
         layout: this.descriptorBindGroupLayout,
         entries: [
           { binding: 0, resource: { buffer: draw.descriptorBuffer } },
-          { binding: 1, resource: { buffer: entityRefBuffer } },
+          { binding: 1, resource: { buffer: this.memberEntityRefBuffer!, offset, size: ENTITY_REF_SIZE } },
           { binding: 2, resource: { buffer: this.dummyLabelColorBuffer } },
         ],
-      }),
-    };
+      });
+      held.descriptorBuffer = draw.descriptorBuffer;
+    }
+    return { pools: held.pools, entity: held.entity };
   }
 
   /**
@@ -684,7 +808,7 @@ export class SliceRenderer {
       return this.device.createBindGroup({
         layout: this.bindGroupLayout,
         entries: this.poolBindGroupEntries(
-          this.aggregateUniformBuffers[i],
+          { buffer: this.aggregateUniformBuffers[i] },
           batch.levels,
           batch.coarse,
           params.colormap,
