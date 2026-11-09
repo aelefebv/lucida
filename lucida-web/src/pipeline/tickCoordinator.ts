@@ -130,6 +130,13 @@ const VIEW_REPLAN_INTERVAL_MS = 200;
 const SELECTION_COALESCE_INTERVAL_MS = 150;
 
 /**
+ * How long a view holds still before it counts as stopped: a few display
+ * frames past the last input of a drag, the gap at which a pause is no
+ * longer the interval between two inputs.
+ */
+export const VIEW_STILL_MS = 100;
+
+/**
  * Per-dataset carry-forward captured at each full rebuild. Lets the next
  * rebuild prove cheaply that only the per-channel intensity display state
  * (contrast, gamma, colormap, opacity) changed, so a descriptor patch can
@@ -390,6 +397,11 @@ export class TickCoordinator {
   private pendingDeferredRebuild = false;
   /** The coalescing window the owed rebuild waits out, from {@link lastRebuildAt}. */
   private deferredRebuildIntervalMs = 0;
+  /** Only the view moved since the rebuild the owed one follows. */
+  private deferredViewOnly = false;
+  /** The view epoch the last tick read, and when it last changed. */
+  private lastSeenViewEpoch: number | null = null;
+  private lastViewMoveAt = Number.NEGATIVE_INFINITY;
   /**
    * Scene scalars captured at the last full rebuild, for the fast-path
    * proofs. The z-range lives per dataset in {@link DatasetRebuildSignature}
@@ -563,6 +575,10 @@ export class TickCoordinator {
       selection: rawEpochs.selection,
       request: this.requestEpoch,
     };
+    if (currentEpochs.view !== this.lastSeenViewEpoch) {
+      this.lastSeenViewEpoch = currentEpochs.view;
+      this.lastViewMoveAt = tickStart;
+    }
 
     // Diff against last epochs — drives both the cache-hit decision and
     // per-epoch cause attribution published to coldState telemetry.
@@ -597,13 +613,15 @@ export class TickCoordinator {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
           : VIEW_REPLAN_INTERVAL_MS;
-        if (tickStart - this.lastRebuildAt < interval) {
+        const viewOnly = causes.every((c) => c === "view");
+        if (tickStart < this.deferredRebuildDue(interval, viewOnly)) {
           coalescedSkip = true;
           // Leave `lastEpochs` stale so the change is re-detected next
           // tick, and flag the deferral so the render loop ticks again
           // once the window elapses and the trailing rebuild lands.
           this.pendingDeferredRebuild = true;
           this.deferredRebuildIntervalMs = interval;
+          this.deferredViewOnly = viewOnly;
         }
       }
     }
@@ -1550,6 +1568,34 @@ export class TickCoordinator {
    */
   msUntilPendingRebuild(now: number): number | null {
     if (!this.pendingDeferredRebuild) return null;
-    return Math.max(0, this.lastRebuildAt + this.deferredRebuildIntervalMs - now);
+    return Math.max(0, this.deferredRebuildDue(this.deferredRebuildIntervalMs, this.deferredViewOnly) - now);
+  }
+
+  /**
+   * When an owed rebuild may run: once its window from the last rebuild has
+   * passed, or, for a view the budgets cut short that only moved, once it
+   * has stopped. Uploads for that view wait for it to stop, so the plan they
+   * follow should be its last.
+   */
+  private deferredRebuildDue(intervalMs: number, viewOnly: boolean): number {
+    const due = this.lastRebuildAt + intervalMs;
+    if (!viewOnly || (this.lastAdmission?.short ?? 0) === 0) return due;
+    return Math.min(due, this.lastViewMoveAt + VIEW_STILL_MS);
+  }
+
+  /**
+   * How long chunk uploads wait, or null when they may go. They wait while
+   * a view the budgets cut short moves, until it has held still for
+   * {@link VIEW_STILL_MS}. Each replan of such a view admits a different
+   * part of it, so an upload during the move takes a full pool's slot from
+   * a chunk the frame draws, for one the view has often moved past by the
+   * time it lands, and the worker searches the pool for that slot first.
+   * Planning and fetching go on, so the chunks are in the cache when the
+   * view stops.
+   */
+  msUntilUploadsResume(now: number): number | null {
+    if ((this.lastAdmission?.short ?? 0) === 0) return null;
+    const wait = this.lastViewMoveAt + VIEW_STILL_MS - now;
+    return wait > 0 ? wait : null;
   }
 }

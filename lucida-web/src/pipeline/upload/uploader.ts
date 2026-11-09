@@ -59,6 +59,7 @@ import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent } from "../../trace/types.ts";
 import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
+import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
@@ -82,6 +83,12 @@ export class Uploader {
 
   /** Snapshotted by `sendColdState` so `deliverToWorker` can stamp chunks. */
   private lastEpochs: SceneEpochs | null = null;
+
+  /**
+   * A tick held chunks back since the last one that delivered everything it
+   * could; see {@link holdDelivery}.
+   */
+  private heldBacklog = false;
 
   /** Reset at the start of each `deliverToWorker`; mutated by the send loop. */
   private currentUploadStats: UploadTickStats = emptyUploadTickStats();
@@ -322,6 +329,15 @@ export class Uploader {
   // Per-tick upload (slicePath / volumePath)
 
   /**
+   * Deliver nothing this tick. The chunks held back go at
+   * {@link HELD_UPLOAD_BUDGET_BYTES} a tick once delivery resumes, until a
+   * tick delivers all it can.
+   */
+  holdDelivery(): void {
+    this.heldBacklog = true;
+  }
+
+  /**
    * Deliver cached, wanted, not-yet-sent chunks to the GPU worker in
    * strict priority order. Budget is a one-item soft cap: the next
    * priority item is sent while `remaining > 0`, even if oversized, and
@@ -336,6 +352,7 @@ export class Uploader {
     sliceZFor: ((datasetId: string) => number) | null,
   ): boolean {
     const tickStart = performance.now();
+    if (this.heldBacklog) budget = Math.max(budget, HELD_UPLOAD_BUDGET_BYTES);
     this.currentUploadStats = emptyUploadTickStats();
     this.currentUploadStats.bytesBudget = budget;
 
@@ -403,6 +420,7 @@ export class Uploader {
     }
 
     this.currentUploadStats.budgetExhausted = budgetExhausted;
+    if (!budgetExhausted) this.heldBacklog = false;
     if (telemetryActive) {
       this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
     }

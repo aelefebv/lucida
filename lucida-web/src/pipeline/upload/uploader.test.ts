@@ -12,6 +12,7 @@ import { setDebugCategories } from "../../debug/logging.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
 import { TickCoordinator } from "../tickCoordinator.ts";
+import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
 import { RESEND_GUARD_TICKS } from "./delivery/resendGuard.ts";
 import { Uploader } from "./uploader.ts";
 import { loadWasm } from "../../viewProperties.ts";
@@ -382,6 +383,33 @@ describe("Uploader unified delivery", () => {
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(4 * 1024 * 1024);
     expect(ret).toBe(true);
+  });
+
+  it("sends chunks held back while the view moved at the held budget, until a tick sends all it can", () => {
+    const MIB = 1024 * 1024;
+    const chunks = (n: number) => Array.from({ length: n }, (_, i) =>
+      makeChunkDelivery({ chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(4 * MIB), priority: i }));
+    let deliverable = chunks(12);
+    const cpuCache = makeCpuCache();
+    vi.mocked(cpuCache.getDeliverable).mockImplementation(function* () {
+      yield* deliverable;
+    });
+    const volumeChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
+    const uploader = new Uploader();
+
+    uploader.holdDelivery();
+    expect(uploader.deliverToWorker(ctx, 4 * MIB, null)).toBe(true);
+    expect(volumeChunkData).toHaveBeenCalledTimes(HELD_UPLOAD_BUDGET_BYTES / (4 * MIB));
+
+    // The rest fit, so the backlog is gone and the caller's budget is back.
+    deliverable = deliverable.slice(HELD_UPLOAD_BUDGET_BYTES / (4 * MIB));
+    uploader.deliverToWorker(ctx, 4 * MIB, null);
+    expect(volumeChunkData).toHaveBeenCalledTimes(12);
+    volumeChunkData.mockClear();
+    deliverable = chunks(3);
+    uploader.deliverToWorker(ctx, 4 * MIB, null);
+    expect(volumeChunkData).toHaveBeenCalledTimes(1);
   });
 
   it("splits upload budget across detail and coarse when both tiers have deliverables", () => {

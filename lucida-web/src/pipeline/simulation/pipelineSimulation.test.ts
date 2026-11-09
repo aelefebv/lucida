@@ -409,6 +409,35 @@ describe("a two-timepoint volume whose detail budget holds the view but not its 
   }
 });
 
+describe("a gesture over a volume the budgets cut short", () => {
+  // The view wants 128 chunks of level 0 and the detail budget holds 100, so
+  // each replan of the moving view admits a different 100. The cache takes
+  // them, and the worker only once the view stops.
+  const CHUNK_32_CUBE_BYTES = 32 * 32 * 32 * 2;
+  const scenario = describeScenario({
+    name: "orbit over a volume beyond the detail budget",
+    mode: "volume",
+    dataset: singleImage({
+      id: "block",
+      pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+    }),
+    cache: { mainBudgetBytes: 100 * CHUNK_32_CUBE_BYTES },
+    gpuComplete: false,
+    steps: [{ zoom: 2 }, { gesture: { orbit: [0.08, 0.03] }, moves: 30 }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`sends the worker nothing while it moves, and what the budgets hold once it stops, at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const orbit = run.phases[2];
+      expect(orbit.chunksSentDuringInput, run.report).toBe(0);
+      expect(orbit.chunksSent, run.report).toBeGreaterThan(0);
+      expect(orbit.quiescence, run.report).toBe("coverage_limited");
+      expect(orbit.detail.resident, run.report).toBe(100);
+    });
+  }
+});
+
 describe("a three-channel volume on a GPU slower than the frame clock", () => {
   // 64³ chunks are 512 KiB, so one tick's upload budget delivers 16 of the
   // view's 396, and each frame holds the stand-in GPU, and with it the frame

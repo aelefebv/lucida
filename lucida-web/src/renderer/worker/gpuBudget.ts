@@ -54,6 +54,37 @@ import { wantedChunksFor } from "../wantedChunks.ts";
 import { gpuLedgerLine } from "./gpuLedger.ts";
 
 
+/**
+ * Every chunk pool texture's usage. COPY_SRC so a pool that grows or shrinks
+ * can copy its chunks into the new texture. Nothing renders to a pool, but
+ * RENDER_ATTACHMENT lets the implementation zero a new texture with a clear
+ * rather than by copying zeros into it from a staging buffer, which for a
+ * pool of a gigabyte held the GPU for a quarter of a second at each growth.
+ */
+export function chunkPoolUsage(): GPUTextureUsageFlags {
+  return GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC |
+    GPUTextureUsage.RENDER_ATTACHMENT;
+}
+
+/**
+ * The slots that hold every chunk the planner wants of the members in
+ * `atlas`'s tier. A full pool grows straight to them: each growth allocates a
+ * texture of the new size and copies the old one into it, so doubling toward
+ * them repeats that cost. A member whose levels differ in chunk shape has
+ * chunks in another pool counted too, which the GPU total bounds like any
+ * growth. A full pool asks at every upload, so this counts no keys.
+ */
+export function wantedSlotsOf(
+  state: RendererState,
+  poolKey: string,
+  atlas: AtlasState | SliceAtlasState,
+): number {
+  const tier = chunkPoolTier(poolKey);
+  let slots = 0;
+  for (const memberId of atlas.entityMetas.keys()) slots += wantedChunksFor(state, memberId, tier)?.size ?? 0;
+  return slots;
+}
+
 /** What every holder has on the GPU now, against the total. */
 export function measureGpuMemory(state: RendererState): GpuMemoryReport {
   let chunkBytes = 0;

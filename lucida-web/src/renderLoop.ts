@@ -123,6 +123,7 @@ export class RenderLoop implements TraceEnvironment {
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
   private trailingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
+  private uploadResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly framePacer = new FramePacer();
   /** The last tick left decoded chunks undelivered for want of upload budget. */
@@ -262,6 +263,10 @@ export class RenderLoop implements TraceEnvironment {
     if (this.trailingRebuildTimer !== null) {
       clearTimeout(this.trailingRebuildTimer);
       this.trailingRebuildTimer = null;
+    }
+    if (this.uploadResumeTimer !== null) {
+      clearTimeout(this.uploadResumeTimer);
+      this.uploadResumeTimer = null;
     }
     if (this.minimapDisplayTimer !== null) {
       clearTimeout(this.minimapDisplayTimer);
@@ -409,8 +414,10 @@ export class RenderLoop implements TraceEnvironment {
   private evaluateAndPublishSettle(): SettleState {
     const state = this.settleState;
     this.session.cpuCache.settleInputs(state);
-    // A view change the planner deferred has not reached the wanted set yet.
-    state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild();
+    // A view change the planner deferred has not reached the wanted set yet,
+    // and chunks held while the view moved have not reached the GPU.
+    state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild() ||
+      this.uploadResumeTimer !== null;
     state.residencyDirty = this.residencyDirty;
     // A frame the worker is still drawing counts: until it lands, the canvas
     // does not show what the view settled on, and a capture would catch it.
@@ -585,6 +592,23 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
+   * Tick once the volume view has held still long enough for the uploads
+   * held while it moved to go. Until then a tick delivers nothing, so it
+   * has nothing new to draw either.
+   */
+  private scheduleUploadResume(): void {
+    if (this.mode !== "volume") return;
+    const wait = this.tickCoordinator.msUntilUploadsResume(performance.now());
+    if (wait === null || this.uploadResumeTimer !== null) return;
+    this.uploadResumeTimer = setTimeout(() => {
+      this.uploadResumeTimer = null;
+      // The view moved again during the wait.
+      if (this.tickCoordinator.msUntilUploadsResume(performance.now()) !== null) this.scheduleUploadResume();
+      else this.setDirty("residency", "uploads_resumed");
+    }, wait);
+  }
+
+  /**
    * Draw a minimap display edit the camera held once it has been still long
    * enough. It redraws only the minimap, so it neither waits for a tick nor
    * dirties the view, which may have settled by then.
@@ -746,7 +770,11 @@ export class RenderLoop implements TraceEnvironment {
         shouldRender = true;
       }
     } else if (this.residencyDirty) {
-      if (
+      if (this.uploadResumeTimer !== null) {
+        // Uploads are held, so nothing new has reached the GPU to draw. The
+        // timer dirties the loop again when they may go.
+        this.residencyDirty = false;
+      } else if (
         now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS &&
         this.framePacer.mayDrawResidency(now, framesInFlight, this.deliveryBacklogged)
       ) {
@@ -793,6 +821,7 @@ export class RenderLoop implements TraceEnvironment {
     }
 
     this.scheduleTrailingRebuild();
+    this.scheduleUploadResume();
 
     // Recording is unconditional, and one subtraction is not a cost worth
     // gating.
