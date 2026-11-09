@@ -49,7 +49,7 @@ use crate::source_limiter::{ReaderId, RequestLabel, SourceReadBounds, SourceRead
 ///
 /// Reads larger than that sweep's are still admitted sixteen at a time, so a
 /// large-chunk dataset reads exactly as wide as when the bound was a count.
-pub(crate) const DEFAULT_MIN_SOURCE_READS: usize = 16;
+const DEFAULT_MIN_SOURCE_READS: usize = 16;
 
 /// Bytes in flight past [`DEFAULT_MIN_SOURCE_READS`], by default: sixteen of
 /// the reads that sweep measured.
@@ -157,6 +157,11 @@ const SOURCE_READ_BYTES_ENV: &str = "LUCIDA_SOURCE_READ_BYTES";
 fn global_source_read_limiter() -> &'static Arc<SourceReadLimiter> {
     static LIMITER: OnceLock<Arc<SourceReadLimiter>> = OnceLock::new();
     LIMITER.get_or_init(|| SourceReadLimiter::with_bounds(configured_source_read_bounds()))
+}
+
+/// The most chunk reads the process-wide source-read bound admits at once.
+pub(crate) fn max_source_reads() -> usize {
+    global_source_read_limiter().bounds().max_reads
 }
 
 /// The process-global limiter for metadata reads, the counterpart to

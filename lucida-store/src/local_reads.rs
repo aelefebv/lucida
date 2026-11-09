@@ -26,11 +26,6 @@ use object_store::{
 };
 use tokio::sync::oneshot;
 
-/// Reads at once. Every read that gets here was already admitted by the
-/// source-read bound, so these need only keep a disk busy, and take as many
-/// reads as that bound always admits together.
-const READ_THREADS: usize = crate::cache::DEFAULT_MIN_SOURCE_READS;
-
 /// `store`, its reads moved onto the read threads.
 pub fn on_read_threads(store: LocalFileSystem) -> Arc<dyn ObjectStore> {
     Arc::new(LocalReads {
@@ -197,28 +192,44 @@ where
 
 /// The read threads' queue. Sending never waits on them: only a thread taking
 /// the next job holds the receiver.
+///
+/// There is a thread for every read the source-read bound admits at once, so
+/// these threads never hold back a read that bound let through. The first
+/// thread starts the others, so the async worker making the first read does
+/// not wait for them all to be created.
 fn read_threads() -> &'static mpsc::Sender<Job> {
     static JOBS: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
     JOBS.get_or_init(|| {
         let (jobs, queue) = mpsc::channel::<Job>();
         let queue = Arc::new(Mutex::new(queue));
-        for _ in 0..READ_THREADS {
-            let queue = Arc::clone(&queue);
-            std::thread::Builder::new()
-                .name("lucida-local-read".into())
-                .spawn(move || {
-                    loop {
-                        let next = queue.lock().unwrap().recv();
-                        match next {
-                            Ok(job) => job(),
-                            Err(_) => return,
-                        }
-                    }
-                })
-                .expect("spawn a read thread");
-        }
+        let threads = crate::cache::max_source_reads().max(1);
+        let first = Arc::clone(&queue);
+        spawn_read_thread(move || {
+            for _ in 1..threads {
+                let queue = Arc::clone(&first);
+                spawn_read_thread(move || take_jobs(&queue));
+            }
+            take_jobs(&first);
+        });
         jobs
     })
+}
+
+fn spawn_read_thread(run: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name("lucida-local-read".into())
+        .spawn(run)
+        .expect("spawn a read thread");
+}
+
+fn take_jobs(queue: &Mutex<mpsc::Receiver<Job>>) {
+    loop {
+        let next = queue.lock().unwrap().recv();
+        match next {
+            Ok(job) => job(),
+            Err(_) => return,
+        }
+    }
 }
 
 #[cfg(test)]
