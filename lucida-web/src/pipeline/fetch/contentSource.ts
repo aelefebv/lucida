@@ -72,10 +72,20 @@ export function sourceChunkFailure(
   });
 }
 
+/** Planes of a chunk, half-open along the chunk's own Z: `[3, 5]` is its fourth and fifth. */
+export type PlaneRange = readonly [number, number];
+
+/** Whether `outer` holds every plane of `inner`. */
+export function holdsPlanes(outer: PlaneRange, inner: PlaneRange): boolean {
+  return outer[0] <= inner[0] && inner[1] <= outer[1];
+}
+
 export interface FetchRequest {
   datasetId: string;
   imageId: string;
   chunkKey: string;       // canonical "level/t/c/z/y/x"
+  /** Planes to fetch in place of the whole chunk. */
+  planes?: PlaneRange;
 }
 
 export interface FetchResult {
@@ -88,19 +98,30 @@ export interface FetchResult {
    */
   codecs?: Uint8Array;
   /**
-   * What the chunk decodes to, from its level's metadata. Encoded bytes
+   * What the bytes decode to, from their level's metadata. Encoded bytes
    * decode to exactly this or fail. Absent when the level is unknown.
    */
   decodedBytes?: number;
+  /**
+   * The planes the bytes hold. Absent when they hold the whole chunk, which
+   * the server may send for any request.
+   */
+  planes?: PlaneRange;
 }
 
 export interface ContentSource {
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult>;
   /**
    * A binary chunk frame off the socket, keyed by its composite chunk key,
-   * with its codec list when the frame is encoded.
+   * with its codec list when the frame is encoded and its planes when it
+   * holds only some of the chunk.
    */
-  handleBinary(key: string, data: ArrayBuffer, codecs?: Uint8Array | null): void;
+  handleBinary(
+    key: string,
+    data: ArrayBuffer,
+    codecs?: Uint8Array | null,
+    planes?: PlaneRange | null,
+  ): void;
 }
 
 /**
@@ -130,19 +151,25 @@ function storedBytesPerSample(dataType: string): number {
   }
 }
 
+/** What one wire chunk of a level decodes to, and the planes it holds along Z. */
+export interface LevelChunkSize {
+  bytes: number;
+  planes: number;
+}
+
 /**
  * What one wire chunk of each level decodes to, by level index: one
  * timepoint and one channel of the level's chunk shape, at the data type's
  * own width.
  */
-export function levelChunkBytes(multiscale: MultiscaleInfo): number[] {
+export function levelChunkSizes(multiscale: MultiscaleInfo): LevelChunkSize[] {
   const sample = storedBytesPerSample(multiscale.data_type);
-  const bytes: number[] = [];
+  const sizes: LevelChunkSize[] = [];
   for (const level of multiscale.levels) {
     const [, , z, y, x] = level.chunk_shape;
-    bytes[level.level_index] = z * y * x * sample;
+    sizes[level.level_index] = { bytes: z * y * x * sample, planes: Math.max(z, 1) };
   }
-  return bytes;
+  return sizes;
 }
 
 /**
@@ -163,7 +190,7 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
  */
 export type LabelSink = (label: WireLabel) => void;
 
-/** One composite key's in-flight fetch, and the label it was sent under. */
+/** One request's in-flight fetch, and the label it was sent under. */
 interface PendingGroup {
   /**
    * The first sender's label, handed to every caller that coalesces onto
@@ -174,7 +201,7 @@ interface PendingGroup {
 }
 
 interface PendingRequest {
-  resolve: (data: ArrayBuffer, codecs: Uint8Array | null) => void;
+  resolve: (data: ArrayBuffer, codecs: Uint8Array | null, planes: PlaneRange | null) => void;
   // Accepts `FetchError` (rejectDataset/rejectAll) and
   // `DOMException("AbortError")` (signal abort). Both pass through
   // `classifyFetchError` in the cache.
@@ -182,8 +209,22 @@ interface PendingRequest {
   timeoutId: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * The key a request waits under: its composite chunk key for the whole
+ * chunk, and that key with its planes for some planes, so a request for the
+ * whole chunk and one for its planes are two wire requests.
+ */
+function pendingKey(compositeKey: string, planes: PlaneRange | undefined): string {
+  return planes ? `${compositeKey}#${planes[0]}:${planes[1]}` : compositeKey;
+}
+
 export class ProxiedContentSource implements ContentSource {
   private pending = new Map<string, PendingGroup>();
+  /**
+   * Each chunk's waiting plane requests, by composite key. A whole chunk, or
+   * the failure of its read, answers every one of them as well.
+   */
+  private planeKeys = new Map<string, Set<string>>();
   /**
    * The connection's label counter. Uniqueness is across the connection:
    * gaps in the sequence are harmless, since nothing derives order from
@@ -198,7 +239,7 @@ export class ProxiedContentSource implements ContentSource {
    */
   private cancelledRids: number[] = [];
   private imageWireFormats = new Map<string, WireFormat>();
-  private imageChunkBytes = new Map<string, readonly number[]>();
+  private imageChunkSizes = new Map<string, readonly LevelChunkSize[]>();
 
   private sendMessage: (json: string) => void;
   private timeoutMs: number;
@@ -224,13 +265,13 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   /**
-   * `chunkBytes` is what one chunk of each level decodes to
-   * ({@link levelChunkBytes}). Without it, an encoded frame for the image
+   * `chunkSizes` is what one chunk of each level decodes to
+   * ({@link levelChunkSizes}). Without it, an encoded frame for the image
    * fails rather than decode unbounded.
    */
-  registerImage(imageId: string, wireFormat: WireFormat, chunkBytes?: readonly number[]): void {
+  registerImage(imageId: string, wireFormat: WireFormat, chunkSizes?: readonly LevelChunkSize[]): void {
     this.imageWireFormats.set(imageId, wireFormat);
-    if (chunkBytes) this.imageChunkBytes.set(imageId, chunkBytes);
+    if (chunkSizes) this.imageChunkSizes.set(imageId, chunkSizes);
   }
 
   /**
@@ -240,15 +281,24 @@ export class ProxiedContentSource implements ContentSource {
   unregisterDataset(imageIds: readonly string[]): void {
     for (const id of imageIds) {
       this.imageWireFormats.delete(id);
-      this.imageChunkBytes.delete(id);
+      this.imageChunkSizes.delete(id);
     }
   }
 
-  handleBinary(key: string, data: ArrayBuffer, codecs: Uint8Array | null = null): void {
-    const entries = this.takePending(key);
+  handleBinary(
+    key: string,
+    data: ArrayBuffer,
+    codecs: Uint8Array | null = null,
+    planes: PlaneRange | null = null,
+  ): void {
+    // Whole bytes answer every request for the chunk, and planes the
+    // requests for planes they hold.
+    const entries = planes
+      ? this.takePlanes(key, (wanted) => holdsPlanes(planes, wanted))
+      : this.takeChunk(key);
     entries.forEach((entry, idx) => {
       clearTimeout(entry.timeoutId);
-      entry.resolve(idx === 0 ? data : data.slice(0), codecs);
+      entry.resolve(idx === 0 ? data : data.slice(0), codecs, planes);
     });
   }
 
@@ -260,7 +310,7 @@ export class ProxiedContentSource implements ContentSource {
     message?: string | null,
   ): void {
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
-    const entries = this.takePending(compositeKey);
+    const entries = this.takeChunk(compositeKey);
     if (entries.length === 0) return;
 
     for (const entry of entries) {
@@ -271,7 +321,9 @@ export class ProxiedContentSource implements ContentSource {
 
   /**
    * Server-reported failure for a source chunk request. Every status
-   * rejects the pending fetch; see {@link sourceChunkFailure} for how.
+   * rejects the pending fetch, and every request for the chunk's planes,
+   * since the server reads the whole chunk for either; see
+   * {@link sourceChunkFailure} for how.
    */
   handleSourceChunkStatus(
     datasetId: string,
@@ -282,7 +334,7 @@ export class ProxiedContentSource implements ContentSource {
     failure?: ChunkFailureKind | null,
   ): void {
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
-    const entries = this.takePending(compositeKey);
+    const entries = this.takeChunk(compositeKey);
     if (entries.length === 0) return;
 
     for (const entry of entries) {
@@ -297,6 +349,7 @@ export class ProxiedContentSource implements ContentSource {
     for (const [key, group] of this.pending) {
       if (key.startsWith(prefix)) {
         this.pending.delete(key);
+        this.planeKeys.delete(key.split("#", 1)[0]);
         this.cancel(group.label);
         for (const entry of group.entries) {
           clearTimeout(entry.timeoutId);
@@ -315,11 +368,13 @@ export class ProxiedContentSource implements ContentSource {
       }
     }
     this.pending.clear();
+    this.planeKeys.clear();
   }
 
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult> {
-    const { datasetId, imageId, chunkKey } = request;
+    const { datasetId, imageId, chunkKey, planes } = request;
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
+    const key = pendingKey(compositeKey, planes);
     const wireFormat = this.imageWireFormats.get(imageId);
     if (!wireFormat) {
       // Setup bug — retrying won't recover.
@@ -330,25 +385,31 @@ export class ProxiedContentSource implements ContentSource {
       );
     }
     const dataType = extractDataType(wireFormat);
-    const decodedBytes = this.imageChunkBytes.get(imageId)?.[Number(chunkKey.split("/", 1)[0])];
+    const size = this.imageChunkSizes.get(imageId)?.[Number(chunkKey.split("/", 1)[0])];
 
     return new Promise<FetchResult>((resolve, reject) => {
       const pendingEntry: PendingRequest = {
-        resolve: (bytes, codecs) => {
+        resolve: (bytes, codecs, arrived) => {
           clearTimeout(pendingEntry.timeoutId);
           const result: FetchResult = { bytes, wireFormat, dataType };
           if (codecs) result.codecs = codecs;
-          if (decodedBytes !== undefined) result.decodedBytes = decodedBytes;
+          if (arrived) result.planes = arrived;
+          if (size !== undefined) {
+            result.decodedBytes = arrived
+              ? (size.bytes / size.planes) * (arrived[1] - arrived[0])
+              : size.bytes;
+          }
           resolve(result);
         },
         reject: (err) => { clearTimeout(pendingEntry.timeoutId); reject(err); },
         timeoutId: setTimeout(() => {
-          this.removePending(compositeKey, pendingEntry);
+          this.removePending(key, pendingEntry);
           reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
         }, this.timeoutMs),
       };
 
-      const { label, send } = this.addPending(compositeKey, pendingEntry);
+      const { label, send } = this.addPending(key, pendingEntry);
+      if (send && planes) this.trackPlanes(compositeKey, key);
       onLabel?.(label);
       if (send) {
         this.sendMessage(JSON.stringify({
@@ -357,6 +418,7 @@ export class ProxiedContentSource implements ContentSource {
           dataset_id: datasetId,
           image_id: imageId,
           key: chunkKey,
+          ...(planes ? { planes: [planes[0], planes[1]] } : {}),
         }));
       }
 
@@ -364,7 +426,7 @@ export class ProxiedContentSource implements ContentSource {
         clearTimeout(pendingEntry.timeoutId);
         // Only an abort tells the server to stop. A timed-out request is
         // retried at once, and the retry rides the read still in flight.
-        const emptied = this.removePending(compositeKey, pendingEntry);
+        const emptied = this.removePending(key, pendingEntry);
         if (emptied) this.cancel(emptied);
         // Keep the AbortError shape for downstream `instanceof DOMException`.
         reject(new DOMException("Aborted", "AbortError"));
@@ -395,6 +457,7 @@ export class ProxiedContentSource implements ContentSource {
     const next = group.entries.filter((candidate) => candidate !== entry);
     if (next.length === 0) {
       this.pending.delete(key);
+      this.untrackPlanes(key);
       return group.label;
     }
     // The label stays with the group: the wire request it names is still
@@ -418,10 +481,47 @@ export class ProxiedContentSource implements ContentSource {
     this.sendMessage(JSON.stringify({ type: "chunk_cancel", rids }));
   }
 
-  private takePending(key: string): PendingRequest[] {
-    const group = this.pending.get(key);
-    this.pending.delete(key);
-    return group?.entries ?? [];
+  /** Every request waiting on the chunk: its whole bytes and any of its planes. */
+  private takeChunk(compositeKey: string): PendingRequest[] {
+    const entries = this.takePlanes(compositeKey, () => true);
+    const whole = this.pending.get(compositeKey);
+    this.pending.delete(compositeKey);
+    return whole ? [...whole.entries, ...entries] : entries;
+  }
+
+  /** The chunk's plane requests whose planes `wanted` accepts. */
+  private takePlanes(compositeKey: string, wanted: (planes: PlaneRange) => boolean): PendingRequest[] {
+    const keys = this.planeKeys.get(compositeKey);
+    if (!keys) return [];
+    const entries: PendingRequest[] = [];
+    for (const key of keys) {
+      const [first, end] = key.slice(key.lastIndexOf("#") + 1).split(":").map(Number);
+      if (!wanted([first, end])) continue;
+      entries.push(...(this.pending.get(key)?.entries ?? []));
+      this.pending.delete(key);
+      keys.delete(key);
+    }
+    if (keys.size === 0) this.planeKeys.delete(compositeKey);
+    return entries;
+  }
+
+  private trackPlanes(compositeKey: string, key: string): void {
+    let keys = this.planeKeys.get(compositeKey);
+    if (!keys) {
+      keys = new Set();
+      this.planeKeys.set(compositeKey, keys);
+    }
+    keys.add(key);
+  }
+
+  private untrackPlanes(key: string): void {
+    const at = key.lastIndexOf("#");
+    if (at < 0) return;
+    const compositeKey = key.slice(0, at);
+    const keys = this.planeKeys.get(compositeKey);
+    if (!keys) return;
+    keys.delete(key);
+    if (keys.size === 0) this.planeKeys.delete(compositeKey);
   }
 
   private mintLabel(): WireLabel {

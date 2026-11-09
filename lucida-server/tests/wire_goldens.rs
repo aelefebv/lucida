@@ -315,7 +315,10 @@ fn document_command_fixture_paths(cmd: &DocumentCommand) -> &'static [&'static s
 
 fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
     match msg {
-        ChunkMessage::ChunkRequest { .. } => &["session/chunk_request.json"],
+        ChunkMessage::ChunkRequest { planes: None, .. } => &["session/chunk_request.json"],
+        ChunkMessage::ChunkRequest {
+            planes: Some(_), ..
+        } => &["session/chunk_request_planes.json"],
         // Excluded: currently unproduced wire vocabulary. Nothing in the
         // repo sends ChunkFetch — it exists as a type (with a round-trip
         // unit test), and the server's handler accepts and ignores it if a
@@ -2347,6 +2350,7 @@ const GENERATED_FILES: &[&str] = &[
 
 const REQUEST_FILES: &[&str] = &[
     "session/chunk_request.json",
+    "session/chunk_request_planes.json",
     "session/chunk_cancel.json",
     "session/chunk_codecs.json",
 ];
@@ -2363,6 +2367,19 @@ fn chunk_request_golden() -> ChunkMessage {
         dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
         image_id: ImageId(SINGLE_IMAGE_ID.into()),
         key: "1/2/1/12/3/4".into(),
+        planes: None,
+    }
+}
+
+/// What the slice view asks for: some planes of the chunk, not all of it.
+/// The page's second request on the connection, so its label is `1`.
+fn chunk_request_planes_golden() -> ChunkMessage {
+    ChunkMessage::ChunkRequest {
+        rid: 1,
+        dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
+        image_id: ImageId(SINGLE_IMAGE_ID.into()),
+        key: "1/2/1/12/3/4".into(),
+        planes: Some([3, 6]),
     }
 }
 
@@ -2408,6 +2425,15 @@ fn request_envelopes_match_goldens() {
     check(
         "session/chunk_request.json",
         &chunk,
+        &req("", &["/type", "/rid", "/dataset_id", "/image_id", "/key"]),
+        &mut failures,
+    );
+
+    let planes = chunk_request_planes_golden();
+    assert!(chunk_message_fixture_paths(&planes).contains(&"session/chunk_request_planes.json"));
+    check(
+        "session/chunk_request_planes.json",
+        &planes,
         &req("", &["/type", "/rid", "/dataset_id", "/image_id", "/key"]),
         &mut failures,
     );

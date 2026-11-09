@@ -1,0 +1,11 @@
+{
+  "type": "chunk_request",
+  "rid": 1,
+  "dataset_id": "wds-0f3a",
+  "image_id": "multiscale-0",
+  "key": "1/2/1/12/3/4",
+  "planes": [
+    3,
+    6
+  ]
+}

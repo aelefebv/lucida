@@ -144,6 +144,23 @@ impl ChunkResolver {
             .and_then(|img| img.levels.get(level as usize).cloned())
     }
 
+    /// How many planes along Z one wire chunk of the level holds: the
+    /// declared chunk's depth on a regridded level, and 1 for an image
+    /// without a Z axis. `None` if the image or the level is unknown.
+    pub fn chunk_depth(&self, image_id: &ImageId, level: u32) -> Option<u64> {
+        let img = self.images.get(image_id)?;
+        let level = img.levels.get(level as usize)?;
+        let shape = level
+            .regrid
+            .as_ref()
+            .map_or(&level.chunk_shape, |regrid| &regrid.chunk_shape);
+        let z = img
+            .axes_names
+            .iter()
+            .position(|axis| axis.eq_ignore_ascii_case("z"));
+        Some(z.and_then(|z| shape.get(z).copied()).unwrap_or(1).max(1))
+    }
+
     /// Resolve a chunk key to where the chunk lives for a given image, or
     /// `None` if the binding has no such image or level, or a sharded
     /// level's layout does not fit the image's axes. Uses the per-level
@@ -260,6 +277,24 @@ mod tests {
             index_location: lucida_store::shard::IndexLocation::End,
             index_checksum: true,
         }
+    }
+
+    #[test]
+    fn a_chunk_depth_is_its_z_extent_and_one_without_z() {
+        let volume = make_image_seed_with_level(
+            "v",
+            vec!["c", "z", "y", "x"],
+            None,
+            vec![1, 16, 32, 32],
+            None,
+        );
+        let plane =
+            make_image_seed_with_level("p", vec!["c", "y", "x"], None, vec![1, 32, 32], None);
+        let resolver = ChunkResolver::new(&make_seed(vec![volume, plane]));
+        assert_eq!(resolver.chunk_depth(&ImageId("v".into()), 0), Some(16));
+        assert_eq!(resolver.chunk_depth(&ImageId("p".into()), 0), Some(1));
+        assert_eq!(resolver.chunk_depth(&ImageId("v".into()), 1), None);
+        assert_eq!(resolver.chunk_depth(&ImageId("none".into()), 0), None);
     }
 
     #[test]

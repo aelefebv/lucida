@@ -441,3 +441,84 @@ describe("ProxiedContentSource.handleBinary", () => {
     expect(result.dataType).toBe("uint16");
   });
 });
+
+// Plane requests
+
+describe("ProxiedContentSource plane requests", () => {
+  const chunk = { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/1/0/0" };
+  const key = "ds-1/image-1/0/0/0/1/0/0";
+
+  beforeEach(() => {
+    // Two levels of 4-plane chunks, 4 KiB each decoded.
+    source.registerImage("image-1", { Raw: { data_type: "uint16" } }, [
+      { bytes: 4096, planes: 4 },
+      { bytes: 4096, planes: 4 },
+    ]);
+  });
+
+  it("asks for the planes, and a plane frame answers with what it holds", async () => {
+    const pending = source.fetch({ ...chunk, planes: [1, 3] }, new AbortController().signal);
+    expect(JSON.parse(sentMessages[0])).toMatchObject({ key: "0/0/0/1/0/0", planes: [1, 3] });
+
+    const bytes = new ArrayBuffer(2048);
+    source.handleBinary(key, bytes, null, [1, 3]);
+    const result = await pending;
+    expect(result.bytes).toBe(bytes);
+    expect(result.planes).toEqual([1, 3]);
+    expect(result.decodedBytes).toBe(2048);
+  });
+
+  it("keeps a request for planes apart from one for the whole chunk", async () => {
+    const planes = source.fetch({ ...chunk, planes: [1, 3] }, new AbortController().signal);
+    const whole = source.fetch(chunk, new AbortController().signal);
+    expect(sentMessages).toHaveLength(2);
+    expect(JSON.parse(sentMessages[1]).planes).toBeUndefined();
+
+    source.handleBinary(key, new ArrayBuffer(2048), null, [1, 3]);
+    expect((await planes).planes).toEqual([1, 3]);
+
+    source.handleBinary(key, new ArrayBuffer(4096));
+    const result = await whole;
+    expect(result.planes).toBeUndefined();
+    expect(result.decodedBytes).toBe(4096);
+  });
+
+  it("answers a request for planes with the whole chunk when that comes", async () => {
+    const planes = source.fetch({ ...chunk, planes: [0, 2] }, new AbortController().signal);
+    source.handleBinary(key, new ArrayBuffer(4096));
+    const result = await planes;
+    expect(result.planes).toBeUndefined();
+    expect(result.decodedBytes).toBe(4096);
+  });
+
+  it("leaves a request for planes a frame does not hold waiting", async () => {
+    const planes = source.fetch({ ...chunk, planes: [2, 4] }, new AbortController().signal);
+    let settled = false;
+    void planes.then(() => { settled = true; }, () => { settled = true; });
+    source.handleBinary(key, new ArrayBuffer(2048), null, [0, 2]);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    source.handleBinary(key, new ArrayBuffer(2048), null, [2, 4]);
+    expect((await planes).planes).toEqual([2, 4]);
+  });
+
+  it("fails every request for the chunk when its read fails", async () => {
+    const planes = source.fetch({ ...chunk, planes: [0, 2] }, new AbortController().signal);
+    const whole = source.fetch(chunk, new AbortController().signal);
+    source.handleSourceChunkStatus("ds-1", "image-1", "0/0/0/1/0/0", "unavailable");
+    await expect(planes).rejects.toBeInstanceOf(FetchError);
+    await expect(whole).rejects.toBeInstanceOf(FetchError);
+  });
+
+  it("takes back a request for planes by its own label", async () => {
+    const ctrl = new AbortController();
+    const planes = source.fetch({ ...chunk, planes: [0, 2] }, ctrl.signal);
+    const label = JSON.parse(sentMessages[0]).rid;
+    ctrl.abort();
+    await expect(planes).rejects.toThrow(/aborted/i);
+    await Promise.resolve();
+    expect(JSON.parse(sentMessages[1])).toEqual({ type: "chunk_cancel", rids: [label] });
+    // Nothing is left waiting on the chunk.
+    expect(() => source.handleBinary(key, new ArrayBuffer(4096))).not.toThrow();
+  });
+});

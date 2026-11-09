@@ -1,7 +1,8 @@
 //! What a chunk frame carries to a client that declared the codecs it
 //! decodes: a source chunk's stored bytes as they are, or a chunk the server
 //! made itself compressed for the link. Every other client, and every chunk
-//! that does not qualify, gets decoded bytes.
+//! that does not qualify, gets decoded bytes. A request for some planes of a
+//! chunk gets those planes, cut from the decoded chunk.
 
 use std::net::IpAddr;
 
@@ -69,9 +70,73 @@ pub fn compress_produced(codecs: CodecSet, decoded: &[u8]) -> Option<Vec<u8>> {
     saves_enough(compressed.len(), decoded.len()).then_some(compressed)
 }
 
+/// The planes of a wire chunk a request asked for in place of all of it,
+/// half-open along the chunk's own Z.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaneCut {
+    first: u32,
+    end: u32,
+    depth: u32,
+}
+
+impl PlaneCut {
+    /// The cut of `planes` from a chunk `depth` planes deep, or `None` when
+    /// the range is empty, reaches past the chunk, or covers all of it. Each
+    /// of those is answered with the whole chunk, which holds every plane.
+    pub fn new([first, end]: [u32; 2], depth: u64) -> Option<Self> {
+        let depth = u32::try_from(depth).ok()?;
+        (first < end && end <= depth && end - first < depth).then_some(PlaneCut {
+            first,
+            end,
+            depth,
+        })
+    }
+
+    pub fn planes(self) -> [u32; 2] {
+        [self.first, self.end]
+    }
+
+    /// The bytes the planes take of a chunk of `len` bytes, or `None` when
+    /// the chunk does not split into its planes evenly.
+    pub fn len_of(self, len: usize) -> Option<usize> {
+        let depth = self.depth as usize;
+        len.is_multiple_of(depth)
+            .then(|| len / depth * (self.end - self.first) as usize)
+    }
+
+    /// The planes out of the whole chunk's bytes, or `None` when the chunk
+    /// does not split into its planes evenly.
+    pub fn cut(self, chunk: &[u8]) -> Option<&[u8]> {
+        let len = self.len_of(chunk.len())?;
+        let start = chunk.len() / self.depth as usize * self.first as usize;
+        chunk.get(start..start + len)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plane_cut_takes_its_planes_of_the_chunk() {
+        let chunk: Vec<u8> = (0..16).collect();
+        let cut = PlaneCut::new([1, 3], 4).unwrap();
+        assert_eq!(cut.planes(), [1, 3]);
+        assert_eq!(cut.cut(&chunk), Some(&chunk[4..12]));
+        assert_eq!(cut.len_of(16), Some(8));
+        // A chunk that is not four equal planes is served whole.
+        assert_eq!(cut.cut(&chunk[..15]), None);
+    }
+
+    #[test]
+    fn a_range_the_chunk_cannot_cut_is_served_whole() {
+        assert_eq!(PlaneCut::new([2, 2], 4), None);
+        assert_eq!(PlaneCut::new([3, 1], 4), None);
+        assert_eq!(PlaneCut::new([3, 5], 4), None);
+        assert_eq!(PlaneCut::new([0, 4], 4), None);
+        assert_eq!(PlaneCut::new([0, 1], 1), None);
+        assert!(PlaneCut::new([3, 4], 4).is_some());
+    }
 
     fn lz4() -> CodecSet {
         [ChunkCodec::Lz4].into_iter().collect()
