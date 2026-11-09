@@ -778,14 +778,11 @@ export function tickMinimap(
   }
   // A dolly, pan, zoom, or Z-scrub falls through to the overlay alone.
   //
-  // The static layer is drawn in the minimap's own viewProj. In slice mode that
-  // camera is fixed, so only a rebuild re-strokes it. In volume mode the layer
-  // also carries the main camera's frustum, so an orbit or any main-camera move
-  // re-strokes too. Computed before the keys advance.
-  const staticDirty =
-    mode === "volume"
-      ? rebuilt || cameraChanged || overlayCamKey !== state.overlayCamKey
-      : rebuilt;
+  // The static layer is the member outlines, drawn in the minimap's own
+  // viewProj, so only a rebuild or an orbit of that camera re-strokes them. The
+  // main camera's frustum is drawn with the viewport overlays instead, so a
+  // dolly or look-around leaves a collection's outlines alone.
+  const staticDirty = rebuilt || orbited;
 
   state.overviewGeometryKey = geometryKey;
   state.overviewCameraKey = cameraKey;

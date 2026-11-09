@@ -384,6 +384,13 @@ export class TraceRecorder {
    */
   private awaitingResident: number[] = [];
   private awaitingDrawn: number[] = [];
+  /**
+   * When each row on {@link awaitingResident} joined the wanted set, or NaN
+   * for a row the view wanted as it was decoded. Kept beside that list until
+   * the frame that stamps `present`, since the share it becomes is of the
+   * whole `upload`.
+   */
+  private readonly awaitingResidentWantedAtMs: number[] = [];
 
   /**
    * One scratch sample and one counter vector for the whole process, refilled
@@ -1064,10 +1071,15 @@ export class TraceRecorder {
    * from the CPU cache — evicted from the GPU and sent again within the same
    * page — carries no row and so contributes no second `upload`. Its first
    * delivery is recorded; the re-delivery is not.
+   *
+   * `wantedAtMs` is when a chunk decoded before the view wanted it joined
+   * the wanted set, so the wait before then reads as the view's and not as
+   * delivery.
    */
-  noteHandedToRenderer(handle: number): void {
+  noteHandedToRenderer(handle: number, wantedAtMs: number = Number.NaN): void {
     if (handle < 0 || !this.resolve(handle)) return;
     this.awaitingResident.push(handle);
+    this.awaitingResidentWantedAtMs.push(wantedAtMs);
   }
 
   /**
@@ -1086,9 +1098,12 @@ export class TraceRecorder {
     if (resident.length > 0 || drawn.length > 0) {
       const atMs = this.now();
       this.closeDrawn(atMs);
+      const wantedAtMs = this.awaitingResidentWantedAtMs;
       for (let i = 0; i < resident.length; i++) {
         this.stampAt(resident[i], PRESENT_START, atMs);
+        if (!Number.isNaN(wantedAtMs[i])) this.noteWantedAt(resident[i], wantedAtMs[i]);
       }
+      wantedAtMs.length = 0;
     }
     // Swap rather than reallocate: the drained list becomes the next
     // frame's pending list.
@@ -1104,6 +1119,13 @@ export class TraceRecorder {
    */
   noteFramesDrawn(): void {
     if (this.awaitingDrawn.length > 0) this.closeDrawn(this.now());
+  }
+
+  /** Once `upload` has closed, keep how much of it the chunk waited for the view. */
+  private noteWantedAt(handle: number, atMs: number): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    run.sink.setWantedAt(handle % GENERATION_STRIDE, this.offsetUs(run, atMs));
   }
 
   /** Close `present` on every row the previous frame drew, at one reading. */
@@ -1726,6 +1748,7 @@ export class TraceRecorder {
     this.sendSample.fill(0);
 
     this.awaitingResident.length = 0;
+    this.awaitingResidentWantedAtMs.length = 0;
     this.awaitingDrawn.length = 0;
 
     const durationUs = clampStamp(Math.round((this.now() - run.startedAtMs) * 1000));

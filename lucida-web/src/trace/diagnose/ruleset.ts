@@ -17,7 +17,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 13;
+export const RULESET_VERSION = 14;
 
 export interface AbsoluteRule {
   id: string;
@@ -280,6 +280,10 @@ export const PHASE_CLASSES: Record<string, PhaseClass> = {
   // without any decode being slow.
   "browser.decode-wait": "queue",
   "browser.decode": "compute",
+  // A chunk decoded before the view wanted it, as a prefetched one is, waits
+  // for the view before its upload counts. A prefetch a step ahead waits
+  // there by design.
+  "browser.unwanted": "queue",
   "browser.upload": "compute",
   "browser.present": "compute",
   "server.arrival": "compute",
@@ -332,7 +336,7 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
     phase: "browser.upload",
     stat: "p95",
     ceilMs: 100,
-    why: "#899 §7: upload dispatch was 91.6% under 100 µs. The ceiling clears the wait for a delivery tick and the per-frame upload budget with margin.",
+    why: "#899 §7: upload dispatch was 91.6% under 100 µs. The ceiling clears the wait for a delivery tick and the per-frame upload budget with margin. Judged from when the view wanted the chunk; a chunk decoded before then waits in browser.unwanted, a queue.",
   },
   {
     id: "compute.present",

@@ -42,6 +42,15 @@ export function patchWantedChunks(
   return [...byKey.values()];
 }
 
+/** Apply a delta's replacements to an index in place, as {@link patchWantedChunks} does to the list. */
+export function patchWantedIndex(index: WantedChunkIndex, replacements: readonly WantedMemberChunks[]): void {
+  for (const entry of replacements) {
+    const key = wantedEntryKey(entry.tier, entry.memberId);
+    if (entry.chunkKeys.length === 0) index.delete(key);
+    else index.set(key, new Set(entry.chunkKeys));
+  }
+}
+
 /** The chunks the planner wants for one member in one tier, under its dataset's latest cold state. */
 export function wantedChunksFor(
   state: RendererState,

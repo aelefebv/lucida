@@ -385,6 +385,19 @@ export class CpuCache {
   private viewCoarseKeysThisTick = new Set<string>();
 
   /**
+   * Moves whenever the plan side of what {@link getDeliverable} and the
+   * demand counts read changes: a submit, a rebuild, rejections cleared, a
+   * dataset dropped. With the stores' and the delivery mirror's own versions
+   * it keys readings that would otherwise walk every cached chunk on every
+   * frame, which on a wide collection is thousands of entries a frame.
+   */
+  private planVersion = 0;
+  /** The versions the last {@link getDeliverable} walk found nothing to deliver at. */
+  private readonly nothingDeliverableAt = { plan: -1, detail: -1, coarse: -1, delivery: -1 };
+  /** The last demand counts, and the versions they were counted at. */
+  private demandAt: { plan: number; detail: number; coarse: number; demand: CacheTelemetry["tierDemand"] } | null = null;
+
+  /**
    * Latest wanted metadata for in-flight fetches. The request object
    * passed to `fetchAndDecode` may have been queued under an older
    * camera/LOD plan; this map lets later submits refresh the generation
@@ -518,6 +531,7 @@ export class CpuCache {
    * one dataset's, so it stands for that dataset's fetches from then on.
    */
   submit(plan: RequestPlan, chunkBytes?: (req: ChunkRequest) => number): void {
+    this.planVersion++;
     this.currentEpochs = plan.epochs;
     if (chunkBytes && plan.requests.length > 0) {
       this.chunkBytesByDataset.set(plan.requests[0].datasetId, chunkBytes);
@@ -641,6 +655,9 @@ export class CpuCache {
           ? req.priority
           : Math.min(cachedEntry.priority, req.priority);
         cachedEntry.lastSeenTick = this.currentSubmitTick;
+        if (cachedEntry.wantedAtMs !== undefined && Number.isNaN(cachedEntry.wantedAtMs) && wantedByView(cachedEntry)) {
+          cachedEntry.wantedAtMs = enqueueNow;
+        }
         continue;
       }
 
@@ -866,6 +883,7 @@ export class CpuCache {
    * view/layout/selection bumps — those must not abort fetches.
    */
   cancelDataset(datasetId: string, entityIds: string[]): void {
+    this.planVersion++;
     const entityIdSet = new Set(entityIds);
 
     this.chunkScheduler.cancelDataset(
@@ -953,10 +971,12 @@ export class CpuCache {
   }
 
   clearRejected(): void {
+    this.planVersion++;
     this.rejectionTracker.clear();
   }
 
   onPlanRebuildStart(): void {
+    this.planVersion++;
     for (const entityId of this.activeEntityIds) {
       if (!this.activeEntityIdsThisRebuild.has(entityId)) {
         this.chunkStore.demoteEntity(entityId);
@@ -989,6 +1009,17 @@ export class CpuCache {
   }
 
   *getDeliverable(): Iterable<ReadyChunkDelivery> {
+    // Nothing that could make a chunk deliverable has happened since a walk
+    // that found none: no plan, no arrival, no chunk released by the worker.
+    const at = this.nothingDeliverableAt;
+    if (
+      at.plan === this.planVersion &&
+      at.detail === this.chunkStore.version &&
+      at.coarse === this.overviewStore.version &&
+      at.delivery === this.deliveryState.version
+    ) {
+      return;
+    }
     const candidates: ReadyChunkDelivery[] = [];
 
     for (const entry of this.chunkStore.iterateTier("active-detail")) {
@@ -1021,6 +1052,14 @@ export class CpuCache {
       candidates.push(this.chunkEntryToDelivery(entry));
     }
 
+    if (candidates.length === 0) {
+      at.plan = this.planVersion;
+      at.detail = this.chunkStore.version;
+      at.coarse = this.overviewStore.version;
+      at.delivery = this.deliveryState.version;
+      return;
+    }
+    at.plan = -1;
     candidates.sort(compareDeliveries);
     yield* candidates;
   }
@@ -1031,11 +1070,14 @@ export class CpuCache {
     // entry so a re-delivery after an eviction cannot re-stamp a row whose
     // life is already over.
     if ((delivery.traceRow ?? -1) >= 0) {
-      traceRecorder.noteHandedToRenderer(delivery.traceRow!);
       const entry =
         this.chunkStore.get(delivery.entityId, delivery.chunkKey) ??
         this.overviewStore.get(delivery.entityId, delivery.chunkKey);
-      if (entry) entry.traceRow = -1;
+      traceRecorder.noteHandedToRenderer(delivery.traceRow!, entry?.wantedAtMs);
+      if (entry) {
+        entry.traceRow = -1;
+        entry.wantedAtMs = undefined;
+      }
     }
     this.deliveryState.markChunkSent(
       delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
@@ -1122,6 +1164,7 @@ export class CpuCache {
    * is eligible to send again, the ones it refused included.
    */
   forgetDelivered(): void {
+    this.planVersion++;
     this.deliveryState.reset();
     this.rejectionTracker.clear();
   }
@@ -1554,6 +1597,7 @@ export class CpuCache {
   }
 
   reset(): void {
+    this.planVersion++;
     this.chunkScheduler.reset();
 
     this.chunkStore.reset();
@@ -1836,6 +1880,9 @@ export class CpuCache {
       cacheEntry.tier = resident.tier;
       cacheEntry.priority = resident.priority;
       cacheEntry.lastSeenTick = resident.lastSeenTick;
+    }
+    if (traceRow >= 0 && !(cacheEntry.lastSeenTick === this.currentSubmitTick && wantedByView(cacheEntry))) {
+      cacheEntry.wantedAtMs = Number.NaN;
     }
     if (!store.insert(cacheEntry)) {
       this.refuseArrival(chunk, traceRow);
@@ -2208,7 +2255,28 @@ export class CpuCache {
     return "active-detail";
   }
 
+  /** The demand counts, walked again only once a plan or either store has moved. */
   private computeTierDemandTelemetry(): CacheTelemetry["tierDemand"] {
+    const held = this.demandAt;
+    if (
+      held &&
+      held.plan === this.planVersion &&
+      held.detail === this.chunkStore.version &&
+      held.coarse === this.overviewStore.version
+    ) {
+      return held.demand;
+    }
+    const demand = this.countTierDemand();
+    this.demandAt = {
+      plan: this.planVersion,
+      detail: this.chunkStore.version,
+      coarse: this.overviewStore.version,
+      demand,
+    };
+    return demand;
+  }
+
+  private countTierDemand(): CacheTelemetry["tierDemand"] {
     let residentDetailChunks = 0;
     let residentDetailBytes = 0;
     let residentCoarseChunks = 0;
@@ -2274,6 +2342,15 @@ export class CpuCache {
     const key = chunkSchedulerKey(req, req.tier);
     return req.planes ? `${key}#${req.planes[0]}:${req.planes[1]}` : key;
   }
+}
+
+/**
+ * Whether the view's own lanes ask for an entry, the ones
+ * {@link CpuCache.getDeliverable} hands to the renderer once a plan has seen
+ * it.
+ */
+function wantedByView(entry: CacheEntry): boolean {
+  return entry.lane === "detail" || entry.lane === "coarse";
 }
 
 /** One fetch in flight, as {@link CpuCache} indexes them by chunk. */

@@ -13,11 +13,13 @@
 import type { TraceRow, TraceRun, TraceServerRow } from "../types.ts";
 import {
   DECODE_WAIT,
+  UNWANTED,
   metadataReadRows,
   metadataReadsWithin,
   percentile,
   phaseClassOf,
   splitDecode,
+  splitUpload,
   usToMs,
 } from "./phaseRollup.ts";
 import type { CriticalPath, PathSegment } from "./types.ts";
@@ -129,6 +131,27 @@ export function buildCriticalPath(run: TraceRun, window: RunWindow = resolveWind
           label,
           class: phaseClassOf(label),
           ms: usToMs(us),
+          source: "the row the run finished on",
+          rows: 1,
+          chunkKey: terminal.chunkKey,
+        });
+      }
+      continue;
+    }
+    // The same split for a chunk that waited for the view: a queue, not
+    // delivery.
+    const upload = phase === "upload" ? splitUpload(terminal, timing) : null;
+    if (upload) {
+      for (const [label, part] of [
+        [UNWANTED, upload.unwanted],
+        ["browser.upload", upload.upload],
+      ] as const) {
+        const partSpan = clipSpan(part.startUs, part.endUs, window);
+        if (!partSpan) continue;
+        add({
+          label,
+          class: phaseClassOf(label),
+          ms: usToMs(partSpan.us),
           source: "the row the run finished on",
           rows: 1,
           chunkKey: terminal.chunkKey,
