@@ -21,6 +21,7 @@ import {
   type ReadyChunkDelivery,
 } from "./cpuCache.ts";
 import { ProxiedContentSource } from "./contentSource.ts";
+import { ChunkStore } from "./chunkStore.ts";
 import { FetchError } from "./retry.ts";
 import type {
   ContentSource,
@@ -285,6 +286,43 @@ describe("CpuCache", () => {
   });
 
   describe("getDeliverable", () => {
+    it("walks the cache again only once something could have made a chunk deliverable", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      const detail = makeRequest({ chunkKey: "0/0/0/0/0/0", x: 0 });
+      const ahead = makeRequest({ chunkKey: "0/0/0/0/0/1", x: 1, lane: "prefetch" });
+      cache.submit(makePlan([detail, ahead]));
+      await flush();
+      const [delivery] = consumeDeliverables(cache);
+      cache.markChunksHeld(delivery.imageId, delivery.c, "detail", [delivery.chunkKey]);
+
+      // Frames with nothing new, as an orbit draws: one walk finds nothing,
+      // and the demand counts settling reads are not counted again either.
+      const walks = vi.spyOn(ChunkStore.prototype, "iterateTier");
+      const counts = vi.spyOn(ChunkStore.prototype, "allEntries");
+      try {
+        for (let frame = 0; frame < 5; frame++) {
+          expect(Array.from(cache.getDeliverable())).toEqual([]);
+          cache.settleInputs(createSettleState());
+        }
+        expect(walks).toHaveBeenCalledTimes(1);
+        expect(counts.mock.calls.length).toBeLessThanOrEqual(3);
+
+        // The view reaches the prefetched chunk: the next walk hands it over.
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([detail, { ...ahead, lane: "detail" }]));
+        expect(Array.from(cache.getDeliverable()).map((d) => d.chunkKey)).toEqual([ahead.chunkKey]);
+        expect(cache.settleInputs(createSettleState())).toMatchObject({
+          desiredDetailChunks: 2,
+          residentDetailChunks: 2,
+        });
+      } finally {
+        walks.mockRestore();
+        counts.mockRestore();
+      }
+    });
+
     it("interleaves equal-priority multi-channel chunks by spatial cell", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
