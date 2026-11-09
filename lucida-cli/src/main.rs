@@ -2321,6 +2321,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     seq,
                     datasets: health.datasets,
                     source_throttle: health.source_throttle,
+                    link_throttle: health.link_throttle,
                 };
                 output.print_either(&output_payload, || {
                     format_dataset_health_human(&output_payload)
@@ -4157,6 +4158,7 @@ async fn run_trace(
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
     let (_seq, server_health) = dataset_client.health(None, wait).await?;
     let source_throttle = trace::SourceThrottleRecord::from_report(server_health.source_throttle);
+    let link_throttle = trace::LinkThrottleRecord::from_report(server_health.link_throttle);
     let health = server_health.datasets;
     let dataset_url = dataset_source_url(dataset, &health)?;
     let mut warmth = trace::summarise_server_warmth(&dataset_url, &health);
@@ -4251,6 +4253,7 @@ async fn run_trace(
         composed_view: composed,
         server_warmth: warmth,
         source_throttle,
+        link_throttle,
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
         screenshot,
@@ -4345,6 +4348,7 @@ async fn run_replay(
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
     let (_seq, server_health) = dataset_client.health(None, wait).await?;
     let source_throttle = trace::SourceThrottleRecord::from_report(server_health.source_throttle);
+    let link_throttle = trace::LinkThrottleRecord::from_report(server_health.link_throttle);
     let health = server_health.datasets;
     let mut warmth = trace::summarise_server_warmth(&plan.dataset_url, &health);
     for dataset_url in std::iter::once(&plan.dataset_url).chain(&plan.other_dataset_urls) {
@@ -4389,6 +4393,7 @@ async fn run_replay(
         },
         server_warmth: warmth,
         source_throttle,
+        link_throttle,
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
         screenshot: screenshot.map(Path::to_path_buf),

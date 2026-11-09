@@ -69,5 +69,10 @@
     "latency_ms": 180,
     "jitter_ms": 100,
     "bytes_per_sec": 18874368
+  },
+  "link_throttle": {
+    "profile": "broadband",
+    "latency_ms": 40,
+    "bytes_per_sec": 12500000
   }
 }

@@ -24,5 +24,12 @@
       "jitter_ms": 100,
       "bytes_per_sec": 18874368
     }
+  },
+  "linkThrottle": {
+    "settings": {
+      "profile": "broadband",
+      "latency_ms": 40,
+      "bytes_per_sec": 12500000
+    }
   }
 }

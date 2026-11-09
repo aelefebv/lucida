@@ -10,6 +10,7 @@ use lucida_server::auth;
 use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
 use lucida_server::inbox;
+use lucida_server::link_throttle::{LinkThrottleConfig, LinkThrottleProfile};
 use lucida_server::origin::{self, OriginPolicy};
 use lucida_server::static_serve;
 use lucida_server::status;
@@ -47,6 +48,8 @@ struct ServeArgs {
     sources: SourceArgs,
     #[command(flatten)]
     source_throttle: SourceThrottleArgs,
+    #[command(flatten)]
+    link_throttle: LinkThrottleArgs,
     /// Enable server-generated coarse chunks.
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_ENABLED", default_value_t = true)]
     generated_coarse_enabled: bool,
@@ -131,6 +134,34 @@ impl SourceThrottleArgs {
             latency_ms: self.source_throttle_latency_ms,
             jitter_ms: self.source_throttle_jitter_ms,
             bytes_per_sec: self.source_throttle_bytes_per_sec,
+        }
+    }
+}
+
+/// A dev-only delay on the session socket, so a page on this machine waits
+/// for its chunks the way one across a network does. Off unless one of
+/// these is set.
+#[derive(Args, Debug, Default)]
+struct LinkThrottleArgs {
+    /// Start from a named profile: `local` (off) or `broadband`. A value
+    /// set below replaces the profile's.
+    #[arg(long = "link-throttle", env = "LUCIDA_LINK_THROTTLE", value_enum)]
+    link_throttle: Option<LinkThrottleProfile>,
+    /// Milliseconds added to every round trip, half each way.
+    #[arg(long, env = "LUCIDA_LINK_THROTTLE_LATENCY_MS")]
+    link_throttle_latency_ms: Option<u64>,
+    /// The cap on what the server sends each connection, in bytes per
+    /// second. Zero lifts the cap.
+    #[arg(long, env = "LUCIDA_LINK_THROTTLE_BYTES_PER_SEC")]
+    link_throttle_bytes_per_sec: Option<u64>,
+}
+
+impl LinkThrottleArgs {
+    fn config(&self) -> LinkThrottleConfig {
+        LinkThrottleConfig {
+            profile: self.link_throttle,
+            latency_ms: self.link_throttle_latency_ms,
+            bytes_per_sec: self.link_throttle_bytes_per_sec,
         }
     }
 }
@@ -414,6 +445,27 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         }
         Err(e) => {
             tracing::error!(error = %e, "source_throttle.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    }
+    // Installed before the server accepts a connection, so no socket
+    // escapes it, and announced for the same reason as the source throttle.
+    match args.link_throttle.config().resolve() {
+        Ok(None) => {}
+        Ok(Some(throttle)) => {
+            let label = throttle.report().label();
+            tracing::warn!(throttle = %label, "link_throttle.enabled");
+            eprintln!("============================================================");
+            eprintln!("WARNING: the session socket is throttled");
+            eprintln!("{label}");
+            eprintln!("Every message to and from a client waits on purpose to");
+            eprintln!("model a network between them.");
+            eprintln!("A development setting. Do not use in production.");
+            eprintln!("============================================================");
+            lucida_server::link_throttle::install(throttle);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "link_throttle.startup.config_error");
             return Err(std::io::Error::other(e.to_string()));
         }
     }
@@ -702,6 +754,42 @@ mod cli_tests {
                 .is_none(),
             "sources read unthrottled unless a throttle is set"
         );
+        assert!(
+            cli.serve_args
+                .link_throttle
+                .config()
+                .resolve()
+                .unwrap()
+                .is_none(),
+            "the session socket runs at full speed unless a throttle is set"
+        );
+    }
+
+    #[test]
+    fn link_throttle_takes_a_profile_and_values_that_replace_its_own() {
+        let cli = parse(&[
+            "serve",
+            "--link-throttle",
+            "broadband",
+            "--link-throttle-latency-ms",
+            "80",
+        ]);
+        let Some(Commands::Serve(args)) = cli.command else {
+            panic!("serve subcommand");
+        };
+        let report = args
+            .link_throttle
+            .config()
+            .resolve()
+            .unwrap()
+            .unwrap()
+            .report();
+        assert_eq!(report.profile, None);
+        assert_eq!(
+            (report.latency_ms, report.bytes_per_sec),
+            (80, Some(12_500_000))
+        );
+        assert!(Cli::try_parse_from(["lucida-server", "--link-throttle", "fast"]).is_err());
     }
 
     #[test]

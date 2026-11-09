@@ -24,6 +24,7 @@ import {
   type DatasetOpenProgressDiagnostic,
   type DatasetOpenStage,
   type DatasetSourceHealth,
+  type LinkThrottleReport,
   type MessageRejection,
   type PresenceState,
   type SourceThrottleReport,
@@ -805,6 +806,12 @@ const expectedSourceThrottle: SourceThrottleReport = {
   bytes_per_sec: 18874368,
 };
 
+const expectedLinkThrottle: LinkThrottleReport = {
+  profile: "broadband",
+  latency_ms: 40,
+  bytes_per_sec: 12500000,
+};
+
 const expectedSourceHealth: DatasetSourceHealth = {
   workspace_dataset_id: "wds-0f3a",
   name: "kidney-multiplex.zarr",
@@ -1196,12 +1203,14 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       request_id: string;
       datasets: DatasetSourceHealth[];
       source_throttle: SourceThrottleReport;
+      link_throttle: LinkThrottleReport;
     };
     expect(envelope).toStrictEqual({
       type: "dataset_health",
       request_id: "web-health-55e0",
       datasets: [expectedSourceHealth],
       source_throttle: expectedSourceThrottle,
+      link_throttle: expectedLinkThrottle,
     });
 
     const { bridge, ws } = openBridge();
@@ -1218,6 +1227,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     await expect(reply).resolves.toStrictEqual({
       datasets: [expectedSourceHealth],
       sourceThrottle: expectedSourceThrottle,
+      linkThrottle: expectedLinkThrottle,
     });
   });
 
