@@ -1,3 +1,4 @@
+pub mod codec;
 pub mod diagnostics;
 pub mod fetch;
 pub mod generated;

@@ -23,9 +23,9 @@ use serde_json::{Map, Number, Value};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-use super::gzip::{self, GunzipError};
 use super::{SAVED_VIEW_VERSION, SavedView, reframe_sample_unit_camera};
 use crate::camera::Camera;
+use crate::gzip::{self, GunzipError};
 
 /// Why a payload could not be encoded or decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]

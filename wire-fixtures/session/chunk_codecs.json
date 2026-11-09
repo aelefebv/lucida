@@ -1,0 +1,11 @@
+{
+  "type": "chunk_codecs",
+  "codecs": [
+    "gzip",
+    "zlib",
+    "zstd",
+    "lz4",
+    "blosc",
+    "crc32c"
+  ]
+}

@@ -1,10 +1,12 @@
-//! The gzip member a `#view=` payload carries, framed here around
-//! `miniz_oxide`'s raw deflate. flate2 does the same in one call, but in the
-//! WASM module every viewer downloads it costs nearly twice as much.
+//! Gzip members framed here around `miniz_oxide`'s raw deflate: the one a
+//! `#view=` payload carries, and the gzip storage codec's. flate2 does the
+//! same in one call, but in the WASM module every viewer downloads it costs
+//! nearly twice as much.
 //!
-//! The header and the deflate level are part of the payload's bytes, which
+//! The header and the deflate level are part of a payload's bytes, which
 //! every client must agree on, so they stay what flate2 wrote.
 
+use miniz_oxide::inflate::core::{DecompressorOxide, decompress as inflate, inflate_flags};
 use miniz_oxide::inflate::{TINFLStatus, decompress_to_vec_with_limit};
 
 /// No name, no modification time, operating system unknown.
@@ -12,7 +14,7 @@ const HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
 const LEVEL: u8 = 6;
 
 /// `data` as one gzip member.
-pub(super) fn compress(data: &[u8]) -> Vec<u8> {
+pub(crate) fn compress(data: &[u8]) -> Vec<u8> {
     let deflated = miniz_oxide::deflate::compress_to_vec(data, LEVEL);
     let mut member = Vec::with_capacity(HEADER.len() + deflated.len() + 8);
     member.extend_from_slice(&HEADER);
@@ -24,7 +26,7 @@ pub(super) fn compress(data: &[u8]) -> Vec<u8> {
 
 /// Why a gzip member did not decompress.
 #[derive(Debug)]
-pub(super) enum GunzipError {
+pub(crate) enum GunzipError {
     /// It inflates past the limit it was given.
     TooLarge,
     Corrupt(String),
@@ -32,7 +34,7 @@ pub(super) enum GunzipError {
 
 /// The data in `member`, a single gzip member, refused once it inflates past
 /// `limit` bytes.
-pub(super) fn decompress(member: &[u8], limit: usize) -> Result<Vec<u8>, GunzipError> {
+pub(crate) fn decompress(member: &[u8], limit: usize) -> Result<Vec<u8>, GunzipError> {
     let corrupt = |why: &str| GunzipError::Corrupt(why.to_owned());
     let body = skip_header(member).ok_or_else(|| corrupt("not a gzip header"))?;
     let (deflated, trailer) = body
@@ -47,6 +49,61 @@ pub(super) fn decompress(member: &[u8], limit: usize) -> Result<Vec<u8>, GunzipE
         return Err(corrupt("checksum mismatch"));
     }
     Ok(data)
+}
+
+/// The data in `stream`, one or more gzip members back to back, as a storage
+/// codec's writer may concatenate them. Refused once it inflates past `limit`
+/// bytes, before more than that is held.
+pub(crate) fn decompress_members(stream: &[u8], limit: usize) -> Result<Vec<u8>, GunzipError> {
+    let corrupt = |why: &str| GunzipError::Corrupt(why.to_owned());
+    let mut out = Vec::new();
+    let mut rest = stream;
+    loop {
+        let body = skip_header(rest).ok_or_else(|| corrupt("not a gzip header"))?;
+        let (data, consumed) = inflate_member(body, limit - out.len())?;
+        let trailer = body
+            .get(consumed..consumed + 8)
+            .ok_or_else(|| corrupt("truncated"))?;
+        let (crc, size) = trailer.split_at(4);
+        if crc != crc32(&data).to_le_bytes() || size != (data.len() as u32).to_le_bytes() {
+            return Err(corrupt("checksum mismatch"));
+        }
+        out.extend_from_slice(&data);
+        rest = &body[consumed + 8..];
+        if rest.is_empty() {
+            return Ok(out);
+        }
+    }
+}
+
+/// Inflate the raw deflate stream `body` starts with, returning its data and
+/// how many bytes of `body` the stream took, so the trailer after it is found.
+fn inflate_member(body: &[u8], limit: usize) -> Result<(Vec<u8>, usize), GunzipError> {
+    let mut out = vec![0; body.len().saturating_mul(2).max(64).min(limit)];
+    let mut decompressor = Box::<DecompressorOxide>::default();
+    let (mut consumed, mut written) = (0, 0);
+    loop {
+        let (status, used, made) = inflate(
+            &mut decompressor,
+            &body[consumed..],
+            &mut out,
+            written,
+            inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF,
+        );
+        consumed += used;
+        written += made;
+        match status {
+            TINFLStatus::Done => {
+                out.truncate(written);
+                return Ok((out, consumed));
+            }
+            TINFLStatus::HasMoreOutput if out.len() >= limit => return Err(GunzipError::TooLarge),
+            TINFLStatus::HasMoreOutput => {
+                out.resize(out.len().saturating_mul(2).min(limit), 0);
+            }
+            status => return Err(GunzipError::Corrupt(format!("{status:?}"))),
+        }
+    }
 }
 
 /// What follows the header, which may carry any of RFC 1952's optional

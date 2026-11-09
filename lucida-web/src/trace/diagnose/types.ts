@@ -871,7 +871,13 @@ export interface ReceivedByLane {
  * carries one chunk, so `requests` is the chunks fetched.
  */
 export interface ReceivedSummary {
+  /** The chunks' bytes decoded, comparable whichever form they came in. */
   bytes: number;
+  /**
+   * What the wire carried for them: less than `bytes` when chunks came still
+   * in the codecs they were stored in.
+   */
+  wireBytes: number;
   requests: number;
   /** Over the interval's span: the average, never a peak. */
   bytesPerS: number;

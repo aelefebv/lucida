@@ -426,7 +426,11 @@ function renderSteadyState(document: DiagnosticDocument, push: PushLine, p: Prin
   if (received) {
     push(
       DETAIL,
-      `   received   ${p("steadyState.received.bytes", received.bytes.toLocaleString())} B over ` +
+      `   received   ${p("steadyState.received.bytes", received.bytes.toLocaleString())} B ` +
+        (received.wireBytes === received.bytes
+          ? ""
+          : `(${p("steadyState.received.wireBytes", received.wireBytes.toLocaleString())} B on the wire) `) +
+        `over ` +
         `${p("steadyState.received.requests", received.requests.toLocaleString())} request(s) · ` +
         `${p("steadyState.received.bytesPerS", received.bytesPerS.toLocaleString())} B/s · ` +
         `${p("steadyState.received.busySeconds", received.busySeconds)} busy second(s) at ` +

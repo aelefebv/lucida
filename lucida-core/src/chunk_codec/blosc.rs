@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 
-use lucida_store::codec::{BloscCompressor, BloscConfig, BloscShuffle};
+use lucida_protocol::codec::{BloscCompressor, BloscConfig, BloscShuffle};
 
 use super::{BoundedError, blosclz, decode_zlib_bounded, decode_zstd_bounded};
 
@@ -203,24 +203,29 @@ pub fn decode_blosc(
         let split_size = block_uncompressed_size / splits;
         let mut block_bytes = Vec::with_capacity(block_uncompressed_size);
         for _ in 0..splits {
-            if input.len() < cursor + 4 {
+            // Offsets and lengths are the stored bytes' own claims, and on a
+            // 32-bit target a sum of two can wrap, so every one is checked
+            // rather than added.
+            let Some(payload_start) = cursor.checked_add(4).filter(|&end| end <= input.len())
+            else {
                 return Err(BloscError::InputTruncated {
                     what: "block compressed-length",
-                    need: cursor + 4,
+                    need: cursor.saturating_add(4),
                     have: input.len(),
                 });
-            }
+            };
             let compressed_len =
-                u32::from_le_bytes(input[cursor..cursor + 4].try_into().unwrap()) as usize;
-            let payload_start = cursor + 4;
-            let payload_end = payload_start + compressed_len;
-            if input.len() < payload_end {
+                u32::from_le_bytes(input[cursor..payload_start].try_into().unwrap()) as usize;
+            let Some(payload_end) = payload_start
+                .checked_add(compressed_len)
+                .filter(|&end| end <= input.len())
+            else {
                 return Err(BloscError::InputTruncated {
                     what: "block payload",
-                    need: payload_end,
+                    need: payload_start.saturating_add(compressed_len),
                     have: input.len(),
                 });
-            }
+            };
             let payload = &input[payload_start..payload_end];
             // c-blosc stores a stream raw when it did not compress smaller,
             // signaled by its length equal to its uncompressed size. This
@@ -286,7 +291,7 @@ fn decompress(
                 block,
                 expected: len,
             },
-            BoundedError::Io(e) => failed(e.to_string()),
+            BoundedError::Corrupt(msg) => failed(msg),
         })
     };
     match compressor {
@@ -417,7 +422,7 @@ mod tests {
     fn cfg(typesize: u8, shuffle: BloscShuffle) -> BloscConfig {
         BloscConfig {
             typesize,
-            cname: lucida_store::codec::BloscCompressor::Zstd,
+            cname: lucida_protocol::codec::BloscCompressor::Zstd,
             shuffle,
         }
     }
@@ -641,6 +646,38 @@ mod tests {
         assert!(matches!(err, BloscError::InputTruncated { .. }));
     }
 
+    /// A block offset or length near `u32::MAX` would wrap a 32-bit sum,
+    /// as the page's WASM build has, so it is refused rather than indexed.
+    #[test]
+    fn an_offset_or_length_past_the_input_is_refused_without_wrapping() {
+        let header = |offset: u32| {
+            let mut out = vec![2, 1, 4 << 5, 1];
+            out.extend_from_slice(&8u32.to_le_bytes());
+            out.extend_from_slice(&8u32.to_le_bytes());
+            out.extend_from_slice(&28u32.to_le_bytes());
+            out.extend_from_slice(&offset.to_le_bytes());
+            out
+        };
+        let err = decode_blosc(&header(u32::MAX - 1), &cfg(1, BloscShuffle::None), 8).unwrap_err();
+        assert!(matches!(
+            err,
+            BloscError::InputTruncated {
+                what: "block compressed-length",
+                ..
+            }
+        ));
+        let mut long = header(20);
+        long.extend_from_slice(&(u32::MAX - 2).to_le_bytes());
+        let err = decode_blosc(&long, &cfg(1, BloscShuffle::None), 8).unwrap_err();
+        assert!(matches!(
+            err,
+            BloscError::InputTruncated {
+                what: "block payload",
+                ..
+            }
+        ));
+    }
+
     /// One zstd block, unshuffled, of typesize 1, whose header claims
     /// `nbytes` and whose payload is `payload` compressed.
     fn one_block(nbytes: u32, payload: &[u8]) -> Vec<u8> {
@@ -703,7 +740,7 @@ mod tests {
 mod partial_block_oracle {
     use super::decode_blosc;
     const NO_LIMIT: usize = usize::MAX;
-    use lucida_store::codec::{BloscCompressor, BloscConfig, BloscShuffle};
+    use lucida_protocol::codec::{BloscCompressor, BloscConfig, BloscShuffle};
     fn ocfg(ts: u8, s: BloscShuffle) -> BloscConfig {
         BloscConfig {
             typesize: ts,
@@ -1172,7 +1209,7 @@ mod partial_block_oracle {
 mod raw_block_oracle {
     use super::decode_blosc;
     const NO_LIMIT: usize = usize::MAX;
-    use lucida_store::codec::{BloscCompressor, BloscConfig, BloscShuffle};
+    use lucida_protocol::codec::{BloscCompressor, BloscConfig, BloscShuffle};
     fn ocfg(ts: u8) -> BloscConfig {
         BloscConfig {
             typesize: ts,

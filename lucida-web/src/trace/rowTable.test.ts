@@ -43,11 +43,11 @@ describe("RowTable", () => {
   it("pins the row width, because the memory caps are derived from it", () => {
     // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots + the
     // two-part wire label + the bytes column, all uint32, plus the decode
-    // work's uint16 share, plus a residency-tier, lane, outcome and
-    // last-boundary byte, plus a 12 B identity index. The resident and
-    // per-run caps derive from this figure, so a change here changes how much
-    // of a run fits.
-    expect(RowTable.BYTES_PER_ROW).toBe(94);
+    // work's and the wire bytes' uint16 shares, plus a residency-tier, lane,
+    // outcome and last-boundary byte, plus a 12 B identity index. The
+    // resident and per-run caps derive from this figure, so a change here
+    // changes how much of a run fits.
+    expect(RowTable.BYTES_PER_ROW).toBe(96);
   });
 
   it("carries the decode worker's own time only for a row it was reported on", () => {
@@ -98,7 +98,20 @@ describe("RowTable", () => {
 
     const rows = table.serialise();
     expect(rows[0].bytes).toBe(326_144);
+    expect(rows[0].wireBytes).toBe(326_144);
     expect(rows[1].bytes).toBe(0);
+    expect(rows[1].wireBytes).toBe(0);
+  });
+
+  it("carries what the wire carried apart from the bytes decoded", () => {
+    const table = new RowTable(1);
+    const delivered = table.append(source(), 0);
+    table.setBytes(delivered, 524_288, 131_072);
+
+    const [row] = table.serialise();
+    expect(row.bytes).toBe(524_288);
+    // Within a part in 65,535 of the bytes decoded.
+    expect(Math.abs(row.wireBytes! - 131_072)).toBeLessThanOrEqual(524_288 / 65_535 / 2);
   });
 
   it("carries lane as a column, not as a phase", () => {

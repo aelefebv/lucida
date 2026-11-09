@@ -1323,16 +1323,18 @@ export class TraceRecorder {
 
   /**
    * Bytes in hand: closes `wire`, opens `decode`, and records what the wire
-   * delivered, in one resolve. The bytes land on the row at the boundary
-   * they arrive at rather than through a second call, because this runs
-   * once per completed fetch and each call spends a handle resolve.
+   * delivered, in one resolve: the chunk's bytes decoded, and `wireBytes`,
+   * what the wire carried, which is less when they came still encoded. The
+   * bytes land on the row at the boundary they arrive at rather than through
+   * a second call, because this runs once per completed fetch and each call
+   * spends a handle resolve.
    */
-  noteBytesReceived(handle: number, bytes: number): void {
+  noteBytesReceived(handle: number, bytes: number, wireBytes = bytes): void {
     const run = this.resolve(handle);
     if (!run) return;
     const index = handle % GENERATION_STRIDE;
     run.sink.stamp(index, Boundary.DecodeStart, this.offsetUs(run, this.now()));
-    run.sink.setBytes(index, bytes);
+    run.sink.setBytes(index, bytes, wireBytes);
   }
 
   /**

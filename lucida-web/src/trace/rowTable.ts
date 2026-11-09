@@ -61,6 +61,14 @@ const WORK_SHARE_SCALE = 0xfffe;
 /** The share column's value for a row whose worker never reported its time. */
 const NO_WORK_SHARE = 0xffff;
 
+/**
+ * What the wire carried for a row, kept as its share of the bytes decoded in
+ * sixteen bits, for the reason {@link WORK_SHARE_SCALE} gives. A chunk's
+ * share is good to a few bytes in its hundreds of kilobytes, and one that
+ * crossed decoded is exact.
+ */
+const WIRE_SHARE_SCALE = 0xffff;
+
 const PLAN_PHASE = PHASES.indexOf("plan");
 const QUEUE_PHASE = PHASES.indexOf("queue");
 
@@ -119,6 +127,8 @@ class RowBlock {
   readonly bytes: Uint32Array;
   /** See {@link WORK_SHARE_SCALE}. */
   readonly decodeWorkShares: Uint16Array;
+  /** See {@link WIRE_SHARE_SCALE}. */
+  readonly wireShares: Uint16Array;
   readonly tiers: Uint8Array;
   readonly lanes: Uint8Array;
   readonly outcomes: Uint8Array;
@@ -161,6 +171,7 @@ class RowBlock {
     this.connectionGenerations = words(1);
     this.bytes = words(1);
     this.decodeWorkShares = halves();
+    this.wireShares = halves();
     this.tiers = octets();
     this.lanes = octets();
     this.outcomes = octets();
@@ -169,7 +180,7 @@ class RowBlock {
 }
 
 /** The columns a block holds per row: the row width less the identity index, which lives outside the blocks. */
-const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 + 4;
+const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 * 2 + 4;
 
 /** The ids the pool gave an entity and the image its rows last carried. */
 interface EntityIds {
@@ -182,12 +193,13 @@ export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
    * label + the bytes the wire delivered, all uint32, plus the decode work's
-   * uint16 share, plus four bytes: tier, lane, outcome, last boundary. Plus
+   * and the wire bytes' uint16 shares, plus four bytes: tier, lane, outcome,
+   * last boundary. Plus
    * the identity index: one int32 per row linking it to the previous row of
    * the same chunk, and two int32 slots per row of capacity in the
    * open-addressing table that finds the newest.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 + 4 + 4 + 2 * 4;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 * 2 + 4 + 4 + 2 * 4;
 
   private readonly strings = new StringPool();
 
@@ -348,6 +360,7 @@ export class RowTable {
     block.rids[at] = NO_RID;
     block.connectionGenerations[at] = NO_CONNECTION;
     block.bytes[at] = 0;
+    block.wireShares[at] = WIRE_SHARE_SCALE;
     block.decodeWorkShares[at] = NO_WORK_SHARE;
 
     const c = at * COORDS_PER_ROW;
@@ -627,10 +640,13 @@ export class RowTable {
     this.enter(boundary);
   }
 
-  /** The payload bytes the wire delivered for this row. */
-  setBytes(index: number, bytes: number): void {
+  /** The payload bytes the wire delivered for this row, decoded and as carried. */
+  setBytes(index: number, bytes: number, wireBytes: number = bytes): void {
     const block = this.blockOf(index);
-    block.bytes[index - block.first] = bytes;
+    const at = index - block.first;
+    block.bytes[at] = bytes;
+    const share = bytes > 0 ? Math.min(1, Math.max(0, wireBytes / bytes)) : 1;
+    block.wireShares[at] = Math.round(share * WIRE_SHARE_SCALE);
   }
 
   /**
@@ -752,6 +768,7 @@ export class RowTable {
       x,
       chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
       bytes: block.bytes[at],
+      wireBytes: Math.round((block.wireShares[at] / WIRE_SHARE_SCALE) * block.bytes[at]),
       outcome: ROW_OUTCOME_NAMES[block.outcomes[at]],
       phases,
       ...(share !== NO_WORK_SHARE && decode

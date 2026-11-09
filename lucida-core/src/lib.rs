@@ -1,10 +1,12 @@
 pub mod auth_principal;
 pub mod camera;
 pub mod chunk;
+pub mod chunk_codec;
 pub mod command;
 pub mod cursor;
 pub mod epoch;
 pub mod framing;
+pub(crate) mod gzip;
 pub(crate) mod mat4;
 pub mod minimap;
 pub mod protocol;

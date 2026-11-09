@@ -932,13 +932,20 @@ export interface TraceRow extends WireLabel {
   /** Canonical `"level/t/c/z/y/x"`, rebuilt from the columns. */
   chunkKey: string;
   /**
-   * The payload bytes the wire delivered for this row, recorded where `wire`
-   * closes, and zero until then. The "reading" half of what an operating
-   * system's network monitor shows, per chunk. Rows that coalesced onto one
+   * The payload bytes the wire delivered for this row, decoded, recorded
+   * where `wire` closes, and zero until then. Rows that coalesced onto one
    * request each carry that request's bytes, so a sum over the wire counts
    * a label once rather than a row once.
    */
   bytes: number;
+  /**
+   * The same payload as the wire carried it: less than `bytes` when the
+   * chunk came still in the codecs it was stored in. The "reading" half of
+   * what an operating system's network monitor shows, per chunk. Absent from
+   * documents written before the wire carried encoded chunks, where it was
+   * `bytes`.
+   */
+  wireBytes?: number;
   outcome: RowOutcomeName;
   phases: Partial<Record<Phase, PhaseTiming>>;
   /**
