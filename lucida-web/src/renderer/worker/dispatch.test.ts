@@ -112,6 +112,7 @@ function makeCtx(): {
   const posts: WorkerToMainMessage[] = [];
   const counters = { wantedSet: 0 };
   const ctx = {
+    device: {},
     state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
     postWantedSet() { counters.wantedSet++; },
