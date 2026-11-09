@@ -137,6 +137,18 @@ describe("admitting against GPU slot pools", () => {
   });
 });
 
+describe("admitPlans with planes", () => {
+  it("charges a request for some planes of a chunk apart from one for all of it", () => {
+    const planes = request(0, { plane: 1, planes: [0, 3] });
+    const whole = request(0, { lane: "prefetch", priority: 300 });
+    const bytesOf = (req: ChunkRequest) => (req.planes ? 3 : 8);
+    const admission = admitPlans([{ requests: [planes, whole], bytesOf }], { detail: 10, coarse: 0 })[0];
+    // The whole chunk does not fit beside its planes, and goes without.
+    expect(admission.admitted).toEqual([planes]);
+    expect(admission.shortfall.detail).toBe(0);
+  });
+});
+
 describe("chunkBytesFor", () => {
   it("charges a level's chunk at the image's sample size, one timepoint and one channel", () => {
     const manifest = {
@@ -156,6 +168,8 @@ describe("chunkBytesFor", () => {
     const bytesOf = chunkBytesFor(manifest);
     expect(bytesOf(request(0))).toBe(8 * 64 * 64 * 2);
     expect(bytesOf(request(0, { level: 1 }))).toBe(4 * 32 * 32 * 2);
+    // Three of the eight planes cost three eighths of the chunk.
+    expect(bytesOf(request(0, { plane: 1, planes: [0, 3] }))).toBe(3 * 64 * 64 * 2);
   });
 
   it("charges every type that decodes to float32 four bytes a sample", () => {

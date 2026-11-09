@@ -54,7 +54,8 @@ export interface Admission {
  *
  * Two requests for one chunk of one tier, such as the coarse and minimap
  * lanes asking for the same chunk, are admitted or refused together and
- * charged once.
+ * charged once. A request for some planes of a chunk and one for all of it
+ * are charged apart, since either may be what the cache ends up holding.
  */
 export function admitPlans(
   plans: readonly PlanToAdmit[],
@@ -88,7 +89,8 @@ export function admitPlans(
     for (const req of plan.requests) {
       if (req.tier !== tier || !take(req)) continue;
       // The tiers hold their own copies, so one key is charged once per tier.
-      const key = `${tier}/${req.entityId}/${req.chunkKey}`;
+      const planes = req.planes ? `#${req.planes[0]}:${req.planes[1]}` : "";
+      const key = `${tier}/${req.entityId}/${req.chunkKey}${planes}`;
       if (noRoom.has(key)) continue;
       // A full slot pool refuses this lane's upload, not the chunk: a lane
       // that never uploads, such as the minimap, can still hold it.
@@ -148,22 +150,28 @@ export interface GpuSlot {
  * chunk shape, one timepoint and one channel, at the image's decoded sample
  * size, which is float32 for every type that draws as one.
  * The server serves every chunk whole at that shape, edge chunks included,
- * so this is what the cache and the GPU hold for it.
+ * so this is what the cache and the GPU hold for it. A request for some of
+ * a chunk's planes costs those planes.
  */
 export function chunkBytesFor(manifest: DatasetManifest): (req: ChunkRequest) => number {
-  const byImage = new Map<string, { levels: number[]; fallback: number }>();
+  const byImage = new Map<string, { levels: number[]; depths: number[]; fallback: number }>();
   for (const image of manifest.images) {
     const sample = decodedBytesPerSample(image.multiscale.data_type);
     const levels: number[] = [];
+    const depths: number[] = [];
     for (const level of image.multiscale.levels) {
       const [, , z, y, x] = level.chunk_shape;
       levels[level.level_index] = z * y * x * sample;
+      depths[level.level_index] = Math.max(z, 1);
     }
-    byImage.set(image.image_id, { levels, fallback: Math.max(0, ...levels.filter(Number.isFinite)) });
+    byImage.set(image.image_id, { levels, depths, fallback: Math.max(0, ...levels.filter(Number.isFinite)) });
   }
   return (req) => {
     const image = byImage.get(req.imageId);
     if (!image) return 0;
-    return image.levels[req.level] ?? image.fallback;
+    const whole = image.levels[req.level] ?? image.fallback;
+    const depth = image.depths[req.level];
+    if (!req.planes || depth === undefined) return whole;
+    return (whole / depth) * (req.planes[1] - req.planes[0]);
   };
 }

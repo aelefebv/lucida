@@ -92,18 +92,23 @@ export class ChunkStore {
    * Evicts via the policy if over budget; caller assembles the entry.
    * Returns false, and changes nothing, when the room could only come from
    * entries the store protects against this one.
+   *
+   * An entry already held for the chunk, such as some of its planes that the
+   * whole chunk now supersedes, gives its room to the new one and is not
+   * counted as evicted.
    */
   insert(entry: CacheEntry): boolean {
-    if (!this.evictIfNeeded(entry.sizeBytes, entry)) return false;
+    const replaced = this.get(entry.entityId, entry.chunkKey);
+    const growth = entry.sizeBytes - (replaced?.sizeBytes ?? 0);
+    if (!this.evictIfNeeded(growth, entry, replaced)) return false;
 
     let entityMap = this.store.get(entry.entityId);
     if (!entityMap) {
       entityMap = new Map();
       this.store.set(entry.entityId, entityMap);
     }
-    const replaced = entityMap.get(entry.chunkKey);
     entityMap.set(entry.chunkKey, entry);
-    this.bytesCounter += entry.sizeBytes;
+    this.bytesCounter += growth;
     if (replaced) this.countLevel(replaced.level, -1);
     this.countLevel(entry.level, 1);
     return true;
@@ -120,11 +125,12 @@ export class ChunkStore {
     this.levelCounts[level] = Math.max(0, this.levelCounts[level] + delta);
   }
 
-  private evictIfNeeded(incomingBytes: number, incoming?: CacheEntry): boolean {
+  private evictIfNeeded(incomingBytes: number, incoming?: CacheEntry, replaced?: CacheEntry): boolean {
     if (this.bytesCounter + incomingBytes <= this.budgetBytesCounter) return true;
     const bytesNeeded = this.bytesCounter + incomingBytes - this.budgetBytesCounter;
     const protects = this.protects;
     let entries = this.collectEntries();
+    if (replaced) entries = entries.filter((resident) => resident !== replaced);
     if (incoming && protects) {
       entries = entries.filter((resident) => !protects(resident, incoming));
       let available = 0;

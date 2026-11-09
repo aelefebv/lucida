@@ -16,6 +16,7 @@ import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
 import {
   plan,
   emitPlanRequests,
+  isZStep,
   emptyPlanStats,
   initialPlanningState,
   type PlanningConfig,
@@ -1301,6 +1302,7 @@ export class TickCoordinator {
         stats,
         planningConfig,
         pd.planningState.zoomDirection,
+        isZStep(pd.planningState.previousZ, selection),
       );
       return {
         dsId: pd.dsId,
@@ -1308,7 +1310,7 @@ export class TickCoordinator {
         snapshot,
         visibleRegion,
         selection,
-        planningState: pd.planningState,
+        planningState: { ...pd.planningState, previousZ: selection.z },
         requests,
         stats,
       };
@@ -1316,12 +1318,13 @@ export class TickCoordinator {
 
     // Advance the fetch lifecycle once. The delivery ledger stays: the worker
     // reports any slot the new T/Z leaves stale. The active set is unchanged,
-    // so `planningState` stays.
+    // so `planningState` keeps it and takes only the new z.
     ctx.cpuCache.onPlanRebuildStart();
     const admissions = this.admit(ctx, planned);
     for (const [index, scrubbed] of planned.entries()) {
       const admission = admissions[index];
       const p = { ...scrubbed, requests: admission.admitted };
+      this.planningState.set(p.dsId, p.planningState);
       this.requestEpoch = scrubRequestEpoch;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
 

@@ -160,6 +160,12 @@ export interface PlanningState {
    * direction.
    */
   zoomDirection: ZoomDirection | null;
+  /**
+   * `selection.z` as the previous plan saw it, or `null` before the first
+   * plan. A move of a few planes from it is a step along Z, after which the
+   * slice view fetches the whole chunks its plane lies in.
+   */
+  previousZ: number | null;
 }
 
 /** Which way the last zoom change moved: toward level 0 or away from it. */
@@ -167,7 +173,7 @@ export type ZoomDirection = "in" | "out";
 
 /** The state before the first plan: nothing held, no zoom seen. */
 export function initialPlanningState(): PlanningState {
-  return { previousActiveSet: [], previousEffectiveZoom: null, zoomDirection: null };
+  return { previousActiveSet: [], previousEffectiveZoom: null, zoomDirection: null, previousZ: null };
 }
 
 export interface RequestPlan {
@@ -245,6 +251,18 @@ export interface ChunkRequest {
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;
+  /**
+   * The plane the slice view draws from this chunk, along the chunk's own Z.
+   * Resident means held whole or with this plane among the planes held.
+   * Absent when the view draws the whole chunk, as the volume view does.
+   */
+  plane?: number;
+  /**
+   * The planes to fetch when the chunk is not resident: a band around
+   * {@link plane}, half-open along the chunk's Z, so the next few steps
+   * along Z find their planes resident. Absent: fetch the whole chunk.
+   */
+  planes?: readonly [number, number];
 }
 
 /** One entry per visible tile, plus pass-through entries for invisible entities. */

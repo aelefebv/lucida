@@ -95,6 +95,11 @@ export interface ReadyChunkDelivery {
    * `wire` and `decode`. -1 when no run was open at fetch time.
    */
   traceRow?: number;
+  /**
+   * The planes `data` holds, half-open along the chunk's Z. Absent when it
+   * holds the whole chunk.
+   */
+  planes?: readonly [number, number];
 }
 
 /**
@@ -142,6 +147,12 @@ export interface CacheEntry {
    * life is already over. -1 when no run was open at fetch time.
    */
   traceRow?: number;
+  /**
+   * The planes `data` holds, half-open along the chunk's Z: what a request
+   * for some planes fetched. Absent when it holds the whole chunk. One entry
+   * per chunk either way, so a whole chunk that arrives replaces its planes.
+   */
+  planes?: readonly [number, number];
 }
 
 export interface TierResidencyEntry {
