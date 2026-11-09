@@ -1683,7 +1683,6 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "jsonwebtoken",
- "libc",
  "lru",
  "lucida-content",
  "lucida-core",
@@ -1708,7 +1707,6 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
- "windows-sys 0.61.2",
  "zstd",
 ]
 
@@ -1720,6 +1718,7 @@ dependencies = [
  "bytes",
  "clap",
  "crc32c",
+ "futures-executor",
  "futures-util",
  "ipnet",
  "lru",

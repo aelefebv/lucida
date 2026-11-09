@@ -9,6 +9,7 @@ pub mod import;
 pub mod import_types;
 pub mod ingest;
 pub mod layout;
+pub(crate) mod local_reads;
 pub mod metadata_reads;
 pub(crate) mod parse;
 pub mod shard;

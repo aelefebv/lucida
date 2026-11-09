@@ -49,7 +49,7 @@ use crate::source_limiter::{ReaderId, RequestLabel, SourceReadBounds, SourceRead
 ///
 /// Reads larger than that sweep's are still admitted sixteen at a time, so a
 /// large-chunk dataset reads exactly as wide as when the bound was a count.
-const DEFAULT_MIN_SOURCE_READS: usize = 16;
+pub(crate) const DEFAULT_MIN_SOURCE_READS: usize = 16;
 
 /// Bytes in flight past [`DEFAULT_MIN_SOURCE_READS`], by default: sixteen of
 /// the reads that sweep measured.

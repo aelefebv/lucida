@@ -8,15 +8,12 @@
 //! waits in the pool's queue before it starts, so the wait is a phase of its
 //! own.
 //!
-//! The threads run below normal priority. There is one per core, so a deep
-//! queue keeps every core decoding, and at equal priority an async worker
-//! woken by a new request waits its turn for a core behind them. That wait
-//! reads as dispatch, though the work behind it was decoding. Below them, the
-//! async workers take a core as soon as they have something to do, and the
-//! burst waits in this pool's queue, where it is measured as a queue.
-//!
-//! They are the pool's own threads, not tokio's blocking pool, whose threads
-//! also run the store's file reads and so cannot be lowered for decoding alone.
+//! The threads are not tokio's blocking pool. That pool queues every task
+//! behind one lock, which each of its threads takes again after every task,
+//! so during a burst an async worker handing it a decode can block on the
+//! lock while the thread holding it waits for a CPU, and every request queued
+//! on that worker waits as `dispatch`. Here only the decode threads share the
+//! queue's lock, and an async worker holds it for one push.
 
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
@@ -73,10 +70,7 @@ impl DecodePool {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("lucida-decode".into())
-                .spawn(move || {
-                    lower_this_threads_priority();
-                    shared.work();
-                })
+                .spawn(move || shared.work())
                 .expect("spawn a decode thread");
         }
         Self { shared }
@@ -203,25 +197,6 @@ impl Queue {
         if reader.running == 0 && reader.waiting.is_empty() {
             self.readers.remove(&id);
         }
-    }
-}
-
-/// Best effort: a thread left at normal priority still decodes correctly.
-fn lower_this_threads_priority() {
-    #[cfg(target_os = "linux")]
-    // SAFETY: both calls only read or set this thread's scheduling attributes.
-    unsafe {
-        // Linux keeps a nice value per thread, so this lowers only this one.
-        let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
-        libc::setpriority(libc::PRIO_PROCESS, tid, 10);
-    }
-    #[cfg(windows)]
-    // SAFETY: the pseudo-handle names the calling thread and needs no closing.
-    unsafe {
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
-        };
-        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
 }
 
@@ -390,9 +365,10 @@ mod tests {
         until(|| pool.queued() == 0).await;
         let mut serves = Vec::new();
         for reader in [CLIENT, CLIENT, CLIENT, ReaderId(2)] {
-            let (pool, order) = (Arc::clone(&pool), Arc::clone(&order));
+            let (serving, order) = (Arc::clone(&pool), Arc::clone(&order));
             serves.push(tokio::spawn(async move {
-                pool.run(reader, move || order.lock().unwrap().push(reader.0))
+                serving
+                    .run(reader, move || order.lock().unwrap().push(reader.0))
                     .await
             }));
             let queued = serves.len();
