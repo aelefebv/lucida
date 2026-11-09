@@ -43,27 +43,48 @@ const CUBE_CORNERS: [number, number, number][] = [
   [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
 ];
 
+/** Canvas x, y of each cube corner, NaN when behind the camera. Reused across members. */
+const projectedCorners = new Float64Array(CUBE_CORNERS.length * 2);
+
+/**
+ * Stroke one member's outline. A collection strokes hundreds of these on
+ * every orbit frame, so the corners are projected into a reused array with
+ * the arithmetic of `transformPoint` then `projectToCanvas`, which keeps the
+ * coordinates and so the pixels the same. The caller sets the stroke style
+ * once for every member. Each outline keeps a stroke of its own, since
+ * where translucent outlines cross, one path would paint the crossing once.
+ */
 function drawBoundingBox(
   ctx: CanvasRenderingContext2D,
   viewProj: Float32Array,
-  modelMatrix: Float32Array,
+  m: Float32Array,
   canvasW: number, canvasH: number,
-  color: string,
 ) {
-  const projected = CUBE_CORNERS.map(([cx, cy, cz]) => {
-    const [wx, wy, wz] = transformPoint(modelMatrix, cx, cy, cz);
-    return projectToCanvas(viewProj, wx, wy, wz, canvasW, canvasH);
-  });
+  const p = viewProj;
+  for (let k = 0; k < CUBE_CORNERS.length; k++) {
+    const [ux, uy, uz] = CUBE_CORNERS[k];
+    const w = m[3] * ux + m[7] * uy + m[11] * uz + m[15];
+    const wx = (m[0] * ux + m[4] * uy + m[8] * uz + m[12]) / w;
+    const wy = (m[1] * ux + m[5] * uy + m[9] * uz + m[13]) / w;
+    const wz = (m[2] * ux + m[6] * uy + m[10] * uz + m[14]) / w;
+    const cx = p[0] * wx + p[4] * wy + p[8] * wz + p[12];
+    const cy = p[1] * wx + p[5] * wy + p[9] * wz + p[13];
+    const cw = p[3] * wx + p[7] * wy + p[11] * wz + p[15];
+    if (cw <= 0) {
+      projectedCorners[2 * k] = Number.NaN;
+      continue;
+    }
+    projectedCorners[2 * k] = ((cx / cw) * 0.5 + 0.5) * canvasW;
+    projectedCorners[2 * k + 1] = (1 - ((cy / cw) * 0.5 + 0.5)) * canvasH;
+  }
 
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1 * devicePixelRatio;
   ctx.beginPath();
   for (const [i, j] of CUBE_EDGES) {
-    const a = projected[i];
-    const b = projected[j];
-    if (!a || !b) continue;
-    ctx.moveTo(a[0], a[1]);
-    ctx.lineTo(b[0], b[1]);
+    const ax = projectedCorners[2 * i];
+    const bx = projectedCorners[2 * j];
+    if (Number.isNaN(ax) || Number.isNaN(bx)) continue;
+    ctx.moveTo(ax, projectedCorners[2 * i + 1]);
+    ctx.lineTo(bx, projectedCorners[2 * j + 1]);
   }
   ctx.stroke();
 }
@@ -215,34 +236,25 @@ function drawSliceViewportRect(
 }
 
 /**
- * Draw the Z-invariant layer: member bounding boxes, axis arrows (orbit only),
- * and in volume mode the camera frustum. None of it depends on the current
- * Z-plane, so a Z-scrub reuses a cached copy. Clears the target first.
+ * Draw the layer that moves only with the minimap's own camera: member
+ * bounding boxes and the axis arrows (orbit only). A Z-scrub and a main-camera
+ * move reuse a cached copy. Clears the target first.
  */
 export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData, colors: MinimapColors): void {
-  const { viewProj, layers, datasetLayers, mode, topDown, canvasW, canvasH, mainInvViewProj } = data;
+  const { viewProj, layers, topDown, canvasW, canvasH } = data;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
   // One bounding box per member, outlining each tile.
-  const outline = paint(colors.stroke, MEMBER_OUTLINE_ALPHA);
+  ctx.strokeStyle = paint(colors.stroke, MEMBER_OUTLINE_ALPHA);
+  ctx.lineWidth = 1 * devicePixelRatio;
   for (const layer of layers) {
-    drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH, outline);
+    drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH);
   }
 
   // Axis arrows (once, not per-dataset). Looking straight down Z, the Z arrow
   // collapses to a point and X and Y only repeat the slice view's orientation.
   if (!topDown) drawAxisArrows(ctx, viewProj, canvasW, canvasH, colors);
-
-  if (mode === "volume" && mainInvViewProj) {
-    // Frustum intersection (per-dataset)
-    for (const dl of datasetLayers) {
-      drawFrustumIntersection(
-        ctx, viewProj, dl.modelMatrix, dl.invModelMatrix, mainInvViewProj,
-        canvasW, canvasH, colors.viewport,
-      );
-    }
-  }
 }
 
 /**
@@ -270,7 +282,18 @@ export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapO
  * so it is re-stroked every callback. Does not clear.
  */
 export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData, colors: MinimapColors): void {
-  const { viewProj, sliceViewports, mode, topDown, canvasW, canvasH, currentZ, theta, phi } = data;
+  const { viewProj, sliceViewports, datasetLayers, mode, topDown, canvasW, canvasH, currentZ, theta, phi, mainInvViewProj } = data;
+
+  if (mode === "volume" && mainInvViewProj) {
+    // The main camera's frustum, one per dataset, so it follows every camera
+    // move without the member outlines being stroked again.
+    for (const dl of datasetLayers) {
+      drawFrustumIntersection(
+        ctx, viewProj, dl.modelMatrix, dl.invModelMatrix, mainInvViewProj,
+        canvasW, canvasH, colors.viewport,
+      );
+    }
+  }
 
   if (mode === "slice") {
     // View rectangle intersections (per-member, in member-local voxel coordinates)

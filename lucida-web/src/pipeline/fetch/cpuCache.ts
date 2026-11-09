@@ -385,6 +385,19 @@ export class CpuCache {
   private viewCoarseKeysThisTick = new Set<string>();
 
   /**
+   * Moves whenever the plan side of what {@link getDeliverable} and the
+   * demand counts read changes: a submit, a rebuild, rejections cleared, a
+   * dataset dropped. With the stores' and the delivery mirror's own versions
+   * it keys readings that would otherwise walk every cached chunk on every
+   * frame, which on a wide collection is thousands of entries a frame.
+   */
+  private planVersion = 0;
+  /** The versions the last {@link getDeliverable} walk found nothing to deliver at. */
+  private readonly nothingDeliverableAt = { plan: -1, detail: -1, coarse: -1, delivery: -1 };
+  /** The last demand counts, and the versions they were counted at. */
+  private demandAt: { plan: number; detail: number; coarse: number; demand: CacheTelemetry["tierDemand"] } | null = null;
+
+  /**
    * Latest wanted metadata for in-flight fetches. The request object
    * passed to `fetchAndDecode` may have been queued under an older
    * camera/LOD plan; this map lets later submits refresh the generation
@@ -510,14 +523,15 @@ export class CpuCache {
 
   /**
    * Submit the current request plan. Re-submitting an unchanged plan is a
-   * no-op. In-flight work for active entities that left the new plan is
-   * preempted, so scrubbed-away T/Z/channel work does not hold scheduler
-   * slots ahead of current requests.
+   * no-op. In-flight work for active or requested entities that left the
+   * new plan is preempted, so scrubbed-away T/Z/channel work does not hold
+   * scheduler slots ahead of current requests.
    *
    * `chunkBytes` gives what each of the plan's chunks decodes to. A plan is
    * one dataset's, so it stands for that dataset's fetches from then on.
    */
   submit(plan: RequestPlan, chunkBytes?: (req: ChunkRequest) => number): void {
+    this.planVersion++;
     this.currentEpochs = plan.epochs;
     if (chunkBytes && plan.requests.length > 0) {
       this.chunkBytesByDataset.set(plan.requests[0].datasetId, chunkBytes);
@@ -532,6 +546,17 @@ export class CpuCache {
       if (entry.kind === "tile" && entry.detailLevels.length > 0) {
         this.targetLevelByEntity.set(entry.entityId, entry.detailLevels[0]);
       }
+    }
+    // A label overlay's chunks are requested under the label's own image id,
+    // which no active set entry names. The plan holds the dataset's whole
+    // wanted set, so it is as authoritative for those entities as for the
+    // ones it holds active.
+    let lastEntityId: string | undefined;
+    for (const req of plan.requests) {
+      if (req.entityId === lastEntityId) continue;
+      lastEntityId = req.entityId;
+      newActiveIds.add(req.entityId);
+      this.activeEntityIdsThisRebuild.add(req.entityId);
     }
 
     // One pass derives every key and tier exactly once. `submit` receives the
@@ -816,10 +841,10 @@ export class CpuCache {
    * Abort a still-active entity's in-flight chunks that its newest plan no
    * longer wants, so they release their concurrency slots now instead of at
    * the transfer timeout. `submit` runs once per dataset with that dataset's
-   * complete request set, so for an entity in this submit's active set the
-   * plan is authoritative. Entities outside it may belong to a dataset
-   * submitted separately this rebuild; {@link onPlanRebuildStart} handles
-   * entities that left the view.
+   * complete request set, so for an entity in this submit's active set, or
+   * one it requests, the plan is authoritative. Other entities may belong to
+   * a dataset submitted separately this rebuild; {@link onPlanRebuildStart}
+   * handles entities that left the view.
    *
    * Only in-flight work is cancelled. `submit` replaces the pending queue
    * wholesale right after, so filtering it would change nothing.
@@ -855,6 +880,7 @@ export class CpuCache {
    * view/layout/selection bumps — those must not abort fetches.
    */
   cancelDataset(datasetId: string, entityIds: string[]): void {
+    this.planVersion++;
     const entityIdSet = new Set(entityIds);
 
     this.chunkScheduler.cancelDataset(
@@ -942,10 +968,12 @@ export class CpuCache {
   }
 
   clearRejected(): void {
+    this.planVersion++;
     this.rejectionTracker.clear();
   }
 
   onPlanRebuildStart(): void {
+    this.planVersion++;
     for (const entityId of this.activeEntityIds) {
       if (!this.activeEntityIdsThisRebuild.has(entityId)) {
         this.chunkStore.demoteEntity(entityId);
@@ -978,6 +1006,17 @@ export class CpuCache {
   }
 
   *getDeliverable(): Iterable<ReadyChunkDelivery> {
+    // Nothing that could make a chunk deliverable has happened since a walk
+    // that found none: no plan, no arrival, no chunk released by the worker.
+    const at = this.nothingDeliverableAt;
+    if (
+      at.plan === this.planVersion &&
+      at.detail === this.chunkStore.version &&
+      at.coarse === this.overviewStore.version &&
+      at.delivery === this.deliveryState.version
+    ) {
+      return;
+    }
     const candidates: ReadyChunkDelivery[] = [];
 
     for (const entry of this.chunkStore.iterateTier("active-detail")) {
@@ -1010,6 +1049,14 @@ export class CpuCache {
       candidates.push(this.chunkEntryToDelivery(entry));
     }
 
+    if (candidates.length === 0) {
+      at.plan = this.planVersion;
+      at.detail = this.chunkStore.version;
+      at.coarse = this.overviewStore.version;
+      at.delivery = this.deliveryState.version;
+      return;
+    }
+    at.plan = -1;
     candidates.sort(compareDeliveries);
     yield* candidates;
   }
@@ -1111,6 +1158,7 @@ export class CpuCache {
    * is eligible to send again, the ones it refused included.
    */
   forgetDelivered(): void {
+    this.planVersion++;
     this.deliveryState.reset();
     this.rejectionTracker.clear();
   }
@@ -1543,6 +1591,7 @@ export class CpuCache {
   }
 
   reset(): void {
+    this.planVersion++;
     this.chunkScheduler.reset();
 
     this.chunkStore.reset();
@@ -2197,7 +2246,28 @@ export class CpuCache {
     return "active-detail";
   }
 
+  /** The demand counts, walked again only once a plan or either store has moved. */
   private computeTierDemandTelemetry(): CacheTelemetry["tierDemand"] {
+    const held = this.demandAt;
+    if (
+      held &&
+      held.plan === this.planVersion &&
+      held.detail === this.chunkStore.version &&
+      held.coarse === this.overviewStore.version
+    ) {
+      return held.demand;
+    }
+    const demand = this.countTierDemand();
+    this.demandAt = {
+      plan: this.planVersion,
+      detail: this.chunkStore.version,
+      coarse: this.overviewStore.version,
+      demand,
+    };
+    return demand;
+  }
+
+  private countTierDemand(): CacheTelemetry["tierDemand"] {
     let residentDetailChunks = 0;
     let residentDetailBytes = 0;
     let residentCoarseChunks = 0;

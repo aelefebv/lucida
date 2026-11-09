@@ -27,6 +27,15 @@ export class DeliveryState {
   private chunks = new Map<string, Map<string, ChunkDelivery>>();
   /** Chunks `sent` and not yet answered, kept as a count so settling reads it for nothing. */
   private unanswered = 0;
+  private releases = 0;
+
+  /**
+   * Moves whenever a chunk stops being sent or held, which is the only way
+   * one becomes eligible to send again.
+   */
+  get version(): number {
+    return this.releases;
+  }
 
   /** How many posted chunks the worker has not yet answered. */
   get chunksUnanswered(): number {
@@ -92,12 +101,14 @@ export class DeliveryState {
       if (!key.startsWith(prefix)) continue;
       for (const delivery of byKey.values()) if (delivery === "sent") this.unanswered--;
       this.chunks.delete(key);
+      this.releases++;
     }
   }
 
   reset(): void {
     this.chunks.clear();
     this.unanswered = 0;
+    this.releases++;
   }
 
   private channel(imageId: string, c: number, create: boolean): Map<string, ChunkDelivery> | undefined {
@@ -115,7 +126,7 @@ export class DeliveryState {
     const byKey = this.chunks.get(channelKey);
     if (!byKey) return;
     if (byKey.get(tierKey) === "sent") this.unanswered--;
-    byKey.delete(tierKey);
+    if (byKey.delete(tierKey)) this.releases++;
     if (byKey.size === 0) this.chunks.delete(channelKey);
   }
 }

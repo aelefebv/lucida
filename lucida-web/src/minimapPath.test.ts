@@ -693,8 +693,8 @@ describe("tickMinimap overview/overlay split", () => {
 
   it("in volume mode re-strokes the frustum on a fly look-around without redrawing the overview", () => {
     // Fly look-around: only scene.inv_view_proj() moves; eye and theta/phi are
-    // unchanged. The overlay must fire with the fresh pose and staticDirty, with
-    // no overview render and no member reads.
+    // unchanged. The overlay must fire with the fresh pose, with no overview
+    // render, no member reads and no member outlines stroked again.
     const scene = makeScene();
     const renderCount = { n: 0 };
     const overlay = vi.fn();
@@ -721,10 +721,11 @@ describe("tickMinimap overview/overlay split", () => {
     expect(matSpy).not.toHaveBeenCalled();
     expect(idSpy).not.toHaveBeenCalled();
 
-    // Overlay re-stroked with the fresh pose; the frustum layer is static.
+    // Overlay re-stroked with the fresh pose; the frustum is drawn with the
+    // viewport overlays, so the outlines' layer is reused.
     expect(overlay).toHaveBeenCalledTimes(2);
     const lookCall = overlay.mock.calls[1][0];
-    expect(lookCall.staticDirty).toBe(true);
+    expect(lookCall.staticDirty).toBe(false);
     expect(lookCall.mainInvViewProj).not.toBeNull();
     expect(Array.from(lookCall.mainInvViewProj as Float32Array)).toEqual(scene.invViewProj);
     // Eye-only inputs did not move, so this is not an orbit: no viewProj change.
@@ -816,9 +817,10 @@ describe("tickMinimap overview/overlay split", () => {
 
     expect(renderCount.n).toBe(1);
     expect(camSpy).toHaveBeenCalledTimes(1);
-    // The main camera moved, so its frustum footprint is still re-stroked.
+    // The main camera moved, so its frustum footprint is still re-stroked,
+    // and the top-down outlines did not move.
     expect(overlay).toHaveBeenCalledTimes(2);
-    expect(overlay.mock.calls[1][0].staticDirty).toBe(true);
+    expect(overlay.mock.calls[1][0].staticDirty).toBe(false);
     expect(overlay.mock.calls[1][0].topDown).toBe(true);
   });
 });

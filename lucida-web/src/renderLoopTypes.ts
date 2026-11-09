@@ -48,11 +48,11 @@ export interface MinimapOverlayData {
   datasetDims: Map<string, { width: number; height: number; depth: number }>;
   mainInvViewProj: Float32Array | null;
   /**
-   * True when the Z-invariant overlay layer (member bounding boxes, axis
-   * arrows, the volume frustum) changed since the last overlay callback.
-   * False on a pure Z-scrub, where the consumer reuses the cached layer and
-   * re-strokes only the slice plane and viewport rect, skipping the O(N)
-   * bounding-box redraw each Z step.
+   * True when the layer drawn in the minimap camera's own view (member
+   * bounding boxes, axis arrows) changed since the last overlay callback.
+   * False on a Z-scrub or a main-camera move, where the consumer reuses the
+   * cached layer and re-strokes only the slice plane, viewport rect and
+   * frustum, skipping the O(N) bounding-box redraw.
    */
   staticDirty: boolean;
 }

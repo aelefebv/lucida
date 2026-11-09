@@ -21,6 +21,7 @@ import {
   type ReadyChunkDelivery,
 } from "./cpuCache.ts";
 import { ProxiedContentSource } from "./contentSource.ts";
+import { ChunkStore } from "./chunkStore.ts";
 import { FetchError } from "./retry.ts";
 import type {
   ContentSource,
@@ -285,6 +286,43 @@ describe("CpuCache", () => {
   });
 
   describe("getDeliverable", () => {
+    it("walks the cache again only once something could have made a chunk deliverable", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      const detail = makeRequest({ chunkKey: "0/0/0/0/0/0", x: 0 });
+      const ahead = makeRequest({ chunkKey: "0/0/0/0/0/1", x: 1, lane: "prefetch" });
+      cache.submit(makePlan([detail, ahead]));
+      await flush();
+      const [delivery] = consumeDeliverables(cache);
+      cache.markChunksHeld(delivery.imageId, delivery.c, "detail", [delivery.chunkKey]);
+
+      // Frames with nothing new, as an orbit draws: one walk finds nothing,
+      // and the demand counts settling reads are not counted again either.
+      const walks = vi.spyOn(ChunkStore.prototype, "iterateTier");
+      const counts = vi.spyOn(ChunkStore.prototype, "allEntries");
+      try {
+        for (let frame = 0; frame < 5; frame++) {
+          expect(Array.from(cache.getDeliverable())).toEqual([]);
+          cache.settleInputs(createSettleState());
+        }
+        expect(walks).toHaveBeenCalledTimes(1);
+        expect(counts.mock.calls.length).toBeLessThanOrEqual(3);
+
+        // The view reaches the prefetched chunk: the next walk hands it over.
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([detail, { ...ahead, lane: "detail" }]));
+        expect(Array.from(cache.getDeliverable()).map((d) => d.chunkKey)).toEqual([ahead.chunkKey]);
+        expect(cache.settleInputs(createSettleState())).toMatchObject({
+          desiredDetailChunks: 2,
+          residentDetailChunks: 2,
+        });
+      } finally {
+        walks.mockRestore();
+        counts.mockRestore();
+      }
+    });
+
     it("interleaves equal-priority multi-channel chunks by spatial cell", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
@@ -789,6 +827,48 @@ describe("CpuCache", () => {
       cache.submit(makePlan([keep]));
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/1")).toBe(false);
+      expect(cache.telemetry().inFlightCount).toBe(1);
+    });
+
+    // A label overlay's chunks are requested under the label's own image id,
+    // which the plan's active set never names.
+    const labelAt = (z: number) => makeRequest({
+      entityId: "label-1", imageId: "label-1", z, chunkKey: `0/0/0/${z}/0/0`,
+    });
+
+    it("cancels a label's in-flight chunk the next plan drops, and keeps the one it still wants", () => {
+      const { cache, source } = createTestCache();
+      const image = makeRequest({ chunkKey: "0/0/0/0/0/0" });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image, labelAt(0), labelAt(1)]));
+      expect(cache.telemetry().inFlightCount).toBe(3);
+
+      // The view moved on past z 0; z 1 is still wanted.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image, labelAt(1), labelAt(2)]));
+
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/0/0/0")).toBe(false);
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/1/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/2/0/0")).toBe(true);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+      expect(source.fetchCount).toBe(4);
+      expect(cache.telemetry().inFlightCount).toBe(3);
+    });
+
+    it("cancels a hidden label's in-flight chunks once a rebuild goes without it", () => {
+      const { cache, source } = createTestCache();
+      const image = makeRequest({ chunkKey: "0/0/0/0/0/0" });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image, labelAt(0)]));
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image]));
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([image]));
+
+      expect(source.pendingFetches.has("entity-1/label-1/0/0/0/0/0/0")).toBe(false);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
       expect(cache.telemetry().inFlightCount).toBe(1);
     });
 

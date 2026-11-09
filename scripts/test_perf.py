@@ -135,6 +135,7 @@ def test_scenarios_name_what_they_need() -> None:
     assert SCENARIOS["orbit-sustained"].camera == "arcball"
     assert needs["label-open"] == {"labels"}
     assert needs["label-z-scrub"] == {"volume", "labels"}
+    assert needs["label-z-play"] == {"volume", "labels"}
 
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
@@ -146,7 +147,7 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         for step in scenario.steps
         if "durationMs" in step or "intervalMs" in step
     }
-    assert paced == {"pan-sustained", "orbit-sustained", "playback"}
+    assert paced == {"pan-sustained", "orbit-sustained", "playback", "label-z-play"}
 
 
 def test_every_scenario_is_short_enough_for_each_step_to_keep_its_run() -> None:
