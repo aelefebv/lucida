@@ -159,6 +159,11 @@ fn global_source_read_limiter() -> &'static Arc<SourceReadLimiter> {
     LIMITER.get_or_init(|| SourceReadLimiter::with_bounds(configured_source_read_bounds()))
 }
 
+/// The most chunk reads the process-wide source-read bound admits at once.
+pub(crate) fn max_source_reads() -> usize {
+    global_source_read_limiter().bounds().max_reads
+}
+
 /// The process-global limiter for metadata reads, the counterpart to
 /// [`global_source_read_limiter`] for the other read class, and its size.
 fn global_metadata_read_limiter() -> &'static (Arc<Semaphore>, usize) {
