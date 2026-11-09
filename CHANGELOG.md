@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.27.0](https://github.com/aelefebv/lucida/compare/v0.26.0...v0.27.0) (2026-11-09)
+
+
+### Features
+
+* a chunk request can name the planes of the chunk it wants ([#1427](https://github.com/aelefebv/lucida/issues/1427)) ([1468dcb](https://github.com/aelefebv/lucida/commit/1468dcbc47834f38378c25d4d81265cfd846d4ae))
+
+
+### Bug Fixes
+
+* **deps:** ignore RUSTSEC-2026-0459 until sqlx accepts libsqlite3-sys 0.39 ([#1431](https://github.com/aelefebv/lucida/issues/1431)) ([4c3d3f3](https://github.com/aelefebv/lucida/commit/4c3d3f31ae841463452f3cf0fe085d67b2bdb153))
+
+
+### Performance
+
+* **web:** draw a collection's members a batch to a pass, not one pass each ([#1426](https://github.com/aelefebv/lucida/issues/1426)) ([61ec7ce](https://github.com/aelefebv/lucida/commit/61ec7ce6bc612fa978c3a425a12ca9c73db4b858))
+* **web:** fit auto-contrast faster and stop per-tile rebuilds on display edits ([#1428](https://github.com/aelefebv/lucida/issues/1428)) ([f621263](https://github.com/aelefebv/lucida/commit/f6212633e31c2dd60fae78d1b5ccebba5f6db3dc))
+* **web:** prefetch holds at most 4 MiB of the link ([#1433](https://github.com/aelefebv/lucida/issues/1433)) ([768438c](https://github.com/aelefebv/lucida/commit/768438c10c2de4e7e6783a218783cb60b956974a))
+* **web:** the slice view fetches the planes it draws ([#1432](https://github.com/aelefebv/lucida/issues/1432)) ([35ceaa5](https://github.com/aelefebv/lucida/commit/35ceaa59121a8fc7ef38c80c97696804de8d5fac))
+
 ## [0.26.0](https://github.com/aelefebv/lucida/compare/v0.25.1...v0.26.0) (2026-11-09)
 
 
