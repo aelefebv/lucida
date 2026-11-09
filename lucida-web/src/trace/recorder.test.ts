@@ -187,6 +187,44 @@ describe("TraceRecorder run lifecycle", () => {
     }
   });
 
+  it("dates the wanted set apart from the prefetch arrivals that hold the close off", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder, advance } = makeRecorder();
+      recorder.openRun(OPEN_CAUSE);
+      recorder.noteQuiescence(evaluateSettle(inputs({ inFlight: 3 }), 1_000));
+      advance(200);
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_200));
+      // Each prefetched arrival wakes a residency tick and a frame.
+      for (let i = 0; i < 3; i++) {
+        advance(300);
+        vi.advanceTimersByTime(300);
+        recorder.noteQuiescence(evaluateSettle(inputs({ residencyDirty: true, speculativeInFlight: 2 }), 0));
+        recorder.noteQuiescence(evaluateSettle(inputs(), 0));
+      }
+      advance(500);
+      vi.advanceTimersByTime(500);
+
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.endReason).toBe("quiescent");
+      expect(run.header.wantedSetMetAtUs).toBe(200_000);
+      expect(run.header.durationUs).toBe(1_600_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forgets the wanted set on input, which changes what the view wants", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
+    advance(100);
+    recorder.noteInput("zoom");
+    recorder.closeRun("explicit");
+
+    expect(recorder.exportDocument().runs[0].header.wantedSetMetAtUs).toBeNull();
+  });
+
   it("emits a run that never settles, with `timeout` as its end reason", () => {
     vi.useFakeTimers();
     try {

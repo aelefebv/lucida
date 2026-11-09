@@ -5,6 +5,7 @@ import {
   createSettleState,
   evaluateSettle,
   stallReasonOf,
+  wantedSetMet,
   type SettleOutcome,
   type SettleState,
 } from "./settle.ts";
@@ -47,6 +48,21 @@ describe("evaluateSettle", () => {
     expect(state.quiescent).toBe(true);
     expect(state.speculativePending).toBe(40);
     expect(state.speculativeInFlight).toBe(4);
+  });
+
+  it("has the wanted set through the residency tick and frame an arrival wakes, and not through input or work", () => {
+    expect(wantedSetMet(settled({ residencyDirty: true, frameInFlight: true, speculativeInFlight: 4 }))).toBe(true);
+    expect(wantedSetMet(settled({ residentDetailChunks: 8, shortDetailChunks: 4 }))).toBe(true);
+    for (const overrides of [
+      { interactiveDirty: true },
+      { inFlight: 1 },
+      { pending: 1 },
+      { pendingUnclassified: true },
+      { uploadsUnanswered: 1 },
+      { residentDetailChunks: 11 },
+    ]) {
+      expect(wantedSetMet(settled(overrides))).toBe(false);
+    }
   });
 
   it("settles without a wanted chunk the source failed for good", () => {

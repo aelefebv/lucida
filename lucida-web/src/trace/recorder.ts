@@ -42,7 +42,7 @@ import type {
   WatchCursor,
   WatchSample,
 } from "./liveProgress.ts";
-import { SETTLE_HOLD_MS, type SettleState } from "../pipeline/settle.ts";
+import { SETTLE_HOLD_MS, wantedSetMet, type SettleState } from "../pipeline/settle.ts";
 import type { ErrorReport } from "../pageErrors.ts";
 import { RULESET } from "./diagnose/ruleset.ts";
 import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
@@ -262,6 +262,12 @@ interface OpenInterval {
   truncation: TruncationRecord | null;
   errors: PageError[];
   errorsDropped: number;
+  /**
+   * When the view last came to have its wanted set, on this recorder's
+   * clock, or null while it lacks it. Cleared by input, which changes what
+   * the view wants before the page has replanned.
+   */
+  wantedSetMetAtMs: number | null;
 }
 
 interface ClosedInterval {
@@ -802,6 +808,7 @@ export class TraceRecorder {
     else this.openRun(interactionCause(input));
     const run = this.open;
     if (!run?.cause) return;
+    run.wantedSetMetAtMs = null;
     (run.lag ??= new LagRecord()).noteInput(input, atMs);
   }
 
@@ -902,7 +909,13 @@ export class TraceRecorder {
     // trivially quiescent — nothing dirty, nothing wanted — so a cold open
     // would otherwise close its own run 500 ms in and discard the metadata
     // reads it is still waiting on, which is the whole of a cold open.
-    if (!state.quiescent || this.hasUnsettledOpen()) {
+    const unsettledOpen = this.hasUnsettledOpen();
+    const run = this.open;
+    if (run) {
+      if (unsettledOpen || !wantedSetMet(state)) run.wantedSetMetAtMs = null;
+      else run.wantedSetMetAtMs ??= this.now();
+    }
+    if (!state.quiescent || unsettledOpen) {
       this.clearHoldTimer();
       return;
     }
@@ -1643,6 +1656,7 @@ export class TraceRecorder {
       truncation: null,
       errors: [],
       errorsDropped: 0,
+      wantedSetMetAtMs: null,
     };
     // A fresh interval preallocates its buffers, so opening one spends from
     // the resident budget before it has recorded anything. Evict here as well
@@ -1732,6 +1746,7 @@ export class TraceRecorder {
         quiescenceHoldMs: this.quiescenceHoldMs,
         timeoutMs: this.timeoutMs,
         outstandingAtSettle: run.environment.captureOutstanding(),
+        wantedSetMetAtUs: run.wantedSetMetAtMs === null ? null : this.offsetUs(run, run.wantedSetMetAtMs),
         connections: run.connections,
       },
     });

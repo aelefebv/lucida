@@ -962,10 +962,24 @@ export interface LoadReading {
   /** When a chunk this run fetched was first on screen, or null when none was. */
   firstFrameMs: number | null;
   /**
-   * When the view went quiescent for good: the wall clock less the hold the
-   * close waited out. Null on a run that did not close by settling.
+   * When the view came to have its wanted set for good: every chunk it
+   * wants resident, or as many as the budgets hold. Prefetch is left out,
+   * though its arrivals hold the run's close off. Null on a run that did not
+   * close by settling.
    */
   settleMs: number | null;
+  /**
+   * When the last chunk the prefetch lane fetched this run was decoded, or
+   * null when it fetched none. Prefetch still queued or in flight at the
+   * close is in {@link RunIdentity.outstanding}.
+   */
+  prefetchMs: number | null;
+  /**
+   * Wanted chunks not resident at the close, both tiers together: the sum
+   * of the steady-state tiers' {@link TierAtSettle.coverageLossChunks}. A
+   * view short of room settles covering less, so this is not a stall.
+   */
+  coverageLossChunks: number;
   /** What the wire delivered during the run. */
   received: ReceivedSummary;
 }

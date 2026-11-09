@@ -1004,6 +1004,26 @@ def _lag(lag: Any) -> dict[str, Any]:
     }
 
 
+def _load(load: Any) -> dict[str, Any]:
+    """First frame, settle, prefetch, what the wire delivered and the wanted
+    chunks not resident, from a load reading; each None where it says nothing."""
+    load = load or {}
+    received = load.get("received") or {}
+    return {
+        "firstFrameMs": load.get("firstFrameMs"),
+        "settleMs": load.get("settleMs"),
+        "prefetchMs": load.get("prefetchMs"),
+        "bytesFetched": received.get("bytes"),
+        "chunksFetched": received.get("requests"),
+        "chunksShort": load.get("coverageLossChunks"),
+    }
+
+
+def _attribution(attribution: Any) -> dict[str, Any]:
+    attribution = attribution or {}
+    return {"topLimiter": attribution.get("cause"), "confidence": attribution.get("confidence")}
+
+
 def _errors(errors: list[dict[str, Any]], step: int | None = None) -> int:
     """The errors the page raised that its allow list does not name, repeats
     included: in script step `step`, counted from 1, or anywhere in the trace."""
@@ -1024,9 +1044,6 @@ def read_run(path: Path) -> dict[str, Any]:
     run_file = _read_json(path)
     diagnostic = run_file.get("diagnostic") or {}
     header = run_file.get("header") or {}
-    load = diagnostic.get("load") or {}
-    received = load.get("received") or {}
-    attribution = diagnostic.get("attribution") or {}
     run = diagnostic.get("run") or {}
     verdict = diagnostic.get("verdict") or {}
     steps = (header.get("script") or {}).get("steps") or []
@@ -1035,13 +1052,9 @@ def read_run(path: Path) -> dict[str, Any]:
         "runId": diagnostic.get("runId"),
         "verdict": verdict.get("kind"),
         "verdictText": verdict.get("text"),
-        "firstFrameMs": load.get("firstFrameMs"),
-        "settleMs": load.get("settleMs"),
-        "bytesFetched": received.get("bytes"),
-        "chunksFetched": received.get("requests"),
+        **_load(diagnostic.get("load")),
         "chunksEvicted": _metric((diagnostic.get("coverage") or {}).get("notHealthSignals"), "evictions"),
-        "topLimiter": attribution.get("cause"),
-        "confidence": attribution.get("confidence"),
+        **_attribution(diagnostic.get("attribution")),
         "adapter": run.get("gpu"),
         "adapterKind": (run.get("adapterKind") or {}).get("label"),
         "sourceThrottle": header.get("sourceThrottle"),
@@ -1054,6 +1067,8 @@ def read_run(path: Path) -> dict[str, Any]:
                 "runId": step.get("runId"),
                 "verdict": (step.get("verdict") or {}).get("kind"),
                 "durationMs": step["durationUs"] / 1000 if isinstance(step.get("durationUs"), (int, float)) else None,
+                **_load(step.get("load")),
+                **_attribution(step.get("attribution")),
                 **_lag(step.get("lag")),
                 "errors": _errors(errors, index),
             }
@@ -1074,10 +1089,12 @@ COLUMNS = [
     "throttle",
     "first frame",
     "settle",
+    "prefetch",
     "duration",
     "fetched",
     "chunks",
     "evicted",
+    "short",
     "top limiter",
     "input to frame p95",
     "longest task",
@@ -1126,6 +1143,7 @@ def step_outcome(step: dict[str, Any]) -> str:
 # Numbers the table shows and the comparison does not judge, by column: no
 # allowance has been measured for their noise.
 READINGS = {
+    "prefetch": ("prefetchMs", _ms),
     "input to frame p95": ("inputToFrameP95Ms", _ms),
     "longest task": ("longestTaskMs", _ms),
     "dropped": ("droppedFrames", _count),
@@ -1164,6 +1182,7 @@ METRICS = (
     Metric("bytesFetched", "fetched", _bytes, relative=0.1, floor=1e6),
     Metric("chunksFetched", "chunks", _count, relative=0.1, floor=8),
     Metric("chunksEvicted", "evicted", _count, relative=0.1, floor=8),
+    Metric("chunksShort", "short", _count, relative=0.1, floor=8),
 )
 
 
@@ -1312,13 +1331,16 @@ def table_cells(cell: Cell, out_dir: Path) -> list[str]:
 
 def step_cells(cell: Cell) -> list[list[str]]:
     """A row under the cell's for each script step, from the step's record:
-    how long its run lasted, its lag, its errors and its verdict. The columns
-    a step record does not carry stay empty."""
+    how long its run lasted, how it loaded, what it waited on, its lag, its
+    errors and its verdict. The columns a step record does not carry stay
+    empty."""
     rows = []
     for index, steps in enumerate(cell.steps(), start=1):
         texts = {
             "scenario": f"↳ {index} {steps[0].get('label') or steps[0].get('kind')}",
             "duration": _stat(_numbers(steps, "durationMs"), _ms),
+            **{m.label: _stat(_numbers(steps, m.field), m.format) for m in METRICS if m.field in steps[0]},
+            "top limiter": _distinct([_limiter(step) for step in steps]),
             **{label: _stat(_numbers(steps, name), fmt) for label, (name, fmt) in READINGS.items()},
             "verdict": _distinct([step_outcome(step) for step in steps]),
         }
