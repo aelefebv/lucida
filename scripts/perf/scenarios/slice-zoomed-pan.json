@@ -1,0 +1,10 @@
+{
+  "description": "zoom the slice view in by 8 about its center, leave it alone for 4 s, then pan it at a person's pace",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "zoom", "factor": 8, "durationMs": 1500 },
+    { "kind": "hold", "ms": 4000 },
+    { "kind": "pan", "dx": -600, "dy": -200, "durationMs": 2000 }
+  ]
+}

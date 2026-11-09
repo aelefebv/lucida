@@ -147,7 +147,16 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         for step in scenario.steps
         if "durationMs" in step or "intervalMs" in step
     }
-    assert paced == {"pan-sustained", "orbit-sustained", "playback", "label-z-play"}
+    assert paced == {
+        "pan-sustained",
+        "orbit-sustained",
+        "playback",
+        "label-z-play",
+        "volume-zoom",
+        "volume-zoomed-orbit",
+        "slice-zoom",
+        "slice-zoomed-pan",
+    }
 
 
 def test_every_scenario_is_short_enough_for_each_step_to_keep_its_run() -> None:

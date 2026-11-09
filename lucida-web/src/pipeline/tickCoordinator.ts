@@ -383,11 +383,13 @@ export class TickCoordinator {
   private lastRebuildAt = Number.NEGATIVE_INFINITY;
   /**
    * True when an interactive change was coalesced and its trailing rebuild
-   * has not run. The render loop keeps ticking while this is set, so the
+   * has not run. The render loop ticks again when the window elapses, so the
    * settled state renders even after the user stops. While set, `lastEpochs`
    * stays stale on purpose so the pending change is re-detected next tick.
    */
   private pendingDeferredRebuild = false;
+  /** The coalescing window the owed rebuild waits out, from {@link lastRebuildAt}. */
+  private deferredRebuildIntervalMs = 0;
   /**
    * Scene scalars captured at the last full rebuild, for the fast-path
    * proofs. The z-range lives per dataset in {@link DatasetRebuildSignature}
@@ -598,9 +600,10 @@ export class TickCoordinator {
         if (tickStart - this.lastRebuildAt < interval) {
           coalescedSkip = true;
           // Leave `lastEpochs` stale so the change is re-detected next
-          // tick, and flag the deferral so the render loop keeps ticking
-          // until the window elapses and the trailing rebuild lands.
+          // tick, and flag the deferral so the render loop ticks again
+          // once the window elapses and the trailing rebuild lands.
           this.pendingDeferredRebuild = true;
+          this.deferredRebuildIntervalMs = interval;
         }
       }
     }
@@ -1534,11 +1537,19 @@ export class TickCoordinator {
   }
 
   /**
-   * True while a coalesced change's trailing rebuild is owed. The render
-   * loop keeps ticking while this holds so the rebuild fires after the user
-   * stops.
+   * True while a coalesced change's trailing rebuild is owed. The view is
+   * not settled until it lands.
    */
   hasPendingRebuild(): boolean {
     return this.pendingDeferredRebuild;
+  }
+
+  /**
+   * How long until the owed rebuild may run, or null when none is owed. The
+   * render loop ticks again then rather than every frame until then.
+   */
+  msUntilPendingRebuild(now: number): number | null {
+    if (!this.pendingDeferredRebuild) return null;
+    return Math.max(0, this.lastRebuildAt + this.deferredRebuildIntervalMs - now);
   }
 }

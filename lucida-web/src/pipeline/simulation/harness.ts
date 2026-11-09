@@ -72,7 +72,8 @@ const REPORT_KEY_LIMIT = 12;
  */
 const RESENT_THRESHOLD = 3;
 
-export type ScenarioStep =
+/** A move a single input makes. */
+export type ScenarioMove =
   | { scrub: { z?: number; t?: number } }
   /** A drag, in device pixels; an arcball pan in a volume. */
   | { pan: [dx: number, dy: number] }
@@ -80,6 +81,14 @@ export type ScenarioStep =
   | { zoom: number }
   /** A 3-D orbit, in radians. */
   | { orbit: [dTheta: number, dPhi: number] };
+
+export type ScenarioStep =
+  | ScenarioMove
+  /**
+   * The same move `moves` times, one input a frame, as a drag or a turning
+   * wheel lands. The phase counts the frames from the last input on.
+   */
+  | { gesture: ScenarioMove; moves: number };
 
 export interface ScenarioSpec {
   name: string;
@@ -244,7 +253,7 @@ export async function runScenario(scenario: Scenario, opts: { dpr: number }): Pr
     phases.push(await sim.settle("open"));
     for (const step of scenario.steps) {
       if (!phases[phases.length - 1].settled) break;
-      phases.push(await sim.settle(sim.apply(step)));
+      phases.push(await sim.settle(await sim.perform(step)));
     }
     const settled = phases.every((p) => p.settled) && phases.length === scenario.steps.length + 1;
     return {
@@ -473,8 +482,18 @@ class Simulation {
     this.loop!.markResidencyDirty(AVAILABILITY_UPDATE_SOURCE);
   }
 
-  /** Apply a step the way its control does, and name it for the report. */
-  apply(step: ScenarioStep): string {
+  /** Perform a step, a gesture one input a frame, and name it for the report. */
+  async perform(step: ScenarioStep): Promise<string> {
+    if (!("gesture" in step)) return this.apply(step);
+    for (let move = 1; move < step.moves; move++) {
+      this.apply(step.gesture);
+      await this.step();
+    }
+    return `${this.apply(step.gesture)}, ${step.moves} times`;
+  }
+
+  /** Apply a move the way its control does, and name it for the report. */
+  private apply(step: ScenarioMove): string {
     const scene = this.scene!;
     const loop = this.loop!;
     const volume = this.scenario.mode === "volume";
