@@ -248,7 +248,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     gpuMemory: deriveGpuMemory(run.readings),
     lag,
     sent: summariseSent(run.sent, run.header.durationUs),
-    load: deriveLoad(run),
+    load: deriveLoad(run, steady.reading.tiers),
     steadyState: steady.reading,
     counts: {
       rows: run.rows.length,
