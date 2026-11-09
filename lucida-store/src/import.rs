@@ -7189,8 +7189,9 @@ mod tests {
     }
 
     /// A fixture directory copied into a [`DistantStore`], read through a
-    /// cache. In memory, so no read waits on a blocking thread the paused
-    /// clock cannot see.
+    /// cache. In memory and on a metadata cap of its own, so no read waits
+    /// on a blocking thread or on another test, neither of which the paused
+    /// clock can see.
     async fn distant_store(dir: &std::path::Path) -> Arc<CachedStore> {
         use object_store::ObjectStoreExt;
         let inner = object_store::memory::InMemory::new();
@@ -7215,10 +7216,10 @@ mod tests {
                     .unwrap();
             }
         }
-        Arc::new(CachedStore::new(
-            Arc::new(DistantStore { inner }),
-            TEST_CACHE_BYTES,
-        ))
+        Arc::new(
+            CachedStore::new(Arc::new(DistantStore { inner }), TEST_CACHE_BYTES)
+                .with_own_metadata_cap(),
+        )
     }
 
     /// How many [`LATENCY`] round trips in a row an import of `store` waits.
