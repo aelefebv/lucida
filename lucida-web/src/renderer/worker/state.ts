@@ -99,6 +99,11 @@ export interface RendererState {
   wantedByDataset: Map<string, WantedChunkIndex>;
   /** dataset → imageId → chunk keys the source failed for good, as the page last listed them. */
   failedByDataset: Map<string, Map<string, ReadonlySet<string>>>;
+  /**
+   * What each chunk pool's indirection was last remapped for, by pool object,
+   * so a pool created or replaced since always remaps. See `applyColdState`.
+   */
+  remappedFor: WeakMap<object, RemapInputs>;
 
   /**
    * Captures the trace bundle asked for that no frame has answered yet.
@@ -133,6 +138,18 @@ export interface RendererState {
   labelSizesOutOfMemory: Set<string>;
 }
 
+/** What a pool's indirection remap reads besides its slots and sections. */
+export interface RemapInputs {
+  t: number;
+  /** The slice plane; zero for a volume pool, which maps every Z. */
+  z: number;
+  /**
+   * A render radius or failed-chunk marks shaped the result, and both move
+   * with the view or the wanted set.
+   */
+  viewDependent: boolean;
+}
+
 /** Build an empty {@link RendererState}. Called once in `case "init"`. */
 export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTotalBytes): RendererState {
   return {
@@ -154,6 +171,7 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     coldStateByDataset: new Map(),
     wantedByDataset: new Map(),
     failedByDataset: new Map(),
+    remappedFor: new WeakMap(),
     frameCaptures: [],
     gpuMemoryPosted: null,
     gpuCapacityPosted: null,

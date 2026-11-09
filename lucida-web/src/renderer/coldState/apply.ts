@@ -32,6 +32,8 @@ import { computeEntityTierMeta } from "./entityMetas.ts";
 import { sourceKey } from "../poolKeys.ts";
 import { postFreedPools } from "../chunkUploadFeedback.ts";
 import { indexWantedChunks, wantedEntryKey } from "../wantedChunks.ts";
+import { renderRadiusEnabled } from "../../pipeline/renderRadius.ts";
+import type { RemapInputs } from "../worker/state.ts";
 
 /**
  * The failed chunks a pool's members want in its tier, by member. Only wanted
@@ -59,6 +61,52 @@ function failedInGroup(
     if (keys.size > 0) out.set(memberId, keys);
   }
   return out;
+}
+
+/** Whether two pool layouts give every member the same sections at the same offsets. */
+function sameSections(
+  held: ReadonlyMap<string, readonly LodIndirectionMeta[]>,
+  next: ReadonlyMap<string, readonly LodIndirectionMeta[]>,
+): boolean {
+  if (held.size !== next.size) return false;
+  for (const [memberId, metas] of next) {
+    const was = held.get(memberId);
+    if (!was || was.length !== metas.length) return false;
+    for (let i = 0; i < metas.length; i++) {
+      const a = was[i];
+      const b = metas[i];
+      if (
+        a.level !== b.level || a.offset !== b.offset ||
+        a.gridDims[0] !== b.gridDims[0] || a.gridDims[1] !== b.gridDims[1] || a.gridDims[2] !== b.gridDims[2]
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether a pool's indirection already says what a remap would write. A remap
+ * walks every resident slot, and uploads and evictions keep the indirection
+ * current between cold states, so a pool whose sections, T and plane are the
+ * ones it was last remapped for, with no render radius or failed marks either
+ * time, would only rebuild what it holds. On a view move that is every pool
+ * whose members stayed put, such as a collection's coarse pools.
+ */
+function remapHolds(
+  state: WorkerCtx["state"],
+  atlas: { entityMetas: Map<string, LodIndirectionMeta[]>; indirectionData: Uint32Array },
+  metas: Map<string, LodIndirectionMeta[]>,
+  totalEntries: number,
+  inputs: RemapInputs,
+): boolean {
+  const last = state.remappedFor.get(atlas);
+  return last !== undefined &&
+    !last.viewDependent && !inputs.viewDependent &&
+    last.t === inputs.t && last.z === inputs.z &&
+    atlas.indirectionData.length === totalEntries &&
+    sameSections(atlas.entityMetas, metas);
 }
 
 /** Apply a cold-state message. The caller posts the wanted-set afterward. */
@@ -135,31 +183,43 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     }
 
     const failed = failedInGroup(state, msg.datasetId, group);
+    const radius = msg.renderRadiusView?.[group.tier];
+    const viewDependent = (radius !== undefined && renderRadiusEnabled(radius)) || (failed?.size ?? 0) > 0;
     if (mode === "volume") {
       const atlas = getOrCreateVolumePool(
         ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, msg.currentT, group.channel, msg.sampleFormat,
       );
+      const inputs: RemapInputs = { t: msg.currentT, z: 0, viewDependent };
+      const holds = remapHolds(state, atlas, newEntityMetas, offset, inputs);
       atlas.entityMetas = newEntityMetas;
-      resizeIndirection(ctx, atlas, offset);
-      remapIndirection(atlas, msg.currentT, group.channel, {
-        visibleRegion: msg.visibleRegion,
-        renderRadiusView: msg.renderRadiusView?.[group.tier],
-        entryByMember,
-        failed,
-      });
+      if (!holds) {
+        resizeIndirection(ctx, atlas, offset);
+        remapIndirection(atlas, msg.currentT, group.channel, {
+          visibleRegion: msg.visibleRegion,
+          renderRadiusView: radius,
+          entryByMember,
+          failed,
+        });
+        state.remappedFor.set(atlas, inputs);
+      }
     } else {
       const atlas = getOrCreateSlicePool(
         ctx, group.poolKey, msg.datasetId, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
         msg.sampleFormat,
       );
+      const inputs: RemapInputs = { t: msg.currentT, z: msg.currentZ, viewDependent };
+      const holds = remapHolds(state, atlas, newEntityMetas, offset, inputs);
       atlas.entityMetas = newEntityMetas;
-      resizeSliceIndirection(ctx, atlas, offset);
-      remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ, {
-        visibleRegion: msg.visibleRegion,
-        renderRadiusView: msg.renderRadiusView?.[group.tier],
-        entryByMember,
-        failed,
-      });
+      if (!holds) {
+        resizeSliceIndirection(ctx, atlas, offset);
+        remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ, {
+          visibleRegion: msg.visibleRegion,
+          renderRadiusView: radius,
+          entryByMember,
+          failed,
+        });
+        state.remappedFor.set(atlas, inputs);
+      }
     }
   }
 
