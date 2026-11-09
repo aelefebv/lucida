@@ -10,6 +10,7 @@
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import type {
+  ChromePart,
   ClientMessageType,
   CoverageGap,
   CoverageLimit,
@@ -277,6 +278,14 @@ export interface FindingObservation {
   height?: number;
   /** A page that scrolled or overflows: its scroll as the run closed, in CSS pixels. */
   scroll?: PageScrollReading;
+  /** A part of the chrome off the screen: its box and the viewport's size, in CSS pixels. */
+  chrome?: ObservedChrome;
+}
+
+/** A part of the chrome as a finding carries it: its box against a viewport of the size beside it. */
+export interface ObservedChrome extends ChromePart {
+  viewportWidth: number;
+  viewportHeight: number;
 }
 
 /** One recorded error as a finding carries it. */

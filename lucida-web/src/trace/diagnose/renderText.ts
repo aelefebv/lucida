@@ -796,6 +796,15 @@ function describeObservation(finding: Finding, p: PrintNumber): string {
       `in a ${p(`${at}.viewportWidth`, s.viewportWidth)}x${p(`${at}.viewportHeight`, s.viewportHeight)} viewport, CSS pixels`
     );
   }
+  if (finding.rule === RULESET.chrome.id && observed.chrome) {
+    const at = `${base}.chrome`;
+    const c = observed.chrome;
+    return (
+      `spans ${p(`${at}.left`, c.left)},${p(`${at}.top`, c.top)} ` +
+      `to ${p(`${at}.right`, c.right)},${p(`${at}.bottom`, c.bottom)} ` +
+      `in a ${p(`${at}.viewportWidth`, c.viewportWidth)}x${p(`${at}.viewportHeight`, c.viewportHeight)} viewport, CSS pixels`
+    );
+  }
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [
       `${p(`${base}.pending`, (observed.pending ?? 0).toLocaleString())} pending`,

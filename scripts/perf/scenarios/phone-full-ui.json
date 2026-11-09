@@ -1,0 +1,9 @@
+{
+  "description": "cold-open on a phone on the full viewer page: the top bar and the bottom sheet around the canvas, so the run reads the phone layout a person sees; the phone suite runs it at ratio 3",
+  "camera": "slice",
+  "width": 390,
+  "height": 844,
+  "mobile": true,
+  "fullUi": true,
+  "steps": []
+}

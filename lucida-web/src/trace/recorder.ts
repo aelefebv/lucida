@@ -70,6 +70,7 @@ import {
   type DatasetOpenBracket,
   type EndReason,
   type CacheWarmth,
+  type ChromeReading,
   type FrameReading,
   type GpuIdentity,
   type GpuMemoryReading,
@@ -294,6 +295,8 @@ interface ClosedInterval {
   frame: FrameReading | null;
   /** Read with the frame. */
   pageScroll: PageScrollReading | null;
+  /** Read with the frame. */
+  chrome: ChromeReading | null;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
@@ -1595,6 +1598,12 @@ export class TraceRecorder {
     if (interval) interval.pageScroll = reading;
   }
 
+  /** Record where the chrome sat once run `runId` closed, on the same terms as {@link noteFrame}. */
+  noteChrome(runId: string, reading: ChromeReading): void {
+    const interval = this.closed.find((candidate) => candidate.header.runId === runId);
+    if (interval) interval.chrome = reading;
+  }
+
   /**
    * The trace seam's payload. Exporting closes the run in progress: end
    * reason is required on every run, and asking for the document is an
@@ -1755,6 +1764,7 @@ export class TraceRecorder {
       errorsDropped: run.errorsDropped,
       frame: null,
       pageScroll: null,
+      chrome: null,
       header: {
         ...run.environment.captureConditions(),
         cacheWarmth: run.cacheWarmth,
@@ -1879,6 +1889,7 @@ export class TraceRecorder {
       errorsDropped: interval.errorsDropped,
       ...(interval.frame ? { frame: interval.frame } : {}),
       ...(interval.pageScroll ? { pageScroll: interval.pageScroll } : {}),
+      ...(interval.chrome ? { chrome: interval.chrome } : {}),
       ...(interval.lag ? { lag: interval.lag.serialise(interval.startedAtMs) } : {}),
     };
   }
