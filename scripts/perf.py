@@ -808,19 +808,32 @@ def existing_server(url: str) -> str:
     return url
 
 
-def start_server(built: Build, out_dir: Path, port: int, network: str | None = None) -> tuple[ProcessTree, str]:
+def throttled(network: str | None) -> bool:
+    """Whether the server the runner starts for `network` reads its sources
+    through a throttle: a profile other than local, or with none named, a
+    throttle the caller's environment sets."""
+    if network is not None:
+        return network != "local"
+    settings = [v for k, v in os.environ.items() if k.startswith("LUCIDA_SOURCE_THROTTLE")]
+    return any(v not in ("", "0", "local") for v in settings)
+
+
+def start_server(
+    built: Build, out_dir: Path, port: int, network: str | None = None, log_name: str = "server.log"
+) -> tuple[ProcessTree, str]:
     """Start the server, under the source throttle profile `network` when one
     is named. Each network's server has a directory and database of its own."""
     assert built.server is not None and built.web_dist is not None
     # The server keeps its database in its working directory.
     server_dir = out_dir / (f"server-{network}" if network else "server")
     server_dir.mkdir(parents=True, exist_ok=True)
+    # A generated coarse tier cached by an earlier server would make a
+    # single-level dataset's first open look warm.
+    shutil.rmtree(server_dir / "generated-coarse", ignore_errors=True)
     env = _scrubbed_env(
         LUCIDA_BIND=f"127.0.0.1:{port}",
         LUCIDA_AUTH="disabled",
         LUCIDA_WEB_DIST=str(built.web_dist),
-        # A generated coarse tier cached by an earlier invocation would make
-        # a single-level dataset's first open look warm.
         LUCIDA_GENERATED_COARSE_CACHE_DIR=str(server_dir / "generated-coarse"),
     )
     if network:
@@ -828,7 +841,7 @@ def start_server(built: Build, out_dir: Path, port: int, network: str | None = N
         # turn it into another throttle.
         env = {k: v for k, v in env.items() if not k.startswith("LUCIDA_SOURCE_THROTTLE")}
         env["LUCIDA_SOURCE_THROTTLE"] = network
-    tree = ProcessTree([str(built.server)], server_dir / "server.log", server_dir, env)
+    tree = ProcessTree([str(built.server)], server_dir / log_name, server_dir, env)
     url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -1835,14 +1848,21 @@ def main(argv: list[str]) -> int:
         server: ProcessTree | None = None
         for index, case in enumerate(cases, start=1):
             # One server at a time: the plan groups the cases by network.
-            if not servers or case.network != servers[-1]["network"]:
-                if args.server is None:
-                    if server is not None:
-                        server.stop()
-                    server, server_url = start_server(built, out_dir, args.port or free_port(), case.network)
-                servers.append({"url": server_url, "network": case.network})
-                throttle = f" under the {case.network} source throttle" if case.network else ""
-                print(f"server {server_url}{throttle}, runs in {out_dir}", flush=True)
+            new_network = not servers or case.network != servers[-1]["network"]
+            # A throttled server's source cache would serve every run after a
+            # dataset's first from memory, past the throttle, so each run
+            # gets a server of its own.
+            per_run = args.server is None and throttled(case.network)
+            if args.server is None and (new_network or per_run):
+                if server is not None:
+                    server.stop()
+                log_name = f"{case.id}.server.log" if per_run else "server.log"
+                server, server_url = start_server(built, out_dir, args.port or free_port(), case.network, log_name)
+            if new_network:
+                servers.append({"url": server_url, "network": case.network, "perRun": per_run})
+                profile = f" with the {case.network} source throttle profile" if case.network else ""
+                fresh = ", a fresh one for each run" if per_run else ""
+                print(f"server {server_url}{profile}{fresh}, runs in {out_dir}", flush=True)
             assert server_url is not None
             print(f"[{index}/{len(cases)}] {case.id} ...", end=" ", flush=True)
             row = run_case(

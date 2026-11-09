@@ -110,8 +110,9 @@ and the web bundle when the files git sees in their sources, or the built output
 differ from what it last built. A failed build stops the invocation before any run.
 
 The server stays up for the whole invocation, or for each network in turn, so only a
-dataset's first run on each meets a cold server. Every browser starts cold. Each run file's
-`header.serverWarmth` says which case it was.
+dataset's first run meets a cold server. Under a throttled network every run gets a server of
+its own, since a warm source cache would serve the later runs past the throttle. Every browser
+starts cold. Each run file's `header.serverWarmth` says which case it was.
 
 `--cli` runs a CLI that is already built, and `--server` drives a running server instead of
 starting one. With both, the runner builds nothing. The server opens datasets by the path

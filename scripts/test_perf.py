@@ -272,6 +272,17 @@ def test_a_network_starts_the_server_under_that_profile_alone(tmp_path: Path, mo
     assert plain["LUCIDA_SOURCE_THROTTLE_LATENCY_MS"] == "40"
 
 
+def test_a_throttled_server_is_one_the_network_or_the_environment_slows(monkeypatch) -> None:
+    for name in [k for k in perf.os.environ if k.startswith("LUCIDA_SOURCE_THROTTLE")]:
+        monkeypatch.delenv(name)
+    assert perf.throttled("remote") and perf.throttled("object-store")
+    assert not perf.throttled("local") and not perf.throttled(None)
+    monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE", "local")
+    assert not perf.throttled(None)
+    monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE_LATENCY_MS", "50")
+    assert perf.throttled(None)
+
+
 def test_no_selection_is_the_quick_suite() -> None:
     cases, _ = plan()
     assert {case.dataset.name for case in cases} == set(SUITES["quick"].datasets)
