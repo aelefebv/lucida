@@ -41,7 +41,7 @@ use crate::open_diagnostics::{
 };
 use crate::session::Session;
 use crate::timing::{FLUSH_INTERVAL, MetadataReadSink, RequestProbe, TimingBuffer};
-use crate::wire_chunk::{PRODUCED_CODEC, compress_produced};
+use crate::wire_chunk::{PRODUCED_CODEC, PlaneCut, compress_produced};
 use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
 use crate::{BroadcastItem, GeneratedConfig, UnicastRoutes};
 
@@ -748,6 +748,7 @@ async fn handle_client_inner(
                             dataset_id,
                             image_id,
                             key,
+                            planes,
                         } => {
                             let mut probe = RequestProbe::arrived(
                                 rid,
@@ -804,6 +805,7 @@ async fn handle_client_inner(
                                             &dataset_id,
                                             &image_id,
                                             &chunk_key,
+                                            planes,
                                             &resolver,
                                             &cache,
                                             &client,
@@ -813,6 +815,8 @@ async fn handle_client_inner(
                                         .await;
                                     });
                                 }
+                                // A generated chunk goes whole even when the
+                                // request named planes, which it holds.
                                 Some(ChunkDispatch::Generated {
                                     level,
                                     derived_chunks,
@@ -1501,6 +1505,10 @@ enum ChunkDispatch {
 
 /// Every exit files the probe's row. An absent chunk is delivered as fill
 /// like any other chunk; every failure reaches the client as a status frame.
+///
+/// `planes`, when the request named them, are sent in place of the whole
+/// chunk. The stored chunk is read and decoded whole either way, since a
+/// stored chunk's codecs cover all of it.
 // Internal helper threading per-request state from the dispatch site;
 // extracting a struct would just push the bundle one frame up.
 #[allow(clippy::too_many_arguments)]
@@ -1509,6 +1517,7 @@ async fn serve_chunk_from_store(
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: &ChunkKey,
+    planes: Option<[u32; 2]>,
     resolver: &ChunkResolver,
     cache: &CachedStore,
     client: &ClientSender,
@@ -1550,6 +1559,8 @@ async fn serve_chunk_from_store(
     // among them, so they wait for a decode thread instead. The frame is
     // queued from there too, so the client's bytes never wait for this task
     // to be polled again.
+    let cut = planes
+        .and_then(|planes| PlaneCut::new(planes, resolver.chunk_depth(image_id, chunk_key.level)?));
     let slot = DecodePool::global().acquire(ReaderId(client_id)).await;
     let (dataset, image, key, client_queue) = (
         dataset_id.clone(),
@@ -1562,12 +1573,17 @@ async fn serve_chunk_from_store(
             // The wait ends when a decode thread takes the work, so starting
             // that thread counts as waiting rather than as decompression.
             probe.mark(ServerPhase::DecodeWait);
-            let buf = if let Some((stored, chain)) = fetched.relayable(codecs) {
-                encode_chunk_frame(client_id, &dataset, &image, key, chain, stored)
+            let buf = if let Some(cut) = cut {
+                match fetched.decode(Some(&mut probe)) {
+                    Ok(read) => plane_frame(client_id, &dataset, &image, key, codecs, cut, read),
+                    Err(error) => return Some((error, probe)),
+                }
+            } else if let Some((stored, chain)) = fetched.relayable(codecs) {
+                encode_chunk_frame(client_id, &dataset, &image, key, None, chain, stored)
             } else {
                 match fetched.decode(Some(&mut probe)) {
                     Ok(ChunkRead::Present(bytes)) => {
-                        encode_chunk_frame(client_id, &dataset, &image, key, &[], &bytes)
+                        encode_chunk_frame(client_id, &dataset, &image, key, None, &[], &bytes)
                     }
                     // An absent chunk's fill is the server's own making, so
                     // it crosses the link as a generated chunk does.
@@ -1576,6 +1592,7 @@ async fn serve_chunk_from_store(
                         &dataset,
                         &image,
                         key,
+                        None,
                         codecs,
                         &absent.into_bytes(),
                     ),
@@ -1632,7 +1649,7 @@ async fn serve_generated_chunk_request(
             );
             slot.run(move || {
                 probe.mark(ServerPhase::DecodeWait);
-                let buf = produced_frame(client_id, &dataset, &image, key, codecs, &bytes);
+                let buf = produced_frame(client_id, &dataset, &image, key, None, codecs, &bytes);
                 probe.mark(ServerPhase::SliceEncode);
                 hand_off(&client_queue, buf, probe);
             })
@@ -1823,13 +1840,15 @@ fn send_generated_chunk_status(
     let _ = client.send(Message::Text(json.into()));
 }
 
-/// A frame for a chunk the server made itself, compressed for a client that
+/// A frame for bytes the server made itself, a generated chunk, an absent
+/// chunk's fill or planes cut from a chunk, compressed for a client that
 /// decodes [`PRODUCED_CODEC`] when that saves enough.
 fn produced_frame(
     client_id: ClientId,
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: impl std::fmt::Display,
+    planes: Option<[u32; 2]>,
     codecs: CodecSet,
     bytes: &[u8],
 ) -> Vec<u8> {
@@ -1839,25 +1858,79 @@ fn produced_frame(
             dataset_id,
             image_id,
             chunk_key,
+            planes,
             &[PRODUCED_CODEC],
             &compressed,
         ),
-        None => encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &[], bytes),
+        None => encode_chunk_frame(
+            client_id,
+            dataset_id,
+            image_id,
+            chunk_key,
+            planes,
+            &[],
+            bytes,
+        ),
     }
 }
 
-/// A chunk frame for `bytes`, still in `codecs` when there are any; see
+/// A frame for the planes `cut` takes of a decoded chunk. The stored codecs
+/// cover the whole chunk, so planes cross the link as bytes the server made.
+/// A chunk that does not split into its planes goes whole, as it would have.
+fn plane_frame(
+    client_id: ClientId,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
+    chunk_key: ChunkKey,
+    codecs: CodecSet,
+    cut: PlaneCut,
+    read: ChunkRead,
+) -> Vec<u8> {
+    let frame = |planes, bytes: &[u8]| {
+        produced_frame(
+            client_id, dataset_id, image_id, chunk_key, planes, codecs, bytes,
+        )
+    };
+    match read {
+        ChunkRead::Present(bytes) => match cut.cut(&bytes) {
+            Some(planes) => frame(Some(cut.planes()), planes),
+            None => encode_chunk_frame(
+                client_id,
+                dataset_id,
+                image_id,
+                chunk_key,
+                None,
+                &[],
+                &bytes,
+            ),
+        },
+        ChunkRead::Absent { len, fill } => match cut.len_of(len) {
+            Some(planes_len) => frame(Some(cut.planes()), &fill.bytes(planes_len)),
+            None => frame(None, &fill.bytes(len)),
+        },
+    }
+}
+
+/// A chunk frame for `bytes`, still in `codecs` when there are any and some
+/// planes of the chunk when `planes` names them; see
 /// [`lucida_protocol::codec::encode_chunk_frame`] for the layout.
 fn encode_chunk_frame(
     client_id: ClientId,
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: impl std::fmt::Display,
+    planes: Option<[u32; 2]>,
     codecs: &[BytesCodec],
     bytes: &[u8],
 ) -> Vec<u8> {
     let composite_key = format!("{dataset_id}/{image_id}/{chunk_key}");
-    lucida_protocol::codec::encode_chunk_frame(client_id as u32, &composite_key, codecs, bytes)
+    lucida_protocol::codec::encode_chunk_frame(
+        client_id as u32,
+        &composite_key,
+        planes,
+        codecs,
+        bytes,
+    )
 }
 
 async fn send_open_progress(
@@ -2335,7 +2408,15 @@ mod tests {
     fn encode_chunk_frame_uses_normal_chunk_key_envelope() {
         let dataset_id = DatasetId("ds1".into());
         let image_id = ImageId("img1".into());
-        let buf = encode_chunk_frame(9, &dataset_id, &image_id, "2/0/0/0/0/0", &[], &[1, 2, 3]);
+        let buf = encode_chunk_frame(
+            9,
+            &dataset_id,
+            &image_id,
+            "2/0/0/0/0/0",
+            None,
+            &[],
+            &[1, 2, 3],
+        );
 
         let client_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         assert_eq!(client_id, 9);
@@ -2358,6 +2439,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             &key("0/0/0/0/0/0"),
+            None,
             &tiny_resolver(),
             &cache,
             &tx,
@@ -2400,6 +2482,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId(image.into()),
             &self::key(key),
+            None,
             resolver,
             &cache,
             &tx,
@@ -2564,6 +2647,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             &key("0/0/0/0/0/0"),
+            None,
             &tiny_resolver(),
             &cache,
             &tx,
@@ -2608,6 +2692,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             &key("0/0/0/0/0/0"),
+            None,
             &resolver,
             &cache,
             &tx,
@@ -2928,6 +3013,7 @@ mod tests {
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
                     &key(&format!("0/0/0/0/0/{index}")),
+                    None,
                     &resolver,
                     &cache,
                     &busy_tx,
@@ -2954,6 +3040,7 @@ mod tests {
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
                     &key("0/0/0/0/1/0"),
+                    None,
                     &resolver,
                     &cache,
                     &newcomer_tx,

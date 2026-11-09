@@ -21,7 +21,7 @@ import {
   type FetchSourceWire,
 } from "./manifestTypes.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
-import { levelChunkBytes } from "./pipeline/fetch/contentSource.ts";
+import { levelChunkSizes } from "./pipeline/fetch/contentSource.ts";
 import { compileCodecModule } from "./pipeline/fetch/codecModule.ts";
 import { readCacheKnobs, subscribeCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
 import { pageDeviceBudgets } from "./deviceBudget.ts";
@@ -889,7 +889,7 @@ export class SessionController {
         this.contentSource.registerImage(
           spec.image_id,
           spec.wire_format,
-          multiscale && levelChunkBytes(multiscale),
+          multiscale && levelChunkSizes(multiscale),
         );
         registeredImages++;
       }
@@ -900,7 +900,7 @@ export class SessionController {
         this.contentSource.registerImage(
           label.image.image_id,
           { Raw: { data_type: label.image.multiscale.data_type } },
-          levelChunkBytes(label.image.multiscale),
+          levelChunkSizes(label.image.multiscale),
         );
         registeredImages++;
       }
@@ -1130,8 +1130,8 @@ export class SessionController {
       },
       onAck: () => {},
       onCommandRejected: (reason) => this.deps.events.onCommandRejected(reason),
-      onBinary: (key, data, codecs) => {
-        this.contentSource.handleBinary(key, data, codecs);
+      onBinary: (key, data, codecs, planes) => {
+        this.contentSource.handleBinary(key, data, codecs, planes);
       },
       onPeerJoined: (clientId, presence) => {
         const next = new Map(this.peers);

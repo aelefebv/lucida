@@ -814,6 +814,14 @@ pub enum ChunkMessage {
         dataset_id: DatasetId,
         image_id: ImageId,
         key: String,
+        /// Planes of the chunk to send in place of all of it, half-open along
+        /// the chunk's own Z, so `[3, 5]` is its fourth and fifth planes. The
+        /// reply is a plane frame (`lucida_protocol::codec::encode_chunk_frame`)
+        /// naming the planes it holds. The server reads and decodes the whole
+        /// chunk either way, and may answer with the whole chunk, which holds
+        /// every plane. A client that never sends it gets whole chunks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planes: Option<[u32; 2]>,
     },
     /// Server -> Data source: fetch this chunk and send it to `client_id`.
     ChunkFetch {
@@ -908,9 +916,14 @@ mod tests {
             dataset_id: DatasetId("ds1".into()),
             image_id: ImageId("img1".into()),
             key: "0/0/0/0/0/0".into(),
+            planes: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"chunk_request\""));
+        assert!(
+            !json.contains("planes"),
+            "a whole-chunk request reads as it always has"
+        );
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ChunkMessage::ChunkRequest {
@@ -918,13 +931,24 @@ mod tests {
                 dataset_id,
                 image_id,
                 key,
+                planes,
             } => {
                 assert_eq!(rid, 7);
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(image_id, ImageId("img1".into()));
                 assert_eq!(key, "0/0/0/0/0/0");
+                assert_eq!(planes, None);
             }
             _ => panic!("expected ChunkRequest"),
+        }
+    }
+
+    #[test]
+    fn a_chunk_request_names_the_planes_it_wants() {
+        let json = r#"{"type":"chunk_request","rid":1,"dataset_id":"ds1","image_id":"img1","key":"0/0/0/2/0/0","planes":[3,5]}"#;
+        match serde_json::from_str::<ChunkMessage>(json).unwrap() {
+            ChunkMessage::ChunkRequest { planes, .. } => assert_eq!(planes, Some([3, 5])),
+            other => panic!("expected ChunkRequest, got {other:?}"),
         }
     }
 
