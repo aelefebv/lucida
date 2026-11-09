@@ -17,7 +17,8 @@ It rebuilds what is stale, generates the datasets it needs, and starts its own s
 free port with its own database. Each run gets a workspace of its own. On the way out it
 stops the server and every browser it started, after Ctrl-C too. The table, `summary.md`
 and `summary.json` go to `target/perf/runs/<time>/` beside the run files, and
-`lucida trace show <run file>` reads any run deeper. `--help` lists the other flags.
+`lucida trace show <run file>` reads any run deeper, with no server. `--help` lists the
+other flags.
 
 Speed numbers need a GPU. CI renders with SwiftShader, which shows whether a view settles
 but not how fast. The table's first line names the adapter.
@@ -28,6 +29,11 @@ runner passes `LUCIDA_SOURCE_THROTTLE` and its companions through to its server,
 `--server` each run records whatever throttle that server reports. A throttled table says so
 on its second line and in its throttle column, and `summary.json` records the throttle as
 `sourceThrottle`.
+
+`--server-env KEY=VALUE`, repeated for more, starts the runner's server with those
+settings, such as `LUCIDA_SOURCE_READ_CONCURRENCY=64`. It never passes the caller's own
+`LUCIDA_` settings otherwise. The table names them on a line of their own, and
+`summary.json` records them as `selection.serverEnv`.
 
 ## The table
 
@@ -60,7 +66,8 @@ verdict says why, and the table lists it underneath.
 `--save-baseline` keeps the results as the baseline for their adapter and device pixel
 ratio, cell by cell; a cell with a failed run is not kept. A throttled cell has a key of its
 own, such as `volume.orbit@remote`, and is never compared with an entry saved under another
-throttle. Baselines live in `perf-baselines/` in the clone's git directory, which every
+throttle. So does a cell under server settings, such as
+`collection.cold-open@remote[LUCIDA_SOURCE_READ_CONCURRENCY=64]`. Baselines live in `perf-baselines/` in the clone's git directory, which every
 worktree shares and `cargo clean` leaves alone. `--baseline DIR` keeps them elsewhere.
 
 Every invocation compares against its adapter's baseline, if one was saved. A `vs baseline`
