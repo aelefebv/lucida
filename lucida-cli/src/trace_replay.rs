@@ -11,7 +11,9 @@
 //! run's header lists it as unrestored, with the reason.
 //!
 //! The replay restores the view by re-hosting a view fragment on the
-//! configured workspace rather than by navigating to the bundle's URL. The
+//! configured workspace rather than by navigating to the bundle's URL, on
+//! the page the run was on: the capture surface, or the full viewer page.
+//! A phone's run drives a phone again, at the window the page laid out in. The
 //! fragment carries the camera, the mode, and every pin, keyed by dataset
 //! ids derived from the source URL, so it reads the same on
 //! another server. Which fragment depends on whether the bundle carries a
@@ -34,10 +36,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::CliError;
-use crate::montage::with_render_param;
 use crate::trace::{
     DEFAULT_DEVICE_PIXEL_RATIO, DEFAULT_HEIGHT, DEFAULT_WIDTH, REPLAY_INPUTS, TraceBundle,
-    TraceRunFile, describe_adapter, format_run_facts,
+    TraceRunFile, describe_adapter, driven_page_url, format_run_facts,
 };
 use crate::trace_knobs::KnobSettings;
 use crate::trace_script::{Script, ScriptRecord, SentInput};
@@ -97,10 +98,15 @@ pub struct ReplayPlan {
     /// no view the driver can start from; the page then frames the dataset
     /// itself, as it does for a cold open.
     pub view_fragment: Option<String>,
-    /// The viewport in CSS pixels, and the ratio to drive the page at.
+    /// The window in CSS pixels, and the ratio to drive the page at.
     pub width: u32,
     pub height: u32,
     pub device_pixel_ratio: f64,
+    /// Drive the page as a phone, as `--mobile` does.
+    pub mobile: bool,
+    /// Load the full viewer page rather than the capture surface, as
+    /// `--full-ui` does.
+    pub full_ui: bool,
     /// The memory the page is told the device has, in GiB, as the run's page
     /// read it. None leaves the page reading this machine's.
     pub device_memory_gib: Option<f64>,
@@ -201,20 +207,42 @@ impl ReplayPlan {
                 _ => None,
             })
         });
-        let viewport = match (resized_from, header.viewport) {
-            (Some([width, height]), _) => Ok((width, height)),
-            (None, Some(viewport)) if viewport.css_width >= 1.0 && viewport.css_height >= 1.0 => {
+        // The full page's chrome takes part of the window, so the window is
+        // the page's size. A bundle older than that field sizes it by the
+        // canvas, which fills the window on the capture surface.
+        let page_size = match header.page_size {
+            Some(size) if size.css_width >= 1.0 && size.css_height >= 1.0 => Ok((
+                size.css_width.round() as u32,
+                size.css_height.round() as u32,
+            )),
+            Some(size) => Err(format!(
+                "the header's page size is {}x{} CSS pixels, which is not a window; the \
+                 viewport sizes it",
+                size.css_width, size.css_height
+            )),
+            None => Err(
+                "the header carries no page size, because the bundle predates it; the viewport \
+                 sizes the window"
+                    .to_string(),
+            ),
+        };
+        let viewport = match (resized_from, page_size.clone(), header.viewport) {
+            (Some([width, height]), _, _) => Ok((width, height)),
+            (None, Ok(size), _) => Ok(size),
+            (None, _, Some(viewport))
+                if viewport.css_width >= 1.0 && viewport.css_height >= 1.0 =>
+            {
                 Ok((
                     viewport.css_width.round() as u32,
                     viewport.css_height.round() as u32,
                 ))
             }
-            (None, Some(viewport)) => Err(format!(
+            (None, _, Some(viewport)) => Err(format!(
                 "the header's viewport is {}x{} CSS pixels, which is not a window; the driver's \
                  default {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} runs",
                 viewport.css_width, viewport.css_height
             )),
-            (None, None) => Err(format!(
+            (None, _, None) => Err(format!(
                 "the header carries no viewport; the driver's default {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} runs"
             )),
         };
@@ -245,6 +273,17 @@ impl ReplayPlan {
             ),
         };
         let device_memory_gib = memory.clone().ok();
+
+        let full_ui = header.full_ui.ok_or_else(|| {
+            "the header does not say which page the run was on, because the page recorded no \
+             run or the bundle predates it; the capture surface runs"
+                .to_string()
+        });
+        let mobile = header.mobile.ok_or_else(|| {
+            "the header does not say whether the browser was a phone's, because the bundle \
+             predates it; a desktop page runs"
+                .to_string()
+        });
 
         // The whole configuration, not the fields that differ from this
         // build's defaults: the run's defaults may not be this build's, and
@@ -284,8 +323,11 @@ impl ReplayPlan {
             ("datasets", dataset),
             ("viewUrl", view.map(|_| ())),
             ("viewport", viewport.map(|_| ())),
+            ("pageSize", page_size.map(|_| ())),
             ("devicePixelRatio", ratio.map(|_| ())),
             ("deviceMemoryGib", memory.map(|_| ())),
+            ("fullUi", full_ui.clone().map(|_| ())),
+            ("mobile", mobile.clone().map(|_| ())),
             ("mode", mode),
             ("planning", planning.map(|_| ())),
             ("pins", pins),
@@ -310,6 +352,8 @@ impl ReplayPlan {
             width,
             height,
             device_pixel_ratio,
+            mobile: mobile.unwrap_or(false),
+            full_ui: full_ui.unwrap_or(false),
             device_memory_gib,
             knobs,
             script,
@@ -399,10 +443,10 @@ fn cold_as_the_run_was(cache_warmth: &Value) -> Result<(), String> {
     ))
 }
 
-/// The view fragment on the configured workspace's viewer page, with the
-/// capture surface's flag, which is the URL a cold open composes.
-pub fn rehost_view(web_url: &str, fragment: &str) -> String {
-    with_render_param(&format!("{web_url}#{fragment}"))
+/// The view fragment on the configured workspace's viewer page, on the
+/// capture surface unless `full_ui`, which is the URL a cold open composes.
+pub fn rehost_view(web_url: &str, fragment: &str, full_ui: bool) -> String {
+    driven_page_url(&format!("{web_url}#{fragment}"), full_ui)
 }
 
 /// The replay's lines among a run's facts: what was replayed, what was
@@ -521,6 +565,7 @@ mod tests {
                     cores: None,
                     camera: None,
                     mobile: false,
+                    full_ui: false,
                 },
                 quiescence_hold_ms: 500.0,
                 settled: true,
@@ -588,6 +633,7 @@ mod tests {
         assert_eq!((plan.width, plan.height), (1440, 900));
         assert_eq!(plan.device_pixel_ratio, 2.0);
         assert_eq!(plan.device_memory_gib, Some(4.0));
+        assert!(!plan.full_ui && !plan.mobile);
 
         let planning: Value = plan.knobs.planning.clone().into_iter().collect();
         assert_eq!(planning, bundle.header.planning);
@@ -603,8 +649,11 @@ mod tests {
                 "dataset",
                 "view URL",
                 "viewport",
+                "page size",
                 "device pixel ratio",
                 "device memory",
+                "full UI",
+                "phone emulation",
                 "slice or volume mode",
                 "planning configuration",
                 "level, render mode, contrast, and colormap pins",
@@ -630,13 +679,81 @@ mod tests {
         let plan = ReplayPlan::from_bundle(&bundle, Path::new("b.json")).unwrap();
         let fragment = plan.view_fragment.as_deref().unwrap();
         assert_eq!(
-            rehost_view("https://lucida.example/w/ws-1", fragment),
+            rehost_view("https://lucida.example/w/ws-1", fragment, false),
             bundle.header.view_url.unwrap()
         );
         assert_eq!(
-            rehost_view("https://other.example/w/ws-9?x=1", "view=ABC"),
+            rehost_view("https://other.example/w/ws-9?x=1", "view=ABC", false),
             "https://other.example/w/ws-9?x=1&render=1#view=ABC"
         );
+        assert_eq!(
+            rehost_view("https://other.example/w/ws-9", "view=ABC", true),
+            "https://other.example/w/ws-9#view=ABC"
+        );
+    }
+
+    /// A phone's run on the full page replays as one: the full page, phone
+    /// emulation, and the window the page laid out in, which is larger than
+    /// the canvas by the chrome around it.
+    #[test]
+    fn a_phone_bundle_of_the_full_page_replays_as_a_phone_on_the_full_page() {
+        let mut bundle = golden_bundle();
+        bundle.header.full_ui = Some(true);
+        bundle.header.mobile = Some(true);
+        bundle.header.page_size = Some(crate::trace::BundlePageSize {
+            css_width: 390.0,
+            css_height: 844.0,
+        });
+        bundle.header.viewport = Some(crate::trace::BundleViewport {
+            css_width: 390.0,
+            css_height: 608.0,
+            device_width: 1170.0,
+            device_height: 1824.0,
+        });
+        bundle.header.device_pixel_ratio = Some(3.0);
+        let plan = ReplayPlan::from_bundle(&bundle, Path::new("phone.bundle.json")).unwrap();
+
+        assert!(plan.full_ui && plan.mobile);
+        assert_eq!((plan.width, plan.height), (390, 844));
+        assert_eq!(plan.device_pixel_ratio, 3.0);
+        for input in ["page size", "full UI", "phone emulation"] {
+            assert!(
+                plan.record
+                    .restored
+                    .iter()
+                    .any(|restored| restored == input),
+                "{input}"
+            );
+        }
+    }
+
+    /// A bundle from before the page said which page it was, whether it was
+    /// a phone's, and how large its window was replays as it always did: the
+    /// capture surface on a desktop page, sized by its canvas, and says so.
+    #[test]
+    fn a_bundle_older_than_the_page_fields_replays_on_the_capture_surface_and_says_so() {
+        let mut bundle = golden_bundle();
+        bundle.header.full_ui = None;
+        bundle.header.mobile = None;
+        bundle.header.page_size = None;
+        let plan = ReplayPlan::from_bundle(&bundle, Path::new("old.bundle.json")).unwrap();
+
+        assert!(!plan.full_ui && !plan.mobile);
+        assert_eq!((plan.width, plan.height), (1440, 900));
+        assert_eq!(
+            inputs(&plan.record.unrestored),
+            vec![
+                "page size",
+                "full UI",
+                "phone emulation",
+                "build",
+                "adapter"
+            ]
+        );
+        let surface = reason(&plan.record.unrestored, "full UI");
+        assert!(surface.contains("the capture surface runs"), "{surface}");
+        let size = reason(&plan.record.unrestored, "page size");
+        assert!(size.contains("the viewport sizes the window"), "{size}");
     }
 
     /// The bundle's steps run again as the steps they were, and a bundle
@@ -756,8 +873,11 @@ mod tests {
         let mut bundle = golden_bundle();
         bundle.header.view_url = None;
         bundle.header.viewport = None;
+        bundle.header.page_size = None;
         bundle.header.device_pixel_ratio = None;
         bundle.header.device_memory_gib = None;
+        bundle.header.full_ui = None;
+        bundle.header.mobile = None;
         bundle.header.planning = Value::Null;
         bundle.header.build = None;
         bundle.header.gpu = None;
@@ -778,8 +898,11 @@ mod tests {
             vec![
                 "view URL",
                 "viewport",
+                "page size",
                 "device pixel ratio",
                 "device memory",
+                "full UI",
+                "phone emulation",
                 "slice or volume mode",
                 "planning configuration",
                 "level, render mode, contrast, and colormap pins",
@@ -953,9 +1076,9 @@ mod tests {
         );
         assert!(
             text.contains(
-                "restored  dataset, view URL, viewport, device pixel ratio, device memory, slice or \
-                 volume mode, planning configuration, level, render mode, contrast, and colormap \
-                 pins, cache warmth\n"
+                "restored  dataset, view URL, viewport, page size, device pixel ratio, device \
+                 memory, full UI, phone emulation, slice or volume mode, planning configuration, \
+                 level, render mode, contrast, and colormap pins, cache warmth\n"
             ),
             "{text}"
         );

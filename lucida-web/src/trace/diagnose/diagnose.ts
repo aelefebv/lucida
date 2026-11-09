@@ -15,6 +15,7 @@ import {
   isDatasetOpenCause,
   isInteractionCause,
   type CacheWarmth,
+  type ChromeReading,
   type CountedPhase,
   type CoverageGap,
   type FrameReading,
@@ -222,6 +223,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     // end, which only a reading of the whole run reaches.
     frame: window.whole ? (run.frame ?? null) : null,
     pageScroll: window.whole ? (run.pageScroll ?? null) : null,
+    chrome: window.whole ? (run.chrome ?? null) : null,
     baseline: options.baseline ?? null,
   });
   const worst = worstRowSelector(run, phases, findings);
@@ -658,6 +660,8 @@ interface FindingsInput {
   frame: FrameReading | null;
   /** The page's scroll once the run closed, when someone read it. */
   pageScroll: PageScrollReading | null;
+  /** Where the chrome sat once the run closed, when someone read it. */
+  chrome: ChromeReading | null;
   baseline: DiagnosticDocument | null;
 }
 
@@ -750,6 +754,28 @@ function pageScrollFinding(reading: PageScrollReading | null): RawFinding | null
   };
 }
 
+/** Each part of the chrome that reaches off the screen, one finding apiece. */
+function chromeFindings(reading: ChromeReading | null): RawFinding[] {
+  if (!reading) return [];
+  const { viewportWidth, viewportHeight } = reading;
+  const slack = RULESET.chrome.tolerancePx;
+  return reading.parts
+    .filter(
+      (part) =>
+        part.left < -slack ||
+        part.top < -slack ||
+        part.right > viewportWidth + slack ||
+        part.bottom > viewportHeight + slack,
+    )
+    .map((part) => ({
+      severity: "stall" as const,
+      rule: RULESET.chrome.id,
+      subject: part.part,
+      observed: { chrome: { ...part, viewportWidth, viewportHeight } },
+      threshold: { kind: "px", value: slack, why: RULESET.chrome.why },
+    }));
+}
+
 /**
  * The uploader cut a feedback loop: it held chunks the renderer kept handing
  * back. A stall, because the view settled without data it asked for.
@@ -837,6 +863,7 @@ const OFF_PATH_RULES = new Set([
   RULESET.pageError.id,
   RULESET.blankFrame.id,
   RULESET.pageScroll.id,
+  RULESET.chrome.id,
   RULESET.lag.id,
 ]);
 
@@ -985,6 +1012,7 @@ function rankFindings(input: FindingsInput): Finding[] {
   if (blankFrame) raw.push(blankFrame);
   const pageScroll = pageScrollFinding(input.pageScroll);
   if (pageScroll) raw.push(pageScroll);
+  raw.push(...chromeFindings(input.chrome));
   const lag = lagFinding(input);
   if (lag) raw.push(lag);
 
@@ -998,12 +1026,14 @@ function rankFindings(input: FindingsInput): Finding[] {
         // since either can be its cause. A held chunk comes next: a slow phase
         // cost time, while a held chunk is data the view settled without. A
         // scrolled page follows: the view may be whole, but part of the page
-        // around it is off the screen.
+        // around it is off the screen. Chrome off the screen comes after the
+        // scroll, the likeliest thing to have carried it there.
         Number(b.rule === RULESET.gpuError.id) - Number(a.rule === RULESET.gpuError.id) ||
         Number(b.rule === RULESET.pageError.id) - Number(a.rule === RULESET.pageError.id) ||
         Number(b.rule === RULESET.blankFrame.id) - Number(a.rule === RULESET.blankFrame.id) ||
         Number(b.rule === RULESET.held.id) - Number(a.rule === RULESET.held.id) ||
         Number(b.rule === RULESET.pageScroll.id) - Number(a.rule === RULESET.pageScroll.id) ||
+        Number(b.rule === RULESET.chrome.id) - Number(a.rule === RULESET.chrome.id) ||
         (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
         (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
     )
@@ -1017,9 +1047,9 @@ function rankFindings(input: FindingsInput): Finding[] {
   // The attribution is the run's answer to "what was this waiting on", so it
   // rides the leading finding about the run. A steady-state finding is about
   // the interval after the run and carries the ruleset's rationale instead.
-  // A held chunk, an error, a blank frame, a scrolled page or a lag finding is
-  // not about the critical path, so the attribution rides the first finding
-  // after them.
+  // A held chunk, an error, a blank frame, a scrolled page, chrome off the
+  // screen or a lag finding is not about the critical path, so the
+  // attribution rides the first finding after them.
   const leader = ranked.findIndex(
     (finding) => finding.severity !== "steady-state" && !OFF_PATH_RULES.has(finding.rule),
   );
@@ -1180,6 +1210,14 @@ function buildVerdict(
     };
   }
 
+  if (lead.rule === RULESET.chrome.id) {
+    return {
+      kind: "stall",
+      text: `${describeChrome(lead)}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
   if (lead.rule === RULESET.lag.id) {
     return {
       kind: "stall",
@@ -1289,6 +1327,17 @@ export function describePageScroll(finding: Finding): string {
     );
   }
   return `${parts.join(" and ")}; the page under the viewer should neither scroll nor overflow`;
+}
+
+export function describeChrome(finding: Finding): string {
+  const box = finding.observed.chrome;
+  if (!box) return `the ${finding.subject} reached off the screen`;
+  const gone =
+    box.bottom <= 0 || box.right <= 0 || box.top >= box.viewportHeight || box.left >= box.viewportWidth;
+  return (
+    `the ${box.part} spans ${box.left},${box.top} to ${box.right},${box.bottom} CSS pixels ` +
+    `in a ${box.viewportWidth}x${box.viewportHeight} viewport, so ${gone ? "all" : "part"} of it is off the screen`
+  );
 }
 
 function describeFirstPaint(finding: Finding): string {

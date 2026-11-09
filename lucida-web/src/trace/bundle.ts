@@ -15,6 +15,7 @@ import type {
   LinkThrottleReport,
   SourceThrottleReport,
 } from "../bridge.ts";
+import { isCaptureSurface } from "../captureSurface.ts";
 import type { PlanningConfig } from "../pipeline/planning/config.ts";
 import type { FrameCaptureResult } from "../renderer/workerProtocol.ts";
 import { decode } from "../savedView/encoder.ts";
@@ -55,8 +56,11 @@ export const REPLAY_HEADER_FIELDS = [
   "datasets",
   "viewUrl",
   "viewport",
+  "pageSize",
   "devicePixelRatio",
   "deviceMemoryGib",
+  "fullUi",
+  "mobile",
   "mode",
   "planning",
   "pins",
@@ -116,7 +120,10 @@ export interface BundleHeader {
   datasets: BundleDataset[];
   /** The page the run happened on, absolute, view fragment and all. */
   viewUrl: string | null;
+  /** The canvas the run drew into, which on the full viewer page is the page less its chrome. */
   viewport: Viewport | null;
+  /** The window the page laid out in, so a replay of the full page lays its chrome out the same. */
+  pageSize: PageSize | null;
   devicePixelRatio: number | null;
   /**
    * The memory the page fitted its budgets to, in GiB: what the browser
@@ -124,6 +131,13 @@ export interface BundleHeader {
    * none and ran at the ceiling budgets.
    */
   deviceMemoryGib: number | null;
+  /**
+   * Whether the run happened on the full viewer page, chrome and all, rather
+   * than the chrome-free capture surface. Null when the page recorded no run.
+   */
+  fullUi: boolean | null;
+  /** Whether the browser reported itself as a phone's, as `lucida trace --mobile` drives one. */
+  mobile: boolean;
   mode: "slice" | "volume" | null;
   planning: PlanningConfig;
   pins: DatasetPins[];
@@ -131,6 +145,12 @@ export interface BundleHeader {
   gpu: GpuIdentity | null;
   /** What the browser already held when the run opened. */
   cacheWarmth: CacheWarmth | null;
+}
+
+/** A window's size in CSS pixels. */
+export interface PageSize {
+  cssWidth: number;
+  cssHeight: number;
 }
 
 /**
@@ -303,6 +323,10 @@ export interface BundleContext {
    * under this reading.
    */
   deviceMemoryGib: number | null;
+  /** The window's size now, or null where there is no page. */
+  pageSize: PageSize | null;
+  /** Whether the browser reports itself as a phone's. */
+  mobile: boolean;
   /**
    * The page's PNG decoder, through its 2D canvas, which the flat-colour
    * check on a fallback frame reads through. Null where there is no page,
@@ -545,8 +569,11 @@ function buildHeader(
     }),
     viewUrl: relative ? `${context.origin ?? ""}${relative}` : null,
     viewport: header?.viewport ?? null,
+    pageSize: context.pageSize,
     devicePixelRatio: header?.devicePixelRatio ?? null,
     deviceMemoryGib: context.deviceMemoryGib,
+    fullUi: relative ? !isCaptureSurface(queryOf(relative)) : null,
+    mobile: context.mobile,
     mode: header?.composedView.mode ?? null,
     planning: context.planning,
     pins: datasetIds.map((datasetId) => pinsFor(datasetId, view)),
@@ -554,6 +581,13 @@ function buildHeader(
     gpu: header?.gpu ?? null,
     cacheWarmth: header?.cacheWarmth ?? null,
   };
+}
+
+/** The `?…` part of a path, query and fragment, or "" when it has none. */
+function queryOf(url: string): string {
+  const path = url.split("#", 1)[0];
+  const start = path.indexOf("?");
+  return start < 0 ? "" : path.slice(start);
 }
 
 function pinsFor(datasetId: string, view: SavedView | null): DatasetPins {

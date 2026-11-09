@@ -185,6 +185,7 @@ def test_a_scenario_adding_a_dataset_the_catalog_lacks_is_refused(tmp_path: Path
         ({"steps": [], "applies": ["volume"]}, "unknown key applies"),
         ({"steps": [], "width": 0}, "width is a positive whole number"),
         ({"steps": [], "mobile": "yes"}, "mobile is true or false"),
+        ({"steps": [], "fullUi": 1}, "fullUi is true or false"),
     ],
 )
 def test_a_malformed_scenario_is_refused(tmp_path: Path, scenario, message: str) -> None:
@@ -378,10 +379,23 @@ def test_the_gate_suite_opens_each_shape_cold_at_ratios_1_and_2() -> None:
     assert (small.camera, small.width, small.height) == ("arcball", 480, 300)
 
 
-def test_the_phone_suite_opens_cold_on_a_phone_at_ratio_3() -> None:
+def test_the_phone_suite_opens_cold_on_a_phone_at_ratio_3_on_both_pages() -> None:
     cases, _ = plan(suite="phone")
-    assert [case.id for case in cases] == ["large-image.phone-cold-open.dpr3", "volume.phone-cold-open.dpr3"]
+    assert [case.id for case in cases] == [
+        "large-image.phone-cold-open.dpr3",
+        "large-image.phone-full-ui.dpr3",
+        "volume.phone-cold-open.dpr3",
+        "volume.phone-full-ui.dpr3",
+    ]
     assert perf.viewport_args(SCENARIOS["phone-cold-open"]) == ["--width", "390", "--height", "844", "--mobile"]
+    assert perf.viewport_args(SCENARIOS["phone-full-ui"]) == [
+        "--width",
+        "390",
+        "--height",
+        "844",
+        "--mobile",
+        "--full-ui",
+    ]
     assert perf.viewport_args(SCENARIOS["volume-open-small"]) == ["--width", "480", "--height", "300"]
     assert perf.viewport_args(SCENARIOS["cold-open"]) == []
 
