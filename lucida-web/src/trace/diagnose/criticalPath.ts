@@ -12,10 +12,12 @@
 
 import type { TraceRow, TraceRun, TraceServerRow } from "../types.ts";
 import {
+  DECODE_WAIT,
   metadataReadRows,
   metadataReadsWithin,
   percentile,
   phaseClassOf,
+  splitDecode,
   usToMs,
 } from "./phaseRollup.ts";
 import type { CriticalPath, PathSegment } from "./types.ts";
@@ -115,6 +117,25 @@ export function buildCriticalPath(run: TraceRun, window: RunWindow = resolveWind
   for (const [phase, timing] of Object.entries(terminal.phases)) {
     const span = clipSpan(timing.startUs, timing.endUs, window);
     if (!span) continue;
+    // Two segments, so the wait is judged as a queue, by its backlog, and
+    // never by its share of the chain as decode work.
+    const split = phase === "decode" ? splitDecode(terminal, span) : null;
+    if (split) {
+      for (const [label, us] of [
+        [DECODE_WAIT, split.waitUs],
+        ["browser.decode", split.workUs],
+      ] as const) {
+        add({
+          label,
+          class: phaseClassOf(label),
+          ms: usToMs(us),
+          source: "the row the run finished on",
+          rows: 1,
+          chunkKey: terminal.chunkKey,
+        });
+      }
+      continue;
+    }
     add({
       label: `browser.${phase}`,
       // The one inventory, not a second cascade beside it: a phase reclassified

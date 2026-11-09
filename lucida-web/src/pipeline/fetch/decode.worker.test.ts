@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
-// `self.onmessage` is exercised through DecodePool integration tests;
-// these tests pin the pure helpers it composes.
+// These tests pin the pure helpers `self.onmessage` composes, and what it
+// reports back beside the samples.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   decompressLz4,
   decompressZstd,
@@ -179,5 +179,22 @@ describe("normalize", () => {
 
   it("refuses a data type it has no layout for, naming it", () => {
     expect(() => normalize(new ArrayBuffer(16), "complex128")).toThrowError("unsupported data type: complex128");
+  });
+});
+
+describe("the decode reply", () => {
+  it("carries when the worker took the request up and finished, on a clock the page shares", async () => {
+    const post = vi.spyOn(self, "postMessage").mockImplementation(() => {});
+    const before = performance.timeOrigin + performance.now();
+    const handler = self.onmessage as unknown as (e: { data: unknown }) => Promise<void>;
+    await handler({ data: { id: 7, bytes: new ArrayBuffer(4), wireFormat: { Raw: { data_type: "uint16" } } } });
+    const after = performance.timeOrigin + performance.now();
+
+    const reply = post.mock.calls[0][0] as { id: number; startedAtMs: number; doneAtMs: number };
+    expect(reply.id).toBe(7);
+    expect(reply.startedAtMs).toBeGreaterThanOrEqual(before);
+    expect(reply.doneAtMs).toBeGreaterThanOrEqual(reply.startedAtMs);
+    expect(reply.doneAtMs).toBeLessThanOrEqual(after);
+    post.mockRestore();
   });
 });
