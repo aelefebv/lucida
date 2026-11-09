@@ -454,9 +454,9 @@ jobs:
             exit 1
           fi
 
-      # kubeconform validates k8s manifests against bundled OpenAPI
-      # schemas — fully offline, no apiserver round-trip required.
-      # `kubectl apply --dry-run=client` doesn't work for offline CI
+      # kubeconform validates k8s manifests against JSON schemas it fetches
+      # from raw.githubusercontent.com, so no apiserver is needed.
+      # `kubectl apply --dry-run=client` doesn't work without a cluster
       # because even with --validate=false it tries to look up resource
       # types via REST mapping (hits localhost:8080).
       #
