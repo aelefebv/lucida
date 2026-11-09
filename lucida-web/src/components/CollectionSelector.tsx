@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manifestTypes.ts";
 import { buildManifestIndex, entityExtent, type VoxelRect } from "../pipeline/layoutBuilders.ts";
 import { usePreference } from "../theme/preferences.ts";
@@ -135,6 +135,32 @@ const PANEL_CELL_CSS = `max(${PANEL_CELL}px, var(--lc-target-min))`;
 
 const groupKey = (row: number, column: number) => `${row},${column}`;
 
+interface NavigatorCellProps {
+  cellKey: string;
+  name: string;
+  current: boolean;
+  disabled: boolean;
+  onPress: (key: string) => void;
+}
+
+/**
+ * One group's cell. Memoized because the current mark follows the view, and
+ * re-rendering a grid of hundreds of buttons each time the view crosses a
+ * group would run every cell's press and focus hooks.
+ */
+const NavigatorCell = memo(function NavigatorCell({ cellKey, name, current, disabled, onPress }: NavigatorCellProps) {
+  return (
+    <UnstyledButton
+      className="lc-navigator-cell"
+      aria-label={name}
+      title={name}
+      aria-current={current ? "location" : undefined}
+      isDisabled={disabled}
+      onPress={() => onPress(cellKey)}
+    />
+  );
+});
+
 export function CollectionSelector({
   collectionKind,
   members,
@@ -200,10 +226,14 @@ export function CollectionSelector({
     });
   }, [watching, groups]);
 
-  const handleGroupClick = (key: string) => {
-    const bounds = groups.find((g) => g.key === key)?.bounds;
-    if (bounds) onGroupClick(bounds);
-  };
+  const pressed = useRef({ groups, onGroupClick });
+  useEffect(() => {
+    pressed.current = { groups, onGroupClick };
+  });
+  const handleGroupClick = useCallback((key: string) => {
+    const bounds = pressed.current.groups.find((g) => g.key === key)?.bounds;
+    if (bounds) pressed.current.onGroupClick(bounds);
+  }, []);
 
   const current = currentKey === null ? undefined : groups.find((g) => g.key === currentKey);
   const cell = panel ? PANEL_CELL : cellSize(columns.length);
@@ -233,16 +263,14 @@ export function CollectionSelector({
             </span>
             {columns.map((column, c) => {
               const key = groupKey(r, c);
-              const name = `${row}${column}`;
               return (
-                <UnstyledButton
+                <NavigatorCell
                   key={key}
-                  className="lc-navigator-cell"
-                  aria-label={name}
-                  title={name}
-                  aria-current={key === currentKey ? "location" : undefined}
-                  isDisabled={!groupMembers.has(key)}
-                  onPress={() => handleGroupClick(key)}
+                  cellKey={key}
+                  name={`${row}${column}`}
+                  current={key === currentKey}
+                  disabled={!groupMembers.has(key)}
+                  onPress={handleGroupClick}
                 />
               );
             })}
