@@ -1259,7 +1259,7 @@ struct TraceRunArgs {
 
 #[derive(Subcommand, Debug)]
 enum TraceCommand {
-    /// Print a persisted run at a chosen depth
+    /// Print a persisted run at a chosen depth, from the file alone
     Show {
         /// Run id, or a path to a run file written with --output
         #[arg(value_name = "RUN")]
@@ -1274,7 +1274,7 @@ enum TraceCommand {
         /// run start, as the text's own follow-up commands spell it. The run
         /// file holds the whole-run reading only, so a window is derived by
         /// the page's own derivation in a headless browser against the
-        /// configured server; nothing is re-recorded
+        /// configured server, with no workspace; nothing is re-recorded
         #[arg(long, value_name = "START..END", conflicts_with_all = ["chunk", "spatial"])]
         window: Option<trace::WindowRequest>,
         /// Seconds to wait for the page that derives a --window reading
@@ -1324,7 +1324,7 @@ enum TraceCommand {
     /// Every delta is right minus left, with a warning when the headers make
     /// the two incomparable. The diff is the page's own, derived behind the
     /// trace seam, so a headless page is opened against the configured
-    /// server to derive it; nothing is re-recorded.
+    /// server to derive it, with no workspace; nothing is re-recorded.
     Diff {
         /// The left run: a run id, or a path to a run file or bundle
         #[arg(value_name = "LEFT")]
@@ -3604,6 +3604,19 @@ async fn emit_trace_command(
 ) -> Result<(), CliError> {
     let server = resolve_server(cli.server.as_deref(), config)?;
     let token = resolve_token(&server.url, config);
+    let config_path = ConfigStore::default_path()?;
+    // Show and diff read files. What they cannot print from the file is
+    // derived in a page, and any page the server serves will do, so neither
+    // needs a workspace, and a show the file answers needs no server at all.
+    match (dataset, command) {
+        (None, Some(TraceCommand::Show { .. })) => {
+            return emit_trace_show(&server, token.as_ref(), &config_path, output, command).await;
+        }
+        (None, Some(TraceCommand::Diff { .. })) => {
+            return emit_trace_diff(&server, token.as_ref(), &config_path, output, command).await;
+        }
+        _ => {}
+    }
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
     let workspace = resolve_workspace_record(
         &workspace_client,
@@ -3614,7 +3627,6 @@ async fn emit_trace_command(
     )
     .await?;
     let target = target_for(&server.url, &workspace)?;
-    let config_path = ConfigStore::default_path()?;
 
     match (dataset, command) {
         (Some(dataset), _) => {
@@ -3667,7 +3679,7 @@ async fn emit_trace_command(
             )
             .await?;
             let comparison = diff_runs(
-                &target,
+                &server,
                 token.as_ref(),
                 wait,
                 &trace::CompareSide::from_run_file(&outcome.file, &outcome.path),
@@ -3707,35 +3719,8 @@ async fn emit_trace_command(
                 return Err(CliError::new(ErrorKind::GateFailed, gate.join("; ")));
             }
         }
-        (
-            None,
-            Some(TraceCommand::Diff {
-                left,
-                right,
-                timeout_seconds,
-                trace_dir,
-            }),
-        ) => {
-            let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
-            let left_path = trace::resolve_run_file(&dir, left);
-            let right_path = trace::resolve_run_file(&dir, right);
-            let left_artifact = trace::read_artifact(&left_path)?;
-            let right_artifact = trace::read_artifact(&right_path)?;
-            let comparison = diff_runs(
-                &target,
-                token.as_ref(),
-                Duration::from_secs(*timeout_seconds),
-                &trace::CompareSide::from_artifact(&left_artifact, &left_path),
-                &trace::CompareSide::from_artifact(&right_artifact, &right_path),
-            )
-            .await?;
-            let payload = serde_json::json!({
-                "left": { "file": left_path, "runId": left_artifact.run_id() },
-                "right": { "file": right_path, "runId": right_artifact.run_id() },
-                "comparison": comparison.comparison,
-                "text": comparison.text,
-            });
-            output.print_either(&payload, || comparison.text.clone())?;
+        (None, Some(TraceCommand::Show { .. } | TraceCommand::Diff { .. })) => {
+            unreachable!("show and diff return before the workspace is resolved")
         }
         (
             None,
@@ -3784,7 +3769,7 @@ async fn emit_trace_command(
             .await?;
             // Original on the left, so the deltas read as what replaying changed.
             let comparison = diff_runs(
-                &target,
+                &server,
                 token.as_ref(),
                 wait,
                 &trace::CompareSide::from_artifact(&artifact, &original_path),
@@ -3811,95 +3796,6 @@ async fn emit_trace_command(
             if let Some(reason) = outcome.gate {
                 return Err(CliError::new(ErrorKind::GateFailed, reason));
             }
-        }
-        (
-            None,
-            Some(TraceCommand::Show {
-                run,
-                phases,
-                phase,
-                window,
-                timeout_seconds,
-                chunk,
-                spatial,
-                trace_dir,
-            }),
-        ) => {
-            let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
-            let path = trace::resolve_run_file(&dir, run);
-            // A bundle carries the same renderings as a run file, so every depth reads either.
-            let artifact = trace::read_artifact(&path)?;
-            let depth = match (phase, phases, chunk, spatial) {
-                (Some(phase), ..) => trace::ShowDepth::Phase(phase.clone()),
-                (None, true, ..) => trace::ShowDepth::Phases,
-                (None, false, Some(chunk), _) => trace::ShowDepth::Chunk(chunk.clone()),
-                (None, false, None, true) => trace::ShowDepth::Spatial,
-                (None, false, None, false) => trace::ShowDepth::Summary,
-            };
-            // The page is opened on an empty inline view: it is there to reach
-            // the derivation, not to load anything.
-            let windowed = match window {
-                Some(window) => {
-                    let empty = SavedView::empty([trace::DEFAULT_WIDTH, trace::DEFAULT_HEIGHT]);
-                    let url =
-                        montage::with_render_param(&viewer_inline_view_web_url(&target, &empty)?);
-                    let read = trace::read_window(
-                        &url,
-                        token.as_ref(),
-                        Duration::from_secs(*timeout_seconds),
-                        artifact.trace(),
-                        artifact.run_id(),
-                        *window,
-                    )
-                    .await
-                    .map_err(|error| error.with_context("url", &url))?;
-                    Some(read)
-                }
-                None => None,
-            };
-            let diagnostic = match &windowed {
-                Some(read) => &read.diagnostic,
-                None => artifact.diagnostic(),
-            };
-            let text = match (&windowed, &artifact) {
-                (Some(read), _) => trace::render_depth(&read.renderings, &depth),
-                (None, trace::TraceArtifact::Run(file)) => trace::render_show(file, &depth),
-                (None, trace::TraceArtifact::Bundle(bundle)) => {
-                    trace::render_depth(&bundle.renderings, &depth)
-                }
-            };
-            // `diagnostic` already carries a `chunk` section, but it is the
-            // worst row's. A chunk named with `--chunk` gets its section
-            // here, beside the text rendered from it.
-            let chunk = trace::chunk_section(artifact.renderings(), &depth);
-            let (payload, human) = match &artifact {
-                trace::TraceArtifact::Run(file) => (
-                    serde_json::json!({
-                        "runFile": path,
-                        "header": file.header,
-                        "window": window,
-                        "diagnostic": diagnostic,
-                        "chunk": chunk,
-                        "text": text,
-                    }),
-                    text.clone(),
-                ),
-                trace::TraceArtifact::Bundle(bundle) => (
-                    serde_json::json!({
-                        "bundle": path,
-                        "header": bundle.header,
-                        "health": bundle.health,
-                        "frame": bundle.frame.as_ref().map(trace::BundleFrame::describe),
-                        "absent": bundle.absent,
-                        "window": window,
-                        "diagnostic": diagnostic,
-                        "chunk": chunk,
-                        "text": text,
-                    }),
-                    trace::format_bundle_human(bundle, &path, &text),
-                ),
-            };
-            output.print_either(&payload, || human.clone())?;
         }
         (
             None,
@@ -4014,6 +3910,166 @@ async fn emit_trace_command(
     Ok(())
 }
 
+/// `trace show`: a run file or bundle at the depth asked for. Every depth the
+/// file rendered prints from it alone; a window is derived in a page.
+async fn emit_trace_show(
+    server: &EffectiveServer,
+    token: Option<&EffectiveToken>,
+    config_path: &Path,
+    output: Output,
+    command: Option<&TraceCommand>,
+) -> Result<(), CliError> {
+    let Some(TraceCommand::Show {
+        run,
+        phases,
+        phase,
+        window,
+        timeout_seconds,
+        chunk,
+        spatial,
+        trace_dir,
+    }) = command
+    else {
+        unreachable!("called for show")
+    };
+    let dir = trace::resolve_trace_dir(trace_dir.as_deref(), config_path);
+    let path = trace::resolve_run_file(&dir, run);
+    // A bundle carries the same renderings as a run file, so every depth reads either.
+    let artifact = trace::read_artifact(&path)?;
+    let depth = match (phase, phases, chunk, spatial) {
+        (Some(phase), ..) => trace::ShowDepth::Phase(phase.clone()),
+        (None, true, ..) => trace::ShowDepth::Phases,
+        (None, false, Some(chunk), _) => trace::ShowDepth::Chunk(chunk.clone()),
+        (None, false, None, true) => trace::ShowDepth::Spatial,
+        (None, false, None, false) => trace::ShowDepth::Summary,
+    };
+    let windowed = match window {
+        Some(window) => {
+            let url = reading_page_url(server, "a --window reading").await?;
+            let read = trace::read_window(
+                &url,
+                token,
+                Duration::from_secs(*timeout_seconds),
+                artifact.trace(),
+                artifact.run_id(),
+                *window,
+            )
+            .await
+            .map_err(|error| error.with_context("url", &url))?;
+            Some(read)
+        }
+        None => None,
+    };
+    let diagnostic = match &windowed {
+        Some(read) => &read.diagnostic,
+        None => artifact.diagnostic(),
+    };
+    let text = match (&windowed, &artifact) {
+        (Some(read), _) => trace::render_depth(&read.renderings, &depth),
+        (None, trace::TraceArtifact::Run(file)) => trace::render_show(file, &depth),
+        (None, trace::TraceArtifact::Bundle(bundle)) => {
+            trace::render_depth(&bundle.renderings, &depth)
+        }
+    };
+    // `diagnostic` already carries a `chunk` section, but it is the
+    // worst row's. A chunk named with `--chunk` gets its section
+    // here, beside the text rendered from it.
+    let chunk = trace::chunk_section(artifact.renderings(), &depth);
+    let (payload, human) = match &artifact {
+        trace::TraceArtifact::Run(file) => (
+            serde_json::json!({
+                "runFile": path,
+                "header": file.header,
+                "window": window,
+                "diagnostic": diagnostic,
+                "chunk": chunk,
+                "text": text,
+            }),
+            text.clone(),
+        ),
+        trace::TraceArtifact::Bundle(bundle) => (
+            serde_json::json!({
+                "bundle": path,
+                "header": bundle.header,
+                "health": bundle.health,
+                "frame": bundle.frame.as_ref().map(trace::BundleFrame::describe),
+                "absent": bundle.absent,
+                "window": window,
+                "diagnostic": diagnostic,
+                "chunk": chunk,
+                "text": text,
+            }),
+            trace::format_bundle_human(bundle, &path, &text),
+        ),
+    };
+    output.print_either(&payload, || human.clone())?;
+    Ok(())
+}
+
+/// `trace diff`: the page's comparison of two run files or bundles.
+async fn emit_trace_diff(
+    server: &EffectiveServer,
+    token: Option<&EffectiveToken>,
+    config_path: &Path,
+    output: Output,
+    command: Option<&TraceCommand>,
+) -> Result<(), CliError> {
+    let Some(TraceCommand::Diff {
+        left,
+        right,
+        timeout_seconds,
+        trace_dir,
+    }) = command
+    else {
+        unreachable!("called for diff")
+    };
+    let dir = trace::resolve_trace_dir(trace_dir.as_deref(), config_path);
+    let left_path = trace::resolve_run_file(&dir, left);
+    let right_path = trace::resolve_run_file(&dir, right);
+    let left_artifact = trace::read_artifact(&left_path)?;
+    let right_artifact = trace::read_artifact(&right_path)?;
+    let comparison = diff_runs(
+        server,
+        token,
+        Duration::from_secs(*timeout_seconds),
+        &trace::CompareSide::from_artifact(&left_artifact, &left_path),
+        &trace::CompareSide::from_artifact(&right_artifact, &right_path),
+    )
+    .await?;
+    let payload = serde_json::json!({
+        "left": { "file": left_path, "runId": left_artifact.run_id() },
+        "right": { "file": right_path, "runId": right_artifact.run_id() },
+        "comparison": comparison.comparison,
+        "text": comparison.text,
+    });
+    output.print_either(&payload, || comparison.text.clone())?;
+    Ok(())
+}
+
+/// The page a window or a comparison is derived in: the server's root, which
+/// installs the trace seam as every page does and opens no workspace. Asked
+/// after the server answers, so a missing server is named rather than waited
+/// out as a page that never loads.
+async fn reading_page_url(server: &EffectiveServer, what: &str) -> Result<String, CliError> {
+    let answered = reqwest::Client::new()
+        .get(format!("{}/healthz", server.url))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success());
+    if !answered {
+        return Err(CliError::new(
+            ErrorKind::UnreachableServer,
+            format!(
+                "{what} is derived in a page a lucida server serves, and no server answers at {}; \
+                 start one, or name one with --server",
+                server.url
+            ),
+        ));
+    }
+    Ok(montage::with_render_param(&format!("{}/", server.url)))
+}
+
 /// A driven run, its file, where its bundle went when one was asked for, and
 /// whether an opt-in gate should fail on it.
 struct TraceRunOutcome {
@@ -4040,18 +4096,16 @@ fn run_payload(outcome: &TraceRunOutcome) -> serde_json::Map<String, serde_json:
     fields
 }
 
-/// Compare two runs through a page opened on an empty inline view, as
-/// `show --window` opens one: the page is there to reach the derivation, not
-/// to load anything.
+/// Compare two runs in a page of `server`'s, as `show --window` reads a
+/// window: the page is there to reach the derivation, not to load anything.
 async fn diff_runs(
-    target: &WorkspaceTarget,
+    server: &EffectiveServer,
     token: Option<&EffectiveToken>,
     wait: Duration,
     left: &trace::CompareSide<'_>,
     right: &trace::CompareSide<'_>,
 ) -> Result<trace::Comparison, CliError> {
-    let empty = SavedView::empty([trace::DEFAULT_WIDTH, trace::DEFAULT_HEIGHT]);
-    let url = montage::with_render_param(&viewer_inline_view_web_url(target, &empty)?);
+    let url = reading_page_url(server, "a comparison").await?;
     trace::read_comparison(&url, token, wait, left, right)
         .await
         .map_err(|error| error.with_context("url", &url))
@@ -6889,6 +6943,51 @@ mod tests {
 
         assert!(try_parse(&["trace", "show", "r", "--window", "500..500"]).is_err());
         assert!(try_parse(&["trace", "show", "r", "--window", "soon"]).is_err());
+    }
+
+    /// A show the file answers reads it with no server and no workspace; a
+    /// window, which only a page derives, names the server it needs.
+    #[tokio::test]
+    async fn trace_show_reads_a_file_offline_and_a_window_names_the_server_it_needs() {
+        // A port nothing listens on: bound, then released.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let server = EffectiveServer {
+            url: format!("http://127.0.0.1:{port}"),
+            source: config::ServerSource::Flag,
+        };
+        let bundle = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("trace-fixtures")
+            .join("bundle-v1.json");
+        let show = |window: Option<&str>| TraceCommand::Show {
+            run: bundle.to_string_lossy().into_owned(),
+            phases: true,
+            phase: None,
+            window: window.map(|window| window.parse().unwrap()),
+            timeout_seconds: 5,
+            chunk: None,
+            spatial: false,
+            trace_dir: None,
+        };
+        let quiet = Output::new(true, true);
+        let unused = Path::new("no-config.json");
+
+        emit_trace_show(&server, None, unused, quiet, Some(&show(None)))
+            .await
+            .unwrap();
+        let error = emit_trace_show(&server, None, unused, quiet, Some(&show(Some("0..100"))))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UnreachableServer);
+        assert!(
+            error.message.contains(&server.url) && error.message.contains("--server"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
