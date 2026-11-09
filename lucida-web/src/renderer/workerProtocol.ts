@@ -5,6 +5,7 @@ import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import type { BlendMode } from "./layerCompositor.ts";
+import type { DeviceLimits } from "./gpuContext.ts";
 
 export interface InitMessage {
   type: "init";
@@ -948,6 +949,8 @@ export interface GpuCapacityReport {
   /** What the other holders take of the total now: label pools, render targets, minimap textures. */
   reservedBytes: number;
   pools: GpuPoolCapacity[];
+  /** The device's limits, which size a pool the worker has not made yet. */
+  limits: DeviceLimits;
 }
 
 /** A changed {@link GpuCapacityReport}: a pool created, grown, shrunk, or freed, or the total or reserve moved. */

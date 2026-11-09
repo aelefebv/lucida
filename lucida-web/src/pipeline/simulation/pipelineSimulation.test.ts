@@ -79,6 +79,33 @@ describe("a static volume", () => {
   }));
 });
 
+describe("a volume whose detail outgrows a pool sized at the WebGPU minimums", () => {
+  // 768 level-0 chunks of 512 KiB, 384 MiB. The minimums' 256 MiB buffer
+  // holds 512 of them, and this device's lets the pool hold them all inside
+  // the GPU total. The first plan is made before the worker reports either.
+  const scenario = describeScenario({
+    name: "deep volume",
+    mode: "volume",
+    viewport: [1440, 900],
+    maxBufferSize: 2048 * 1024 * 1024,
+    dataset: singleImage({
+      id: "deep",
+      pyramid: { shape: [1, 1, 192, 1024, 1024], chunk: [64, 64, 64], levels: 4 },
+    }),
+    // Zeros cost nothing to make, which keeps a view this large quick.
+    source: { samples: (_chunk, count) => new Uint16Array(count) },
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering every chunk the view wants at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.detail).toEqual({ resident: 768, desired: 768 });
+      expect(open.coverage).toBe(1);
+    });
+  }
+});
+
 /** 36 tiles of one 128-sample pyramid, a coarse chunk per tile. */
 const WIDE = collection({
   id: "wide",

@@ -6,7 +6,7 @@ import type { ContentSource } from "./fetch/contentSource.ts";
 import type { DecodePool } from "./fetch/decodePool.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 
-import type { ColdStateDeltaMessage, ColdStateMessage } from "../renderer/workerProtocol.ts";
+import type { ColdStateDeltaMessage, ColdStateMessage, GpuCapacityReport } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
 import { TickCoordinator, type MinimapChunkCoord } from "./tickCoordinator.ts";
 import { Uploader } from "./upload/uploader.ts";
@@ -562,6 +562,51 @@ describe("epoch caching", () => {
       orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
       expect(planSpy).toHaveBeenCalledTimes(1);
       expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("plans again, at once, when a capacity report would admit part of the last shortfall, and only then", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { scene, datasets } = makeTickCoordinatorDeps();
+      const ctx = makeCtx(scene, datasets);
+      const slotBytes = 256 * 256 * 2;
+      const limits = {
+        maxTextureDimension2D: 8192,
+        maxTextureDimension3D: 2048,
+        maxStorageBufferBindingSize: 128 * 1024 * 1024,
+        maxBufferSize: 256 * 1024 * 1024,
+      };
+      // The other holders leave the chunk pools room for one chunk.
+      let report: GpuCapacityReport = { budgetBytes: 64 * slotBytes, reservedBytes: 63 * slotBytes, pools: [], limits };
+      Object.assign(ctx.client, { gpuCapacity: () => report });
+      const submitted = () => vi.mocked(ctx.cpuCache.submit).mock.calls.at(-1)![0] as RequestPlan;
+      const orch = makeOrch();
+
+      orch.planAndFetch(ctx, emptyMinimap);
+      const { detail, coarse } = submitted().shortfall!;
+      expect(detail + coarse).toBeGreaterThan(0);
+
+      // A new report with no more room owes no plan.
+      report = { ...report };
+      expect(orch.noteGpuCapacity(ctx)).toBe(false);
+      orch.planAndFetch(ctx, emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+
+      // Inside the coalescing window, a report that frees room plans again
+      // on the next tick and admits all of it.
+      report = { ...report, reservedBytes: 0 };
+      expect(orch.noteGpuCapacity(ctx)).toBe(true);
+      orch.planAndFetch(ctx, emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(2);
+      expect(submitted().shortfall).toEqual({ detail: 0, coarse: 0 });
+      expect(orch.hasPendingRebuild()).toBe(false);
+
+      // With nothing short, no report owes a plan.
+      report = { ...report };
+      expect(orch.noteGpuCapacity(ctx)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
