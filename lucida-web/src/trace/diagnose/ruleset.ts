@@ -17,7 +17,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 10;
+export const RULESET_VERSION = 11;
 
 export interface AbsoluteRule {
   id: string;
@@ -257,6 +257,10 @@ export const PHASE_CLASSES: Record<string, PhaseClass> = {
   "browser.plan": "compute",
   "browser.queue": "queue",
   "browser.wire": "io",
+  // `decode` is the worker's own time. The wait around it, for a worker or for
+  // the main thread, is a queue: on a few cores a burst of chunks waits there
+  // without any decode being slow.
+  "browser.decode-wait": "queue",
   "browser.decode": "compute",
   "browser.upload": "compute",
   "browser.present": "compute",
@@ -303,7 +307,7 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
     phase: "browser.decode",
     stat: "p95",
     ceilMs: 50,
-    why: "#899 §7: client decode round trip p50 0.09 ms, with 65% of samples under the 100 µs clock floor.",
+    why: "#899 §7: client decode round trip p50 0.09 ms, with 65% of samples under the 100 µs clock floor. Judged on the worker's own time where the worker reports it; the wait for a worker or for the main thread is browser.decode-wait, a queue.",
   },
   {
     id: "compute.upload",

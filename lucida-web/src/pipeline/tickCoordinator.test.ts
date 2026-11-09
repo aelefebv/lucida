@@ -1295,6 +1295,115 @@ describe("display-only fast path", () => {
     }
   });
 
+  it("patches the display, then ships a view-move delta, when a contrast edit lands with a camera move", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const coldStateDisplay = vi.fn();
+      const coldStateDelta = vi.fn();
+      const sent: string[] = [];
+      coldStateDisplay.mockImplementation(() => sent.push("display"));
+      coldStateDelta.mockImplementation(() => sent.push("delta"));
+
+      bumpSettingsGeneration();
+      const scene1 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings(),
+      });
+      orch.planAndFetch(
+        makeCtx(scene1, datasets, { cpuCache, coldState, coldStateDisplay, coldStateDelta }),
+        emptyMinimap,
+      );
+      expect(coldState).toHaveBeenCalledTimes(1);
+      planSpy.mockClear();
+      coldState.mockClear();
+
+      // An auto-contrast fit that follows the view: the camera and the
+      // contrast change together, and nothing else does.
+      vi.advanceTimersByTime(500);
+      bumpSettingsGeneration();
+      const scene2 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 2, selection: 2 },
+        allSettings: baseSettings({ contrast_min: 1000 }),
+      });
+      orch.planAndFetch(
+        makeCtx(scene2, datasets, { cpuCache, coldState, coldStateDisplay, coldStateDelta }),
+        emptyMinimap,
+      );
+
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(coldState).not.toHaveBeenCalled();
+      // The patch lands first, so the entries the delta keeps carry the new display.
+      expect(sent).toEqual(["display", "delta"]);
+      const pushed = coldStateDisplay.mock.calls[0][0] as {
+        displayStateByChannel: Record<number, { contrastMin: number }>;
+      };
+      expect(pushed.displayStateByChannel[0].contrastMin).toBe(1000);
+
+      // The signature the patch refreshed is the one a later display edit compares against.
+      vi.advanceTimersByTime(500);
+      coldStateDisplay.mockClear();
+      bumpSettingsGeneration();
+      const scene3 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 2, selection: 3 },
+        allSettings: baseSettings({ contrast_min: 1000 }),
+      });
+      orch.planAndFetch(
+        makeCtx(scene3, datasets, { cpuCache, coldState, coldStateDisplay, coldStateDelta }),
+        emptyMinimap,
+      );
+      expect(coldStateDisplay).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does a full rebuild when a camera move rides a selection change that is not display-only", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const coldStateDisplay = vi.fn();
+      const coldStateDelta = vi.fn();
+
+      bumpSettingsGeneration();
+      const scene1 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings(),
+        t: 0,
+      });
+      orch.planAndFetch(
+        makeCtx(scene1, datasets, { cpuCache, coldState, coldStateDisplay, coldStateDelta }),
+        emptyMinimap,
+      );
+      coldState.mockClear();
+
+      vi.advanceTimersByTime(500);
+      bumpSettingsGeneration();
+      const scene2 = createMockScene({
+        epochs: { content: 1, layout: 1, view: 2, selection: 2 },
+        allSettings: baseSettings({ contrast_min: 1000 }),
+        t: 5,
+      });
+      orch.planAndFetch(
+        makeCtx(scene2, datasets, { cpuCache, coldState, coldStateDisplay, coldStateDelta }),
+        emptyMinimap,
+      );
+
+      expect(coldState).toHaveBeenCalledTimes(1);
+      expect(coldStateDisplay).not.toHaveBeenCalled();
+      expect(coldStateDelta).not.toHaveBeenCalled();
+      expect((coldState.mock.calls[0][0] as ColdStateMessage).currentT).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ships a second delta on a chained view move with no full send between (sync + previousActiveSet thread)", () => {
     vi.useFakeTimers({ toFake: ["performance"] });
     try {

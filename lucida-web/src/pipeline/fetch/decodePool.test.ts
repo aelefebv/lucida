@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { DecodePool } from "./decodePool.ts";
+import { DecodePool, decodeWorkMs } from "./decodePool.ts";
+import type { DecodeTiming } from "./decode.worker.ts";
 import type { WireFormat } from "../../manifestTypes.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { Boundary } from "../../trace/types.ts";
@@ -41,7 +42,9 @@ const ENVIRONMENT = {
  */
 class FakeWorker {
   static instances: FakeWorker[] = [];
-  onmessage: ((e: { data: { id: number; data?: ArrayBuffer; error?: string } }) => void) | null = null;
+  onmessage:
+    | ((e: { data: Partial<DecodeTiming> & { id: number; data?: ArrayBuffer; error?: string } }) => void)
+    | null = null;
   posted: { id: number; bytes: ArrayBuffer }[] = [];
   terminated = false;
 
@@ -57,12 +60,32 @@ class FakeWorker {
     this.terminated = true;
   }
 
-  reply(id: number, data: ArrayBuffer): void {
-    this.onmessage?.({ data: { id, data } });
+  reply(id: number, data: ArrayBuffer, timing: Partial<DecodeTiming> = {}): void {
+    this.onmessage?.({ data: { id, data, ...timing } });
   }
 }
 
 const wireFormat: WireFormat = { Raw: { data_type: "uint16" } };
+
+/** A moment on this thread's clock, as a worker reports it. */
+function shared(pageMs: number): number {
+  return performance.timeOrigin + pageMs;
+}
+
+describe("decodeWorkMs", () => {
+  it("is the worker's own span, on this thread's clock", () => {
+    expect(decodeWorkMs(100, 150, { startedAtMs: shared(120), doneAtMs: shared(124) })).toBeCloseTo(4, 3);
+  });
+
+  it("holds a skewed worker clock inside the round trip this thread saw", () => {
+    expect(decodeWorkMs(100, 150, { startedAtMs: shared(90), doneAtMs: shared(160) })).toBeCloseTo(50, 3);
+    expect(decodeWorkMs(100, 150, { startedAtMs: shared(170), doneAtMs: shared(180) })).toBe(0);
+  });
+
+  it("is null for a reply that carries no timing", () => {
+    expect(decodeWorkMs(100, 150, {})).toBeNull();
+  });
+});
 
 describe("DecodePool", () => {
   beforeEach(() => {
@@ -155,6 +178,38 @@ describe("DecodePool", () => {
 
     pool.terminate();
     await expect(firstDecode).rejects.toThrow("DecodePool terminated");
+    traceRecorder.reset();
+  });
+
+  it("keeps each worker's own time on its row, apart from the wait around it", async () => {
+    let pageMs = 1_000;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => pageMs);
+    traceRecorder.reset();
+    traceRecorder.setEnvironment(ENVIRONMENT);
+    traceRecorder.openRun(OPEN_CAUSE);
+    const first = traceRecorder.beginChunkRow({ ...CHUNK, x: 1 }, 0);
+    const second = traceRecorder.beginChunkRow({ ...CHUNK, x: 2 }, 0);
+    traceRecorder.stamp(first, Boundary.DecodeStart);
+    traceRecorder.stamp(second, Boundary.DecodeStart);
+
+    const pool = new DecodePool(1);
+    pool.decode(new ArrayBuffer(8), wireFormat, first);
+    pool.decode(new ArrayBuffer(8), wireFormat, second);
+    const worker = FakeWorker.instances[0];
+
+    // One worker decodes the two in turn, 4 ms and then 6 ms, and the page
+    // hears both 50 ms after it posted them, once its thread comes free.
+    pageMs = 1_050;
+    worker.reply(worker.posted[0].id, new ArrayBuffer(16), { startedAtMs: shared(1_000), doneAtMs: shared(1_004) });
+    worker.reply(worker.posted[1].id, new ArrayBuffer(16), { startedAtMs: shared(1_004), doneAtMs: shared(1_010) });
+    traceRecorder.closeRun("explicit");
+
+    const [run] = traceRecorder.exportDocument().runs;
+    expect(run.rows.map(r => r.phases.decode?.durationUs)).toEqual([50_000, 50_000]);
+    expect(run.rows.map(r => r.decodeWorkUs)).toEqual([4_000, 6_000]);
+
+    pool.terminate();
+    now.mockRestore();
     traceRecorder.reset();
   });
 });

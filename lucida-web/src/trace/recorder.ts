@@ -1337,6 +1337,19 @@ export class TraceRecorder {
     run.sink.setBytes(index, bytes, wireBytes);
   }
 
+  /**
+   * A decode came back: closes `decode` and opens `upload`, and keeps how much
+   * of that round trip the worker spent decoding, so the rest reads as a wait
+   * rather than as decode work. `workMs` is null when the worker said nothing.
+   */
+  noteDecoded(handle: number, workMs: number | null): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    const index = handle % GENERATION_STRIDE;
+    run.sink.stamp(index, Boundary.UploadStart, this.offsetUs(run, this.now()));
+    if (workMs !== null) run.sink.setDecodeWork(index, clamp(Math.round(workMs * 1000)));
+  }
+
   finishRow(handle: number, outcome: RowOutcomeValue): void {
     const run = this.resolve(handle);
     if (!run) return;

@@ -1,12 +1,12 @@
 // @vitest-environment happy-dom
-// `self.onmessage` is exercised through DecodePool integration tests;
-// these tests pin the pure helpers it composes.
+// These tests pin the pure helpers `self.onmessage` composes, and what it
+// reports back beside the samples.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import { initSync } from "lucida-core";
-import { decompress, normalize } from "./decode.worker.ts";
+import { decode, normalize } from "./decode.worker.ts";
 
 // The worker instantiates the module itself in a browser; under vitest it
 // cannot fetch the WASM file, so it is instantiated here first, and the
@@ -30,14 +30,14 @@ const LZ4_FIVE = new Uint8Array([0x05, 0x00, 0x00, 0x00, 0x50, 0x10, 0x20, 0x30,
 
 const ZSTD = new Uint8Array([3]);
 
-describe("decompress", () => {
+describe("decode", () => {
   it("passes decoded bytes through", async () => {
     const bytes = new Uint8Array([1, 2, 3, 4]).buffer;
-    expect(await decompress({ id: 0, bytes, wireFormat: UINT16, decodedBytes: 4 })).toBe(bytes);
+    expect(await decode({ id: 0, bytes, wireFormat: UINT16, decodedBytes: 4 })).toBe(bytes);
   });
 
   it("decodes an encoded frame's codecs to its level's chunk size", async () => {
-    const out = await decompress({
+    const out = await decode({
       id: 0,
       bytes: ZSTD_1_TO_16.slice().buffer,
       wireFormat: UINT16,
@@ -50,20 +50,20 @@ describe("decompress", () => {
 
   it("fails bytes that decode to any other size than their level gives", async () => {
     const encoded = (decodedBytes: number) =>
-      decompress({ id: 0, bytes: ZSTD_1_TO_16.slice().buffer, wireFormat: UINT16, codecs: ZSTD, decodedBytes });
+      decode({ id: 0, bytes: ZSTD_1_TO_16.slice().buffer, wireFormat: UINT16, codecs: ZSTD, decodedBytes });
     await expect(encoded(32)).rejects.toThrow(/decoded 16 bytes where the stored chunk shape holds 32/);
     await expect(encoded(8)).rejects.toThrow(/more than the 8 bytes/);
   });
 
   it("refuses encoded bytes whose level gives no size, rather than decode unbounded", async () => {
     await expect(
-      decompress({ id: 0, bytes: ZSTD_1_TO_16.slice().buffer, wireFormat: UINT16, codecs: ZSTD }),
+      decode({ id: 0, bytes: ZSTD_1_TO_16.slice().buffer, wireFormat: UINT16, codecs: ZSTD }),
     ).rejects.toThrow(/no decoded size/);
   });
 
   it("fails a codec list it cannot read", async () => {
     await expect(
-      decompress({
+      decode({
         id: 0,
         bytes: ZSTD_1_TO_16.slice().buffer,
         wireFormat: UINT16,
@@ -74,14 +74,14 @@ describe("decompress", () => {
   });
 
   it("decodes the compressed per-image wire formats through the same codecs", async () => {
-    const lz4 = await decompress({
+    const lz4 = await decode({
       id: 0,
       bytes: LZ4_FIVE.slice().buffer,
       wireFormat: { Lz4: { data_type: "Uint8" } },
       decodedBytes: 5,
     });
     expect(Array.from(new Uint8Array(lz4))).toEqual([0x10, 0x20, 0x30, 0x40, 0x50]);
-    const zstd = await decompress({
+    const zstd = await decode({
       id: 0,
       bytes: ZSTD_1_TO_16.slice().buffer,
       wireFormat: { Zstd: { data_type: "Uint8" } },
@@ -205,5 +205,42 @@ describe("normalize", () => {
 
   it("refuses a data type it has no layout for, naming it", () => {
     expect(() => normalize(new ArrayBuffer(16), "complex128")).toThrowError("unsupported data type: complex128");
+  });
+});
+
+describe("the decode reply", () => {
+  const reply = async (data: unknown) => {
+    const post = vi.spyOn(self, "postMessage").mockImplementation(() => {});
+    const before = performance.timeOrigin + performance.now();
+    const handler = self.onmessage as unknown as (e: { data: unknown }) => Promise<void>;
+    await handler({ data });
+    const after = performance.timeOrigin + performance.now();
+    const posted = post.mock.calls[0][0] as { id: number; startedAtMs: number; doneAtMs: number; error?: string };
+    post.mockRestore();
+    return { posted, before, after };
+  };
+
+  it("carries when the worker took the request up and finished, on a clock the page shares", async () => {
+    const { posted, before, after } = await reply({
+      id: 7,
+      bytes: new ArrayBuffer(4),
+      wireFormat: { Raw: { data_type: "uint16" } },
+    });
+    expect(posted.id).toBe(7);
+    expect(posted.startedAtMs).toBeGreaterThanOrEqual(before);
+    expect(posted.doneAtMs).toBeGreaterThanOrEqual(posted.startedAtMs);
+    expect(posted.doneAtMs).toBeLessThanOrEqual(after);
+  });
+
+  it("times an encoded chunk's decode, not the module it needed loaded first", async () => {
+    const { posted } = await reply({
+      id: 8,
+      bytes: ZSTD_1_TO_16.slice().buffer,
+      wireFormat: UINT16,
+      codecs: ZSTD,
+      decodedBytes: 16,
+    });
+    expect(posted.error).toBeUndefined();
+    expect(posted.doneAtMs).toBeGreaterThanOrEqual(posted.startedAtMs);
   });
 });
