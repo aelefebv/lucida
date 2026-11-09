@@ -712,6 +712,30 @@ describe("TraceRecorder upload and present", () => {
     expect(serialised.outcome).toBe("complete");
   });
 
+  it("keeps a chunk's wait for the view apart from its delivery", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const ahead = recorder.beginChunkRow(CHUNK, 0);
+    const wanted = recorder.beginChunkRow({ ...CHUNK, x: 1 }, 0);
+    recorder.stamp(ahead, Boundary.UploadStart);   // both decoded at t = 0
+    recorder.stamp(wanted, Boundary.UploadStart);
+
+    advance(500);
+    const wantedAtMs = 1_500;                      // a plan wanted it at t = 500 ms
+    advance(10);
+    recorder.noteHandedToRenderer(ahead, wantedAtMs);
+    recorder.noteHandedToRenderer(wanted);
+    advance(6);
+    recorder.noteFrameDispatched();                // resident at t = 516 ms
+    recorder.closeRun("explicit");
+
+    const [aheadRow, wantedRow] = recorder.exportDocument().runs[0].rows;
+    expect(aheadRow.phases.upload?.durationUs).toBe(516_000);
+    // Within a part in 65,534 of the upload.
+    expect(Math.abs(aheadRow.unwantedUs! - 500_000)).toBeLessThanOrEqual(516_000 / 65_534);
+    expect("unwantedUs" in wantedRow).toBe(false);
+  });
+
   it("closes present when the frame is drawn, with no frame after it", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);

@@ -52,6 +52,8 @@ export interface TraceSink {
   setBytes(index: number, bytes: number, wireBytes: number): void;
   /** The decode worker's own time on the row's chunk, inside its `decode` round trip. */
   setDecodeWork(index: number, workUs: number): void;
+  /** When the row's chunk joined the wanted set, inside its `upload`, for a chunk decoded before then. */
+  setWantedAt(index: number, offsetUs: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   /**
    * The rows so far, tallied for the live view. The one read that
@@ -148,6 +150,8 @@ export class NoopTraceSink implements TraceSink {
   setBytes(): void {}
 
   setDecodeWork(): void {}
+
+  setWantedAt(): void {}
 
   setOutcome(): void {}
 
@@ -262,6 +266,10 @@ export class TableTraceSink implements TraceSink {
 
   setDecodeWork(index: number, workUs: number): void {
     this.rows.setDecodeWork(index, workUs);
+  }
+
+  setWantedAt(index: number, offsetUs: number): void {
+    this.rows.setWantedAt(index, offsetUs);
   }
 
   setOutcome(index: number, outcome: RowOutcomeValue): void {

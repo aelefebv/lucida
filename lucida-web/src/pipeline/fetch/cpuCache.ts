@@ -630,6 +630,9 @@ export class CpuCache {
           ? req.priority
           : Math.min(cachedEntry.priority, req.priority);
         cachedEntry.lastSeenTick = this.currentSubmitTick;
+        if (cachedEntry.wantedAtMs !== undefined && Number.isNaN(cachedEntry.wantedAtMs) && wantedByView(cachedEntry)) {
+          cachedEntry.wantedAtMs = enqueueNow;
+        }
         continue;
       }
 
@@ -1020,11 +1023,14 @@ export class CpuCache {
     // entry so a re-delivery after an eviction cannot re-stamp a row whose
     // life is already over.
     if ((delivery.traceRow ?? -1) >= 0) {
-      traceRecorder.noteHandedToRenderer(delivery.traceRow!);
       const entry =
         this.chunkStore.get(delivery.entityId, delivery.chunkKey) ??
         this.overviewStore.get(delivery.entityId, delivery.chunkKey);
-      if (entry) entry.traceRow = -1;
+      traceRecorder.noteHandedToRenderer(delivery.traceRow!, entry?.wantedAtMs);
+      if (entry) {
+        entry.traceRow = -1;
+        entry.wantedAtMs = undefined;
+      }
     }
     this.deliveryState.markChunkSent(
       delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
@@ -1826,6 +1832,9 @@ export class CpuCache {
       cacheEntry.priority = resident.priority;
       cacheEntry.lastSeenTick = resident.lastSeenTick;
     }
+    if (traceRow >= 0 && !(cacheEntry.lastSeenTick === this.currentSubmitTick && wantedByView(cacheEntry))) {
+      cacheEntry.wantedAtMs = Number.NaN;
+    }
     if (!store.insert(cacheEntry)) {
       this.refuseArrival(chunk, traceRow);
       return;
@@ -2263,6 +2272,15 @@ export class CpuCache {
     const key = chunkSchedulerKey(req, req.tier);
     return req.planes ? `${key}#${req.planes[0]}:${req.planes[1]}` : key;
   }
+}
+
+/**
+ * Whether the view's own lanes ask for an entry, the ones
+ * {@link CpuCache.getDeliverable} hands to the renderer once a plan has seen
+ * it.
+ */
+function wantedByView(entry: CacheEntry): boolean {
+  return entry.lane === "detail" || entry.lane === "coarse";
 }
 
 /** One fetch in flight, as {@link CpuCache} indexes them by chunk. */

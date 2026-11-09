@@ -473,3 +473,53 @@ describe("lifecycle rows", () => {
     }
   });
 });
+
+describe("the wait for the view", () => {
+  beforeEach(() => {
+    traceRecorder.reset();
+    traceRecorder.setEnvironment(null);
+  });
+
+  /** A decode that closes `decode` on the row, as the real pool does. */
+  function stampingDecode(): DecodePool {
+    return {
+      decode: async (bytes: ArrayBuffer, _format: unknown, traceRow: number) => {
+        traceRecorder.noteDecoded(traceRow, null);
+        return bytes;
+      },
+      size: 1,
+    } as unknown as DecodePool;
+  }
+
+  it("keeps a prefetched chunk's wait for the view out of its upload", async () => {
+    let clock = 1_000;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock);
+    try {
+      openRun();
+      const { source } = createSource(64);
+      const cache = newCache(source, stampingDecode());
+      const ahead = makeRequest({ lane: "prefetch", x: 0 });
+      const wanted = makeRequest({ x: 1 });
+      cache.submit(makePlan([ahead, wanted]));
+      await flush();
+
+      // The view reaches the prefetched chunk half a second later.
+      clock += 500;
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([{ ...ahead, lane: "detail" }, wanted]));
+      clock += 10;
+      for (const delivery of cache.getDeliverable()) cache.markSent(delivery);
+      clock += 6;
+      traceRecorder.noteFrameDispatched();
+
+      const rows = traceRecorder.exportDocument().runs[0].rows;
+      const byX = new Map(rows.map((row) => [row.x, row]));
+      expect(byX.get(0)!.phases.upload!.durationUs).toBe(516_000);
+      expect(Math.abs(byX.get(0)!.unwantedUs! - 500_000)).toBeLessThanOrEqual(516_000 / 65_534);
+      // Wanted as it was decoded, so all of its upload is delivery.
+      expect("unwantedUs" in byX.get(1)!).toBe(false);
+    } finally {
+      now.mockRestore();
+    }
+  });
+});

@@ -120,6 +120,30 @@ export function splitDecode(row: TraceRow, span: ClippedSpan): { workUs: number;
 }
 
 /**
+ * The part of a row's `upload` its chunk spent decoded and waiting for the
+ * view to want it, as a prefetched chunk does. Kept apart from the upload
+ * itself so a chunk fetched ahead of the view does not read as slow delivery.
+ */
+export const UNWANTED = "browser.unwanted";
+
+/**
+ * A row's `upload`, split at the moment its chunk joined the wanted set: the
+ * wait for the view first, then the delivery. Null for a row the view wanted
+ * as it was decoded, so the whole span stays `upload`.
+ */
+export function splitUpload(
+  row: TraceRow,
+  timing: { startUs: number; endUs: number },
+): { unwanted: { startUs: number; endUs: number }; upload: { startUs: number; endUs: number } } | null {
+  if (row.unwantedUs == null) return null;
+  const wantedUs = Math.min(timing.endUs, timing.startUs + row.unwantedUs);
+  return {
+    unwanted: { startUs: timing.startUs, endUs: wantedUs },
+    upload: { startUs: wantedUs, endUs: timing.endUs },
+  };
+}
+
+/**
  * One observation of a phase: how long it took, which row it belonged to, and
  * where on the run's clock it sat when anything could say.
  *
@@ -187,6 +211,13 @@ export function rollupWindow(run: TraceRun, window: RunWindow): WindowRollup {
         // Both inherit the round trip's position, as a server phase does its bracket.
         push("browser.decode", { us: split.workUs, startUs: span.startUs, endUs: span.endUs, label: row.chunkKey });
         push(DECODE_WAIT, { us: split.waitUs, startUs: span.startUs, endUs: span.endUs, label: row.chunkKey });
+        continue;
+      }
+      const upload = phase === "upload" ? splitUpload(row, timing) : null;
+      if (upload) {
+        // Unlike the decode work, the wait's place inside the span is known.
+        pushPlaced(UNWANTED, `row:${index}`, upload.unwanted.startUs, upload.unwanted.endUs, row.chunkKey);
+        pushPlaced("browser.upload", `row:${index}`, upload.upload.startUs, upload.upload.endUs, row.chunkKey);
         continue;
       }
       pushPlaced(`browser.${phase}`, `row:${index}`, timing.startUs, timing.endUs, row.chunkKey);

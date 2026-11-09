@@ -43,10 +43,21 @@ import {
 const COORDS_PER_ROW = 6;
 
 /**
- * The last-boundary column's value for a row that has stamped nothing. Not a
- * boundary index, and above every real one, so the column can hold either.
+ * A row's state byte holds its last boundary in the low four bits and its
+ * outcome above them, and its lane byte its lane in the low four bits and its
+ * residency tier above: the two bytes that frees hold the unwanted wait's
+ * share without widening the row.
  */
-const NO_BOUNDARY = 0xff;
+const BOUNDARY_MASK = 0x0f;
+const OUTCOME_SHIFT = 4;
+const LANE_MASK = 0x0f;
+const TIER_SHIFT = 4;
+
+/**
+ * The last boundary a row that has stamped nothing holds. Not a boundary
+ * index, and above every real one, so the four bits can hold either.
+ */
+const NO_BOUNDARY = BOUNDARY_MASK;
 
 /** An empty slot in the identity index, and the end of a row's identity chain. */
 const NO_ROW = -1;
@@ -60,6 +71,15 @@ const NO_ROW = -1;
 const WORK_SHARE_SCALE = 0xfffe;
 /** The share column's value for a row whose worker never reported its time. */
 const NO_WORK_SHARE = 0xffff;
+
+/**
+ * How long a chunk sat decoded before the view wanted it, kept as its share
+ * of the row's `upload` in sixteen bits for the same reasons as the decode
+ * work.
+ */
+const UNWANTED_SHARE_SCALE = 0xfffe;
+/** The unwanted column's value for a row the view wanted as it was decoded. */
+const NO_UNWANTED_SHARE = 0xffff;
 
 /**
  * What the wire carried for a row, kept as its share of the bytes decoded in
@@ -86,6 +106,7 @@ const QUEUE_START = Boundary.QueueStart;
 const WIRE_START = Boundary.WireStart;
 const DECODE_START = Boundary.DecodeStart;
 const UPLOAD_START = Boundary.UploadStart;
+const PRESENT_START = Boundary.PresentStart;
 const IN_FLIGHT = RowOutcome.InFlight;
 const COMPLETE = RowOutcome.Complete;
 const RETIRED = RowOutcome.Retired;
@@ -129,16 +150,17 @@ class RowBlock {
   readonly decodeWorkShares: Uint16Array;
   /** See {@link WIRE_SHARE_SCALE}. */
   readonly wireShares: Uint16Array;
-  readonly tiers: Uint8Array;
+  /** See {@link UNWANTED_SHARE_SCALE}. */
+  readonly unwantedShares: Uint16Array;
+  /** Lane and residency tier; see {@link LANE_MASK}. */
   readonly lanes: Uint8Array;
-  readonly outcomes: Uint8Array;
   /**
-   * The highest boundary each row has stamped, or {@link NO_BOUNDARY}. A row
-   * sits in the phase after its last boundary, so this one byte is what lets
-   * a stamp move the row between the table's counters without re-reading
-   * its slots.
+   * The highest boundary each row has stamped, or {@link NO_BOUNDARY}, and
+   * its outcome; see {@link BOUNDARY_MASK}. A row sits in the phase after its
+   * last boundary, so this one byte is what lets a stamp move the row
+   * between the table's counters without re-reading its slots.
    */
-  readonly lastBoundary: Uint8Array;
+  readonly states: Uint8Array;
   readonly first: number;
 
   constructor(first: number, size: number) {
@@ -172,15 +194,14 @@ class RowBlock {
     this.bytes = words(1);
     this.decodeWorkShares = halves();
     this.wireShares = halves();
-    this.tiers = octets();
+    this.unwantedShares = halves();
     this.lanes = octets();
-    this.outcomes = octets();
-    this.lastBoundary = octets();
+    this.states = octets();
   }
 }
 
 /** The columns a block holds per row: the row width less the identity index, which lives outside the blocks. */
-const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 * 2 + 4;
+const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 3 * 2 + 2;
 
 /** The ids the pool gave an entity and the image its rows last carried. */
 interface EntityIds {
@@ -192,14 +213,14 @@ interface EntityIds {
 export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
-   * label + the bytes the wire delivered, all uint32, plus the decode work's
-   * and the wire bytes' uint16 shares, plus four bytes: tier, lane, outcome,
-   * last boundary. Plus
+   * label + the bytes the wire delivered, all uint32, plus the decode work's,
+   * the wire bytes' and the unwanted wait's uint16 shares, plus two bytes:
+   * lane with tier, and last boundary with outcome. Plus
    * the identity index: one int32 per row linking it to the previous row of
    * the same chunk, and two int32 slots per row of capacity in the
    * open-addressing table that finds the newest.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 * 2 + 4 + 4 + 2 * 4;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 3 * 2 + 2 + 4 + 2 * 4;
 
   private readonly strings = new StringPool();
 
@@ -294,7 +315,7 @@ export class RowTable {
     const at = index - block.first;
     const base = at * SLOTS_PER_ROW;
     for (let b = 0; b < SLOTS_PER_ROW; b++) block.stamps[base + b] = UNSET;
-    block.lastBoundary[at] = NO_BOUNDARY;
+    block.states[at] = NO_BOUNDARY | (IN_FLIGHT << OUTCOME_SHIFT);
     this.unstamped++;
     return index;
   }
@@ -322,7 +343,7 @@ export class RowTable {
     stamps[base + QUEUE_START] = queueStartUs;
     stamps[base + WIRE_START] = wireStartUs;
     for (let b = WIRE_START + 1; b < SLOTS_PER_ROW; b++) stamps[base + b] = UNSET;
-    block.lastBoundary[at] = WIRE_START;
+    block.states[at] = WIRE_START | (IN_FLIGHT << OUTCOME_SHIFT);
     this.occupancy[WIRE_START]++;
     return index;
   }
@@ -354,14 +375,13 @@ export class RowTable {
     block.datasetIds[at] = this.lastDataset;
     block.entityIds[at] = entity.entity;
     block.imageIds[at] = entity.image;
-    block.tiers[at] = tier;
-    block.lanes[at] = laneOf(src.lane);
-    block.outcomes[at] = IN_FLIGHT;
+    block.lanes[at] = laneOf(src.lane) | (tier << TIER_SHIFT);
     block.rids[at] = NO_RID;
     block.connectionGenerations[at] = NO_CONNECTION;
     block.bytes[at] = 0;
     block.wireShares[at] = WIRE_SHARE_SCALE;
     block.decodeWorkShares[at] = NO_WORK_SHARE;
+    block.unwantedShares[at] = NO_UNWANTED_SHARE;
 
     const c = at * COORDS_PER_ROW;
     const coords = block.coords;
@@ -539,7 +559,7 @@ export class RowTable {
   stateAt(index: number): RowState {
     const block = this.blockOf(index);
     const at = index - block.first;
-    const outcome = block.outcomes[at];
+    const outcome = block.states[at] >> OUTCOME_SHIFT;
     if (outcome === COMPLETE) return "complete";
     if (outcome === RETIRED) return "retired";
     const base = at * SLOTS_PER_ROW;
@@ -574,7 +594,7 @@ export class RowTable {
     let end = closeUs;
     const block = this.blockOf(index);
     const at = index - block.first;
-    if (block.outcomes[at] !== IN_FLIGHT) {
+    if (block.states[at] >> OUTCOME_SHIFT !== IN_FLIGHT) {
       const base = at * SLOTS_PER_ROW;
       const stamps = block.stamps;
       let last: number | null = null;
@@ -632,10 +652,11 @@ export class RowTable {
     const block = this.blockOf(index);
     const at = index - block.first;
     block.stamps[at * SLOTS_PER_ROW + boundary] = offsetUs;
-    const previous = block.lastBoundary[at];
+    const state = block.states[at];
+    const previous = state & BOUNDARY_MASK;
     if (previous !== NO_BOUNDARY && boundary <= previous) return;
-    block.lastBoundary[at] = boundary;
-    if (block.outcomes[at] !== IN_FLIGHT) return;
+    block.states[at] = (state & ~BOUNDARY_MASK) | boundary;
+    if (state >> OUTCOME_SHIFT !== IN_FLIGHT) return;
     this.leave(previous);
     this.enter(boundary);
   }
@@ -665,6 +686,22 @@ export class RowTable {
     block.decodeWorkShares[at] = Math.round(share * WORK_SHARE_SCALE);
   }
 
+  /**
+   * When the row's chunk joined the wanted set, once both ends of its
+   * `upload` are stamped. A row missing either keeps none.
+   */
+  setWantedAt(index: number, offsetUs: number): void {
+    const block = this.blockOf(index);
+    const at = index - block.first;
+    const base = at * SLOTS_PER_ROW;
+    const startUs = block.stamps[base + UPLOAD_START];
+    const endUs = block.stamps[base + PRESENT_START];
+    if (startUs === UNSET || endUs === UNSET) return;
+    const uploadUs = endUs - startUs;
+    const share = uploadUs > 0 ? Math.min(1, Math.max(0, (offsetUs - startUs) / uploadUs)) : 0;
+    block.unwantedShares[at] = Math.round(share * UNWANTED_SHARE_SCALE);
+  }
+
   stampAt(index: number, boundary: number): number {
     const block = this.blockOf(index);
     return block.stamps[(index - block.first) * SLOTS_PER_ROW + boundary];
@@ -673,20 +710,22 @@ export class RowTable {
   setOutcome(index: number, outcome: RowOutcomeValue): void {
     const block = this.blockOf(index);
     const at = index - block.first;
-    const previous = block.outcomes[at];
+    const state = block.states[at];
+    const previous = state >> OUTCOME_SHIFT;
     if (previous === outcome) return;
-    block.outcomes[at] = outcome;
-    if (previous === IN_FLIGHT) this.leave(block.lastBoundary[at]);
+    const boundary = state & BOUNDARY_MASK;
+    block.states[at] = boundary | (outcome << OUTCOME_SHIFT);
+    if (previous === IN_FLIGHT) this.leave(boundary);
     else if (previous === COMPLETE) this.complete--;
     else this.retired--;
-    if (outcome === IN_FLIGHT) this.enter(block.lastBoundary[at]);
+    if (outcome === IN_FLIGHT) this.enter(boundary);
     else if (outcome === COMPLETE) this.complete++;
     else this.retired++;
   }
 
   outcomeAt(index: number): number {
     const block = this.blockOf(index);
-    return block.outcomes[index - block.first];
+    return block.states[index - block.first] >> OUTCOME_SHIFT;
   }
 
   /**
@@ -751,6 +790,9 @@ export class RowTable {
     }
     const share = block.decodeWorkShares[at];
     const decode = phases.decode;
+    const unwanted = block.unwantedShares[at];
+    const upload = phases.upload;
+    const laneTier = block.lanes[at];
 
     return {
       rid: block.rids[at],
@@ -758,8 +800,8 @@ export class RowTable {
       datasetId: this.strings.get(block.datasetIds[at]),
       entityId: this.strings.get(block.entityIds[at]),
       imageId: this.strings.get(block.imageIds[at]),
-      lane: LANE_NAMES[block.lanes[at]],
-      residencyTier: RESIDENCY_TIERS[block.tiers[at]],
+      lane: LANE_NAMES[laneTier & LANE_MASK],
+      residencyTier: RESIDENCY_TIERS[laneTier >> TIER_SHIFT],
       level,
       t,
       c: ch,
@@ -769,10 +811,13 @@ export class RowTable {
       chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
       bytes: block.bytes[at],
       wireBytes: Math.round((block.wireShares[at] / WIRE_SHARE_SCALE) * block.bytes[at]),
-      outcome: ROW_OUTCOME_NAMES[block.outcomes[at]],
+      outcome: ROW_OUTCOME_NAMES[block.states[at] >> OUTCOME_SHIFT],
       phases,
       ...(share !== NO_WORK_SHARE && decode
         ? { decodeWorkUs: Math.round((share / WORK_SHARE_SCALE) * decode.durationUs) }
+        : {}),
+      ...(unwanted !== NO_UNWANTED_SHARE && upload
+        ? { unwantedUs: Math.round((unwanted / UNWANTED_SHARE_SCALE) * upload.durationUs) }
         : {}),
     };
   }
