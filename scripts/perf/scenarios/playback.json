@@ -1,0 +1,8 @@
+{
+  "description": "play T forward three timepoints, one every 250 ms",
+  "requires": ["time"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "scrub", "axis": "t", "count": 3, "intervalMs": 250 }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "description": "orbit the volume half a turn over 3 s at a person's pace, then tilt it over 1 s",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "steps": [
+    { "kind": "orbit", "theta": 180, "phi": 0, "durationMs": 3000 },
+    { "kind": "orbit", "theta": 0, "phi": 30, "durationMs": 1000 }
+  ]
+}

@@ -126,6 +126,54 @@ def test_scenarios_name_what_they_need() -> None:
     assert needs["channel-solo"] == {"channels"}
     assert needs["channel-toggle"] == {"channels"}
     assert SCENARIOS["orbit"].camera == "arcball"
+    for name in ("fit", "resize", "contrast", "add-remove", "pan-sustained"):
+        assert needs[name] == frozenset(), name
+    assert needs["mode-switch"] == {"volume"}
+    assert needs["orbit-sustained"] == {"volume"}
+    assert needs["playback"] == {"time"}
+    assert SCENARIOS["orbit-sustained"].camera == "arcball"
+
+
+def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
+    kinds = {step["kind"] for scenario in SCENARIOS.values() for step in scenario.steps}
+    assert {"mode", "fit", "resize", "contrast", "add", "remove"} <= kinds
+    paced = {
+        name
+        for name, scenario in SCENARIOS.items()
+        for step in scenario.steps
+        if "durationMs" in step or "intervalMs" in step
+    }
+    assert paced == {"pan-sustained", "orbit-sustained", "playback"}
+
+
+def test_every_scenario_is_short_enough_for_each_step_to_keep_its_run() -> None:
+    # The recorder drops its oldest runs under its memory cap; 13 steps on a
+    # 3-channel volume lost the first step's run before export.
+    for name, scenario in SCENARIOS.items():
+        assert len(scenario.steps) <= 4, name
+
+
+def test_a_scenario_that_adds_a_dataset_names_it_and_never_runs_on_it(tmp_path: Path) -> None:
+    add_remove = SCENARIOS["add-remove"]
+    assert add_remove.adds == ("image",)
+    assert not add_remove.applies_to(CATALOG["image"])
+    assert add_remove.applies_to(CATALOG["volume"])
+    with pytest.raises(perf.PerfError, match="add-remove skips image: the trace driver refuses"):
+        plan(datasets=["image"], scenarios=["add-remove"])
+
+    locations = {"image": "/data/image.ome.zarr"}
+    script = json.loads(perf.script_file(add_remove, locations, tmp_path).read_text(encoding="utf-8"))
+    assert script == {
+        "steps": [{"kind": "add", "url": "/data/image.ome.zarr"}, {"kind": "remove", "url": "/data/image.ome.zarr"}]
+    }
+    # A scenario that names no dataset goes to the CLI as it is.
+    assert perf.script_file(SCENARIOS["orbit"], locations, tmp_path) == SCENARIOS["orbit"].path
+
+
+def test_a_scenario_adding_a_dataset_the_catalog_lacks_is_refused(tmp_path: Path) -> None:
+    scenario = perf.load_scenario(write(tmp_path / "adds.json", {"steps": [{"kind": "add", "url": "dataset:gone"}]}))
+    with pytest.raises(perf.PerfError, match="adds gone, which the catalog lacks"):
+        perf.plan(perf.Selection(datasets=["image"]), CATALOG, {"adds": scenario}, SUITES)
 
 
 @pytest.mark.parametrize(
@@ -162,6 +210,77 @@ def test_the_full_suite_runs_every_dataset_at_ratios_1_and_2() -> None:
         assert {case.ratio for case in cases if case.dataset.name == name} == {1.0, 2.0}, name
     for name in SCENARIOS:
         assert any(case.scenario.name == name for case in cases), name
+
+
+def test_the_full_suite_runs_every_case_read_locally_and_through_the_remote_throttle() -> None:
+    cases, _ = plan(suite="full")
+    assert [case.network for case in cases] == sorted((case.network for case in cases), key=["local", "remote"].index)
+    local = [case.id.removesuffix(".local") for case in cases if case.network == "local"]
+    remote = [case.id.removesuffix(".remote") for case in cases if case.network == "remote"]
+    assert local == remote
+    assert "volume.orbit-sustained.dpr2.remote" in {case.id for case in cases}
+
+
+def test_the_quick_and_gate_suites_leave_the_server_as_it_is() -> None:
+    for suite in ("quick", "gate"):
+        cases, _ = plan(suite=suite)
+        assert {case.network for case in cases} == {None}, suite
+
+
+def test_networks_from_a_flag_replace_the_suites_and_a_given_server_keeps_its_own() -> None:
+    cases, _ = plan(datasets=["image"], scenarios=["cold-open"], ratios=[1.0], networks=["object-store"])
+    assert [case.id for case in cases] == ["image.cold-open.dpr1.object-store"]
+    cases, _ = plan(suite="full", own_server=False)
+    assert {case.network for case in cases} == {None}
+    # A network alone is a condition on the quick suite.
+    cases, _ = plan(networks=["remote"])
+    assert {case.dataset.name for case in cases} == set(SUITES["quick"].datasets)
+    assert {case.network for case in cases} == {"remote"}
+    with pytest.raises(perf.PerfError, match="no network called lan; the networks are local, object-store, remote"):
+        perf.parse_network("lan")
+
+
+def test_a_network_is_for_a_server_the_runner_starts() -> None:
+    with pytest.raises(SystemExit):
+        perf.parse_args(["--network", "remote", "--server", "http://127.0.0.1:9876"])
+    assert perf.parse_args(["--network", "remote", "--port", "9888"]).network == ["remote"]
+
+
+def test_a_network_starts_the_server_under_that_profile_alone(tmp_path: Path, monkeypatch) -> None:
+    started = []
+
+    class Started:
+        def __init__(self, argv, log, cwd, env) -> None:
+            started.append((cwd, env))
+
+        def wait(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(perf, "ProcessTree", Started)
+    monkeypatch.setattr(perf, "_answers", lambda url, timeout: True)
+    monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE", "object-store")
+    monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE_LATENCY_MS", "40")
+    built = perf.Build(tmp_path / "lucida", tmp_path / "lucida-server", tmp_path / "dist")
+    perf.start_server(built, tmp_path, 9888, "remote")
+    perf.start_server(built, tmp_path, 9888)
+    (remote_dir, remote), (plain_dir, plain) = started
+    assert remote["LUCIDA_SOURCE_THROTTLE"] == "remote"
+    assert "LUCIDA_SOURCE_THROTTLE_LATENCY_MS" not in remote
+    assert remote_dir != plain_dir
+    # With no network the caller's own throttle stands.
+    assert plain["LUCIDA_SOURCE_THROTTLE"] == "object-store"
+    assert plain["LUCIDA_SOURCE_THROTTLE_LATENCY_MS"] == "40"
+
+
+def test_a_throttled_server_is_one_the_network_or_the_environment_slows(monkeypatch) -> None:
+    for name in [k for k in perf.os.environ if k.startswith("LUCIDA_SOURCE_THROTTLE")]:
+        monkeypatch.delenv(name)
+    assert perf.throttled("remote") and perf.throttled("object-store")
+    assert not perf.throttled("local") and not perf.throttled(None)
+    monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE", "local")
+    assert not perf.throttled(None)
+    monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE_LATENCY_MS", "50")
+    assert perf.throttled(None)
 
 
 def test_no_selection_is_the_quick_suite() -> None:
@@ -219,6 +338,7 @@ def test_repeats_each_get_a_run_of_their_own() -> None:
         ({"datasets": ["nope"]}, "no dataset called nope; the datasets are large-image"),
         ({"scenarios": ["spin"]}, "no scenario called spin; the scenarios are"),
         ({"suite": "nightly"}, "no suite called nightly; the suites are quick, full"),
+        ({"datasets": ["image"], "networks": ["remote"], "scenarios": ["orbit"]}, "orbit needs volume"),
         ({"datasets": ["image"], "scenarios": ["orbit"]}, "orbit needs volume, so it skips image"),
         ({"repeat": 0, "datasets": ["image"]}, "--repeat is at least 1"),
     ],
@@ -299,9 +419,40 @@ DIAGNOSTIC = {
 }
 
 
+def lag(p95: float, longest: float, dropped: int | None) -> dict:
+    return {
+        "inputs": 40,
+        "inputToFrame": {"samples": 40, "p50Ms": p95 / 2, "p95Ms": p95, "maxMs": p95 * 2},
+        "unanswered": 0,
+        "longTasks": {"count": 1 if longest else 0, "longestMs": longest, "totalMs": longest},
+        "frames": {"presented": 80, "dropped": dropped, "displayIntervalMs": 17.6},
+        "unrecorded": 0,
+        "statement": "",
+    }
+
+
+def page_error(step, count=1, allowed=None) -> dict:
+    return {
+        "interval": "run-2",
+        "atMs": 5.0,
+        "step": step,
+        "source": "console",
+        "message": "x",
+        "count": count,
+        "allowed": allowed,
+    }
+
+
 def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
-    script = [{"kind": "orbit", "runId": "run-2", "verdict": {"kind": "clear"}}, {"kind": "wait", "runId": None}]
-    fields = perf.read_run(run_file(tmp_path, DIAGNOSTIC, script))
+    script = [
+        {"kind": "mode", "to": "3d", "runId": "run-2", "verdict": {"kind": "clear"}, "durationUs": 1_650_400},
+        {"kind": "orbit", "theta": 30, "runId": "run-3", "verdict": {"kind": "stall"}, "lag": lag(28.4, 61, 2)},
+        {"kind": "wait", "runId": None},
+    ]
+    path = run_file(tmp_path, {**DIAGNOSTIC, "lag": lag(28.4, 61, 2)}, script, throttle=REMOTE)
+    run = json.loads(path.read_text(encoding="utf-8"))
+    run["header"]["errors"] = [page_error(None), page_error(2, count=3), page_error(2, allowed="benign")]
+    fields = perf.read_run(write(path, run))
     assert fields["firstFrameMs"] == 212.4
     assert fields["settleMs"] == 1840.0
     assert fields["bytesFetched"] == 12_400_000
@@ -309,9 +460,33 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
     assert fields["chunksEvicted"] == 7
     assert fields["topLimiter"] == "fetch.wire"
     assert fields["verdict"] == "clear"
+    assert fields["sourceThrottle"] == REMOTE
+    assert (fields["inputToFrameP95Ms"], fields["longestTaskMs"], fields["droppedFrames"]) == (28.4, 61, 2)
+    # Every error the allow list does not name, repeats included, wherever it fell.
+    assert fields["errors"] == 4
+    no_lag = {"inputToFrameP95Ms": None, "longestTaskMs": None, "droppedFrames": None}
     assert fields["steps"] == [
-        {"kind": "orbit", "runId": "run-2", "verdict": "clear"},
-        {"kind": "wait", "runId": None, "verdict": None},
+        {
+            "kind": "mode",
+            "label": "mode 3d",
+            "runId": "run-2",
+            "verdict": "clear",
+            "durationMs": 1650.4,
+            **no_lag,
+            "errors": 0,
+        },
+        {
+            "kind": "orbit",
+            "label": "orbit",
+            "runId": "run-3",
+            "verdict": "stall",
+            "durationMs": None,
+            "inputToFrameP95Ms": 28.4,
+            "longestTaskMs": 61,
+            "droppedFrames": 2,
+            "errors": 3,
+        },
+        {"kind": "wait", "label": "wait", "runId": None, "verdict": None, "durationMs": None, **no_lag, "errors": 0},
     ]
 
 
@@ -321,12 +496,21 @@ def test_a_field_the_diagnostic_lacks_is_a_dash_not_a_number(tmp_path: Path) -> 
     row = perf.Row(case, path, tmp_path / "run.txt", exit_code=0, fields=perf.read_run(path))
     cells = dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))
     assert cells["first frame"] == cells["settle"] == cells["fetched"] == cells["top limiter"] == "-"
+    # A run that took no input has no lag reading, not one of zeros.
+    assert cells["input to frame p95"] == cells["longest task"] == cells["dropped"] == "-"
+    assert cells["errors"] == "0"
     assert cells["verdict"] == "unsettled"
     assert cells["run"] == "run.json"
 
 
+def table_rows(markdown: str) -> list[dict[str, str]]:
+    """The table's rows below its header, each by column."""
+    lines = [line for line in markdown.splitlines() if line.startswith("| ") and not line.startswith("| ---")]
+    return [dict(zip(perf.COLUMNS, (c.strip() for c in line.strip()[1:-1].split(" | ")))) for line in lines[1:]]
+
+
 def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path) -> None:
-    path = run_file(tmp_path, DIAGNOSTIC)
+    path = run_file(tmp_path, DIAGNOSTIC, throttle=UNTHROTTLED)
     ok = perf.Row(perf.Case(CATALOG["image"], SCENARIOS["cold-open"], 1.0, 1), path, tmp_path / "a.txt", 0)
     ok.fields = perf.read_run(path)
     (tmp_path / "b.txt").write_text("error: the server refused | the open\n", encoding="utf-8")
@@ -337,7 +521,10 @@ def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path
     markdown = perf.render_markdown([ok, failed], tmp_path)
     lines = markdown.splitlines()
     assert lines[0] == "adapter: nvidia ampere (hardware adapter)"
-    assert "| image | cold-open | 1 | 212 ms | 1,840 ms | 12.4 MB | 96 | 7 | fetch.wire (attributed) | clear |" in markdown
+    assert (
+        "| image | cold-open | 1 | - | 212 ms | 1,840 ms | - | 12.4 MB | 96 | 7 | fetch.wire (attributed) "
+        "| - | - | - | 0 | clear |"
+    ) in markdown
     assert "| error: the server refused \\| the open |" in markdown
     # The header, its rule, and one row per run.
     assert len([line for line in lines if line.startswith("|")]) == 4
@@ -357,10 +544,59 @@ def test_a_throttled_server_says_so_in_the_table_and_the_summary(tmp_path: Path)
     assert perf.render_markdown([row], tmp_path).splitlines()[1] == f"throttle: {REMOTE['summary']}"
     assert perf.summary_json([row], tmp_path, {})["sourceThrottle"] == REMOTE
 
-    unthrottled = run_file(tmp_path, DIAGNOSTIC, throttle={"summary": "source reads unthrottled"})
+    assert dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))["throttle"] == "remote"
+
+    unthrottled = run_file(tmp_path, DIAGNOSTIC, throttle=UNTHROTTLED)
     row.fields = perf.read_run(unthrottled)
-    assert perf.summary_json([row], tmp_path, {})["sourceThrottle"] == {"summary": "source reads unthrottled"}
+    assert perf.summary_json([row], tmp_path, {})["sourceThrottle"] == UNTHROTTLED
     assert not perf.render_markdown([row], tmp_path).splitlines()[1].startswith("throttle:")
+    assert dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))["throttle"] == "-"
+
+
+def test_a_scripted_scenario_shows_a_row_for_each_step_under_its_own(tmp_path: Path) -> None:
+    def run(n: int, first_exported: bool) -> perf.Row:
+        orbit = {"kind": "orbit", "runId": f"run-{n}a"}
+        if first_exported:
+            orbit.update(verdict={"kind": "clear"}, durationUs=4_000_000, lag=lag(26.0, 0, 0))
+        tilt = {
+            "kind": "orbit",
+            "runId": f"run-{n}b",
+            "verdict": {"kind": "clear"},
+            "durationUs": 1_000_000 + n * 200_000,
+            "lag": lag(30.0, 75, 3),
+        }
+        path = run_file(tmp_path, {**DIAGNOSTIC, "lag": lag(30.0, 75, 3)}, [orbit, tilt], throttle=UNTHROTTLED)
+        path = path.rename(tmp_path / f"run-{n}.json")
+        row = perf.Row(perf.Case(CATALOG["volume"], SCENARIOS["orbit-sustained"], 1.0, n), path, path, 0)
+        row.fields = perf.read_run(path)
+        return row
+
+    # The second repeat lost its first step's run to the recorder's cap, so
+    # that step has no verdict, no duration and no lag reading.
+    rows = [run(1, True), run(2, False)]
+    cell, first, second = table_rows(perf.render_markdown(rows, tmp_path))
+    assert cell["scenario"] == "orbit-sustained ×2"
+    assert (cell["input to frame p95"], cell["longest task"], cell["errors"]) == ("30 ms", "75 ms", "0")
+    assert first["scenario"] == "↳ 1 orbit"
+    assert (first["duration"], first["input to frame p95"]) == ("4,000 ms", "26 ms")
+    assert first["verdict"] == "clear ×1, no verdict: run not exported ×1"
+    assert second["scenario"] == "↳ 2 orbit"
+    assert (second["duration"], second["dropped"], second["verdict"]) == ("1,300 ms ±100 ms", "3", "clear")
+    # The columns a step record does not carry stay empty rather than read as absent.
+    assert first["settle"] == first["fetched"] == first["dataset"] == ""
+
+    lines = perf.render_markdown(rows, tmp_path).splitlines()
+    assert lines[-2] == "1 step(s) have no verdict, so the table does not call them clear:"
+    assert lines[-1] == "- volume.orbit-sustained dpr 1 step 1 orbit: no verdict: run not exported"
+
+
+def test_a_step_that_opened_no_run_has_no_verdict_and_is_never_clear() -> None:
+    assert perf.step_outcome({"runId": None, "verdict": None}) == "no verdict: no run opened"
+    assert perf.step_outcome({"runId": "run-1", "verdict": None}) == "no verdict: run not exported"
+    assert perf.step_outcome({"runId": "run-1", "verdict": "clear"}) == "clear"
+
+
+UNTHROTTLED = {"summary": "source reads unthrottled"}
 
 
 def test_the_server_keeps_the_callers_source_throttle(monkeypatch) -> None:
@@ -377,11 +613,13 @@ ADAPTER = "nvidia ampere (hardware adapter)"
 ADAPTER_DIR = "nvidia-ampere-hardware-adapter"
 
 
-def measured(tmp_path: Path, name: str, ratio: float = 1.0, repeat: int = 1, error=None, **fields) -> perf.Row:
+def measured(
+    tmp_path: Path, name: str, ratio: float = 1.0, repeat: int = 1, error=None, network=None, **fields
+) -> perf.Row:
     """A run of `name` ("dataset.scenario") whose diagnostic read as `fields`
-    over a settled default."""
+    over a settled, unthrottled default."""
     dataset, scenario = name.split(".")
-    case = perf.Case(CATALOG[dataset], SCENARIOS[scenario], ratio, repeat)
+    case = perf.Case(CATALOG[dataset], SCENARIOS[scenario], ratio, repeat, network)
     row = perf.Row(case, tmp_path / f"{case.id}.json", tmp_path / f"{case.id}.txt", 0 if error is None else 1, error)
     if error is None:
         row.fields = {
@@ -393,6 +631,7 @@ def measured(tmp_path: Path, name: str, ratio: float = 1.0, repeat: int = 1, err
             "bytesFetched": 5_000_000,
             "chunksFetched": 80,
             "chunksEvicted": 0,
+            "sourceThrottle": UNTHROTTLED,
             **fields,
         }
     return row
@@ -549,6 +788,53 @@ def test_knobs_reach_the_trace_and_a_baseline_under_other_knobs_says_so(tmp_path
     root = saved(tmp_path, [measured(tmp_path, "image.cold-open")])
     _, comparison = compared([measured(tmp_path, "image.cold-open")], root, ("max-fetches=1",))
     assert "dpr 1: knobs differ: these runs --max-fetches 1, the baseline none" in comparison.notes
+
+
+def test_a_throttled_cell_is_kept_and_compared_apart_from_an_unthrottled_one(tmp_path: Path) -> None:
+    local = measured(tmp_path, "volume.cold-open", network="local")
+    remote = measured(tmp_path, "volume.cold-open", network="remote", settleMs=6000.0, sourceThrottle=REMOTE)
+    root = saved(tmp_path, [local, remote])
+    cells = json.loads((root / ADAPTER_DIR / "dpr1.json").read_text(encoding="utf-8"))["cells"]
+    assert sorted(cells) == ["volume.cold-open", "volume.cold-open@remote"]
+    assert cells["volume.cold-open"]["sourceThrottle"] is None
+    assert cells["volume.cold-open@remote"]["sourceThrottle"] == REMOTE["settings"]
+
+    # Slow under the throttle, as the throttled baseline was: no regression.
+    later = [measured(tmp_path, "volume.cold-open", network="local"), remote]
+    cells_now, comparison = compared(later, root)
+    assert [comparison.describe(cell) for cell in cells_now] == ["within noise", "within noise"]
+    rows = table_rows(perf.render_markdown(later, tmp_path, comparison))
+    assert [row["throttle"] for row in rows] == ["-", "remote"]
+
+
+def test_a_cell_whose_throttle_differs_from_its_baseline_entry_is_not_compared(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "volume.cold-open", sourceThrottle=REMOTE)])
+    faster = {**REMOTE, "settings": {**REMOTE["settings"], "latency_ms": 20}}
+    later = measured(tmp_path, "volume.cold-open", settleMs=9000.0, sourceThrottle=faster)
+    [cell], comparison = compared([later], root)
+    assert cell.key == "volume.cold-open@remote"
+    assert comparison.found(cell) is None and not comparison.regressed(cell)
+    assert comparison.notes[-1] == (
+        "dpr 1: not compared, because the source throttle differs from the baseline's: volume.cold-open@remote"
+    )
+
+
+def test_runs_that_do_not_say_whether_they_were_throttled_are_never_kept_or_compared(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "image.cold-open")])
+    unsaid = measured(tmp_path, "image.cold-open", sourceThrottle=None)
+    notes = perf.save_baseline(perf.group_cells([unsaid]), root, {}, ())
+    assert notes == [
+        "not saved, because the runs do not say whether sources were throttled: image.cold-open@unrecorded dpr 1"
+    ]
+    [cell], comparison = compared([unsaid], root)
+    assert comparison.found(cell) is None
+
+
+def test_a_failed_throttled_run_keeps_the_network_it_asked_for(tmp_path: Path) -> None:
+    [cell] = perf.group_cells([measured(tmp_path, "volume.cold-open", network="remote", error="timed out")])
+    assert cell.key == "volume.cold-open@remote"
+    [cell] = perf.group_cells([measured(tmp_path, "volume.cold-open", network="local", error="timed out")])
+    assert cell.key == "volume.cold-open"
 
 
 if __name__ == "__main__":

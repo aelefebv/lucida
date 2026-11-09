@@ -1,0 +1,8 @@
+{
+  "description": "shrink the viewport to 1000x700 CSS pixels, then grow it back to the default 1440x900",
+  "camera": "slice",
+  "steps": [
+    { "kind": "resize", "width": 1000, "height": 700 },
+    { "kind": "resize", "width": 1440, "height": 900 }
+  ]
+}

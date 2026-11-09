@@ -3,12 +3,14 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Run `lucida trace` over a matrix of datasets, scenarios and device pixel
-ratios, and print one table of what each run's diagnostic says.
+"""Run `lucida trace` over a matrix of datasets, scenarios, device pixel
+ratios and source throttles, and print one table of what each run's
+diagnostic says.
 
     uv run scripts/perf.py                          # the quick suite
     uv run scripts/perf.py --suite full
     uv run scripts/perf.py --dataset volume --scenario orbit,z-scrub --ratio 2
+    uv run scripts/perf.py --network remote
     uv run scripts/perf.py --list
     uv run scripts/perf.py --repeat 3 --save-baseline
     uv run scripts/perf.py --suite gate --gate --cli <lucida> --server <url>
@@ -20,9 +22,10 @@ Ctrl-C included. `--cli` and `--server` hand it a built CLI and a running
 server instead. The catalog, scenarios and suites live in `scripts/perf/`;
 `docs/perf.md` describes them.
 
-Every number in the table is a field of a run's diagnostic. This script
-selects and formats; it derives nothing beyond the median and spread across
-repeats and the change against a baseline.
+Every number in the table is a field of a run's diagnostic or its step
+records. This script selects and formats; it derives nothing beyond the
+median and spread across repeats, a count of the page's errors, and the
+change against a baseline.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -60,6 +63,11 @@ TRAITS = ("volume", "time", "channels", "collection")
 CAMERAS = ("slice", "arcball")
 SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "steps"}
 DEFAULT_SUITE = "quick"
+# The server's source throttle profiles; `local` reads at the source's own speed.
+NETWORKS = ("local", "object-store", "remote")
+# How an add or remove step names a catalog dataset, whose location only the
+# runner knows.
+DATASET_REF = "dataset:"
 
 
 class PerfError(Exception):
@@ -93,8 +101,23 @@ class Scenario:
     width: int | None = None
     height: int | None = None
 
+    @property
+    def adds(self) -> tuple[str, ...]:
+        """The catalog datasets its add and remove steps name."""
+        urls = [step.get("url") for step in self.steps if step.get("kind") in ("add", "remove")]
+        names = [url[len(DATASET_REF) :] for url in urls if isinstance(url, str) and url.startswith(DATASET_REF)]
+        return tuple(dict.fromkeys(names))
+
+    def why_not(self, dataset: Dataset) -> str | None:
+        """Why it does not run on `dataset`, or None when it does."""
+        if not self.requires <= dataset.traits:
+            return f"needs {', '.join(sorted(self.requires))}"
+        if dataset.name in self.adds:
+            return "the trace driver refuses a script that adds the dataset the run opens"
+        return None
+
     def applies_to(self, dataset: Dataset) -> bool:
-        return self.requires <= dataset.traits
+        return self.why_not(dataset) is None
 
 
 @dataclass(frozen=True)
@@ -104,6 +127,8 @@ class Suite:
     datasets: tuple[str, ...]
     scenarios: tuple[str, ...]
     ratios: tuple[float, ...]
+    # Source throttle profiles; none leaves the server's sources as the caller's environment sets them.
+    networks: tuple[str, ...] = ()
 
 
 def _read_json(path: Path) -> Any:
@@ -220,6 +245,7 @@ def load_suites(path: Path, catalog: dict[str, Dataset], scenarios: dict[str, Sc
             datasets=_names(where, entry.get("datasets"), catalog, "dataset"),
             scenarios=_names(where, entry.get("scenarios"), scenarios, "scenario"),
             ratios=tuple(parse_ratio(str(r)) for r in entry.get("ratios", [1, 2])),
+            networks=tuple(parse_network(str(n)) for n in entry.get("networks", [])),
         )
     return suites
 
@@ -234,6 +260,12 @@ def parse_ratio(text: str) -> float:
     return ratio
 
 
+def parse_network(text: str) -> str:
+    if text not in NETWORKS:
+        raise PerfError(f"no network called {text}; the networks are {', '.join(NETWORKS)}")
+    return text
+
+
 # ---------------------------------------------------------------------------
 # The matrix
 # ---------------------------------------------------------------------------
@@ -245,11 +277,15 @@ class Case:
     scenario: Scenario
     ratio: float
     repeat: int
+    # The source throttle profile the runner starts its server under; None
+    # leaves the server as it is.
+    network: str | None = None
 
     @property
     def id(self) -> str:
+        network = f".{self.network}" if self.network else ""
         suffix = f".{self.repeat}" if self.repeat > 1 else ""
-        return f"{self.dataset.name}.{self.scenario.name}.dpr{format_ratio(self.ratio)}{suffix}"
+        return f"{self.dataset.name}.{self.scenario.name}.dpr{format_ratio(self.ratio)}{network}{suffix}"
 
 
 @dataclass
@@ -258,7 +294,22 @@ class Selection:
     datasets: list[str] = field(default_factory=list)
     scenarios: list[str] = field(default_factory=list)
     ratios: list[float] = field(default_factory=list)
+    networks: list[str] = field(default_factory=list)
     repeat: int = 1
+    # False when the runs drive a server the runner did not start, whose
+    # throttle it cannot set.
+    own_server: bool = True
+
+
+def chosen_suite(selection: Selection, suites: dict[str, Suite]) -> Suite | None:
+    """The suite that fills the dimensions the flags leave open: the named
+    one, or the quick suite when no flag chooses what to run. A network is a
+    condition to run it under, like a knob, so it alone leaves the quick suite."""
+    explicit = selection.datasets or selection.scenarios or selection.ratios
+    suite_name = selection.suite or (None if explicit else DEFAULT_SUITE)
+    if suite_name is not None and suite_name not in suites:
+        raise PerfError(f"no suite called {suite_name}; the suites are {', '.join(suites)}")
+    return suites.get(suite_name) if suite_name else None
 
 
 def plan(
@@ -271,14 +322,11 @@ def plan(
     the scenario does not apply.
 
     A suite supplies each dimension the flags leave open. With no suite and no
-    flags it is the quick suite; flags alone leave the rest at every scenario
-    and ratios 1 and 2.
+    flags it is the quick suite; flags alone leave the rest at every scenario,
+    ratios 1 and 2, and the server as the caller's environment sets it. The
+    network is the outermost dimension, so one server at a time serves its runs.
     """
-    explicit = selection.datasets or selection.scenarios or selection.ratios
-    suite_name = selection.suite or (None if explicit else DEFAULT_SUITE)
-    if suite_name is not None and suite_name not in suites:
-        raise PerfError(f"no suite called {suite_name}; the suites are {', '.join(suites)}")
-    suite = suites.get(suite_name) if suite_name else None
+    suite = chosen_suite(selection, suites)
     unknown_names("dataset", selection.datasets, catalog)
     unknown_names("scenario", selection.scenarios, scenarios)
     if selection.repeat < 1:
@@ -287,6 +335,9 @@ def plan(
     dataset_names = selection.datasets or (list(suite.datasets) if suite else list(catalog))
     scenario_names = selection.scenarios or (list(suite.scenarios) if suite else list(scenarios))
     ratios = selection.ratios or (list(suite.ratios) if suite else [1.0, 2.0])
+    networks: list[str | None] = list(selection.networks or (suite.networks if suite else ()))
+    if not selection.own_server or not networks:
+        networks = [None]
 
     cases: list[Case] = []
     skipped: list[tuple[str, str]] = []
@@ -294,6 +345,11 @@ def plan(
         dataset = catalog[dataset_name]
         for scenario_name in dict.fromkeys(scenario_names):
             scenario = scenarios[scenario_name]
+            if missing := [name for name in scenario.adds if name not in catalog]:
+                raise PerfError(
+                    f"scenario {scenario_name} adds {', '.join(missing)}, which the catalog lacks; "
+                    f"the datasets are {', '.join(catalog)}"
+                )
             if not scenario.applies_to(dataset):
                 skipped.append((dataset_name, scenario_name))
                 continue
@@ -301,17 +357,22 @@ def plan(
                 for repeat in range(1, selection.repeat + 1):
                     cases.append(Case(dataset, scenario, ratio, repeat))
     if not cases:
-        raise PerfError("the selection holds no run: " + describe_skipped(skipped, scenarios))
-    return cases, skipped
+        raise PerfError("the selection holds no run: " + describe_skipped(skipped, scenarios, catalog))
+    return [replace(case, network=n) for n in dict.fromkeys(networks) for case in cases], skipped
 
 
-def describe_skipped(skipped: list[tuple[str, str]], scenarios: dict[str, Scenario]) -> str:
-    by_scenario: dict[str, list[str]] = {}
+def describe_skipped(
+    skipped: list[tuple[str, str]], scenarios: dict[str, Scenario], catalog: dict[str, Dataset]
+) -> str:
+    by_reason: dict[tuple[str, str], list[str]] = {}
     for dataset_name, scenario_name in skipped:
-        by_scenario.setdefault(scenario_name, []).append(dataset_name)
+        reason = scenarios[scenario_name].why_not(catalog[dataset_name]) or ""
+        by_reason.setdefault((scenario_name, reason), []).append(dataset_name)
     return "; ".join(
-        f"{name} needs {', '.join(sorted(scenarios[name].requires))}, so it skips {', '.join(datasets)}"
-        for name, datasets in by_scenario.items()
+        f"{name} {reason}, so it skips {', '.join(datasets)}"
+        if reason.startswith("needs ")
+        else f"{name} skips {', '.join(datasets)}: {reason}"
+        for (name, reason), datasets in by_reason.items()
     )
 
 
@@ -747,20 +808,40 @@ def existing_server(url: str) -> str:
     return url
 
 
-def start_server(built: Build, out_dir: Path, port: int) -> tuple[ProcessTree, str]:
+def throttled(network: str | None) -> bool:
+    """Whether the server the runner starts for `network` reads its sources
+    through a throttle: a profile other than local, or with none named, a
+    throttle the caller's environment sets."""
+    if network is not None:
+        return network != "local"
+    settings = [v for k, v in os.environ.items() if k.startswith("LUCIDA_SOURCE_THROTTLE")]
+    return any(v not in ("", "0", "local") for v in settings)
+
+
+def start_server(
+    built: Build, out_dir: Path, port: int, network: str | None = None, log_name: str = "server.log"
+) -> tuple[ProcessTree, str]:
+    """Start the server, under the source throttle profile `network` when one
+    is named. Each network's server has a directory and database of its own."""
     assert built.server is not None and built.web_dist is not None
     # The server keeps its database in its working directory.
-    server_dir = out_dir / "server"
+    server_dir = out_dir / (f"server-{network}" if network else "server")
     server_dir.mkdir(parents=True, exist_ok=True)
+    # A generated coarse tier cached by an earlier server would make a
+    # single-level dataset's first open look warm.
+    shutil.rmtree(server_dir / "generated-coarse", ignore_errors=True)
     env = _scrubbed_env(
         LUCIDA_BIND=f"127.0.0.1:{port}",
         LUCIDA_AUTH="disabled",
         LUCIDA_WEB_DIST=str(built.web_dist),
-        # A generated coarse tier cached by an earlier invocation would make
-        # a single-level dataset's first open look warm.
         LUCIDA_GENERATED_COARSE_CACHE_DIR=str(server_dir / "generated-coarse"),
     )
-    tree = ProcessTree([str(built.server)], server_dir / "server.log", server_dir, env)
+    if network:
+        # The profile alone: a caller's latency or bandwidth would quietly
+        # turn it into another throttle.
+        env = {k: v for k, v in env.items() if not k.startswith("LUCIDA_SOURCE_THROTTLE")}
+        env["LUCIDA_SOURCE_THROTTLE"] = network
+    tree = ProcessTree([str(built.server)], server_dir / log_name, server_dir, env)
     url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -806,11 +887,27 @@ def _first_error_line(log: Path) -> str:
     return lines[-1] if lines else "no output"
 
 
+def script_file(scenario: Scenario, locations: dict[str, str], runs_dir: Path) -> Path:
+    """The file `lucida trace --script` reads: the scenario's own, or, when its
+    steps name catalog datasets, a copy with each one's location put in."""
+    if not scenario.adds:
+        return scenario.path
+    steps = [
+        {**step, "url": locations[step["url"][len(DATASET_REF) :]]}
+        if step.get("kind") in ("add", "remove") and str(step.get("url", "")).startswith(DATASET_REF)
+        else step
+        for step in scenario.steps
+    ]
+    path = runs_dir / f"{scenario.name}.script.json"
+    path.write_text(json.dumps({"steps": steps}, indent=2), encoding="utf-8")
+    return path
+
+
 def run_case(
     case: Case,
     built: Build,
     server_url: str,
-    location: str,
+    locations: dict[str, str],
     out_dir: Path,
     timeout: int,
     stamp: str,
@@ -853,7 +950,7 @@ def run_case(
         "--workspace",
         workspace,
         "trace",
-        location,
+        locations[case.dataset.name],
         "--camera",
         scenario.camera,
         "--device-pixel-ratio",
@@ -875,7 +972,7 @@ def run_case(
     if scenario.steps:
         # A scenario file is a script file: the CLI reads its steps and
         # ignores the keys around them.
-        argv += ["--script", str(scenario.path)]
+        argv += ["--script", str(script_file(scenario, locations, runs_dir))]
     trace = ProcessTree(argv, row.log, REPO, env)
     try:
         # The CLI has its own deadline per wait; this one only catches a hang.
@@ -896,8 +993,34 @@ def _metric(signals: list[dict[str, Any]] | None, name: str) -> Any:
     return None
 
 
+def _lag(lag: Any) -> dict[str, Any]:
+    """Input to frame at p95, the longest main-thread task and the frames
+    dropped, from a lag reading; each None when the run took no input."""
+    lag = lag or {}
+    return {
+        "inputToFrameP95Ms": (lag.get("inputToFrame") or {}).get("p95Ms"),
+        "longestTaskMs": (lag.get("longTasks") or {}).get("longestMs"),
+        "droppedFrames": (lag.get("frames") or {}).get("dropped"),
+    }
+
+
+def _errors(errors: list[dict[str, Any]], step: int | None = None) -> int:
+    """The errors the page raised that its allow list does not name, repeats
+    included: in script step `step`, counted from 1, or anywhere in the trace."""
+    return sum(
+        error.get("count") or 1
+        for error in errors
+        if not error.get("allowed") and (step is None or error.get("step") == step)
+    )
+
+
+def _step_label(step: dict[str, Any]) -> str:
+    kind = step.get("kind") or "?"
+    return f"{kind} {step['to']}" if kind == "mode" and step.get("to") else kind
+
+
 def read_run(path: Path) -> dict[str, Any]:
-    """The table's fields, as the run file's diagnostic states them."""
+    """The table's fields, as the run file's diagnostic and its step records state them."""
     run_file = _read_json(path)
     diagnostic = run_file.get("diagnostic") or {}
     header = run_file.get("header") or {}
@@ -907,6 +1030,7 @@ def read_run(path: Path) -> dict[str, Any]:
     run = diagnostic.get("run") or {}
     verdict = diagnostic.get("verdict") or {}
     steps = (header.get("script") or {}).get("steps") or []
+    errors = header.get("errors") or []
     return {
         "runId": diagnostic.get("runId"),
         "verdict": verdict.get("kind"),
@@ -921,13 +1045,19 @@ def read_run(path: Path) -> dict[str, Any]:
         "adapter": run.get("gpu"),
         "adapterKind": (run.get("adapterKind") or {}).get("label"),
         "sourceThrottle": header.get("sourceThrottle"),
+        **_lag(diagnostic.get("lag")),
+        "errors": _errors(errors),
         "steps": [
             {
                 "kind": step.get("kind"),
+                "label": _step_label(step),
                 "runId": step.get("runId"),
                 "verdict": (step.get("verdict") or {}).get("kind"),
+                "durationMs": step["durationUs"] / 1000 if isinstance(step.get("durationUs"), (int, float)) else None,
+                **_lag(step.get("lag")),
+                "errors": _errors(errors, index),
             }
-            for step in steps
+            for index, step in enumerate(steps, start=1)
         ],
     }
 
@@ -941,14 +1071,19 @@ COLUMNS = [
     "dataset",
     "scenario",
     "dpr",
+    "throttle",
     "first frame",
     "settle",
+    "duration",
     "fetched",
     "chunks",
     "evicted",
     "top limiter",
+    "input to frame p95",
+    "longest task",
+    "dropped",
+    "errors",
     "verdict",
-    "steps",
     "run",
 ]
 
@@ -978,11 +1113,24 @@ def _limiter(fields: dict[str, Any]) -> str:
     return f"{text} ({fields['confidence']})" if fields.get("confidence") else text
 
 
-def _steps(fields: dict[str, Any]) -> str:
-    steps = fields.get("steps") or []
-    if not steps:
-        return DASH
-    return " ".join(f"{step['kind']}:{step['verdict'] or 'no run'}" for step in steps)
+def step_outcome(step: dict[str, Any]) -> str:
+    """A step's verdict, or why it has none. A step without one is never
+    clear: its run may have been the one that stalled."""
+    if step.get("verdict"):
+        return step["verdict"]
+    # The recorder drops its oldest runs to stay under its memory cap, so a
+    # long script can lose an early step's run before the export reads it.
+    return "no verdict: run not exported" if step.get("runId") else "no verdict: no run opened"
+
+
+# Numbers the table shows and the comparison does not judge, by column: no
+# allowance has been measured for their noise.
+READINGS = {
+    "input to frame p95": ("inputToFrameP95Ms", _ms),
+    "longest task": ("longestTaskMs", _ms),
+    "dropped": ("droppedFrames", _count),
+    "errors": ("errors", _count),
+}
 
 
 @dataclass(frozen=True)
@@ -1035,26 +1183,66 @@ class Stats:
         return cls(len(values), statistics.median(values), min(values), max(values))
 
 
+UNRECORDED = "unrecorded"
+
+
+def throttle_of(fields: dict[str, Any]) -> Any:
+    """The source throttle a run's server reported: its settings, None when it
+    read sources unthrottled, or UNRECORDED when the run file does not say."""
+    record = fields.get("sourceThrottle")
+    return record.get("settings") if isinstance(record, dict) else UNRECORDED
+
+
+def _numbers(records: list[dict[str, Any]], name: str) -> Stats | None:
+    return Stats.of([r[name] for r in records if isinstance(r.get(name), (int, float))])
+
 
 @dataclass
 class Cell:
-    """The runs of one dataset, scenario and ratio: a row of the table, and
-    what a baseline keeps and compares, under `key`, for its adapter and ratio."""
+    """The runs of one dataset, scenario, ratio and network: a row of the
+    table, and what a baseline keeps and compares, under `key`, for its
+    adapter and ratio."""
 
     dataset: str
     scenario: str
     ratio: float
+    network: str | None
     rows: list[Row]
 
     @property
     def key(self) -> str:
-        return f"{self.dataset}.{self.scenario}"
+        # A throttled cell is a cell of its own, so a baseline never compares
+        # it with the same cell read at the source's own speed.
+        mark = self.throttle_mark()
+        return f"{self.dataset}.{self.scenario}" + (f"@{mark}" if mark else "")
+
+    def throttle(self) -> Any:
+        """The throttle every measured run reported, or UNRECORDED when one
+        did not say or they disagree."""
+        reported = [throttle_of(f) for f in self.measured()]
+        return reported[0] if reported and all(t == reported[0] for t in reported) else UNRECORDED
+
+    def throttle_mark(self) -> str:
+        """The throttle's name, empty when sources read unthrottled: the
+        profile the runs reported, custom for values of no profile, or the
+        network asked for when no run got far enough to report one."""
+        if not self.measured():
+            return "" if self.network in (None, "local") else self.network
+        settings = self.throttle()
+        if settings is None:
+            return ""
+        return UNRECORDED if settings == UNRECORDED else settings.get("profile") or "custom"
 
     def measured(self) -> list[dict[str, Any]]:
         return [row.fields for row in self.rows if row.error is None]
 
     def stats(self, name: str) -> Stats | None:
-        return Stats.of([f[name] for f in self.measured() if isinstance(f.get(name), (int, float))])
+        return _numbers(self.measured(), name)
+
+    def steps(self) -> list[list[dict[str, Any]]]:
+        """Each script step across the measured repeats, in step order."""
+        records = [f.get("steps") or [] for f in self.measured()]
+        return [[steps[i] for steps in records if i < len(steps)] for i in range(max(map(len, records), default=0))]
 
     def outcomes(self) -> list[str]:
         return ["error" if row.error is not None else row.fields.get("verdict") or "no verdict" for row in self.rows]
@@ -1073,11 +1261,11 @@ def adapter_of(fields: dict[str, Any]) -> str | None:
 
 
 def group_cells(rows: list[Row]) -> list[Cell]:
-    """The rows gathered by dataset, scenario and ratio, in the order each first ran."""
-    cells: dict[tuple[str, str, float], Cell] = {}
+    """The rows gathered by dataset, scenario, ratio and network, in the order each first ran."""
+    cells: dict[tuple[str, str, float, str | None], Cell] = {}
     for row in rows:
         case = row.case
-        key = (case.dataset.name, case.scenario.name, case.ratio)
+        key = (case.dataset.name, case.scenario.name, case.ratio, case.network)
         cells.setdefault(key, Cell(*key, [])).rows.append(row)
     return list(cells.values())
 
@@ -1100,21 +1288,54 @@ def _stat(stats: Stats | None, fmt: Callable[[Any], str]) -> str:
 
 
 def table_cells(cell: Cell, out_dir: Path) -> list[str]:
+    """The cell's row: the run its file is about, which for a scripted
+    scenario is the run its last step opened."""
     runs = len(cell.rows)
     first = cell.rows[0]
     run = (first.run_file if first.run_file.exists() else first.log).relative_to(out_dir).as_posix()
     measured = cell.measured()
     verdicts = [f"error: {row.error}" if row.error else row.fields.get("verdict") or DASH for row in cell.rows]
-    return [
-        cell.dataset,
-        cell.scenario + (f" ×{runs}" if runs > 1 else ""),
-        format_ratio(cell.ratio),
-        *[_stat(cell.stats(m.field), m.format) for m in METRICS],
-        _distinct([_limiter(f) for f in measured]) if measured else DASH,
-        _distinct(verdicts),
-        _distinct([_steps(f) for f in measured]) if measured else DASH,
-        run + (f" +{runs - 1}" if runs > 1 else ""),
-    ]
+    texts = {
+        "dataset": cell.dataset,
+        "scenario": cell.scenario + (f" ×{runs}" if runs > 1 else ""),
+        "dpr": format_ratio(cell.ratio),
+        "throttle": cell.throttle_mark() or DASH,
+        "duration": DASH,
+        **{m.label: _stat(cell.stats(m.field), m.format) for m in METRICS},
+        "top limiter": _distinct([_limiter(f) for f in measured]) if measured else DASH,
+        **{label: _stat(cell.stats(name), fmt) for label, (name, fmt) in READINGS.items()},
+        "verdict": _distinct(verdicts),
+        "run": run + (f" +{runs - 1}" if runs > 1 else ""),
+    }
+    return [texts[column] for column in COLUMNS]
+
+
+def step_cells(cell: Cell) -> list[list[str]]:
+    """A row under the cell's for each script step, from the step's record:
+    how long its run lasted, its lag, its errors and its verdict. The columns
+    a step record does not carry stay empty."""
+    rows = []
+    for index, steps in enumerate(cell.steps(), start=1):
+        texts = {
+            "scenario": f"↳ {index} {steps[0].get('label') or steps[0].get('kind')}",
+            "duration": _stat(_numbers(steps, "durationMs"), _ms),
+            **{label: _stat(_numbers(steps, name), fmt) for label, (name, fmt) in READINGS.items()},
+            "verdict": _distinct([step_outcome(step) for step in steps]),
+        }
+        rows.append([texts.get(column, "") for column in COLUMNS])
+    return rows
+
+
+def unjudged_steps(cells: list[Cell]) -> list[str]:
+    """Each script step some run of a cell left without a verdict."""
+    found = []
+    for cell in cells:
+        for index, steps in enumerate(cell.steps(), start=1):
+            missing = [outcome for step in steps if (outcome := step_outcome(step)).startswith("no verdict")]
+            if missing:
+                label = steps[0].get("label") or steps[0].get("kind")
+                found.append(f"{cell.key} dpr {format_ratio(cell.ratio)} step {index} {label}: {_distinct(missing)}")
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -1243,6 +1464,10 @@ def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison
 
     Speed on one adapter says nothing about speed on another, so a baseline
     is found by adapter and a file recorded on another adapter is refused.
+    Nor does speed under one source throttle say anything about speed under
+    another, so a cell whose throttle differs from its baseline's is not
+    compared; an entry saved before runs recorded a throttle was read
+    unthrottled.
     """
     comparison = Comparison(root)
     adapters = {a for cell in cells if (a := cell.adapter())}
@@ -1279,12 +1504,22 @@ def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison
             continue
         comparison.compared = True
         entries = []
+        throttled_otherwise = []
         for cell in cells:
             entry = baseline["cells"].get(cell.key) if cell.ratio == ratio else None
-            if entry is not None:
-                entries.append(entry)
-                comparison.changes[(cell.key, ratio)] = compare_records(entry, cell.record())
+            if entry is None:
+                continue
+            if cell.measured() and cell.throttle() != entry.get("sourceThrottle"):
+                throttled_otherwise.append(cell.key)
+                continue
+            entries.append(entry)
+            comparison.changes[(cell.key, ratio)] = compare_records(entry, cell.record())
         comparison.notes.append(f"dpr {dpr}: baseline {path}, from {_provenance(entries) or 'no matching cell'}")
+        if throttled_otherwise:
+            comparison.notes.append(
+                f"dpr {dpr}: not compared, because the source throttle differs from the baseline's: "
+                + ", ".join(throttled_otherwise)
+            )
         theirs = ", ".join(sorted({_knobs_text(e.get("knobs")) for e in entries} - {_knobs_text(knobs)}))
         if theirs:
             comparison.notes.append(f"dpr {dpr}: knobs differ: these runs {_knobs_text(knobs)}, the baseline {theirs}")
@@ -1294,14 +1529,19 @@ def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison
 def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tuple[str, ...]) -> list[str]:
     """Write each clean cell into the baseline of its adapter and ratio,
     replacing that cell and keeping the rest. A cell with a failed run is
-    left out, so a broken run never becomes the reference."""
+    left out, so a broken run never becomes the reference, and so is one
+    whose runs do not say whether its sources were throttled."""
     notes: list[str] = []
     groups: dict[tuple[str, float], list[Cell]] = {}
     left_out = []
+    unthrottled_unknown = []
     for cell in cells:
         adapter = cell.adapter()
         if adapter is None or any(row.error is not None for row in cell.rows):
             left_out.append(f"{cell.key} dpr {format_ratio(cell.ratio)}")
+            continue
+        if cell.throttle() == UNRECORDED:
+            unthrottled_unknown.append(f"{cell.key} dpr {format_ratio(cell.ratio)}")
             continue
         groups.setdefault((adapter, cell.ratio), []).append(cell)
     for (adapter, ratio), group in groups.items():
@@ -1316,6 +1556,7 @@ def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tu
                 "dirty": meta.get("dirty"),
                 "savedAt": meta.get("startedAt"),
                 "knobs": list(knobs),
+                "sourceThrottle": cell.throttle(),
             }
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(path.name + ".partial")
@@ -1324,6 +1565,10 @@ def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tu
         notes.append(f"saved {len(group)} cells as the dpr {format_ratio(ratio)} baseline: {path}")
     if left_out:
         notes.append(f"not saved, because a run failed: {', '.join(left_out)}")
+    if unthrottled_unknown:
+        notes.append(
+            f"not saved, because the runs do not say whether sources were throttled: {', '.join(unthrottled_unknown)}"
+        )
     return notes
 
 
@@ -1342,7 +1587,7 @@ def render_markdown(rows: list[Row], out_dir: Path, comparison: Comparison | Non
         {r.fields["sourceThrottle"]["summary"] for r in rows if (r.fields.get("sourceThrottle") or {}).get("settings")}
     )
     if throttled:
-        lines.append(f"throttle: {', '.join(throttled)}")
+        lines.append(f"throttle: {'; '.join(throttled)}")
     lines += comparison.notes if comparison else []
     compared = comparison if comparison and comparison.compared else None
     columns = COLUMNS + ([BASELINE_COLUMN] if compared else [])
@@ -1353,6 +1598,13 @@ def render_markdown(rows: list[Row], out_dir: Path, comparison: Comparison | Non
     for cell in cells:
         texts = table_cells(cell, out_dir) + ([compared.describe(cell)] if compared else [])
         lines.append("| " + " | ".join(cell_text(t) for t in texts) + " |")
+        for step in step_cells(cell):
+            texts = step + ([""] if compared else [])
+            lines.append("| " + " | ".join(cell_text(t) for t in texts) + " |")
+    unjudged = unjudged_steps(cells)
+    if unjudged:
+        lines += ["", f"{len(unjudged)} step(s) have no verdict, so the table does not call them clear:"]
+        lines += [f"- {text}" for text in unjudged]
     return "\n".join(lines) + "\n"
 
 
@@ -1380,6 +1632,7 @@ def summary_json(
                 "dataset": row.case.dataset.name,
                 "scenario": row.case.scenario.name,
                 "ratio": row.case.ratio,
+                "network": row.case.network,
                 "repeat": row.case.repeat,
                 "runFile": row.run_file.relative_to(out_dir).as_posix() if row.run_file.exists() else None,
                 "log": row.log.relative_to(out_dir).as_posix(),
@@ -1394,6 +1647,8 @@ def summary_json(
                 "dataset": cell.dataset,
                 "scenario": cell.scenario,
                 "ratio": cell.ratio,
+                "network": cell.network,
+                "key": cell.key,
                 **cell.record(),
                 "vsBaseline": None
                 if comparison is None or (changes := comparison.found(cell)) is None
@@ -1483,6 +1738,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     server.add_argument(
         "--server", metavar="URL", help="drive this running server instead of building and starting one"
     )
+    parser.add_argument(
+        "--network",
+        action="append",
+        help=f"start the server under each of these source throttle profiles in turn, comma-separated or "
+        f"repeated: {', '.join(NETWORKS)}",
+    )
     parser.add_argument("--cli", type=Path, metavar="PATH", help="run this built lucida CLI instead of building one")
     parser.add_argument(
         "--gate", action="store_true", help="fail a run that stalls or never settles, as `lucida trace --gate` does"
@@ -1490,7 +1751,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bundle", action="store_true", help="also write each run's bundle beside its run file")
     parser.add_argument("--list", action="store_true", help="list datasets, scenarios and suites, then exit")
     parser.add_argument("--dry-run", action="store_true", help="print the runs the selection makes, then exit")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.network and args.server:
+        parser.error("--network sets the throttle of a server this script starts; a --server sets its own")
+    return args
 
 
 def _interrupt(signum: int, frame: Any) -> None:
@@ -1527,12 +1791,20 @@ def main(argv: list[str]) -> int:
         datasets=_split(args.dataset),
         scenarios=_split(args.scenario),
         ratios=[parse_ratio(r) for r in _split(args.ratio)],
+        networks=[parse_network(n) for n in _split(args.network)],
         repeat=args.repeat,
+        own_server=args.server is None,
     )
     knobs = tuple(parse_knob(k) for k in _split(args.knob))
     cases, skipped = plan(selection, catalog, scenarios, suites)
+    suite = chosen_suite(selection, suites)
+    if args.server and suite and suite.networks:
+        print(
+            f"--server: the {suite.name} suite's networks, {', '.join(suite.networks)}, need a server this "
+            "script starts; each run records the throttle the given server reports"
+        )
     if skipped:
-        print(f"not applicable, left out: {describe_skipped(skipped, scenarios)}")
+        print(f"not applicable, left out: {describe_skipped(skipped, scenarios, catalog)}")
     if args.dry_run:
         for case in cases:
             print(case.id)
@@ -1558,6 +1830,7 @@ def main(argv: list[str]) -> int:
             "datasets": selection.datasets,
             "scenarios": selection.scenarios,
             "ratios": selection.ratios,
+            "networks": selection.networks,
             "repeat": selection.repeat,
             "knobs": list(knobs),
         },
@@ -1568,19 +1841,35 @@ def main(argv: list[str]) -> int:
     try:
         server_url = existing_server(args.server) if args.server else None
         built = build(cli, server=server_url is None)
-        unique = list({case.dataset.name: case.dataset for case in cases}.values())
-        locations = ensure_datasets(unique, data_dir)
-        if server_url is None:
-            _, server_url = start_server(built, out_dir, args.port or free_port())
-        meta["server"] = server_url
-        print(f"server {server_url}, runs in {out_dir}", flush=True)
+        needed = [case.dataset for case in cases] + [catalog[name] for case in cases for name in case.scenario.adds]
+        locations = ensure_datasets(list({d.name: d for d in needed}.values()), data_dir)
+        servers: list[dict[str, Any]] = []
+        meta["servers"] = servers
+        server: ProcessTree | None = None
         for index, case in enumerate(cases, start=1):
+            # One server at a time: the plan groups the cases by network.
+            new_network = not servers or case.network != servers[-1]["network"]
+            # A throttled server's source cache would serve every run after a
+            # dataset's first from memory, past the throttle, so each run
+            # gets a server of its own.
+            per_run = args.server is None and throttled(case.network)
+            if args.server is None and (new_network or per_run):
+                if server is not None:
+                    server.stop()
+                log_name = f"{case.id}.server.log" if per_run else "server.log"
+                server, server_url = start_server(built, out_dir, args.port or free_port(), case.network, log_name)
+            if new_network:
+                servers.append({"url": server_url, "network": case.network, "perRun": per_run})
+                profile = f" with the {case.network} source throttle profile" if case.network else ""
+                fresh = ", a fresh one for each run" if per_run else ""
+                print(f"server {server_url}{profile}{fresh}, runs in {out_dir}", flush=True)
+            assert server_url is not None
             print(f"[{index}/{len(cases)}] {case.id} ...", end=" ", flush=True)
             row = run_case(
                 case,
                 built,
                 server_url,
-                locations[case.dataset.name],
+                locations,
                 out_dir,
                 args.timeout_seconds,
                 stamp,

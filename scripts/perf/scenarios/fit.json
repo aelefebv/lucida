@@ -1,0 +1,9 @@
+{
+  "description": "zoom in by 4 and pan away, then fit the view to the dataset again",
+  "camera": "slice",
+  "steps": [
+    { "kind": "zoom", "factor": 4 },
+    { "kind": "pan", "dx": -600, "dy": 0 },
+    { "kind": "fit" }
+  ]
+}
