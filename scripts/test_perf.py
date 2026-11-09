@@ -478,7 +478,7 @@ DIAGNOSTIC = {
         "settleMs": 1840.0,
         "prefetchMs": 2410.0,
         "coverageLossChunks": 512,
-        "received": {"bytes": 12_400_000, "requests": 96},
+        "received": {"bytes": 12_400_000, "wireBytes": 5_100_000, "requests": 96},
     },
     "coverage": {"notHealthSignals": [{"metric": "retries", "value": 0}, {"metric": "evictions", "value": 7}]},
 }
@@ -531,6 +531,7 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
     assert fields["settleMs"] == 1840.0
     assert fields["prefetchMs"] == 2410.0
     assert fields["bytesFetched"] == 12_400_000
+    assert fields["bytesWire"] == 5_100_000
     assert fields["chunksFetched"] == 96
     assert fields["chunksEvicted"] == 7
     assert fields["chunksShort"] == 512
@@ -542,7 +543,7 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
     assert fields["errors"] == 4
     no_lag = {"inputToFrameP95Ms": None, "longestTaskMs": None, "droppedFrames": None}
     no_load = dict.fromkeys(
-        ("firstFrameMs", "settleMs", "prefetchMs", "bytesFetched", "chunksFetched", "chunksShort", "topLimiter")
+        ("firstFrameMs", "settleMs", "prefetchMs", "bytesFetched", "bytesWire", "chunksFetched", "chunksShort", "topLimiter")
     )
     no_load["confidence"] = None
     assert fields["steps"] == [
@@ -557,6 +558,9 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
             "settleMs": 412.5,
             "prefetchMs": None,
             "bytesFetched": 4_500_000,
+            # A record without `wireBytes` was written before the wire
+            # carried encoded chunks, so it carried what was fetched.
+            "bytesWire": 4_500_000,
             "chunksFetched": None,
             "chunksShort": 0,
             "topLimiter": "browser.upload",
@@ -622,7 +626,7 @@ def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path
     lines = markdown.splitlines()
     assert lines[0] == "adapter: nvidia ampere (hardware adapter)"
     assert (
-        "| image | cold-open | 1 | - | 212 ms | 1,840 ms | 2,410 ms | - | 12.4 MB | 96 | 7 | 512 "
+        "| image | cold-open | 1 | - | 212 ms | 1,840 ms | 2,410 ms | - | 12.4 MB | 5.1 MB | 96 | 7 | 512 "
         "| fetch.wire (attributed) | - | - | - | 0 | clear |"
     ) in markdown
     assert "| error: the server refused \\| the open |" in markdown

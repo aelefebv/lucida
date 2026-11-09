@@ -2,14 +2,17 @@
 //! names Zarr v3 and numcodecs give it, and the chain a level's metadata
 //! declares, validated once at import.
 //!
-//! The decoding lives in [`lucida_server::decode`], because it needs `zstd`,
-//! `lz4_flex`, and deflate, which `lucida-store` deliberately does not depend
-//! on. These types are pure data that travel through `ImageBindingSeed`.
+//! The decoding lives in `lucida_core::chunk_codec`, which the server and the
+//! page share, and the bytes-to-bytes codec types in
+//! [`lucida_protocol::codec`], since a chunk frame names them. These types are
+//! pure data that travel through `ImageBindingSeed`.
 //! [`parse_codec_chain`] refuses a codec missing from [`REGISTRY`], or a chain
 //! out of the order Zarr v3 fixes, with a [`StoreError::Metadata`] that names
 //! the offending value.
 
 use serde::{Deserialize, Serialize};
+
+pub use lucida_protocol::codec::{BloscCompressor, BloscConfig, BloscShuffle, BytesCodec};
 
 use crate::backend::StoreError;
 
@@ -64,64 +67,6 @@ pub enum ArrayCodec {
 pub enum ByteOrder {
     Little,
     Big,
-}
-
-/// A bytes-to-bytes codec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BytesCodec {
-    /// An RFC 1952 gzip stream.
-    Gzip,
-    /// An RFC 1950 zlib stream.
-    Zlib,
-    /// A zstd stream of one or more frames.
-    Zstd,
-    /// An lz4 block behind its decoded length as a little-endian `u32`, as
-    /// numcodecs writes it.
-    Lz4,
-    Blosc(BloscConfig),
-    /// A crc32c checksum of the bytes, as a little-endian `u32` after them.
-    Crc32c,
-}
-
-/// The Blosc1 configuration a codec chain declares. The decoder checks each
-/// chunk's own header against it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BloscConfig {
-    pub typesize: u8,
-    pub cname: BloscCompressor,
-    pub shuffle: BloscShuffle,
-}
-
-/// The compressor inside Blosc1. Snappy is the one Blosc1 offers that
-/// lucida does not decode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BloscCompressor {
-    BloscLz,
-    Lz4,
-    Lz4hc,
-    Zlib,
-    Zstd,
-}
-
-impl BloscCompressor {
-    /// The format code a Blosc1 header carries for this compressor. `lz4`
-    /// and `lz4hc` write one format.
-    pub fn format_code(self) -> u8 {
-        match self {
-            BloscCompressor::BloscLz => 0,
-            BloscCompressor::Lz4 | BloscCompressor::Lz4hc => 1,
-            BloscCompressor::Zlib => 3,
-            BloscCompressor::Zstd => 4,
-        }
-    }
-}
-
-/// Blosc1 shuffle filter. Matches the Blosc1 header flag bits we recognize.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BloscShuffle {
-    None,
-    Byte,
-    Bit,
 }
 
 /// What a level's chunks hold, which the codec configurations are checked

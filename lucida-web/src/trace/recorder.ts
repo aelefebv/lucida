@@ -1323,16 +1323,31 @@ export class TraceRecorder {
 
   /**
    * Bytes in hand: closes `wire`, opens `decode`, and records what the wire
-   * delivered, in one resolve. The bytes land on the row at the boundary
-   * they arrive at rather than through a second call, because this runs
-   * once per completed fetch and each call spends a handle resolve.
+   * delivered, in one resolve: the chunk's bytes decoded, and `wireBytes`,
+   * what the wire carried, which is less when they came still encoded. The
+   * bytes land on the row at the boundary they arrive at rather than through
+   * a second call, because this runs once per completed fetch and each call
+   * spends a handle resolve.
    */
-  noteBytesReceived(handle: number, bytes: number): void {
+  noteBytesReceived(handle: number, bytes: number, wireBytes = bytes): void {
     const run = this.resolve(handle);
     if (!run) return;
     const index = handle % GENERATION_STRIDE;
     run.sink.stamp(index, Boundary.DecodeStart, this.offsetUs(run, this.now()));
-    run.sink.setBytes(index, bytes);
+    run.sink.setBytes(index, bytes, wireBytes);
+  }
+
+  /**
+   * A decode came back: closes `decode` and opens `upload`, and keeps how much
+   * of that round trip the worker spent decoding, so the rest reads as a wait
+   * rather than as decode work. `workMs` is null when the worker said nothing.
+   */
+  noteDecoded(handle: number, workMs: number | null): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    const index = handle % GENERATION_STRIDE;
+    run.sink.stamp(index, Boundary.UploadStart, this.offsetUs(run, this.now()));
+    if (workMs !== null) run.sink.setDecodeWork(index, clamp(Math.round(workMs * 1000)));
   }
 
   finishRow(handle: number, outcome: RowOutcomeValue): void {

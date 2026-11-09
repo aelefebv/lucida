@@ -1,7 +1,8 @@
-// Decompress (Raw / LZ4 / Zstd), then lay samples out for upload: uint8,
-// uint16 and uint32 as they are, every other numeric type as float32 values
-// (see `dataTypeUtil.ts`).
+// Undo the storage codecs a chunk still carries, then lay samples out for
+// upload: uint8, uint16 and uint32 as they are, every other numeric type as
+// float32 values (see `dataTypeUtil.ts`).
 
+import type * as Core from "lucida-core";
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 import { reportWorkerErrors } from "../../pageErrors.ts";
 
@@ -11,85 +12,109 @@ interface DecodeRequest {
   id: number;
   bytes: ArrayBuffer;
   wireFormat: WireFormat;
+  /** The codec list of bytes still in the codecs the chunk was stored in. */
+  codecs?: Uint8Array;
+  /** What the chunk decodes to, from its level's metadata. */
+  decodedBytes?: number;
 }
 
-interface DecodeResponse {
+/**
+ * When this worker took the request up and when it finished, as
+ * `performance.timeOrigin + performance.now()`: a clock the page shares, so
+ * the page can tell the decode itself from the wait around it.
+ */
+interface DecodeTiming {
+  startedAtMs: number;
+  doneAtMs: number;
+}
+
+interface DecodeResponse extends DecodeTiming {
   id: number;
   data: ArrayBuffer;
   error?: undefined;
 }
 
-interface DecodeError {
+interface DecodeError extends DecodeTiming {
   id: number;
   data?: undefined;
   error: string;
 }
 
-function decompressLz4(src: ArrayBuffer): ArrayBuffer {
-  const input = new Uint8Array(src);
-
-  // 4-byte LE uncompressed size, then LZ4 block data.
-  const uncompressedSize =
-    input[0] | (input[1] << 8) | (input[2] << 16) | (input[3] << 24);
-
-  const dst = new Uint8Array(uncompressedSize);
-  let sIdx = 4;
-  let dIdx = 0;
-
-  while (sIdx < input.length) {
-    const token = input[sIdx++];
-    let literalLen = token >> 4;
-    if (literalLen === 15) {
-      let b: number;
-      do {
-        b = input[sIdx++];
-        literalLen += b;
-      } while (b === 255);
-    }
-
-    dst.set(input.subarray(sIdx, sIdx + literalLen), dIdx);
-    sIdx += literalLen;
-    dIdx += literalLen;
-
-    if (sIdx >= input.length) break;
-
-    const offset = input[sIdx] | (input[sIdx + 1] << 8);
-    sIdx += 2;
-
-    let matchLen = (token & 0x0f) + 4;
-    if ((token & 0x0f) === 15) {
-      let b: number;
-      do {
-        b = input[sIdx++];
-        matchLen += b;
-      } while (b === 255);
-    }
-
-    let matchPos = dIdx - offset;
-    for (let i = 0; i < matchLen; i++) {
-      dst[dIdx++] = dst[matchPos++];
-    }
-  }
-
-  return dst.buffer;
+function sharedNow(): number {
+  return performance.timeOrigin + performance.now();
 }
 
-let fzstdModule: typeof import("fzstd") | null = null;
+/**
+ * The codec lists of the two compressed per-image wire formats, as an encoded
+ * frame would carry them (`lucida_protocol::codec::write_codecs`).
+ */
+const ZSTD_CODECS = new Uint8Array([3]);
+const LZ4_CODECS = new Uint8Array([4]);
 
-async function decompressZstd(src: ArrayBuffer): Promise<ArrayBuffer> {
-  if (!fzstdModule) {
-    fzstdModule = await import("fzstd");
-  }
-  // fzstd returns a view into a larger buffer with a 12-byte prefix;
-  // slice to the decoded range so downstream readers don't see garbage.
-  const decoded = fzstdModule.decompress(new Uint8Array(src));
-  return decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength) as ArrayBuffer;
+let core: Promise<typeof Core> | null = null;
+
+/**
+ * The WASM module's decoders, instantiated in this worker on the first
+ * encoded chunk, so a page served only decoded frames never loads them here.
+ */
+function codecModule(): Promise<typeof Core> {
+  core ??= import("lucida-core").then(async (module) => {
+    await module.default();
+    return module;
+  });
+  return core;
 }
 
-function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | Promise<ArrayBuffer> {
-  if ("Lz4" in wireFormat) return decompressLz4(bytes);
-  if ("Zstd" in wireFormat) return decompressZstd(bytes);
-  return bytes; // Raw
+/**
+ * `bytes` decoded through `codecs` to exactly `decodedBytes`, or an error. The
+ * size is the bound: an unknown one is refused, because a chunk that could
+ * decode to anything would let a hostile source make the page allocate
+ * without limit.
+ */
+function decodeCodecs(
+  core: typeof Core,
+  bytes: ArrayBuffer,
+  codecs: Uint8Array,
+  decodedBytes: number | undefined,
+): ArrayBuffer {
+  // The module takes the size as a 32-bit length, so one past that would
+  // wrap rather than bound anything.
+  if (
+    decodedBytes === undefined ||
+    !Number.isInteger(decodedBytes) ||
+    decodedBytes < 0 ||
+    decodedBytes > 0xffff_ffff
+  ) {
+    throw new Error("an encoded chunk whose level gives no decoded size");
+  }
+  const out = core.decode_chunk(codecs, new Uint8Array(bytes), decodedBytes);
+  return out.byteOffset === 0 && out.byteLength === out.buffer.byteLength
+    ? (out.buffer as ArrayBuffer)
+    : (out.slice().buffer as ArrayBuffer);
+}
+
+/** The codecs a request's bytes are still in, or null for decoded bytes. */
+function codecsOf({ wireFormat, codecs }: DecodeRequest): Uint8Array | null {
+  if (codecs) return codecs;
+  if ("Lz4" in wireFormat) return LZ4_CODECS;
+  if ("Zstd" in wireFormat) return ZSTD_CODECS;
+  return null;
+}
+
+/**
+ * The request's bytes with their codecs undone. `core` is the loaded module,
+ * which bytes still in codecs need.
+ */
+function decompress(request: DecodeRequest, core: typeof Core | null): ArrayBuffer {
+  const codecs = codecsOf(request);
+  if (!codecs) return request.bytes;
+  if (!core) throw new Error("the codec module is not loaded");
+  return decodeCodecs(core, request.bytes, codecs, request.decodedBytes);
+}
+
+/** {@link decompress}, loading the module first when the bytes need it. */
+async function decode(request: DecodeRequest): Promise<ArrayBuffer> {
+  return decompress(request, codecsOf(request) ? await codecModule() : null);
 }
 
 /** The float32 NaN every decoded NaN becomes. */
@@ -248,17 +273,28 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
 }
 
 self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
-  const { id, bytes, wireFormat } = e.data;
+  let startedAtMs = sharedNow();
+  const request = e.data;
+  const { id, wireFormat } = request;
   try {
-    const decompressed = await decompress(bytes, wireFormat);
+    // Loading the module is setup, not decoding, so the decode starts once
+    // it is in hand: a worker's first encoded chunk would otherwise carry it.
+    const core = codecsOf(request) ? await codecModule() : null;
+    startedAtMs = sharedNow();
+    const decompressed = decompress(request, core);
     const data = normalize(decompressed, extractDataType(wireFormat));
-    (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
+    (self as unknown as Worker).postMessage(
+      { id, data, startedAtMs, doneAtMs: sharedNow() } satisfies DecodeResponse,
+      [data],
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    (self as unknown as Worker).postMessage({ id, error: message } satisfies DecodeError);
+    (self as unknown as Worker).postMessage(
+      { id, error: message, startedAtMs, doneAtMs: sharedNow() } satisfies DecodeError,
+    );
   }
 };
 
 // Re-exported for direct testing (imported as a module, not a worker).
-export { decompressLz4, decompressZstd, normalize };
-export type { DecodeRequest, DecodeResponse, DecodeError };
+export { decode, normalize };
+export type { DecodeRequest, DecodeResponse, DecodeError, DecodeTiming };

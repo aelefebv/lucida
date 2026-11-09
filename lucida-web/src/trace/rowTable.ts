@@ -51,6 +51,24 @@ const NO_BOUNDARY = 0xff;
 /** An empty slot in the identity index, and the end of a row's identity chain. */
 const NO_ROW = -1;
 
+/**
+ * The decode worker's own time, kept as its share of the row's `decode` round
+ * trip in sixteen bits. Four bytes would push a run's row-table doubling past
+ * the per-run cap, and sixteen bits of microseconds would stop a slow decode
+ * at 65 ms; a share is good to one part in 65,534 of any round trip.
+ */
+const WORK_SHARE_SCALE = 0xfffe;
+/** The share column's value for a row whose worker never reported its time. */
+const NO_WORK_SHARE = 0xffff;
+
+/**
+ * What the wire carried for a row, kept as its share of the bytes decoded in
+ * sixteen bits, for the reason {@link WORK_SHARE_SCALE} gives. A chunk's
+ * share is good to a few bytes in its hundreds of kilobytes, and one that
+ * crossed decoded is exact.
+ */
+const WIRE_SHARE_SCALE = 0xffff;
+
 const PLAN_PHASE = PHASES.indexOf("plan");
 const QUEUE_PHASE = PHASES.indexOf("queue");
 
@@ -67,6 +85,7 @@ const PLAN_START = Boundary.PlanStart;
 const QUEUE_START = Boundary.QueueStart;
 const WIRE_START = Boundary.WireStart;
 const DECODE_START = Boundary.DecodeStart;
+const UPLOAD_START = Boundary.UploadStart;
 const IN_FLIGHT = RowOutcome.InFlight;
 const COMPLETE = RowOutcome.Complete;
 const RETIRED = RowOutcome.Retired;
@@ -106,6 +125,10 @@ class RowBlock {
   readonly rids: Uint32Array;
   readonly connectionGenerations: Uint32Array;
   readonly bytes: Uint32Array;
+  /** See {@link WORK_SHARE_SCALE}. */
+  readonly decodeWorkShares: Uint16Array;
+  /** See {@link WIRE_SHARE_SCALE}. */
+  readonly wireShares: Uint16Array;
   readonly tiers: Uint8Array;
   readonly lanes: Uint8Array;
   readonly outcomes: Uint8Array;
@@ -120,12 +143,17 @@ class RowBlock {
 
   constructor(first: number, size: number) {
     this.first = first;
-    // One allocation for every column. The uint32 columns go first, so each
-    // starts on a four-byte boundary.
+    // One allocation for every column, widest first, so each starts on a
+    // boundary of its own width.
     const buffer = new ArrayBuffer(size * BLOCK_BYTES_PER_ROW);
     let offset = 0;
     const words = (perRow: number): Uint32Array => {
       const column = new Uint32Array(buffer, offset, size * perRow);
+      offset += column.byteLength;
+      return column;
+    };
+    const halves = (): Uint16Array => {
+      const column = new Uint16Array(buffer, offset, size);
       offset += column.byteLength;
       return column;
     };
@@ -142,6 +170,8 @@ class RowBlock {
     this.rids = words(1);
     this.connectionGenerations = words(1);
     this.bytes = words(1);
+    this.decodeWorkShares = halves();
+    this.wireShares = halves();
     this.tiers = octets();
     this.lanes = octets();
     this.outcomes = octets();
@@ -150,7 +180,7 @@ class RowBlock {
 }
 
 /** The columns a block holds per row: the row width less the identity index, which lives outside the blocks. */
-const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 4;
+const BLOCK_BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 * 2 + 4;
 
 /** The ids the pool gave an entity and the image its rows last carried. */
 interface EntityIds {
@@ -162,12 +192,14 @@ interface EntityIds {
 export class RowTable {
   /**
    * 3 interned ids + 6 coordinates + 7 boundary slots + the two-part wire
-   * label + the bytes the wire delivered, all uint32, plus four bytes: tier,
-   * lane, outcome, last boundary. Plus the identity index: one int32 per row
-   * linking it to the previous row of the same chunk, and two int32 slots
-   * per row of capacity in the open-addressing table that finds the newest.
+   * label + the bytes the wire delivered, all uint32, plus the decode work's
+   * and the wire bytes' uint16 shares, plus four bytes: tier, lane, outcome,
+   * last boundary. Plus
+   * the identity index: one int32 per row linking it to the previous row of
+   * the same chunk, and two int32 slots per row of capacity in the
+   * open-addressing table that finds the newest.
    */
-  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 4 + 4 + 2 * 4;
+  static readonly BYTES_PER_ROW = (3 + COORDS_PER_ROW + SLOTS_PER_ROW + 2 + 1) * 4 + 2 * 2 + 4 + 4 + 2 * 4;
 
   private readonly strings = new StringPool();
 
@@ -328,6 +360,8 @@ export class RowTable {
     block.rids[at] = NO_RID;
     block.connectionGenerations[at] = NO_CONNECTION;
     block.bytes[at] = 0;
+    block.wireShares[at] = WIRE_SHARE_SCALE;
+    block.decodeWorkShares[at] = NO_WORK_SHARE;
 
     const c = at * COORDS_PER_ROW;
     const coords = block.coords;
@@ -606,10 +640,29 @@ export class RowTable {
     this.enter(boundary);
   }
 
-  /** The payload bytes the wire delivered for this row. */
-  setBytes(index: number, bytes: number): void {
+  /** The payload bytes the wire delivered for this row, decoded and as carried. */
+  setBytes(index: number, bytes: number, wireBytes: number = bytes): void {
     const block = this.blockOf(index);
-    block.bytes[index - block.first] = bytes;
+    const at = index - block.first;
+    block.bytes[at] = bytes;
+    const share = bytes > 0 ? Math.min(1, Math.max(0, wireBytes / bytes)) : 1;
+    block.wireShares[at] = Math.round(share * WIRE_SHARE_SCALE);
+  }
+
+  /**
+   * The decode worker's own time on the row's chunk, once both ends of its
+   * `decode` round trip are stamped. A row missing either keeps none.
+   */
+  setDecodeWork(index: number, workUs: number): void {
+    const block = this.blockOf(index);
+    const at = index - block.first;
+    const base = at * SLOTS_PER_ROW;
+    const startUs = block.stamps[base + DECODE_START];
+    const endUs = block.stamps[base + UPLOAD_START];
+    if (startUs === UNSET || endUs === UNSET) return;
+    const roundTripUs = endUs - startUs;
+    const share = roundTripUs > 0 ? Math.min(1, Math.max(0, workUs / roundTripUs)) : 0;
+    block.decodeWorkShares[at] = Math.round(share * WORK_SHARE_SCALE);
   }
 
   stampAt(index: number, boundary: number): number {
@@ -696,6 +749,8 @@ export class RowTable {
       if (startUs === UNSET || endUs === UNSET) continue;
       phases[PHASES[p]] = { startUs, endUs, durationUs: endUs - startUs };
     }
+    const share = block.decodeWorkShares[at];
+    const decode = phases.decode;
 
     return {
       rid: block.rids[at],
@@ -713,8 +768,12 @@ export class RowTable {
       x,
       chunkKey: `${level}/${t}/${ch}/${z}/${y}/${x}`,
       bytes: block.bytes[at],
+      wireBytes: Math.round((block.wireShares[at] / WIRE_SHARE_SCALE) * block.bytes[at]),
       outcome: ROW_OUTCOME_NAMES[block.outcomes[at]],
       phases,
+      ...(share !== NO_WORK_SHARE && decode
+        ? { decodeWorkUs: Math.round((share / WORK_SHARE_SCALE) * decode.durationUs) }
+        : {}),
     };
   }
 

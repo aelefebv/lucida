@@ -48,8 +48,10 @@ export interface TraceSink {
   ): number;
   setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
-  /** The payload bytes the wire delivered for the row. */
-  setBytes(index: number, bytes: number): void;
+  /** The payload bytes the wire delivered for the row, decoded and as carried. */
+  setBytes(index: number, bytes: number, wireBytes: number): void;
+  /** The decode worker's own time on the row's chunk, inside its `decode` round trip. */
+  setDecodeWork(index: number, workUs: number): void;
   setOutcome(index: number, outcome: RowOutcomeValue): void;
   /**
    * The rows so far, tallied for the live view. The one read that
@@ -144,6 +146,8 @@ export class NoopTraceSink implements TraceSink {
   stamp(): void {}
 
   setBytes(): void {}
+
+  setDecodeWork(): void {}
 
   setOutcome(): void {}
 
@@ -252,8 +256,12 @@ export class TableTraceSink implements TraceSink {
     this.rows.stamp(index, boundary, offsetUs);
   }
 
-  setBytes(index: number, bytes: number): void {
-    this.rows.setBytes(index, bytes);
+  setBytes(index: number, bytes: number, wireBytes: number): void {
+    this.rows.setBytes(index, bytes, wireBytes);
+  }
+
+  setDecodeWork(index: number, workUs: number): void {
+    this.rows.setDecodeWork(index, workUs);
   }
 
   setOutcome(index: number, outcome: RowOutcomeValue): void {

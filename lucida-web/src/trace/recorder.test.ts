@@ -491,6 +491,34 @@ describe("TraceRecorder rows", () => {
     expect(serialised.bytes).toBe(326_144);
   });
 
+  it("closes the decode round trip with the worker's own time inside it", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.noteBytesReceived(row, 4_096);
+    advance(30);
+    recorder.noteDecoded(row, 1.25);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.decode?.durationUs).toBe(30_000);
+    expect(serialised.decodeWorkUs).toBe(1_250);
+  });
+
+  it("closes the decode round trip alone when the worker reported no time", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.noteBytesReceived(row, 4_096);
+    advance(30);
+    recorder.noteDecoded(row, null);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.decode?.durationUs).toBe(30_000);
+    expect(serialised.decodeWorkUs).toBeUndefined();
+  });
+
   it("ignores stamps for a row whose run has already closed", () => {
     const { recorder } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);

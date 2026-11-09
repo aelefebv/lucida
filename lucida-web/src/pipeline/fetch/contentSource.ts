@@ -1,7 +1,7 @@
 // Transport only — resolves chunk requests to wire-format bytes; does
 // not decode, normalize, or cache.
 
-import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
+import { extractDataType, type MultiscaleInfo, type WireFormat } from "../../manifestTypes.ts";
 import type { GeneratedChunkStatus } from "../generatedAvailability.ts";
 import { FetchError } from "./retry.ts";
 import type { WireLabel } from "../../trace/types.ts";
@@ -82,12 +82,67 @@ export interface FetchResult {
   bytes: ArrayBuffer;
   wireFormat: WireFormat;
   dataType: string;
+  /**
+   * The codec list of an encoded frame: the bytes are still in the codecs
+   * the chunk was stored in. Absent when they arrived decoded.
+   */
+  codecs?: Uint8Array;
+  /**
+   * What the chunk decodes to, from its level's metadata. Encoded bytes
+   * decode to exactly this or fail. Absent when the level is unknown.
+   */
+  decodedBytes?: number;
 }
 
 export interface ContentSource {
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult>;
-  /** A binary chunk frame off the socket, keyed by its composite chunk key. */
-  handleBinary(key: string, data: ArrayBuffer): void;
+  /**
+   * A binary chunk frame off the socket, keyed by its composite chunk key,
+   * with its codec list when the frame is encoded.
+   */
+  handleBinary(key: string, data: ArrayBuffer, codecs?: Uint8Array | null): void;
+}
+
+/**
+ * The codecs the decode workers undo, declared to the server on every
+ * connection so it can relay a chunk still in the codecs it was stored in.
+ * Mirror of `lucida_protocol::codec::ChunkCodec`.
+ */
+export const DECODED_CODECS = ["gzip", "zlib", "zstd", "lz4", "blosc", "crc32c"] as const;
+
+/** Bytes one sample takes as stored and as the wire carries it, decoded. */
+function storedBytesPerSample(dataType: string): number {
+  switch (dataType.toLowerCase()) {
+    case "uint8":
+    case "int8":
+    case "bool":
+      return 1;
+    case "uint16":
+    case "int16":
+    case "float16":
+      return 2;
+    case "uint32":
+    case "int32":
+    case "float32":
+      return 4;
+    default:
+      return 8;
+  }
+}
+
+/**
+ * What one wire chunk of each level decodes to, by level index: one
+ * timepoint and one channel of the level's chunk shape, at the data type's
+ * own width.
+ */
+export function levelChunkBytes(multiscale: MultiscaleInfo): number[] {
+  const sample = storedBytesPerSample(multiscale.data_type);
+  const bytes: number[] = [];
+  for (const level of multiscale.levels) {
+    const [, , z, y, x] = level.chunk_shape;
+    bytes[level.level_index] = z * y * x * sample;
+  }
+  return bytes;
 }
 
 /**
@@ -119,7 +174,7 @@ interface PendingGroup {
 }
 
 interface PendingRequest {
-  resolve: (data: ArrayBuffer) => void;
+  resolve: (data: ArrayBuffer, codecs: Uint8Array | null) => void;
   // Accepts `FetchError` (rejectDataset/rejectAll) and
   // `DOMException("AbortError")` (signal abort). Both pass through
   // `classifyFetchError` in the cache.
@@ -143,6 +198,7 @@ export class ProxiedContentSource implements ContentSource {
    */
   private cancelledRids: number[] = [];
   private imageWireFormats = new Map<string, WireFormat>();
+  private imageChunkBytes = new Map<string, readonly number[]>();
 
   private sendMessage: (json: string) => void;
   private timeoutMs: number;
@@ -163,10 +219,18 @@ export class ProxiedContentSource implements ContentSource {
     // The old connection's labels mean nothing on the new one, and the
     // server dropped that connection's requests when it closed.
     this.cancelledRids = [];
+    // The server forgets a connection's codecs with it.
+    this.sendMessage(JSON.stringify({ type: "chunk_codecs", codecs: DECODED_CODECS }));
   }
 
-  registerImage(imageId: string, wireFormat: WireFormat): void {
+  /**
+   * `chunkBytes` is what one chunk of each level decodes to
+   * ({@link levelChunkBytes}). Without it, an encoded frame for the image
+   * fails rather than decode unbounded.
+   */
+  registerImage(imageId: string, wireFormat: WireFormat, chunkBytes?: readonly number[]): void {
     this.imageWireFormats.set(imageId, wireFormat);
+    if (chunkBytes) this.imageChunkBytes.set(imageId, chunkBytes);
   }
 
   /**
@@ -176,14 +240,15 @@ export class ProxiedContentSource implements ContentSource {
   unregisterDataset(imageIds: readonly string[]): void {
     for (const id of imageIds) {
       this.imageWireFormats.delete(id);
+      this.imageChunkBytes.delete(id);
     }
   }
 
-  handleBinary(key: string, data: ArrayBuffer): void {
+  handleBinary(key: string, data: ArrayBuffer, codecs: Uint8Array | null = null): void {
     const entries = this.takePending(key);
     entries.forEach((entry, idx) => {
       clearTimeout(entry.timeoutId);
-      entry.resolve(idx === 0 ? data : data.slice(0));
+      entry.resolve(idx === 0 ? data : data.slice(0), codecs);
     });
   }
 
@@ -265,10 +330,17 @@ export class ProxiedContentSource implements ContentSource {
       );
     }
     const dataType = extractDataType(wireFormat);
+    const decodedBytes = this.imageChunkBytes.get(imageId)?.[Number(chunkKey.split("/", 1)[0])];
 
     return new Promise<FetchResult>((resolve, reject) => {
       const pendingEntry: PendingRequest = {
-        resolve: (bytes) => { clearTimeout(pendingEntry.timeoutId); resolve({ bytes, wireFormat, dataType }); },
+        resolve: (bytes, codecs) => {
+          clearTimeout(pendingEntry.timeoutId);
+          const result: FetchResult = { bytes, wireFormat, dataType };
+          if (codecs) result.codecs = codecs;
+          if (decodedBytes !== undefined) result.decodedBytes = decodedBytes;
+          resolve(result);
+        },
         reject: (err) => { clearTimeout(pendingEntry.timeoutId); reject(err); },
         timeoutId: setTimeout(() => {
           this.removePending(compositeKey, pendingEntry);

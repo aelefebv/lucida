@@ -16,9 +16,6 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
-      fzstd:
-        specifier: ^0.1.1
-        version: 0.1.1
       lucida-core:
         specifier: link:../lucida-core/pkg
         version: link:../lucida-core/pkg
@@ -65,6 +62,9 @@ importers:
       eslint-plugin-react-refresh:
         specifier: ^0.5.7
         version: 0.5.7(eslint@9.39.4)
+      fzstd:
+        specifier: ^0.1.1
+        version: 0.1.1
       globals:
         specifier: ^17.14.0
         version: 17.14.0

@@ -286,6 +286,13 @@ const RECONNECT_DELAY_MS = 2000;
  *  workspace (`CLOSE_ACCESS_REVOKED`, 1008 "policy violation"). */
 const CLOSE_ACCESS_REVOKED = 1008;
 
+/**
+ * Bit 15 of a chunk frame's key length marks an encoded frame, whose codec
+ * list sits between the key and the payload as `[codecs_len: u8][codecs]`.
+ * Mirror of `lucida_protocol::codec::ENCODED_FRAME_FLAG`.
+ */
+const ENCODED_FRAME_FLAG = 0x8000;
+
 /** Membership key of a document command, for the datasets-present mirror:
  *  `dataset_opened` adds `manifest.dataset_id`, `remove_dataset` removes
  *  `id`; every other command leaves membership untouched. */
@@ -377,11 +384,13 @@ export interface BridgeHandlers {
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number) => void;
   /**
-   * Binary frame, forwarded as (key, payload) after the bridge parses the
-   * envelope (client_id, keyLen, key, payload). Routing by key lives in the
-   * content source so the bridge stays a generic binary transport.
+   * Binary frame, forwarded as (key, payload, codecs) after the bridge parses
+   * the envelope (client_id, keyLen, key, payload). `codecs` is an encoded
+   * frame's codec list, null for decoded bytes. Routing by key and decoding
+   * live in the fetch pipeline, so the bridge stays a generic binary
+   * transport.
    */
-  onBinary?: (key: string, payload: ArrayBuffer) => void;
+  onBinary?: (key: string, payload: ArrayBuffer, codecs: Uint8Array | null) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
   onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: PresenceState["view"], display: PresenceState["display"]) => void;
@@ -856,12 +865,23 @@ export class Bridge {
     if (buffer.byteLength < 6) return;
     const view = new DataView(buffer);
     // Skip client_id (4 bytes); this client is the target.
-    const keyLen = view.getUint16(4, true);
-    if (buffer.byteLength < 6 + keyLen) return;
+    const keyField = view.getUint16(4, true);
+    const keyLen = keyField & ~ENCODED_FRAME_FLAG;
+    let at = 6 + keyLen;
+    if (buffer.byteLength < at) return;
     const keyBytes = new Uint8Array(buffer, 6, keyLen);
     const key = new TextDecoder().decode(keyBytes);
-    const payload = buffer.slice(6 + keyLen);
-    this.handlers.onBinary?.(key, payload);
+    let codecs: Uint8Array | null = null;
+    if (keyField & ENCODED_FRAME_FLAG) {
+      if (buffer.byteLength < at + 1) return;
+      const codecsLen = view.getUint8(at);
+      at += 1;
+      if (buffer.byteLength < at + codecsLen) return;
+      codecs = new Uint8Array(buffer.slice(at, at + codecsLen));
+      at += codecsLen;
+    }
+    const payload = buffer.slice(at);
+    this.handlers.onBinary?.(key, payload, codecs);
   }
 
   /**

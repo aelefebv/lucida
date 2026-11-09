@@ -26,6 +26,7 @@ import {
   saturatedReopen,
   sendHeavyIdleRun,
 } from "./fixtures.ts";
+import { DECODE_WAIT } from "./phaseRollup.ts";
 import { renderDiagnostic, renderLiveTimeline } from "./renderText.ts";
 import {
   deriveLiveTimeline,
@@ -240,13 +241,18 @@ describe("the row-derived charts", () => {
     const { bucketMs } = document.timeline.axis;
 
     expect(browser.series.map((entry) => entry.id)).toEqual([...PHASES]);
-    for (const phase of document.phases.filter((entry) => entry.side === "browser")) {
-      const entry = recorded(browser, phase.id.replace("browser.", ""));
+    const rolled = (id: string) => document.phases.find((entry) => entry.id === id);
+    for (const phase of PHASES) {
+      const entry = recorded(browser, phase);
+      const rollup = rolled(`browser.${phase}`)!;
+      // The chart draws each row's whole decode round trip, which the rollup
+      // splits into the decode and the wait around it.
+      const waitMs = phase === "decode" ? (rolled(DECODE_WAIT)?.totalMs ?? 0) : 0;
       // Average rows per bucket times the bucket length is row-milliseconds,
       // which is what the rollup's total counts. Rounded to two decimals per
       // bucket, so the tolerance is the rounding's.
-      expect(sum(entry.values) * bucketMs).toBeCloseTo(phase.totalMs, -1);
-      expect(entry.samples).toBe(phase.n);
+      expect(sum(entry.values) * bucketMs).toBeCloseTo(rollup.totalMs + waitMs, -1);
+      expect(entry.samples).toBe(rollup.n);
     }
     expect(document.timeline.rowsWalked).toBe(true);
   });

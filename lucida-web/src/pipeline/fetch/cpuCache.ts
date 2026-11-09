@@ -1641,23 +1641,30 @@ export class CpuCache {
       return;
     }
 
+    // Encoded bytes decode to exactly their level's chunk size or fail, so
+    // that size is what they deliver. Counting it, and not what the wire
+    // carried, keeps the fetched bytes comparable whichever form they came in.
+    const wireBytes = result.bytes.byteLength;
+    const fetchedBytes = result.codecs ? (result.decodedBytes ?? wireBytes) : wireBytes;
     // Closes `wire` and opens `decode` — adjacent phases share the slot
     // between them — and records what the wire delivered. The pool closes
     // `decode` on its own onmessage, and the row completes when a frame has
     // drawn the chunk.
-    traceRecorder.noteBytesReceived(traceRow, result.bytes.byteLength);
+    traceRecorder.noteBytesReceived(traceRow, fetchedBytes, wireBytes);
 
-    this.counters.recordCompletedFetch(result.bytes.byteLength);
+    this.counters.recordCompletedFetch(fetchedBytes);
     // Correct the in-flight byte estimate only while this settle still owns
     // the slot; a superseded successor keeps its own accounting.
     if (this.chunkScheduler.isCurrent(key, controller)) {
-      this.chunkScheduler.correctInFlightBytes(key, result.bytes.byteLength);
+      this.chunkScheduler.correctInFlightBytes(key, fetchedBytes);
     }
 
     let decoded: ArrayBuffer;
     try {
       const t0 = performance.now();
-      decoded = await this.decode.decode(result.bytes, result.wireFormat, traceRow);
+      decoded = await this.decode.decode(
+        result.bytes, result.wireFormat, traceRow, result.codecs, result.decodedBytes,
+      );
       this.counters.recordDecode(performance.now() - t0);
     } catch (err: unknown) {
       traceRecorder.finishRow(traceRow, RowOutcome.Retired);
