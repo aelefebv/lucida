@@ -17,7 +17,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 11;
+export const RULESET_VERSION = 12;
 
 export interface AbsoluteRule {
   id: string;
@@ -161,6 +161,12 @@ export interface BlankFrameRule {
   why: string;
 }
 
+/** The page under the viewer scrolled, or could. */
+export interface PageScrollRule {
+  id: string;
+  why: string;
+}
+
 /** Planning passes woken by an availability update and nothing else. */
 export interface ReplanRule {
   id: string;
@@ -239,6 +245,8 @@ export interface Ruleset {
   pageError: PageErrorRule;
   /** A settled frame of one colour, read off the page's own capture. */
   blankFrame: BlankFrameRule;
+  /** A page that scrolled or overflows its viewport once the run closed. */
+  pageScroll: PageScrollRule;
   /** Input to frame on an interaction run. */
   lag: LagRule;
   /**
@@ -461,6 +469,10 @@ export const RULESET: Ruleset = {
   blankFrame: {
     id: "frame.blank",
     why: "A frame of one flat colour across the whole canvas drew nothing over its background, or drew nothing at all, while every phase can look healthy. It is read off the page's own capture of its canvas, because a DevTools screenshot can leave a WebGPU canvas out. A dark view is not blank: one pixel that differs is enough, and the generated datasets draw a visible picture.",
+  },
+  pageScroll: {
+    id: "page.scroll",
+    why: "The viewer fills the visible viewport, so the page under it never scrolls. A page that can scroll gets scrolled, by the browser, a focus, or a route that kept the last page's offset, and a scrolled page carries the top bar off the screen and shows empty space below the viewer. A phone's 100vh is its height with the address bar hidden, so a rule sized in it overflows there and nowhere on a desktop. Read once the run closed: the page's scroll offset, and the document's scroll size against the viewport it scrolls in. Any offset or any overflow is enough, because a correct page has neither.",
   },
   lag: {
     id: "lag.input-to-frame",

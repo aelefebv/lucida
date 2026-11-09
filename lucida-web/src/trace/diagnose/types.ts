@@ -17,6 +17,7 @@ import type {
   GpuIdentity,
   LaneName,
   PageErrorSource,
+  PageScrollReading,
   Phase,
   PointEventKind,
   PointEventReason,
@@ -274,6 +275,8 @@ export interface FindingObservation {
   colour?: string;
   width?: number;
   height?: number;
+  /** A page that scrolled or overflows: its scroll as the run closed, in CSS pixels. */
+  scroll?: PageScrollReading;
 }
 
 /** One recorded error as a finding carries it. */

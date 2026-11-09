@@ -787,6 +787,15 @@ function describeObservation(finding: Finding, p: PrintNumber): string {
       `${p(`${base}.width`, observed.width ?? 0)}x${p(`${base}.height`, observed.height ?? 0)} pixels`
     );
   }
+  if (finding.rule === RULESET.pageScroll.id && observed.scroll) {
+    const at = `${base}.scroll`;
+    const s = observed.scroll;
+    return (
+      `scrolled to ${p(`${at}.scrollX`, s.scrollX)},${p(`${at}.scrollY`, s.scrollY)}, ` +
+      `document ${p(`${at}.scrollWidth`, s.scrollWidth)}x${p(`${at}.scrollHeight`, s.scrollHeight)} ` +
+      `in a ${p(`${at}.viewportWidth`, s.viewportWidth)}x${p(`${at}.viewportHeight`, s.viewportHeight)} viewport, CSS pixels`
+    );
+  }
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [
       `${p(`${base}.pending`, (observed.pending ?? 0).toLocaleString())} pending`,

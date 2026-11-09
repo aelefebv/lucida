@@ -520,6 +520,7 @@ mod tests {
                     device_memory_gib: None,
                     cores: None,
                     camera: None,
+                    mobile: false,
                 },
                 quiescence_hold_ms: 500.0,
                 settled: true,

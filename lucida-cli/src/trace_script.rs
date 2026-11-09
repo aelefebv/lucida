@@ -1499,7 +1499,11 @@ async fn run_step(
                     reason: format!("the viewport is already {width}x{height}"),
                 }
             } else {
-                let to = Viewport::new(*width, *height, viewport.device_scale_factor);
+                let to = Viewport {
+                    width: *width,
+                    height: *height,
+                    ..*viewport
+                };
                 page.set_viewport(to, wait).await?;
                 *viewport = to;
                 lands_later = true;

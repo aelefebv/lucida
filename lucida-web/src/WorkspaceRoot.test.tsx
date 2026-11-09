@@ -240,6 +240,20 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     });
   });
 
+  it("opens the viewer at the top of the page, not where the dashboard was scrolled to", async () => {
+    window.history.replaceState({}, "", "/");
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-created" }));
+    const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+      render(<WorkspaceRoot />);
+      fireEvent.click(await screen.findByRole("button", { name: "dashboard-open-with-seed" }));
+      await screen.findByTestId("app-mounted");
+      expect(scrollTo).toHaveBeenCalledWith(0, 0);
+    } finally {
+      scrollTo.mockRestore();
+    }
+  });
+
   it("delivers the seed only ONCE: a plain re-open of the same workspace carries no seed", async () => {
     window.history.replaceState({}, "", "/");
     openWorkspaceMock.mockResolvedValue(record({ id: "ws-created" }));

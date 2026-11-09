@@ -16,6 +16,7 @@ import { toChromeTraceJson } from "./chromeTrace.ts";
 import { compareTraces, renderComparison, type CompareSide, type RunComparison } from "./diagnose/compare.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
 import { decodePngOnPage, pageDecodesPng, readFrame } from "./flatFrame.ts";
+import { readPageScroll } from "./pageScroll.ts";
 import {
   renderProvisional,
   type ProvisionalOptions,
@@ -39,7 +40,13 @@ import {
 import { INPUT_SCALE, type InputScale } from "../components/inputScale.ts";
 import { requestAdapterWithRetry, type AdapterRetry } from "../renderer/requestAdapter.ts";
 import type { SavedView } from "../savedView/types.ts";
-import { TRACE_SCHEMA_VERSION, type FrameReading, type GpuIdentity, type TraceDocument } from "./types.ts";
+import {
+  TRACE_SCHEMA_VERSION,
+  type FrameReading,
+  type GpuIdentity,
+  type PageScrollReading,
+  type TraceDocument,
+} from "./types.ts";
 
 /**
  * What a reading of a trace can be scoped to: one run, and one interval of
@@ -181,6 +188,13 @@ export interface LucidaTraceSeam {
    * the frame is the one the run settled on. Closes nothing.
    */
   readFrame(runId?: string): Promise<FrameReading>;
+  /**
+   * Read where the page is scrolled and how far it could scroll, and record
+   * it on run `runId`, the newest concluded run when absent, where the
+   * diagnostic reads it: a page that scrolled or overflows its viewport is a
+   * finding. A driver calls this beside {@link readFrame}. Closes nothing.
+   */
+  readPageScroll(runId?: string): PageScrollReading;
   /**
    * The trace read as a diagnostic: thresholds, the attribution back-walk,
    * the coverage block and the verdict. Defaults to the newest run.
@@ -386,6 +400,12 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       );
       const run = runId ?? traceRecorder.concludedRuns.lastId;
       if (run) traceRecorder.noteFrame(run, reading);
+      return reading;
+    },
+    readPageScroll: (runId?: string) => {
+      const reading = readPageScroll();
+      const run = runId ?? traceRecorder.concludedRuns.lastId;
+      if (run) traceRecorder.notePageScroll(run, reading);
       return reading;
     },
     diagnose: (runId?: string, scope?: Omit<DiagnoseScope, "runId">) =>

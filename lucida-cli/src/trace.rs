@@ -69,13 +69,14 @@ pub(crate) const CLOSE_AS_TIMEOUT: &str =
     "window.lucidaTrace ? (window.lucidaTrace.closeRun('timeout'), true) : false";
 
 /// Read the frame the waited-for run settled on through the page's own
-/// capture, and record it on that run, where its diagnostic reads it. Done
-/// before the export, which is where the diagnostic is derived. A page too
-/// old to read its frame is left alone.
+/// capture, and the page's scroll, and record both on that run, where its
+/// diagnostic reads them. Done before the export, which is where the
+/// diagnostic is derived. A page too old to read either is left alone.
 const FRAME_READ_EXPRESSION: &str = r#"(async () => {
   const seam = window.lucidaTrace;
   if (!seam || typeof seam.readFrame !== 'function') return null;
   const waited = window.__lucidaTraceRunId || seam.runState.lastConcludedRunId || undefined;
+  if (typeof seam.readPageScroll === 'function') seam.readPageScroll(waited);
   return JSON.stringify(await seam.readFrame(waited));
 })()"#;
 
@@ -319,6 +320,10 @@ pub struct ComposedView {
     /// than the page's own framing, and the level the core says it calls for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<ComposedCamera>,
+    /// Whether the driver drove the page as a phone: a mobile layout, touch
+    /// input, and a mobile user agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mobile: bool,
 }
 
 /// `--device-memory`: a positive number of GiB.
@@ -2021,10 +2026,11 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .cores
         .map(|cores| format!(" · {cores} cores"))
         .unwrap_or_default();
+    let phone = if view.mobile { " · phone" } else { "" };
     let errors = format_errors(&header.errors);
     format!(
         "{replay}\
-         view      {} @ {}x{} DPR {}{memory}{cores}\n\
+         view      {} @ {}x{} DPR {}{phone}{memory}{cores}\n\
          {camera}\
          server    {}\n\
          {throttle}\
@@ -3057,6 +3063,7 @@ mod tests {
             device_memory_gib: None,
             cores: None,
             camera: None,
+            mobile: false,
         }
     }
 
@@ -3271,6 +3278,30 @@ mod tests {
             "timeout",
         );
         assert!(gate_failure(&unsettled).unwrap().contains("never settled"));
+    }
+
+    /// The page's diagnostic reads the page's scroll into a stall, so the
+    /// gate fails a run that settled clear in every phase on a page that
+    /// overflows its viewport.
+    #[test]
+    fn the_gate_fails_a_page_that_overflows_its_viewport() {
+        let overflowing = run_file(
+            json!({
+                "verdict": {
+                    "kind": "stall",
+                    "text": "its document is 390x924 CSS pixels in a 390x844 viewport; \
+                             the page under the viewer should neither scroll nor overflow"
+                },
+                "findings": [{ "rule": "page.scroll", "severity": "stall" }]
+            }),
+            true,
+            "quiescent",
+        );
+        let failure = gate_failure(&overflowing).unwrap();
+        assert!(
+            failure.starts_with("stall: its document is 390x924"),
+            "{failure}"
+        );
     }
 
     /// A page the server dropped reconnects, retries what it lost and can
@@ -4009,6 +4040,31 @@ mod tests {
             !serde_json::to_string(&plain.header)
                 .unwrap()
                 .contains("cores")
+        );
+    }
+
+    #[test]
+    fn a_run_driven_as_a_phone_says_so_in_its_header() {
+        let with = DriverFacts {
+            composed_view: ComposedView {
+                width: 390,
+                height: 844,
+                device_pixel_ratio: 3.0,
+                mobile: true,
+                ..composed()
+            },
+            ..facts()
+        };
+        let file = assemble_run_file(minimal_export(), &with);
+        let json = serde_json::to_value(&file.header).unwrap();
+        assert_eq!(json["composedView"]["mobile"], json!(true));
+        let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
+        assert!(text.contains("@ 390x844 DPR 3 · phone\n"), "{text}");
+        let plain = assemble_run_file(minimal_export(), &facts());
+        assert!(
+            !serde_json::to_string(&plain.header)
+                .unwrap()
+                .contains("mobile")
         );
     }
 
@@ -5344,6 +5400,7 @@ mod tests {
     #[test]
     fn the_frame_read_asks_the_page_for_the_run_the_driver_waited_for() {
         assert!(FRAME_READ_EXPRESSION.contains("seam.readFrame(waited)"));
+        assert!(FRAME_READ_EXPRESSION.contains("seam.readPageScroll(waited)"));
         assert!(FRAME_READ_EXPRESSION.contains("__lucidaTraceRunId"));
         assert!(FRAME_READ_EXPRESSION.contains("typeof seam.readFrame !== 'function'"));
     }

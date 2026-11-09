@@ -50,6 +50,9 @@ pub struct Viewport {
     pub width: u32,
     pub height: u32,
     pub device_scale_factor: f64,
+    /// Drive the page as a phone: laid out as a mobile browser lays it out,
+    /// with touch input and a mobile user agent.
+    pub mobile: bool,
 }
 
 impl Viewport {
@@ -58,8 +61,37 @@ impl Viewport {
             width,
             height,
             device_scale_factor,
+            mobile: false,
         }
     }
+
+    /// The same window, driven as a phone when `mobile` is set.
+    pub fn with_mobile(self, mobile: bool) -> Self {
+        Self { mobile, ..self }
+    }
+}
+
+/// What a phone's browser reports itself as: Chrome's reduced user agent on
+/// Android, since the engine under it is Chrome.
+const MOBILE_USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ",
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
+);
+
+/// `Emulation.setUserAgentOverride` parameters for a phone, client hints
+/// included, so `navigator.userAgentData.mobile` agrees with the string.
+fn mobile_user_agent_params() -> Value {
+    json!({
+        "userAgent": MOBILE_USER_AGENT,
+        "platform": "Linux armv81",
+        "userAgentMetadata": {
+            "platform": "Android",
+            "platformVersion": "10",
+            "architecture": "",
+            "model": "K",
+            "mobile": true
+        }
+    })
 }
 
 /// Chrome command-line arguments for a headless run in `viewport`, writing its
@@ -112,7 +144,7 @@ fn device_metrics_params(viewport: Viewport) -> Value {
         "width": viewport.width,
         "height": viewport.height,
         "deviceScaleFactor": viewport.device_scale_factor,
-        "mobile": false
+        "mobile": viewport.mobile
     })
 }
 
@@ -256,6 +288,20 @@ impl HeadlessBrowser {
             wait,
         )
         .await?;
+        if self.viewport.mobile {
+            page.call(
+                "Emulation.setTouchEmulationEnabled",
+                json!({ "enabled": true, "maxTouchPoints": 5 }),
+                wait,
+            )
+            .await?;
+            page.call(
+                "Emulation.setUserAgentOverride",
+                mobile_user_agent_params(),
+                wait,
+            )
+            .await?;
+        }
         page.call("Page.enable", json!({}), wait).await?;
         if let Some(source) = script {
             page.call(
@@ -955,6 +1001,18 @@ mod tests {
 
         let retina = device_metrics_params(Viewport::new(800, 600, 2.0));
         assert_eq!(retina["deviceScaleFactor"], json!(2.0));
+
+        let phone = device_metrics_params(Viewport::new(390, 844, 3.0).with_mobile(true));
+        assert_eq!(phone["mobile"], json!(true));
+        assert_eq!(phone["deviceScaleFactor"], json!(3.0));
+    }
+
+    #[test]
+    fn a_phone_reports_a_mobile_user_agent_in_the_string_and_the_client_hints() {
+        let params = mobile_user_agent_params();
+        assert!(params["userAgent"].as_str().unwrap().contains(" Mobile "));
+        assert_eq!(params["userAgentMetadata"]["mobile"], json!(true));
+        assert_eq!(params["userAgentMetadata"]["platform"], json!("Android"));
     }
 
     #[test]

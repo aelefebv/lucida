@@ -533,6 +533,62 @@ describe("a blank settled frame", () => {
   });
 });
 
+describe("a page that scrolled or overflows", () => {
+  const fits = {
+    scrollX: 0,
+    scrollY: 0,
+    scrollWidth: 390,
+    scrollHeight: 844,
+    viewportWidth: 390,
+    viewportHeight: 844,
+  };
+
+  it("is a stall when the page overflows its viewport, as a 100vh body does under a phone's address bar", () => {
+    const run = healthyLocalOpen();
+    run.pageScroll = { ...fits, scrollHeight: 924 };
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("its document is 390x924 CSS pixels in a 390x844 viewport");
+    expect(doc.findings[0]).toMatchObject({
+      rule: RULESET.pageScroll.id,
+      observed: { scroll: { scrollHeight: 924, viewportHeight: 844 } },
+      attribution: null,
+    });
+    expect(renderDiagnostic(doc).text).toContain("scrolled to 0,0, document 390x924 in a 390x844 viewport");
+  });
+
+  it("is a stall when the page was scrolled, even with nothing left to scroll", () => {
+    const run = healthyLocalOpen();
+    run.pageScroll = { ...fits, scrollY: 80 };
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("the page was scrolled to 0,80;");
+  });
+
+  it("is not found on a page that fits, one never read, or a window short of the run's end", () => {
+    const run = healthyLocalOpen();
+    run.pageScroll = fits;
+    expect(diagnoseRun(run).findings.some((f) => f.rule === RULESET.pageScroll.id)).toBe(false);
+    delete run.pageScroll;
+    expect(diagnoseRun(run).findings.some((f) => f.rule === RULESET.pageScroll.id)).toBe(false);
+    run.pageScroll = { ...fits, scrollY: 80 };
+    const windowed = diagnoseRun(run, { window: { startMs: 0, endMs: 10 } });
+    expect(windowed.findings.some((f) => f.rule === RULESET.pageScroll.id)).toBe(false);
+  });
+
+  it("follows a blank frame", () => {
+    const run = healthyLocalOpen();
+    run.frame = { width: 8, height: 4, flatColour: "#000000", unread: null };
+    run.pageScroll = { ...fits, scrollY: 80 };
+    expect(diagnoseRun(run).findings.slice(0, 2).map((f) => f.rule)).toEqual([
+      RULESET.blankFrame.id,
+      RULESET.pageScroll.id,
+    ]);
+  });
+});
+
 describe("first paint on a cold open", () => {
   const presentCeiling = RULESET.absolute.find((rule) => rule.phase === "browser.present")!;
 
