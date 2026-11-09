@@ -58,14 +58,21 @@ export type DispatchSkip = "other-plane" | "no-meta";
 
 /**
  * One Z plane of a decoded chunk, copied out of the cache's buffer, which the
- * cache keeps for later deliveries. `null` when the chunk is too short to
- * hold it. Posting transfers the copy and empties it, so its size is read
- * before the post.
+ * cache keeps for later deliveries. `firstZ` is the chunk's first plane the
+ * buffer holds, which is 0 for a whole chunk. `null` when the buffer does not
+ * hold the plane. Posting transfers the copy and empties it, so its size is
+ * read before the post.
  */
-function cutPlane(data: ArrayBuffer, dataType: string, localZ: number, planeLen: number): ArrayBuffer | null {
+function cutPlane(
+  data: ArrayBuffer,
+  dataType: string,
+  localZ: number,
+  planeLen: number,
+  firstZ = 0,
+): ArrayBuffer | null {
   const planeBytes = planeLen * decodedSampleBytes(dataType);
-  const start = localZ * planeBytes;
-  if (localZ < 0 || start + planeBytes > data.byteLength) return null;
+  const start = (localZ - firstZ) * planeBytes;
+  if (start < 0 || start + planeBytes > data.byteLength) return null;
   return data.slice(start, start + planeBytes);
 }
 
@@ -74,7 +81,8 @@ function cutPlane(data: ArrayBuffer, dataType: string, localZ: number, planeLen:
  * so it is sent only the plane `sliceZ` maps to, a chunk-depth fraction of
  * the bytes, and a Z move to another plane of the same chunk sends that
  * plane. Posts nothing, and says why, when it cannot place the chunk or the
- * chunk does not hold the plane.
+ * chunk does not hold the plane. A delivery of some planes of a chunk that
+ * lacks the plane is `other-plane`: the plan asks for the plane again.
  */
 export function dispatchChunkDelivery(
   client: UploadClient,
@@ -99,6 +107,9 @@ export function dispatchChunkDelivery(
   };
 
   if (viewMode === "volume") {
+    // Planes are never resident for the volume view, which asks for whole
+    // chunks; one that is left over from the slice view is not a chunk.
+    if (delivery.planes) return "other-plane";
     client.volumeChunkData(
       memberId,
       [chunk],
@@ -122,7 +133,10 @@ export function dispatchChunkDelivery(
   const levelZ = sliceLevelZ(sliceZ, fullResDepth, levelDepth);
   const cz = Math.max(chunkZ, 1);
   if (delivery.z !== Math.floor(levelZ / cz)) return "other-plane";
-  const plane = cutPlane(delivery.data, delivery.dataType, levelZ - delivery.z * cz, chunkY * chunkX);
+  const localZ = levelZ - delivery.z * cz;
+  const held = delivery.planes;
+  if (held && (localZ < held[0] || localZ >= held[1])) return "other-plane";
+  const plane = cutPlane(delivery.data, delivery.dataType, localZ, chunkY * chunkX, held?.[0]);
   if (!plane) return "no-meta";
   const bytes = plane.byteLength;
   client.sliceChunkData(

@@ -15,6 +15,10 @@ the coarsest level that still puts a sample under every device pixel, unless a
 level pin holds it. The server reads each chunk and sends it as one wire chunk:
 one timepoint, one channel, and the full spatial extent of one chunk, still
 compressed when the viewer can decode it (see the codec chain below). Nothing reads a whole array.
+The slice view of a volume asks for a few planes of each chunk around the one
+it draws, and the server still reads and decodes the whole chunk to cut them.
+Once the view steps along Z, it fetches the whole chunks its plane lies in, so
+the steps after that cost nothing.
 
 Over a remote object store, a view is bounded by how many reads per second the
 link completes. One measured link plateaued at a concurrency of 16, near 57

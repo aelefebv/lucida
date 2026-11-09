@@ -29,7 +29,7 @@ export {
 
 export { buildActiveSet, groupMembers } from "./activeSet.ts";
 
-export { chunkKey, compareChunkRequests } from "./emit.ts";
+export { chunkKey, compareChunkRequests, isZStep, SLICE_BAND_PLANES } from "./emit.ts";
 
 export { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
 

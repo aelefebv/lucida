@@ -194,6 +194,32 @@ describe("dispatchChunkDelivery", () => {
     expect(sliceChunkData).not.toHaveBeenCalled();
   });
 
+  it("cuts the plane out of a delivery that holds some planes of the chunk", () => {
+    const meta = makeMeta();
+    // Plane 1 of chunk 1 alone, filled with 7.
+    const delivery = makeChunkDelivery({ data: new Uint16Array(PLANE).fill(7).buffer, planes: [1, 2] });
+    const { client, posted } = makeMockClient();
+
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS)).toEqual({
+      memberId: "img-0:ch0",
+      bytes: PLANE * 2,
+    });
+    expect(new Uint16Array(posted[0]).every((v) => v === 7)).toBe(true);
+  });
+
+  it("posts nothing from planes that leave out the one the view draws", () => {
+    const meta = makeMeta();
+    const delivery = makeChunkDelivery({ data: new Uint16Array(PLANE).buffer, planes: [0, 1] });
+    const { client, sliceChunkData, volumeChunkData } = makeMockClient();
+
+    // z 3 is plane 1 of chunk 1, which the delivery does not hold.
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS)).toBe("other-plane");
+    // Nor are planes a chunk to the volume view.
+    expect(dispatchChunkDelivery(client, delivery, meta, "volume", null, EPOCHS)).toBe("other-plane");
+    expect(sliceChunkData).not.toHaveBeenCalled();
+    expect(volumeChunkData).not.toHaveBeenCalled();
+  });
+
   it("sends the volume view the whole chunk", () => {
     const meta = makeMeta();
     const delivery = makeChunkDelivery();

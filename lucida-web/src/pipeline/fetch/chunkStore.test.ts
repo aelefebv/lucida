@@ -385,3 +385,25 @@ describe("ChunkStore.entityChunkKeys", () => {
     expect(collected.get("e-2")).toEqual(new Set(["c"]));
   });
 });
+
+describe("ChunkStore replacing a chunk's entry", () => {
+  it("counts only the new entry's bytes and records no eviction for the old one", () => {
+    const { store, evictionLog } = makeMainStore({ budgetBytes: 100 });
+    store.insert(makeEntry({ chunkKey: "c", sizeBytes: 30, planes: [0, 3] }));
+    expect(store.insert(makeEntry({ chunkKey: "c", sizeBytes: 90 }))).toBe(true);
+    expect(store.bytes).toBe(90);
+    expect(store.get("e-1", "c")?.planes).toBeUndefined();
+    expect(evictionLog).toEqual([]);
+    expect(store.levelResidency()).toEqual([1]);
+  });
+
+  it("makes room from other entries for the growth alone", () => {
+    const { store, evictionLog } = makeMainStore({ budgetBytes: 100 });
+    store.insert(makeEntry({ chunkKey: "other", sizeBytes: 40 }));
+    store.insert(makeEntry({ chunkKey: "c", sizeBytes: 30, planes: [0, 3] }));
+    store.insert(makeEntry({ chunkKey: "c", sizeBytes: 90 }));
+    expect(store.bytes).toBe(90);
+    expect(store.get("e-1", "other")).toBeUndefined();
+    expect(evictionLog).toHaveLength(1);
+  });
+});

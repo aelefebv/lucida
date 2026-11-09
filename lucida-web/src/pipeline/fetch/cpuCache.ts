@@ -534,16 +534,24 @@ export class CpuCache {
     const keys = new Array<string>(requests.length);
     const tiers = new Array<ResidencyTier>(requests.length);
     // Seeded with this submit's active-entity in-flight keys; the pass below
-    // strikes out each key the plan still wants, leaving the work to abort.
-    // Bounded by the concurrency cap.
+    // strikes out each fetch the plan still wants, leaving the work to abort.
+    // Bounded by the concurrency cap, as is the index of what is in flight.
     const unwantedInFlightKeys = this.activeInFlightChunkKeys(newActiveIds);
+    const inFlight = this.inFlightByChunk();
     for (let i = 0; i < requests.length; i++) {
       const req = requests[i];
       const tier = req.tier;
       const key = chunkSchedulerKey(req, tier);
       keys[i] = key;
       tiers[i] = tier;
-      if (unwantedInFlightKeys.size > 0) unwantedInFlightKeys.delete(key);
+      if (unwantedInFlightKeys.size > 0) {
+        // A chunk still wanted keeps its whole fetch, which holds every
+        // plane, and any fetch of planes that holds the one it draws.
+        unwantedInFlightKeys.delete(key);
+        for (const fetch of inFlight.get(key) ?? []) {
+          if (holdsPlane(fetch.request.planes, req.plane)) unwantedInFlightKeys.delete(fetch.key);
+        }
+      }
       if (tier === "detail") {
         this.desiredDetailKeysThisTick.add(key);
         if (req.lane !== "prefetch") this.viewDetailKeysThisTick.add(key);
@@ -570,7 +578,7 @@ export class CpuCache {
     this.queueHeldByRebuild = true;
     const pendingChunks: ChunkRequest[] = [];
     const pendingTiers: ResidencyTier[] = [];
-    const pendingKeys = new Set(carried.map((req) => chunkSchedulerKey(req, req.tier)));
+    const pendingKeys = new Set(carried.map((req) => this.inFlightKey(req)));
     const enqueueNow = performance.now();
     let nextRetryAt = Infinity;
     for (let i = 0; i < requests.length; i++) {
@@ -594,6 +602,15 @@ export class CpuCache {
       const cachedEntry = this.lookupCachedEntry(req);
       if (cachedEntry) {
         this.counters.recordHit();
+        // The whole chunk a step along Z prefetches is the one whose plane
+        // the view draws, which asked first and keeps it the view's.
+        if (
+          req.lane === "prefetch" &&
+          cachedEntry.lane !== "prefetch" &&
+          cachedEntry.lastSeenTick === this.currentSubmitTick
+        ) {
+          continue;
+        }
         const lane = this.resolveDemandLane(req.lane, key);
         cachedEntry.lane = lane;
         cachedEntry.residencyTier = tiers[i];
@@ -607,14 +624,19 @@ export class CpuCache {
         continue;
       }
 
-      if (this.chunkScheduler.hasInFlight(key)) {
+      const covering = coveringFetch(inFlight.get(key), req);
+      if (covering !== null) {
         // A second demand attaching to a fetch already on the wire. The
         // attach itself is below the clock floor, so it is counted per tick;
         // the one fetch keeps the one row.
         traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
-        this.rememberInFlightChunk(key, req, { ...this.currentEpochs });
+        this.rememberInFlightChunk(covering, req, { ...this.currentEpochs });
         continue;
       }
+      // The view does not wait behind a whole chunk prefetched after a step
+      // along Z, but that chunk lands as the view's when it comes.
+      const whole = req.plane === undefined ? undefined : inFlight.get(key)?.find((fetch) => !fetch.request.planes);
+      if (whole) this.rememberInFlightChunk(whole.key, req, { ...this.currentEpochs });
 
       // Permanent failures stay excluded until reset or cancelDataset.
       // Transient and pending records self-heal, and the reconcile timer is
@@ -629,11 +651,12 @@ export class CpuCache {
       // residency tier + key); one fetch serves both. The first occurrence
       // keeps the queue slot, and plans arrive priority-sorted, so it is the
       // most urgent.
-      if (pendingKeys.has(key)) {
+      const fetchKey = this.inFlightKey(req);
+      if (pendingKeys.has(fetchKey)) {
         traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
         continue;
       }
-      pendingKeys.add(key);
+      pendingKeys.add(fetchKey);
       pendingChunks.push(req);
       pendingTiers.push(tiers[i]);
     }
@@ -675,14 +698,16 @@ export class CpuCache {
     const pending: ChunkRequest[] = [];
     const tiers: ResidencyTier[] = [];
     const seen = new Set<string>();
+    const inFlight = this.inFlightByChunk();
     for (const requests of this.wantedRequests) {
       for (const req of requests) {
         const key = chunkSchedulerKey(req, req.tier);
-        if (seen.has(key)) continue;
-        seen.add(key);
+        const fetchKey = this.inFlightKey(req);
+        if (seen.has(fetchKey)) continue;
+        seen.add(fetchKey);
         if (this.rejectionTracker.has(req.entityId, req.chunkKey)) continue;
         if (this.refusedThisPlan.has(key)) continue;
-        if (this.lookupCachedEntry(req) || this.chunkScheduler.hasInFlight(key)) continue;
+        if (this.lookupCachedEntry(req) || coveringFetch(inFlight.get(key), req) !== null) continue;
         const failure = this.excludingFailure(key, now);
         if (failure) {
           nextRetryAt = Math.min(nextRetryAt, failure.eligibleAt);
@@ -1332,6 +1357,7 @@ export class CpuCache {
    */
   private countMissing(out: CacheSettleInputs, full: Record<ResidencyTier, boolean>): void {
     const seen = new Set<string>();
+    const inFlight = this.inFlightByChunk();
     const short = (tier: ResidencyTier): void => {
       if (tier === "detail") out.shortDetailChunks++;
       else out.shortCoarseChunks++;
@@ -1349,7 +1375,7 @@ export class CpuCache {
           short(req.tier);
           continue;
         }
-        if (entry || this.chunkScheduler.hasInFlight(key)) continue;
+        if (entry || coveringFetch(inFlight.get(key), req) !== null) continue;
         const record = this.getFailureRecord(key);
         // A permanent failure is counted with the failed chunks above.
         if (record?.kind === "permanent") continue;
@@ -1443,21 +1469,31 @@ export class CpuCache {
     this.updateConfig({ ...this.ownKnobValues, ...knobs });
   }
 
-  /** Searches detail then overview. */
+  /** The whole chunk, searching detail then overview. */
   getCachedChunk(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
-    const entry =
-      this.chunkStore.get(entityId, chunkKey) ??
-      this.overviewStore.get(entityId, chunkKey);
+    const entry = this.wholeEntry(entityId, chunkKey);
     return entry ? this.chunkEntryToDelivery(entry) : null;
   }
 
   /**
-   * A resident chunk's samples from either tier, without the delivery copy
-   * {@link getCachedChunk} makes. Auto-contrast checks every chunk it reads
-   * on each tick until they are all resident.
+   * A resident whole chunk's samples from either tier, without the delivery
+   * copy {@link getCachedChunk} makes. Auto-contrast checks every chunk it
+   * reads on each tick until they are all resident.
    */
   cachedSamples(entityId: string, chunkKey: string): { data: ArrayBuffer; dataType: string } | undefined {
-    return this.chunkStore.get(entityId, chunkKey) ?? this.overviewStore.get(entityId, chunkKey);
+    return this.wholeEntry(entityId, chunkKey);
+  }
+
+  /**
+   * A chunk held whole in either store. Readers that take a chunk's samples
+   * as its full shape never see one held as some of its planes.
+   */
+  private wholeEntry(entityId: string, chunkKey: string): CacheEntry | undefined {
+    for (const store of [this.chunkStore, this.overviewStore]) {
+      const entry = store.get(entityId, chunkKey);
+      if (entry && !entry.planes) return entry;
+    }
+    return undefined;
   }
 
   /** Whether the server answered that it is still generating the chunk, and has not said it is ready. */
@@ -1557,11 +1593,19 @@ export class CpuCache {
     // drain and passes none, so its row reads the clock itself.
     const rowTier = req.tier === "coarse" ? 1 : 0;
     const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs, dispatchedAtMs);
+    // `key` names this fetch, and `chunk` the chunk it fetches, which is
+    // what failures, the wanted set and refusals are kept by.
+    const chunk = chunkSchedulerKey(req, req.tier);
 
     let result: FetchResult;
     try {
       result = await this.source.fetch(
-        { datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey },
+        {
+          datasetId: req.datasetId,
+          imageId: req.imageId,
+          chunkKey: req.chunkKey,
+          ...(req.planes ? { planes: req.planes } : {}),
+        },
         controller.signal,
         // The transport's label for this chunk. When this fetch coalesced onto
         // one already in flight it is the first sender's, so every row that
@@ -1587,9 +1631,9 @@ export class CpuCache {
         const overtaken = this.settledWhileInFlight.has(key);
         if (this.settleFetch(key, controller)) {
           if (!overtaken) {
-            this.recordFailure(key, "pending", req);
+            this.recordFailure(chunk, "pending", req);
           } else {
-            if (this.isWanted(key)) this.armReconcileForAvailability();
+            if (this.isWanted(chunk)) this.armReconcileForAvailability();
             this.notifyListeners();
           }
           this.drainScheduler();
@@ -1633,7 +1677,7 @@ export class CpuCache {
         fed = true;
       }
       if (this.settleFetch(key, controller)) {
-        this.recordFailure(key, isPermanent ? "permanent" : "transient", req, fe.failure);
+        this.recordFailure(chunk, isPermanent ? "permanent" : "transient", req, fe.failure);
         this.counters.recordFetchFailure(isPermanent, fe.message);
         this.recordFailureForBurstDetection(isPermanent, fe.message);
         traceRecorder.recordPointEvent(PointEvent.Failure, fe.failure ?? fe.kind, req, rowTier);
@@ -1680,7 +1724,7 @@ export class CpuCache {
         if (!fedStreak) {
           this.recordChunkFailureForStreak(streakMessage);
         }
-        this.recordFailure(key, "transient", req);
+        this.recordFailure(chunk, "transient", req);
         this.counters.recordFetchFailure(false, streakMessage);
         this.recordFailureForBurstDetection(false, streakMessage);
         // Bytes that arrived and could not be decoded fail the delivery just
@@ -1708,14 +1752,14 @@ export class CpuCache {
     // state untouched.
     if (this.settleFetch(key, controller)) {
       this.recordChunkDelivered();
-      this.clearFailure(key);
+      this.clearFailure(chunk);
     }
 
     // Cache even if cancelled during decode — the work is done. The
     // lane is demand-resolved: an arrival the view's coarse lane also
     // wanted must be deliverable now, not after the next rebuild
     // happens to relabel it.
-    const lane = this.resolveDemandLane(effectiveReq.lane, key);
+    const lane = this.resolveDemandLane(effectiveReq.lane, chunk);
     const tier = stale ? "demoted-detail" : this.laneToTier(lane);
     const cacheEntry: CacheEntry = {
       data: decoded,
@@ -1741,37 +1785,61 @@ export class CpuCache {
       // and `present` land on the same row as `wire` and `decode`.
       traceRow,
     };
+    if (result.planes) cacheEntry.planes = result.planes;
 
     // Coarse-tier lanes share the overview store.
-    if (lane === "overview" || lane === "minimap" || lane === "coarse") {
-      if (stale && this.overviewStore.bytes + cacheEntry.sizeBytes > this.overviewStore.budgetBytes) {
-        // Decoded and then dropped on the floor: the row ends here, and
-        // saying so is the difference between a chunk that stalled and one
-        // that was never going to arrive.
-        traceRecorder.finishRow(traceRow, RowOutcome.Retired);
-        this.drainScheduler();
-        return;
-      }
-      if (!this.overviewStore.insert(cacheEntry)) {
-        this.refuseArrival(key, traceRow);
-        return;
-      }
-    } else {
-      if (stale && this.chunkStore.bytes + cacheEntry.sizeBytes > this.chunkStore.budgetBytes) {
-        traceRecorder.finishRow(traceRow, RowOutcome.Retired);
-        this.drainScheduler();
-        return;
-      }
-      if (!this.chunkStore.insert(cacheEntry)) {
-        this.refuseArrival(key, traceRow);
-        return;
-      }
+    const store = lane === "overview" || lane === "minimap" || lane === "coarse"
+      ? this.overviewStore
+      : this.chunkStore;
+    // One entry per chunk. A whole chunk keeps its place against planes of
+    // it, and stale planes never displace planes the store already holds.
+    const resident = store.get(cacheEntry.entityId, cacheEntry.chunkKey);
+    const supersedes = resident === undefined ||
+      (result.planes === undefined || (resident.planes !== undefined && !stale));
+    const room = store.budgetBytes - store.bytes + (resident?.sizeBytes ?? 0);
+    if (!supersedes || (stale && cacheEntry.sizeBytes > room)) {
+      // Decoded and then dropped on the floor: the row ends here, and
+      // saying so is the difference between a chunk that stalled and one
+      // that was never going to arrive.
+      traceRecorder.finishRow(traceRow, RowOutcome.Retired);
+      this.drainScheduler();
+      return;
     }
+    if (
+      resident !== undefined &&
+      result.planes === undefined &&
+      resident.lastSeenTick === this.currentSubmitTick &&
+      resident.priority < cacheEntry.priority
+    ) {
+      // The whole chunk holds the plane the view draws from its planes.
+      cacheEntry.lane = resident.lane;
+      cacheEntry.tier = resident.tier;
+      cacheEntry.priority = resident.priority;
+      cacheEntry.lastSeenTick = resident.lastSeenTick;
+    }
+    if (!store.insert(cacheEntry)) {
+      this.refuseArrival(chunk, traceRow);
+      return;
+    }
+    // Any fetch still bringing planes of a chunk now held whole brings
+    // nothing new.
+    if (result.planes === undefined) this.cancelPlaneFetches(chunk);
     // Cache admission: the moment decoded bytes become resident. Counted, not
     // timed — the insert is well under the platform's clock floor.
     traceRecorder.countPhase(CountedPhaseIndex.CacheAdmission);
 
-    this.notifyListeners();
+    // A chunk only the prefetch lane wants, or a whole one whose plane the
+    // renderer already holds from its planes, changes nothing on screen.
+    // Waking the page for it would hold a settled view open until the
+    // prefetch ends.
+    const unseen =
+      cacheEntry.lane === "prefetch" ||
+      (result.planes === undefined &&
+        resident?.planes !== undefined &&
+        this.deliveryState.wasChunkSent(
+          cacheEntry.imageId, cacheEntry.c, cacheEntry.chunkKey, cacheEntry.residencyTier,
+        ));
+    if (!unseen) this.notifyListeners();
 
     this.drainScheduler();
   }
@@ -1851,11 +1919,36 @@ export class CpuCache {
     req: ChunkRequest,
     epochs: SceneEpochs,
   ): void {
+    // Within one plan the most urgent demand decides how the chunk lands.
+    const seen = this.inFlightChunkMeta.get(key);
+    if (seen && seen.lastSeenTick === this.currentSubmitTick && seen.request.priority < req.priority) return;
     this.inFlightChunkMeta.set(key, {
       request: req,
       lastSeenTick: this.currentSubmitTick,
       epochs,
     });
+  }
+
+  /**
+   * The fetches in flight, by the chunk each fetches: its whole chunk, or
+   * some of its planes. Bounded by the concurrency cap.
+   */
+  private inFlightByChunk(): Map<string, InFlightFetch[]> {
+    const byChunk = new Map<string, InFlightFetch[]>();
+    for (const [key, entry] of this.chunkScheduler.inFlightEntries()) {
+      const chunk = chunkSchedulerKey(entry.request, entry.request.tier);
+      const fetches = byChunk.get(chunk);
+      if (fetches) fetches.push({ key, request: entry.request });
+      else byChunk.set(chunk, [{ key, request: entry.request }]);
+    }
+    return byChunk;
+  }
+
+  /** Abort every fetch of some planes of `chunk`. */
+  private cancelPlaneFetches(chunk: string): void {
+    const prefix = `${chunk}#`;
+    const cancelled = this.chunkScheduler.cancelInFlightWhere((_entry, key) => key.startsWith(prefix));
+    for (const key of cancelled) this.forgetCancelledChunk(key);
   }
 
   /** Drop what the cache keeps beside a chunk fetch it cancelled. */
@@ -2040,7 +2133,7 @@ export class CpuCache {
   }
 
   private chunkEntryToDelivery(entry: CacheEntry): ReadyChunkDelivery {
-    return {
+    const delivery: ReadyChunkDelivery = {
       entityId: entry.entityId,
       imageId: entry.imageId,
       level: entry.level,
@@ -2058,14 +2151,21 @@ export class CpuCache {
       priority: entry.priority,
       traceRow: entry.traceRow,
     };
+    if (entry.planes) delivery.planes = entry.planes;
+    return delivery;
   }
 
+  /**
+   * The entry that holds what `req` asks to be resident: the whole chunk, or
+   * planes among which is the one the view draws.
+   */
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     // minimap/overview/coarse share the overview/coarse cache.
     const usesOverviewCache =
       req.lane === "overview" || req.lane === "minimap" || req.lane === "coarse";
     const store = usesOverviewCache ? this.overviewStore : this.chunkStore;
-    return store.get(req.entityId, req.chunkKey);
+    const entry = store.get(req.entityId, req.chunkKey);
+    return entry && holdsPlane(entry.planes, req.plane) ? entry : undefined;
   }
 
   /**
@@ -2145,9 +2245,46 @@ export class CpuCache {
     return queues;
   }
 
+  /**
+   * The scheduler key of the fetch `req` starts: its chunk's key, with the
+   * planes when it fetches only those, so a fetch of some planes and one of
+   * the whole chunk can be in flight together.
+   */
   private inFlightKey(req: ChunkRequest): string {
-    return chunkSchedulerKey(req, req.tier);
+    const key = chunkSchedulerKey(req, req.tier);
+    return req.planes ? `${key}#${req.planes[0]}:${req.planes[1]}` : key;
   }
+}
+
+/** One fetch in flight, as {@link CpuCache} indexes them by chunk. */
+interface InFlightFetch {
+  key: string;
+  request: ChunkRequest;
+}
+
+/**
+ * Whether bytes holding `held` planes, or the whole chunk when absent, hold
+ * what a request drawing `plane` needs: every plane when it draws the whole
+ * chunk.
+ */
+function holdsPlane(held: readonly [number, number] | undefined, plane: number | undefined): boolean {
+  if (held === undefined) return true;
+  return plane !== undefined && held[0] <= plane && plane < held[1];
+}
+
+/**
+ * The key of the in-flight fetch among `fetches` whose arrival will hold
+ * what `req` needs, or null. A request for a plane does not wait on a whole
+ * chunk the prefetch lane is bringing: its planes come sooner by their own
+ * fetch.
+ */
+function coveringFetch(fetches: readonly InFlightFetch[] | undefined, req: ChunkRequest): string | null {
+  for (const fetch of fetches ?? []) {
+    if (!holdsPlane(fetch.request.planes, req.plane)) continue;
+    if (!fetch.request.planes && req.plane !== undefined && fetch.request.lane === "prefetch") continue;
+    return fetch.key;
+  }
+  return null;
 }
 
 /**

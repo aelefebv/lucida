@@ -11,6 +11,7 @@ import {
   emitMinimapLane,
   emitPrefetchLane,
   enumeratePlanChunks,
+  isZStep,
   LaneRequests,
 } from "./emit.ts";
 import { buildActiveSet } from "./activeSet.ts";
@@ -39,9 +40,10 @@ function resolveZoomDirection(
 /**
  * Emit the chunk requests for an already-resolved active set. Lets a caller regenerate requests for a T scrub or Z-plane move
  * without `buildActiveSet`. Pure in `(activeSet, snapshot, config,
- * zoomDirection)`, so the result matches a full {@link plan} for that
- * selection. A scrub is not a zoom, so the stored `zoomDirection` applies.
- * Postconditions match {@link plan}; mutates only `stats`.
+ * zoomDirection, zStep)`, so the result matches a full {@link plan} for
+ * that selection. A scrub is not a zoom, so the stored `zoomDirection`
+ * applies. `zStep` says the selection stepped along Z since the last plan
+ * ({@link isZStep}). Postconditions match {@link plan}; mutates only `stats`.
  */
 export function emitPlanRequests(
   activeSet: ActiveSetEntry[],
@@ -49,6 +51,7 @@ export function emitPlanRequests(
   stats: PlanStats,
   config: PlanningConfig,
   zoomDirection: ZoomDirection | null,
+  zStep = false,
 ): ChunkRequest[] {
   const entityById = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) {
@@ -60,7 +63,7 @@ export function emitPlanRequests(
 
   emitDetailLane(chunks, snapshot, stats, lanes, config);
 
-  emitPrefetchLane(chunks, snapshot, stats, lanes, config);
+  emitPrefetchLane(chunks, snapshot, stats, lanes, config, zStep);
 
   emitCoarseLane(chunks, snapshot, stats, lanes, config);
 
@@ -103,7 +106,8 @@ export function plan(
   const effectiveZoom = snapshot.visibleRegion.effectiveZoom;
   const zoomDirection = resolveZoomDirection(state, effectiveZoom);
 
-  const requests = emitPlanRequests(activeSet, snapshot, stats, config, zoomDirection);
+  const zStep = isZStep(state.previousZ, snapshot.selection);
+  const requests = emitPlanRequests(activeSet, snapshot, stats, config, zoomDirection, zStep);
 
   const epochs: SceneEpochs = {
     ...snapshot.epochs,
@@ -114,6 +118,7 @@ export function plan(
     previousActiveSet: activeSet,
     previousEffectiveZoom: effectiveZoom,
     zoomDirection,
+    previousZ: snapshot.selection.z,
   };
   return { requests, activeSet, epochs, stats, nextState };
 }
