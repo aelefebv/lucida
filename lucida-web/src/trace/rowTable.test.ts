@@ -42,11 +42,52 @@ describe("RowTable", () => {
 
   it("pins the row width, because the memory caps are derived from it", () => {
     // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots + the
-    // two-part wire label + the bytes column, all uint32, plus a
-    // residency-tier, lane, outcome and last-boundary byte, plus a 12 B
-    // identity index. The resident and per-run caps derive from this figure,
-    // so a change here changes how much of a run fits.
-    expect(RowTable.BYTES_PER_ROW).toBe(92);
+    // two-part wire label + the bytes column, all uint32, plus the decode
+    // work's uint16 share, plus a residency-tier, lane, outcome and
+    // last-boundary byte, plus a 12 B identity index. The resident and
+    // per-run caps derive from this figure, so a change here changes how much
+    // of a run fits.
+    expect(RowTable.BYTES_PER_ROW).toBe(94);
+  });
+
+  it("carries the decode worker's own time only for a row it was reported on", () => {
+    const table = new RowTable(4);
+    const rows = [0, 1, 2].map(() => table.append(source(), 0));
+    for (const row of rows) {
+      table.stamp(row, Boundary.DecodeStart, 10_000);
+      table.stamp(row, Boundary.UploadStart, 410_000);
+    }
+    table.setDecodeWork(rows[0], 1_250);
+    // A skewed report never makes the work longer than the round trip.
+    table.setDecodeWork(rows[1], 900_000);
+
+    const [decoded, skewed, silent] = table.serialise();
+    // Within a part in 65,534 of the 400 ms round trip.
+    expect(decoded.decodeWorkUs).toBeGreaterThanOrEqual(1_247);
+    expect(decoded.decodeWorkUs).toBeLessThanOrEqual(1_253);
+    expect(skewed.decodeWorkUs).toBe(400_000);
+    expect("decodeWorkUs" in silent).toBe(false);
+  });
+
+  it("keeps the decode work within a part in 65,534 of a long round trip", () => {
+    const table = new RowTable(1);
+    const row = table.append(source(), 0);
+    table.stamp(row, Boundary.DecodeStart, 0);
+    table.stamp(row, Boundary.UploadStart, 60_000_000);
+    table.setDecodeWork(row, 48_765);
+
+    const [serialised] = table.serialise();
+    expect(Math.abs(serialised.decodeWorkUs! - 48_765)).toBeLessThanOrEqual(60_000_000 / 65_534 / 2);
+  });
+
+  it("keeps no decode work for a row whose round trip never closed", () => {
+    const table = new RowTable(1);
+    const row = table.append(source(), 0);
+    table.stamp(row, Boundary.DecodeStart, 0);
+    table.setDecodeWork(row, 1_000);
+    table.stamp(row, Boundary.UploadStart, 5_000);
+
+    expect("decodeWorkUs" in table.serialise()[0]).toBe(false);
   });
 
   it("carries the bytes the wire delivered, and zero until it did", () => {

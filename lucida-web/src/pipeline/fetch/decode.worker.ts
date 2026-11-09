@@ -13,16 +13,30 @@ interface DecodeRequest {
   wireFormat: WireFormat;
 }
 
-interface DecodeResponse {
+/**
+ * When this worker took the request up and when it finished, as
+ * `performance.timeOrigin + performance.now()`: a clock the page shares, so
+ * the page can tell the decode itself from the wait around it.
+ */
+interface DecodeTiming {
+  startedAtMs: number;
+  doneAtMs: number;
+}
+
+interface DecodeResponse extends DecodeTiming {
   id: number;
   data: ArrayBuffer;
   error?: undefined;
 }
 
-interface DecodeError {
+interface DecodeError extends DecodeTiming {
   id: number;
   data?: undefined;
   error: string;
+}
+
+function sharedNow(): number {
+  return performance.timeOrigin + performance.now();
 }
 
 function decompressLz4(src: ArrayBuffer): ArrayBuffer {
@@ -248,17 +262,23 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
 }
 
 self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
+  const startedAtMs = sharedNow();
   const { id, bytes, wireFormat } = e.data;
   try {
     const decompressed = await decompress(bytes, wireFormat);
     const data = normalize(decompressed, extractDataType(wireFormat));
-    (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
+    (self as unknown as Worker).postMessage(
+      { id, data, startedAtMs, doneAtMs: sharedNow() } satisfies DecodeResponse,
+      [data],
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    (self as unknown as Worker).postMessage({ id, error: message } satisfies DecodeError);
+    (self as unknown as Worker).postMessage(
+      { id, error: message, startedAtMs, doneAtMs: sharedNow() } satisfies DecodeError,
+    );
   }
 };
 
 // Re-exported for direct testing (imported as a module, not a worker).
 export { decompressLz4, decompressZstd, normalize };
-export type { DecodeRequest, DecodeResponse, DecodeError };
+export type { DecodeRequest, DecodeResponse, DecodeError, DecodeTiming };

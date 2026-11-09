@@ -8,7 +8,7 @@
  * the attribution walks back to.
  */
 
-import type { TraceRun, TraceServerRow } from "../types.ts";
+import type { TraceRow, TraceRun, TraceServerRow } from "../types.ts";
 import { PHASE_CLASSES } from "./ruleset.ts";
 import type { AggregateCandidate, PhaseClass, PhaseRollup, PhaseSide } from "./types.ts";
 import { clipSpan, inWindow, resolveWindow, type ClippedSpan, type RunWindow } from "./window.ts";
@@ -97,6 +97,29 @@ export function metadataReadsWithin(run: TraceRun, window: RunWindow): MetadataR
 export const OPEN_PHASE = "metadata.dataset-open";
 
 /**
+ * The part of a row's `decode` round trip spent waiting: for a worker still
+ * busy with earlier chunks, and for a main thread too busy to take the result.
+ * Kept apart from the decode itself so a backlog reads as a queue, not as
+ * slow decoding.
+ */
+export const DECODE_WAIT = "browser.decode-wait";
+
+/**
+ * A row's decode round trip, as far as `span` holds it, split into the
+ * worker's own time and the wait around it. Null for a row whose worker never
+ * reported its time, so the whole round trip stays `decode`.
+ *
+ * Where inside the round trip the work sat is not kept, so a cut round trip
+ * caps the work at the part inside rather than apportioning it, as a server
+ * phase is capped at its bracket.
+ */
+export function splitDecode(row: TraceRow, span: ClippedSpan): { workUs: number; waitUs: number } | null {
+  if (row.decodeWorkUs == null) return null;
+  const workUs = Math.min(row.decodeWorkUs, span.us);
+  return { workUs, waitUs: span.us - workUs };
+}
+
+/**
  * One observation of a phase: how long it took, which row it belonged to, and
  * where on the run's clock it sat when anything could say.
  *
@@ -157,6 +180,15 @@ export function rollupWindow(run: TraceRun, window: RunWindow): WindowRollup {
 
   for (const [index, row] of run.rows.entries()) {
     for (const [phase, timing] of Object.entries(row.phases)) {
+      const span = phase === "decode" ? clipSpan(timing.startUs, timing.endUs, window) : null;
+      const split = span && splitDecode(row, span);
+      if (span && split) {
+        if (span.clipped) clippedRows.add(`row:${index}`);
+        // Both inherit the round trip's position, as a server phase does its bracket.
+        push("browser.decode", { us: split.workUs, startUs: span.startUs, endUs: span.endUs, label: row.chunkKey });
+        push(DECODE_WAIT, { us: split.waitUs, startUs: span.startUs, endUs: span.endUs, label: row.chunkKey });
+        continue;
+      }
       pushPlaced(`browser.${phase}`, `row:${index}`, timing.startUs, timing.endUs, row.chunkKey);
     }
   }

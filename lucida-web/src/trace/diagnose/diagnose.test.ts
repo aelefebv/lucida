@@ -107,6 +107,38 @@ describe("thresholds", () => {
     ).toBe(false);
   });
 
+  it("still stalls on a slow decoder once the worker reports its own time", () => {
+    const decodeCeilMs = RULESET.absolute.find((rule) => rule.phase === "browser.decode")!.ceilMs;
+    const doc = diagnoseRun(decodeOpen({ roundTripUs: 90 * MS, workUs: 80 * MS }));
+
+    const decode = doc.phases.find((phase) => phase.id === "browser.decode");
+    expect(decode?.p95Ms).toBe(80);
+    expect(decode!.p95Ms).toBeGreaterThan(decodeCeilMs);
+    const finding = doc.findings.find((f) => f.subject === "browser.decode");
+    expect(finding?.rule).toBe("compute.decode");
+    expect(finding?.severity).toBe("stall");
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("browser.decode");
+  });
+
+  it("reads a decode backlog as a queue rather than as decode work", () => {
+    // Every chunk waits 400 ms for a worker or for the main thread, and each
+    // decode takes 2 ms of it: the round trip is eight times the decode
+    // ceiling, and nothing decoded slowly.
+    const doc = diagnoseRun(decodeOpen({ roundTripUs: 400 * MS, workUs: 2 * MS }));
+
+    const decode = doc.phases.find((phase) => phase.id === "browser.decode");
+    const wait = doc.phases.find((phase) => phase.id === "browser.decode-wait");
+    expect(decode?.p95Ms).toBe(2);
+    expect(wait).toMatchObject({ class: "queue", p95Ms: 398 });
+    expect(doc.findings.filter((f) => f.severity !== "note")).toEqual([]);
+    expect(doc.verdict.kind).toBe("clear");
+
+    const segments = doc.criticalPath.segments;
+    expect(segments.find((s) => s.label === "browser.decode-wait")).toMatchObject({ class: "queue", ms: 398 });
+    expect(segments.find((s) => s.label === "browser.decode")).toMatchObject({ class: "compute", ms: 2 });
+  });
+
   it("flags a queue by backlog ETA measured over the trailing second", () => {
     const doc = diagnoseRun(saturatedReopen());
     const limiter = doc.limiters[0];
@@ -1133,6 +1165,31 @@ function scaledOpen(factor: number) {
     }
   }
   return run;
+}
+
+/**
+ * A local open of 40 chunks that land together, each decode round trip
+ * `roundTripUs` long, of which the worker spent `workUs` decoding.
+ */
+function decodeOpen({ roundTripUs, workUs }: { roundTripUs: number; workUs: number }): TraceRun {
+  const rows = Array.from({ length: 40 }, (_, i) =>
+    makeRow(
+      {
+        startUs: 40 * MS + i * 200,
+        durations: { plan: 400, queue: 2 * MS, wire: 18 * MS, decode: roundTripUs, upload: 1_200, present: 2 * MS },
+        rid: i,
+        decodeWorkUs: workUs,
+      },
+      i,
+    ),
+  );
+  return makeRun({
+    header: { runId: "decode-open", durationUs: 1_000 * MS },
+    rows,
+    readings: Array.from({ length: 12 }, (_, i) =>
+      makeReading(30 * MS + i * 25 * MS, { queueDepth: 0, inFlight: (i % 3) + 1, frameTimeUs: 3_500 }),
+    ),
+  });
 }
 
 /** Two segments within 1.25x of each other, so no single one can be named. */
