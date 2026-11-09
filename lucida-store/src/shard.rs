@@ -1072,7 +1072,7 @@ mod tests {
             .unwrap();
         let before = store.get_count.load(Ordering::SeqCst);
 
-        let held = limiter.acquire(ReaderId(99)).await;
+        let held = limiter.acquire(ReaderId(99), 0).await;
         let mut handles = Vec::new();
         for position in [0usize, 1] {
             let shards = Arc::clone(&shards);

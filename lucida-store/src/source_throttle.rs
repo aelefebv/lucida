@@ -56,7 +56,7 @@ impl SourceThrottleProfile {
             // Performance": small-object and first-byte latencies of
             // "roughly 100-200 milliseconds", and one concurrent request per
             // 85-90 MB/s, about 15 of them to fill a 10 Gb/s NIC. lucida
-            // reads 16 at a time, so the cap is that NIC.
+            // reads at least 16 at a time, so the cap is that NIC.
             Self::ObjectStore => SourceThrottleSettings {
                 latency: Duration::from_millis(100),
                 jitter: Duration::from_millis(100),
@@ -67,7 +67,7 @@ impl SourceThrottleProfile {
             // ("Azure network round-trip latency statistics", July 2026) are
             // 69 ms from East US to West US and 83 ms from East US to West
             // Europe. The cap is the ~18 MiB/s a real remote link flattened at
-            // in the sweep behind `DEFAULT_SOURCE_READ_CONCURRENCY`.
+            // in the sweep behind `DEFAULT_MIN_SOURCE_READS`.
             Self::Remote => SourceThrottleSettings {
                 latency: Duration::from_millis(180),
                 jitter: Duration::from_millis(100),

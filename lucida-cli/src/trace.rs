@@ -310,6 +310,10 @@ pub struct ComposedView {
     /// overrode it. The page fits its memory budgets to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_memory_gib: Option<f64>,
+    /// The logical cores the page was told the device has, when the driver
+    /// overrode them. The page sizes its decode workers to them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cores: Option<u32>,
     /// The camera the driver composed, when the caller asked for one rather
     /// than the page's own framing, and the level the core says it calls for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,6 +333,14 @@ pub fn parse_device_memory(text: &str) -> Result<f64, String> {
 fn device_memory_script(gib: f64) -> String {
     format!(
         "Object.defineProperty(Navigator.prototype, \"deviceMemory\", {{ get: () => {gib}, configurable: true }});"
+    )
+}
+
+/// A script that makes the page read `cores` as the device's logical cores.
+/// It runs before the page's own scripts, which read them once at startup.
+fn cores_script(cores: u32) -> String {
+    format!(
+        "Object.defineProperty(Navigator.prototype, \"hardwareConcurrency\", {{ get: () => {cores}, configurable: true }});"
     )
 }
 
@@ -1997,10 +2009,14 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .device_memory_gib
         .map(|gib| format!(" · device memory {gib} GiB"))
         .unwrap_or_default();
+    let cores = view
+        .cores
+        .map(|cores| format!(" · {cores} cores"))
+        .unwrap_or_default();
     let errors = format_errors(&header.errors);
     format!(
         "{replay}\
-         view      {} @ {}x{} DPR {}{memory}\n\
+         view      {} @ {}x{} DPR {}{memory}{cores}\n\
          {camera}\
          server    {}\n\
          {throttle}\
@@ -2409,6 +2425,7 @@ pub async fn drive_run(
     let request = DriveRequest {
         knobs: (!facts.knobs.is_empty()).then_some(&facts.knobs),
         device_memory_gib: facts.composed_view.device_memory_gib,
+        cores: facts.composed_view.cores,
         screenshot: facts.screenshot.as_deref(),
         script: (!facts.script.is_empty()).then_some(&facts.script),
     };
@@ -2473,15 +2490,17 @@ struct Driven {
 struct DriveRequest<'a> {
     knobs: Option<&'a KnobSettings>,
     device_memory_gib: Option<f64>,
+    cores: Option<u32>,
     screenshot: Option<&'a Path>,
     script: Option<&'a Script>,
 }
 
 /// What runs in the page before its own scripts: the knobs' preference seed and
-/// the device memory override, or None when the request has neither.
+/// the device overrides, or None when the request has none of them.
 fn new_document_script(request: &DriveRequest<'_>) -> Option<String> {
     let parts: Vec<String> = [
         request.device_memory_gib.map(device_memory_script),
+        request.cores.map(cores_script),
         request.knobs.and_then(KnobSettings::new_document_script),
     ]
     .into_iter()
@@ -3026,6 +3045,7 @@ mod tests {
             height: DEFAULT_HEIGHT,
             device_pixel_ratio: DEFAULT_DEVICE_PIXEL_RATIO,
             device_memory_gib: None,
+            cores: None,
             camera: None,
         }
     }
@@ -3936,6 +3956,47 @@ mod tests {
             !serde_json::to_string(&plain.header)
                 .unwrap()
                 .contains("deviceMemory")
+        );
+    }
+
+    /// A core count override reaches the page before its scripts, and the
+    /// header says the run was driven under it.
+    #[test]
+    fn the_cores_override_runs_before_the_page_and_the_header_names_it() {
+        let request = DriveRequest {
+            device_memory_gib: Some(4.0),
+            cores: Some(8),
+            ..DriveRequest::default()
+        };
+        let script = new_document_script(&request).unwrap();
+        assert!(
+            script.contains(
+                "Object.defineProperty(Navigator.prototype, \"hardwareConcurrency\", { get: () => 8, configurable: true });"
+            ),
+            "{script}"
+        );
+
+        let with = DriverFacts {
+            composed_view: ComposedView {
+                device_memory_gib: Some(4.0),
+                cores: Some(8),
+                ..composed()
+            },
+            ..facts()
+        };
+        let file = assemble_run_file(minimal_export(), &with);
+        let json = serde_json::to_value(&file.header).unwrap();
+        assert_eq!(json["composedView"]["cores"], json!(8));
+        let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
+        assert!(
+            text.contains("DPR 2 · device memory 4 GiB · 8 cores\n"),
+            "{text}"
+        );
+        let plain = assemble_run_file(minimal_export(), &facts());
+        assert!(
+            !serde_json::to_string(&plain.header)
+                .unwrap()
+                .contains("cores")
         );
     }
 

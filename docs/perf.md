@@ -17,7 +17,8 @@ It rebuilds what is stale, generates the datasets it needs, and starts its own s
 free port with its own database. Each run gets a workspace of its own. On the way out it
 stops the server and every browser it started, after Ctrl-C too. The table, `summary.md`
 and `summary.json` go to `target/perf/runs/<time>/` beside the run files, and
-`lucida trace show <run file>` reads any run deeper. `--help` lists the other flags.
+`lucida trace show <run file>` reads any run deeper, with no server. `--help` lists the
+other flags.
 
 Speed numbers need a GPU. CI renders with SwiftShader, which shows whether a view settles
 but not how fast. The table's first line names the adapter.
@@ -39,6 +40,11 @@ The `full` suite runs `local` and `remote`. Without `--network` the runner passe
 and with `--server` each run records whatever throttles that server reports. A throttled
 table says so on its second line and in its throttle column, and `summary.json` records the
 throttles as `sourceThrottle` and `linkThrottle`.
+
+`--server-env KEY=VALUE`, repeated for more, starts the runner's server with those
+settings, such as `LUCIDA_SOURCE_READ_CONCURRENCY=64`, though not a throttle's, which a
+network sets. It never passes the caller's own `LUCIDA_` settings otherwise. The table names them on a line of their own, and
+`summary.json` records them as `selection.serverEnv`.
 
 ## The table
 
@@ -71,9 +77,10 @@ verdict says why, and the table lists it underneath.
 `--save-baseline` keeps the results as the baseline for their adapter and device pixel
 ratio, cell by cell; a cell with a failed run is not kept. A throttled cell has a key of its
 own, such as `volume.orbit@remote+link-broadband`, and is never compared with an entry saved
-under other throttles. Baselines live in `perf-baselines/` in the clone's git directory,
-which every worktree shares and `cargo clean` leaves alone. `--baseline DIR` keeps them
-elsewhere.
+under other throttles. So does a cell under server settings, such as
+`collection.cold-open@remote+link-broadband[LUCIDA_SOURCE_READ_CONCURRENCY=64]`. Baselines
+live in `perf-baselines/` in the clone's git directory, which every worktree shares and
+`cargo clean` leaves alone. `--baseline DIR` keeps them elsewhere.
 
 Every invocation compares against its adapter's baseline, if one was saved. A `vs baseline`
 column names what moved by more than the noise allowance in `METRICS` in `scripts/perf.py`,
@@ -82,7 +89,8 @@ as a failed run does. A baseline from another adapter is never compared: a file 
 one exits 2, as a setup error does.
 
 `--knob NAME=VALUE` passes a Dev controls knob to every run; `--knob max-fetches=1` is a
-slowdown the comparison flags.
+slowdown the comparison flags. A device override goes the same way: `--knob cores=4` drives
+the page as a 4-core machine, and `--knob device-memory=4` as one with 4 GiB.
 
 ## Selection
 

@@ -1,0 +1,9 @@
+{
+  "description": "add the large collection beside the open collection, then remove it",
+  "requires": ["collection"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "add", "url": "dataset:large-collection" },
+    { "kind": "remove", "url": "dataset:large-collection" }
+  ]
+}

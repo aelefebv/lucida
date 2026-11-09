@@ -286,6 +286,28 @@ def parse_network(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# What the runner sets on the server it starts itself.
+RUNNER_SERVER_ENV = ("LUCIDA_BIND", "LUCIDA_AUTH", "LUCIDA_WEB_DIST", "LUCIDA_GENERATED_COARSE_CACHE_DIR")
+
+
+def parse_server_env(texts: list[str]) -> tuple[str, ...]:
+    """Server settings as KEY=VALUE, sorted by key so the same settings make
+    the same baseline key in any order."""
+    settings: dict[str, str] = {}
+    for text in texts:
+        key, equals, value = text.partition("=")
+        if not equals or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise PerfError(f"a server setting is KEY=VALUE, such as LUCIDA_SOURCE_READ_CONCURRENCY=64, not {text!r}")
+        if key in RUNNER_SERVER_ENV:
+            raise PerfError(f"the runner sets {key} on the server it starts")
+        if key.startswith(THROTTLE_SETTINGS):
+            raise PerfError(f"{key} is a throttle setting; choose a network with --network")
+        if key in settings:
+            raise PerfError(f"--server-env names {key} twice")
+        settings[key] = value
+    return tuple(f"{key}={settings[key]}" for key in sorted(settings))
+
+
 @dataclass(frozen=True)
 class Case:
     dataset: Dataset
@@ -295,6 +317,8 @@ class Case:
     # The network the runner starts its server under; None leaves the
     # server as it is.
     network: str | None = None
+    # Settings for the server the runner starts, as KEY=VALUE, sorted by key.
+    server_env: tuple[str, ...] = ()
 
     @property
     def id(self) -> str:
@@ -314,6 +338,7 @@ class Selection:
     # False when the runs drive a server the runner did not start, whose
     # throttle it cannot set.
     own_server: bool = True
+    server_env: tuple[str, ...] = ()
 
 
 def chosen_suite(selection: Selection, suites: dict[str, Suite]) -> Suite | None:
@@ -373,7 +398,9 @@ def plan(
                     cases.append(Case(dataset, scenario, ratio, repeat))
     if not cases:
         raise PerfError("the selection holds no run: " + describe_skipped(skipped, scenarios, catalog))
-    return [replace(case, network=n) for n in dict.fromkeys(networks) for case in cases], skipped
+    return [
+        replace(case, network=n, server_env=selection.server_env) for n in dict.fromkeys(networks) for case in cases
+    ], skipped
 
 
 def describe_skipped(
@@ -835,10 +862,16 @@ def throttled(network: str | None) -> bool:
 
 
 def start_server(
-    built: Build, out_dir: Path, port: int, network: str | None = None, log_name: str = "server.log"
+    built: Build,
+    out_dir: Path,
+    port: int,
+    network: str | None = None,
+    log_name: str = "server.log",
+    server_env: tuple[str, ...] = (),
 ) -> tuple[ProcessTree, str]:
-    """Start the server, under the throttles of `network` when one is named.
-    Each network's server has a directory and database of its own."""
+    """Start the server, under the throttles of `network` when one is named
+    and with the settings in `server_env`. Each network's server has a
+    directory and database of its own."""
     assert built.server is not None and built.web_dist is not None
     # The server keeps its database in its working directory.
     server_dir = out_dir / (f"server-{network}" if network else "server")
@@ -857,6 +890,7 @@ def start_server(
         # turn one into another throttle.
         env = {k: v for k, v in env.items() if not k.startswith(THROTTLE_SETTINGS)}
         env["LUCIDA_SOURCE_THROTTLE"], env["LUCIDA_LINK_THROTTLE"] = NETWORKS[network]
+    env.update(setting.split("=", 1) for setting in server_env)
     tree = ProcessTree([str(built.server)], server_dir / log_name, server_dir, env)
     url = f"http://127.0.0.1:{port}"
     deadline = time.monotonic() + 30
@@ -1248,10 +1282,19 @@ class Cell:
 
     @property
     def key(self) -> str:
-        # A throttled cell is a cell of its own, so a baseline never compares
-        # it with the same cell measured without that throttle.
+        # A throttled cell, or one whose server ran with other settings, is a
+        # cell of its own, so a baseline never compares it with the same cell
+        # measured without that throttle or under the server's defaults.
         mark = self.throttle_mark()
-        return f"{self.dataset}.{self.scenario}" + (f"@{mark}" if mark else "")
+        settings = self.server_env()
+        return (
+            f"{self.dataset}.{self.scenario}"
+            + (f"@{mark}" if mark else "")
+            + (f"[{','.join(settings)}]" if settings else "")
+        )
+
+    def server_env(self) -> tuple[str, ...]:
+        return self.rows[0].case.server_env if self.rows else ()
 
     def throttle(self, record: str = "sourceThrottle") -> Any:
         """The throttle every measured run reported, or UNRECORDED when one
@@ -1607,6 +1650,7 @@ def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tu
                 "knobs": list(knobs),
                 "sourceThrottle": cell.throttle(),
                 "linkThrottle": cell.throttle("linkThrottle"),
+                "serverEnv": list(cell.server_env()),
             }
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(path.name + ".partial")
@@ -1643,6 +1687,9 @@ def render_markdown(rows: list[Row], out_dir: Path, comparison: Comparison | Non
     )
     if throttled:
         lines.append(f"throttle: {'; '.join(throttled)}")
+    server_env = sorted({setting for r in rows for setting in r.case.server_env})
+    if server_env:
+        lines.append(f"server settings: {' '.join(server_env)}")
     lines += comparison.notes if comparison else []
     compared = comparison if comparison and comparison.compared else None
     columns = COLUMNS + ([BASELINE_COLUMN] if compared else [])
@@ -1800,6 +1847,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=f"start the server under each of these networks' source and link throttles in turn, "
         f"comma-separated or repeated: {', '.join(NETWORKS)}",
     )
+    parser.add_argument(
+        "--server-env",
+        action="append",
+        metavar="KEY=VALUE",
+        help="a setting for the server this script starts, repeated for more; the summary and the baseline key record it",
+    )
     parser.add_argument("--cli", type=Path, metavar="PATH", help="run this built lucida CLI instead of building one")
     parser.add_argument(
         "--gate", action="store_true", help="fail a run that stalls or never settles, as `lucida trace --gate` does"
@@ -1810,6 +1863,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.network and args.server:
         parser.error("--network sets the throttle of a server this script starts; a --server sets its own")
+    if args.server_env and args.server:
+        parser.error("--server-env sets the environment of a server this script starts; a --server has its own")
     return args
 
 
@@ -1850,6 +1905,7 @@ def main(argv: list[str]) -> int:
         networks=[parse_network(n) for n in _split(args.network)],
         repeat=args.repeat,
         own_server=args.server is None,
+        server_env=parse_server_env(args.server_env or []),
     )
     knobs = tuple(parse_knob(k) for k in _split(args.knob))
     cases, skipped = plan(selection, catalog, scenarios, suites)
@@ -1889,6 +1945,7 @@ def main(argv: list[str]) -> int:
             "networks": selection.networks,
             "repeat": selection.repeat,
             "knobs": list(knobs),
+            "serverEnv": list(selection.server_env),
         },
     }
     github = os.environ.get("GITHUB_ACTIONS") == "true"
@@ -1913,7 +1970,9 @@ def main(argv: list[str]) -> int:
                 if server is not None:
                     server.stop()
                 log_name = f"{case.id}.server.log" if per_run else "server.log"
-                server, server_url = start_server(built, out_dir, args.port or free_port(), case.network, log_name)
+                server, server_url = start_server(
+                    built, out_dir, args.port or free_port(), case.network, log_name, case.server_env
+                )
             if new_network:
                 servers.append({"url": server_url, "network": case.network, "perRun": per_run})
                 profile = (
@@ -1923,6 +1982,7 @@ def main(argv: list[str]) -> int:
                     if case.network
                     else ""
                 )
+                profile += f", settings {' '.join(case.server_env)}" if case.server_env else ""
                 fresh = ", a fresh one for each run" if per_run else ""
                 print(f"server {server_url}{profile}{fresh}, runs in {out_dir}", flush=True)
             assert server_url is not None

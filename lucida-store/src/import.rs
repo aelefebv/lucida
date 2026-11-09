@@ -83,7 +83,20 @@ async fn import_single_image(
     // Channel display names from the OME omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(root_json);
 
-    let level_metas = parse::read_level_metas(store, format, "", &level_entries).await?;
+    // Each awaited step is a round trip to a remote store, so every read that
+    // needs only the root shares the level reads' one.
+    let (level_metas, probed, likely_origins) = tokio::join!(
+        parse::read_level_metas(store, format, "", &level_entries),
+        probe_labels_for_image(store, format, ""),
+        unwritten::probe_likely_origins(
+            store,
+            "",
+            &level_entries,
+            format.likely_chunk_key_encoding(),
+            axes_names.len(),
+        ),
+    );
+    let level_metas = level_metas?;
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
@@ -141,34 +154,31 @@ async fn import_single_image(
         },
     };
 
-    // Look for a `labels/` child group and attach any label overlays to this
-    // image. Absent labels (the common case) yield nothing; malformed ones
+    // Attach any label overlays the `labels/` probe found to this image.
+    // Absent labels (the common case) yield nothing; malformed ones
     // degrade gracefully without failing the import, but an index that
     // exists (or errors) without yielding names is surfaced as a warning so
     // possibly-incomplete discovery never passes silently.
     let mut warnings: Vec<ImportWarning> = Vec::new();
     warnings.extend(pinned_axes_warning(id, &layout.pinned));
-    warnings.extend(unwritten::warn_unwritten_levels(store, "", id, &probe_targets).await);
+    let label_index_warning = (probed.index == LabelIndexState::Unusable)
+        .then(|| unusable_label_index_warning(id, 1, &[probed.labels_prefix.as_str()]));
 
     let mut label_budget = LabelBudget::new();
-    let probed = probe_labels_for_image(store, format, "").await;
-    if probed.index == LabelIndexState::Unusable {
-        warnings.push(unusable_label_index_warning(
+    let (unwritten, labels) = tokio::join!(
+        unwritten::warn_unwritten_levels(store, "", id, &probe_targets, &likely_origins),
+        build_labels_within_budget(
+            &mut label_budget,
+            store,
+            format,
             id,
-            1,
-            &[probed.labels_prefix.as_str()],
-        ));
-    }
-    let labels = build_labels_within_budget(
-        &mut label_budget,
-        store,
-        format,
-        id,
-        &image_id,
-        &entity_id,
-        probed,
-    )
-    .await;
+            &image_id,
+            &entity_id,
+            probed,
+        ),
+    );
+    warnings.extend(unwritten);
+    warnings.extend(label_index_warning);
 
     let default_layout_id = LayoutId("source".to_string());
     let source_layout = LayoutSpec {
@@ -219,11 +229,6 @@ async fn import_single_image(
         warnings,
     })
 }
-
-/// Maximum number of metadata object-store GETs kept in flight while importing
-/// a collection. Bounds fan-out so a wide collection opens quickly without self-throttling
-/// the backing store.
-const METADATA_FETCH_CONCURRENCY: usize = 32;
 
 /// Sampled label discovery engages only when it would skip at least this
 /// many per-tile probes. Sampling probes each group's first and last tile,
@@ -433,7 +438,7 @@ async fn read_tile_geometry(
 /// stays O(groups). The first candidate is read
 /// alone, so a healthy collection reads one tile. Only when it is
 /// unreadable are the rest fanned out with bounded concurrency
-/// ([`METADATA_FETCH_CONCURRENCY`]) and reduced in declared order, so a
+/// ([`CachedStore::metadata_read_concurrency`]) and reduced in declared order, so a
 /// corrupt leading group falls forward without one serial round trip per
 /// candidate.
 ///
@@ -470,7 +475,7 @@ async fn select_shared_tile_geometry(
             (prefix, outcome)
         }
     }))
-    .buffered(METADATA_FETCH_CONCURRENCY);
+    .buffered(store.metadata_read_concurrency());
     while let Some((prefix, outcome)) = stream.next().await {
         match outcome {
             Ok(geometry) => return (Some(geometry), unreadable),
@@ -512,7 +517,7 @@ fn unusable_tile_geometry_warning(
 ///
 /// Every tile is read, not one per group, because a tile the import does not
 /// read is bound as if stored like another and its differences go unnamed.
-/// Reads fan out with bounded concurrency ([`METADATA_FETCH_CONCURRENCY`]).
+/// Reads fan out with bounded concurrency ([`CachedStore::metadata_read_concurrency`]).
 /// Each read owns its inputs so the future borrows nothing and stays `Send`.
 #[allow(clippy::too_many_arguments)]
 async fn read_stored_tiles(
@@ -545,7 +550,7 @@ async fn read_stored_tiles(
         })
         .collect();
     futures_util::stream::iter(reads)
-        .buffered(METADATA_FETCH_CONCURRENCY)
+        .buffered(store.metadata_read_concurrency())
         .collect()
         .await
 }
@@ -821,7 +826,7 @@ async fn import_collection(
                     (index, outcome)
                 }
             }))
-            .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+            .buffer_unordered(store.metadata_read_concurrency());
         while let Some((index, outcome)) = stream.next().await {
             slots[index] = Some(outcome);
         }
@@ -929,20 +934,12 @@ async fn import_collection(
 
     // Whether an export wrote a level is a property of the export, so this is
     // asked once, of the representative, not once per tile.
-    warnings.extend(
-        unwritten::warn_unwritten_levels(
-            store,
-            &geometry_tile_prefix,
-            id,
-            &build_probe_targets(
-                &level_entries,
-                &level_metas,
-                &level_bindings,
-                &representative_levels,
-                &axes_names,
-            ),
-        )
-        .await,
+    let probe_targets = build_probe_targets(
+        &level_entries,
+        &level_metas,
+        &level_bindings,
+        &representative_levels,
+        &axes_names,
     );
 
     let mut tile_prefixes: Vec<String> = Vec::new();
@@ -963,17 +960,58 @@ async fn import_collection(
         },
         scale: level_entries[0].scale,
     };
-    let stored_tiles = read_stored_tiles(
-        store,
-        format,
-        &tile_prefixes,
-        &geometry_tile_prefix,
-        &representative,
-        &axes_names,
-        data_type,
-        &layout.pinned,
-    )
-    .await;
+
+    // Discover per-tile `labels/` groups. Like the geometry reads, this must
+    // not fan out one read per tile on a wide collection: collections within
+    // LABEL_PROBE_SAMPLING_MIN_SKIPPED tiles of their own sample size probe
+    // every tile exhaustively, while wider ones sample each group's first and
+    // last tile and expand to the whole group when a sample signals labels.
+    // Tiles left unprobed are treated as label-free and the import records a
+    // warning naming the exhaustive-discovery override.
+    let mut probed_labels: Vec<Option<ProbedLabels>> =
+        (0..tile_prefixes.len()).map(|_| None).collect();
+    let samples = sample_probe_indices(&group_spans);
+    let exhaustive_labels = use_exhaustive_label_probes(
+        tile_prefixes.len(),
+        samples.len(),
+        force_exhaustive_label_discovery,
+    );
+    let first_label_probes = if exhaustive_labels {
+        (0..tile_prefixes.len()).collect()
+    } else {
+        samples
+    };
+
+    // Each awaited step is a round trip to a remote store, and these three
+    // need nothing from each other.
+    let origins_unasked = unwritten::LikelyOrigins::default();
+    let (unwritten, stored_tiles, ()) = tokio::join!(
+        unwritten::warn_unwritten_levels(
+            store,
+            &geometry_tile_prefix,
+            id,
+            &probe_targets,
+            &origins_unasked,
+        ),
+        read_stored_tiles(
+            store,
+            format,
+            &tile_prefixes,
+            &geometry_tile_prefix,
+            &representative,
+            &axes_names,
+            data_type,
+            &layout.pinned,
+        ),
+        probe_labels_for_tiles(
+            store,
+            format,
+            &tile_prefixes,
+            first_label_probes,
+            &mut probed_labels,
+        ),
+    );
+    warnings.extend(unwritten);
     let unusable: Vec<String> = tile_prefixes
         .iter()
         .zip(&stored_tiles)
@@ -1083,26 +1121,7 @@ async fn import_collection(
     let mut label_specs: Vec<LabelSpec> = Vec::new();
     let mut label_budget = LabelBudget::new();
 
-    // Discover per-tile `labels/` groups. Like the geometry reads above, this
-    // must not fan out one read per tile on a wide collection: collections
-    // within LABEL_PROBE_SAMPLING_MIN_SKIPPED tiles of their own sample size
-    // probe every tile exhaustively, while wider ones sample each group's
-    // first and last tile and expand to the whole group when a sample
-    // signals labels. Tiles left unprobed are treated as label-free and the
-    // import records a warning naming the exhaustive-discovery override.
-    let mut probed_labels: Vec<Option<ProbedLabels>> =
-        (0..tile_prefixes.len()).map(|_| None).collect();
-    let samples = sample_probe_indices(&group_spans);
-    if use_exhaustive_label_probes(
-        tile_prefixes.len(),
-        samples.len(),
-        force_exhaustive_label_discovery,
-    ) {
-        let all: Vec<usize> = (0..tile_prefixes.len()).collect();
-        probe_labels_for_tiles(store, format, &tile_prefixes, all, &mut probed_labels).await;
-    } else {
-        probe_labels_for_tiles(store, format, &tile_prefixes, samples, &mut probed_labels).await;
-
+    if !exhaustive_labels {
         // Expand every tile of a group whose samples signal labels, so a
         // labeled group's discovery stays complete. Only a clean NotFound on
         // both samples is a definitive miss.
@@ -1188,36 +1207,26 @@ async fn import_collection(
         ));
     }
 
-    // Build the probed labels serially, in declared tile order, gated by the
-    // shared running budget: `build_label`'s expensive per-label reads and
-    // allocations only run while the budget has room and stop the instant it is
-    // exhausted. This keeps peak label memory/IO O(budget) and reproduces the
-    // sequential importer's retention exactly — the same labels and colors are
-    // kept, and the same ones dropped, in the same order.
-    let mut tile_labels = Vec::with_capacity(tile_prefixes.len());
-    for (prefix, probed) in tile_prefixes.iter().zip(probed_labels) {
-        // A tile left unprobed by sampled discovery is treated as label-free
-        // (the sampling warning above covers the possibility it wasn't).
-        let probed = probed.unwrap_or_else(|| ProbedLabels {
-            labels_prefix: format!("{prefix}/labels"),
-            names: Vec::new(),
-            index: LabelIndexState::Absent,
-        });
-        let image_id = ImageId(format!("{id}:image:{prefix}"));
-        let owner = EntityId(format!("{id}:tile:{prefix}"));
-        let imported = build_labels_within_budget(
-            &mut label_budget,
-            store,
-            format,
-            id,
-            &image_id,
-            &owner,
-            probed,
-        )
-        .await;
-        tile_labels.push(imported);
-    }
-    let mut tile_labels = tile_labels.into_iter();
+    let label_sources = tile_prefixes
+        .iter()
+        .zip(probed_labels)
+        .map(|(prefix, probed)| LabelSource {
+            image_id: ImageId(format!("{id}:image:{prefix}")),
+            owner: EntityId(format!("{id}:tile:{prefix}")),
+            // A tile left unprobed by sampled discovery is treated as
+            // label-free (the sampling warning above covers the possibility
+            // it wasn't).
+            probed: probed.unwrap_or_else(|| ProbedLabels {
+                labels_prefix: format!("{prefix}/labels"),
+                names: Vec::new(),
+                index: LabelIndexState::Absent,
+            }),
+        })
+        .collect();
+    let mut tile_labels =
+        build_labels_in_order(&mut label_budget, store, format, id, label_sources)
+            .await
+            .into_iter();
     let mut stored_tiles = stored_tiles.iter();
 
     for group in &parsed_groups {
@@ -1795,10 +1804,10 @@ fn unusable_label_index_warning(
 /// an index that exists but yields no usable names is marked
 /// [`LabelIndexState::Unusable`] so callers can treat the anomaly as a signal.
 ///
-/// This reads exactly one small index object and holds only names, so it is the
-/// only per-tile label I/O safe to fan out concurrently: probing every tile of
-/// a wide collection at once costs no per-label memory. The expensive per-label reads
-/// happen later in [`build_labels_within_budget`], gated by the shared budget.
+/// This reads exactly one small index object and holds only names, so probing
+/// every tile of a wide collection at once costs no per-label memory. The
+/// expensive per-label reads happen later in [`build_labels_in_order`], gated by
+/// the shared budget.
 async fn probe_labels_for_image(
     store: &Arc<CachedStore>,
     format: &ZarrFormat,
@@ -1860,19 +1869,13 @@ async fn probe_labels_for_tiles(
             (index, probed)
         }
     }))
-    .buffer_unordered(METADATA_FETCH_CONCURRENCY);
+    .buffer_unordered(store.metadata_read_concurrency());
     while let Some((index, probed)) = probe_stream.next().await {
         probed_labels[index] = Some(probed);
     }
 }
 
-/// Build a source image's probed labels in declared order, charging the
-/// shared dataset budget and stopping as soon as it is exhausted.
-///
-/// The budget gates `build_label` itself, so label reads and memory stay
-/// O(budget) even for a dataset that declares far more labels. The retained
-/// set and the logging match a sequential importer whatever order the probe
-/// that produced `probed` ran in.
+/// Build one source image's probed labels, charging the shared dataset budget.
 async fn build_labels_within_budget(
     budget: &mut LabelBudget,
     store: &Arc<CachedStore>,
@@ -1882,55 +1885,140 @@ async fn build_labels_within_budget(
     source_owner: &EntityId,
     probed: ProbedLabels,
 ) -> ImportedLabels {
-    let ProbedLabels {
-        labels_prefix,
-        names,
-        // Build cost is driven purely by the names; how the index responded
-        // matters only to discovery scheduling.
-        index: _,
-    } = probed;
-    let mut imported = ImportedLabels::default();
-    for name in names {
-        if budget.labels_remaining == 0 {
-            tracing::warn!(
-                dataset = %dataset_id,
-                labels = %labels_prefix,
-                "import.label.budget_reached"
-            );
-            break;
-        }
-        match build_label(
-            store,
-            format,
-            &labels_prefix,
-            &name,
-            source_image_id,
-            source_owner,
-        )
+    let source = LabelSource {
+        image_id: source_image_id.clone(),
+        owner: source_owner.clone(),
+        probed,
+    };
+    build_labels_in_order(budget, store, format, dataset_id, vec![source])
         .await
+        .pop()
+        .unwrap_or_default()
+}
+
+/// A source image whose probed labels are to be built: the image they lie
+/// over and the entity that places it.
+struct LabelSource {
+    image_id: ImageId,
+    owner: EntityId,
+    probed: ProbedLabels,
+}
+
+/// One declared label waiting to be built, and which source it belongs to.
+struct PendingLabel {
+    source: usize,
+    labels_prefix: String,
+    name: String,
+    image_id: ImageId,
+    owner: EntityId,
+}
+
+/// Build every source's probed labels, one [`ImportedLabels`] per source in
+/// the order given, charging the shared dataset budget in declared order.
+///
+/// A build is two round trips, the label's group and then its levels, and a
+/// collection can carry a label on every tile, so builds overlap, up to
+/// [`CachedStore::metadata_read_concurrency`]. Results are still charged in declared
+/// order, so the labels, colors and names kept are the ones a build at a time
+/// would keep. No more builds are in flight than the budget has labels left,
+/// so a label past the budget is never read, and label reads and memory track
+/// the budget, never the number of labels a dataset declares.
+async fn build_labels_in_order(
+    budget: &mut LabelBudget,
+    store: &Arc<CachedStore>,
+    format: &ZarrFormat,
+    dataset_id: &str,
+    sources: Vec<LabelSource>,
+) -> Vec<ImportedLabels> {
+    let mut imported: Vec<ImportedLabels> =
+        sources.iter().map(|_| ImportedLabels::default()).collect();
+    let mut pending = sources
+        .into_iter()
+        .enumerate()
+        .flat_map(
+            |(
+                source,
+                LabelSource {
+                    image_id,
+                    owner,
+                    probed,
+                },
+            )| {
+                // Build cost is driven purely by the names; how the index
+                // responded matters only to discovery scheduling.
+                let ProbedLabels {
+                    labels_prefix,
+                    names,
+                    index: _,
+                } = probed;
+                names.into_iter().map(move |name| PendingLabel {
+                    source,
+                    labels_prefix: labels_prefix.clone(),
+                    name,
+                    image_id: image_id.clone(),
+                    owner: owner.clone(),
+                })
+            },
+        )
+        .peekable();
+    let mut in_flight = futures_util::stream::FuturesOrdered::new();
+    loop {
+        // A build in flight takes at most one label from the budget, so this
+        // never starts one the budget could not keep.
+        while in_flight.len()
+            < store
+                .metadata_read_concurrency()
+                .min(budget.labels_remaining)
+            && let Some(label) = pending.next()
         {
-            Ok(mut label) => {
+            let store = store.clone();
+            in_flight.push_back(async move {
+                let built = build_label(
+                    &store,
+                    format,
+                    &label.labels_prefix,
+                    &label.name,
+                    &label.image_id,
+                    &label.owner,
+                )
+                .await;
+                (label, built)
+            });
+        }
+        let Some((label, built)) = in_flight.next().await else {
+            break;
+        };
+        match built {
+            Ok(mut built) => {
                 // Clamp this label's colors and names to the remaining
                 // dataset-wide budgets before retaining them, then charge them.
-                label.spec.colors.truncate(budget.colors_remaining);
-                budget.colors_remaining -= label.spec.colors.len();
-                label.spec.names.truncate(budget.names_remaining);
-                budget.names_remaining -= label.spec.names.len();
+                built.spec.colors.truncate(budget.colors_remaining);
+                budget.colors_remaining -= built.spec.colors.len();
+                built.spec.names.truncate(budget.names_remaining);
+                budget.names_remaining -= built.spec.names.len();
                 budget.labels_remaining -= 1;
-                imported.specs.push(label.spec);
-                imported.fetch.push(label.fetch);
-                imported.bindings.push(label.binding);
+                let imported = &mut imported[label.source];
+                imported.specs.push(built.spec);
+                imported.fetch.push(built.fetch);
+                imported.bindings.push(built.binding);
             }
             Err(e) => {
                 tracing::warn!(
                     dataset = %dataset_id,
-                    labels = %labels_prefix,
-                    label = %name,
+                    labels = %label.labels_prefix,
+                    label = %label.name,
                     error = %e,
                     "import.label.skipped"
                 );
             }
         }
+    }
+    if let Some(label) = pending.peek() {
+        tracing::warn!(
+            dataset = %dataset_id,
+            labels = %label.labels_prefix,
+            "import.label.budget_reached"
+        );
     }
     imported
 }
@@ -5602,6 +5690,60 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A label that fails to build takes nothing from the budget, so the next
+    /// declared label is built in its place, and the one past the budget is
+    /// still never read.
+    #[tokio::test]
+    async fn a_failed_label_build_leaves_its_budget_to_the_next() {
+        let dir = temp_dir("label_budget_failed_build");
+        create_single_image_fixture(&dir, None);
+        write_labels_index(&dir, &["keep0", "broken", "keep1", "over"]);
+        write_broken_label_group(&dir, "broken");
+        for name in ["keep0", "keep1", "over"] {
+            write_label_multiscale(
+                &dir,
+                name,
+                &["t", "z", "y", "x"],
+                &[1, 1, 16, 16],
+                &[1, 1, 16, 16],
+                &[1.0, 1.0, 1.0, 1.0],
+                "uint16",
+                serde_json::Value::Null,
+            );
+        }
+        let (store, reads) = recording_store(&dir);
+        let format = ZarrFormat::V3 { consolidated: None };
+        let mut budget = LabelBudget {
+            labels_remaining: 2,
+            ..LabelBudget::new()
+        };
+
+        let probed = probe_labels_for_image(&store, &format, "").await;
+        let imported = build_labels_within_budget(
+            &mut budget,
+            &store,
+            &format,
+            "ds",
+            &ImageId("img".to_string()),
+            &EntityId("owner".to_string()),
+            probed,
+        )
+        .await;
+
+        let kept: Vec<&str> = imported.specs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(kept, ["keep0", "keep1"]);
+        assert_eq!(budget.labels_remaining, 0);
+        let reads = reads.lock().unwrap();
+        assert!(reads.iter().any(|p| p.contains("labels/broken/")));
+        assert!(
+            reads.iter().all(|p| !p.contains("labels/over")),
+            "no I/O may touch the over-budget label: {reads:?}",
+        );
+        drop(reads);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// An import reads through the source cache, so no object is fetched from
     /// the backend twice — within one import or across a repeat import
     /// through the same cache. The repeat is the case that matters remotely:
@@ -7083,6 +7225,307 @@ mod tests {
             result.warnings
         );
         assert_eq!(result.manifest.images()[0].multiscale.levels.len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What one request to [`DistantStore`] waits before it is answered.
+    const LATENCY: std::time::Duration = std::time::Duration::from_millis(100);
+
+    /// A store [`LATENCY`] away: every request, a HEAD included, waits it out.
+    /// Under paused time an import's elapsed time is then exactly its round
+    /// trips in a row.
+    #[derive(Debug)]
+    struct DistantStore {
+        inner: object_store::memory::InMemory,
+    }
+
+    impl std::fmt::Display for DistantStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "DistantStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for DistantStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            tokio::time::sleep(LATENCY).await;
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A fixture directory copied into a [`DistantStore`], read through a
+    /// cache. In memory and on a metadata cap of its own, so no read waits
+    /// on a blocking thread or on another test, neither of which the paused
+    /// clock can see.
+    async fn distant_store(dir: &std::path::Path) -> Arc<CachedStore> {
+        use object_store::ObjectStoreExt;
+        let inner = object_store::memory::InMemory::new();
+        for (key, bytes) in files_under(dir) {
+            inner.put(&Path::from(key), bytes.into()).await.unwrap();
+        }
+        Arc::new(
+            CachedStore::new(Arc::new(DistantStore { inner }), TEST_CACHE_BYTES)
+                .with_own_metadata_cap(crate::cache::DEFAULT_METADATA_READ_CONCURRENCY),
+        )
+    }
+
+    /// Every file under `dir`, keyed by its object path relative to `dir`.
+    fn files_under(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(at) = pending.pop() {
+            for entry in fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let key = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .components()
+                    .map(|part| part.as_os_str().to_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                files.push((key, fs::read(&path).unwrap()));
+            }
+        }
+        files
+    }
+
+    /// The store's metadata-read cap bounds an import: a collection whose
+    /// tiles could all be read at once never has more reads in flight than
+    /// the cap, and keeps it full.
+    #[tokio::test]
+    async fn an_import_reads_no_wider_than_its_stores_metadata_cap() {
+        let dir = temp_dir("metadata_cap_bounds_import");
+        create_collection_fixture(
+            &dir,
+            "capped",
+            &["A", "B"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 3),
+                ("A", "2", 0, 1, 3),
+                ("B", "1", 1, 0, 3),
+                ("B", "2", 1, 1, 3),
+            ],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        // Every read waits a little, so reads let through together are seen
+        // together.
+        let backend = Arc::new(crate::test_support::CountingStore::new(20));
+        for (key, bytes) in files_under(&dir) {
+            backend.seed(&key, bytes).await;
+        }
+        let store =
+            Arc::new(CachedStore::new(backend.clone(), TEST_CACHE_BYTES).with_own_metadata_cap(3));
+        assert_eq!(store.metadata_read_concurrency(), 3);
+
+        let result = import_dataset(&store, "ds", "Capped").await.unwrap();
+
+        assert_eq!(result.manifest.images().len(), 12);
+        assert_eq!(
+            backend.max_active.load(std::sync::atomic::Ordering::SeqCst),
+            3
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// How many [`LATENCY`] round trips in a row an import of `store` waits.
+    async fn round_trips(store: &Arc<CachedStore>) -> (u128, ImportResult) {
+        let started = tokio::time::Instant::now();
+        let result = import_dataset(store, "ds", "Distant").await.unwrap();
+        (started.elapsed().as_millis() / LATENCY.as_millis(), result)
+    }
+
+    /// A single image waits on its root, then on everything else at once:
+    /// the level metadata, the `labels/` probe and the unwritten-level probe.
+    /// The probe still names the bare level.
+    #[tokio::test(start_paused = true)]
+    async fn a_single_image_open_waits_on_two_round_trips() {
+        let dir = temp_dir("round_trips_single_image");
+        create_two_level_fixture(&dir, &["1"]);
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 2);
+        let warnings = unwritten_warnings(&result);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        assert!(
+            warnings[0]
+                .message
+                .contains("level 0 has no chunks written")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A level keyed other than most levels are has its origin probed once
+    /// its metadata says where, a round trip later, and is named all the same.
+    #[tokio::test(start_paused = true)]
+    async fn an_origin_keyed_unusually_is_probed_where_its_metadata_says() {
+        let dir = temp_dir("round_trips_unusual_key");
+        create_two_level_fixture(&dir, &[]);
+        for level in ["0", "1"] {
+            let meta_path = dir.join(level).join("zarr.json");
+            let mut meta: serde_json::Value =
+                serde_json::from_slice(&fs::read(&meta_path).unwrap()).unwrap();
+            meta["chunk_key_encoding"] =
+                serde_json::json!({"name": "v2", "configuration": {"separator": "."}});
+            fs::write(&meta_path, meta.to_string()).unwrap();
+        }
+        fs::write(dir.join("1").join("0.0.0.0.0"), vec![0u8; 32 * 32 * 2]).unwrap();
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 3);
+        let warnings = unwritten_warnings(&result);
+        assert_eq!(warnings.len(), 1, "warnings: {:?}", result.warnings);
+        assert!(
+            warnings[0]
+                .message
+                .contains("level 0 has no chunks written")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Past the representative tile, the other tiles' geometry, the
+    /// unwritten-level probe and the label probes share their round trips:
+    /// root, groups, the representative's group and levels, then the other
+    /// tiles' groups and levels.
+    #[tokio::test(start_paused = true)]
+    async fn a_collection_open_probes_beside_the_tile_reads() {
+        let dir = temp_dir("round_trips_collection");
+        create_collection_fixture(
+            &dir,
+            "distant",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 2)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 6);
+        assert_eq!(result.manifest.images().len(), 4);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The labels on a collection's tiles are built together: they add two
+    /// round trips to the open, the labels' groups and then their levels,
+    /// not two per label. They are kept in declared tile order, and one that
+    /// fails to build is skipped where it stands.
+    #[tokio::test(start_paused = true)]
+    async fn a_collection_builds_its_tiles_labels_together() {
+        let dir = temp_dir("round_trips_collection_labels");
+        create_collection_fixture(
+            &dir,
+            "distant",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 2)],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+            1,
+        );
+        for tile in ["A/1/0", "A/1/1", "A/2/0", "A/2/1"] {
+            let tile_dir = dir.join(tile);
+            write_labels_index(&tile_dir, &["mask"]);
+            if tile == "A/1/1" {
+                write_broken_label_group(&tile_dir, "mask");
+                continue;
+            }
+            write_label_multiscale(
+                &tile_dir,
+                "mask",
+                &["t", "z", "y", "x"],
+                &[1, 1, 64, 64],
+                &[1, 1, 64, 64],
+                &[1.0, 1.0, 1.0, 1.0],
+                "uint16",
+                serde_json::Value::Null,
+            );
+        }
+        let store = distant_store(&dir).await;
+
+        let (trips, result) = round_trips(&store).await;
+
+        assert_eq!(trips, 8);
+        let labeled: Vec<String> = result
+            .manifest
+            .labels()
+            .into_iter()
+            .map(|label| label.source_image_id.0)
+            .collect();
+        assert_eq!(
+            labeled,
+            ["ds:image:A/1/0", "ds:image:A/2/0", "ds:image:A/2/1"]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
