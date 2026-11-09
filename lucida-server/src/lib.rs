@@ -19,6 +19,7 @@ pub mod generated;
 pub mod handler;
 pub mod health;
 pub mod inbox;
+pub mod link_throttle;
 pub mod open_diagnostics;
 pub mod origin;
 mod sample_histogram;

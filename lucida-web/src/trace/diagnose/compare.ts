@@ -11,7 +11,7 @@
  * warned about.
  */
 
-import type { SourceThrottleReport } from "../../bridge.ts";
+import type { LinkThrottleReport, SourceThrottleReport } from "../../bridge.ts";
 import { CACHE_KNOB_FIELDS, type CacheKnobs } from "../../pipeline/fetch/cacheKnobs.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "../../pipeline/planning/config.ts";
 import type { RunHeader, TraceDocument } from "../types.ts";
@@ -63,6 +63,11 @@ export interface CompareSide {
    * throttle is in every source read the run waited on.
    */
   sourceThrottle?: { settings: SourceThrottleReport | null } | null;
+  /**
+   * The throttle the server put on the session socket, read as
+   * `sourceThrottle` is: every chunk the run waited for crossed it.
+   */
+  linkThrottle?: { settings: LinkThrottleReport | null } | null;
 }
 
 /** What each side is, for the text's two identity lines and the JSON. */
@@ -244,6 +249,7 @@ const WARNING_LABELS: Record<string, string> = {
   cacheWarmth: "browser cache",
   quiescenceHoldMs: "quiescence hold",
   sourceThrottle: "source throttle",
+  linkThrottle: "link throttle",
 };
 
 function compareHeaders(left: ResolvedSide, right: ResolvedSide): HeaderDifference[] {
@@ -268,13 +274,12 @@ function compareHeaders(left: ResolvedSide, right: ResolvedSide): HeaderDifferen
   // Only two records that disagree prove the runs ran under different
   // throttles. A side that does not say, such as a saved run, which never
   // records one, is listed as unknown beside the other.
-  const leftThrottle = throttleOf(left.side);
-  const rightThrottle = throttleOf(right.side);
-  if (leftThrottle !== null && rightThrottle !== null) {
-    breaking("sourceThrottle", leftThrottle, rightThrottle);
-  } else if (leftThrottle !== null || rightThrottle !== null) {
-    listed("condition", "sourceThrottle", leftThrottle, rightThrottle);
-  }
+  const throttle = (field: string, l: string | null, r: string | null) => {
+    if (l !== null && r !== null) breaking(field, l, r);
+    else if (l !== null || r !== null) listed("condition", field, l, r);
+  };
+  throttle("sourceThrottle", throttleOf(left.side), throttleOf(right.side));
+  throttle("linkThrottle", linkThrottleOf(left.side), linkThrottleOf(right.side));
   // The end reason is an outcome, not a condition: listed, never warned about.
   listed("run", "endReason", left.doc.run.endReason, right.doc.run.endReason);
 
@@ -321,6 +326,18 @@ function throttleOf(side: CompareSide): string | null {
       ? "no bandwidth cap"
       : `${Math.round((settings.bytes_per_sec / (1024 * 1024)) * 10) / 10} MiB/s across all reads`;
   return `${settings.profile ?? "custom"}: ${latency} per request, ${bandwidth}`;
+}
+
+/** `off`, the profile and its numbers, or null when the side does not say. */
+function linkThrottleOf(side: CompareSide): string | null {
+  if (!side.linkThrottle) return null;
+  const settings = side.linkThrottle.settings;
+  if (!settings) return "off";
+  const bandwidth =
+    settings.bytes_per_sec == null
+      ? "no bandwidth cap"
+      : `${Math.round(((settings.bytes_per_sec * 8) / 1_000_000) * 10) / 10} Mbit/s to each client`;
+  return `${settings.profile ?? "custom"}: ${settings.latency_ms} ms round trip, ${bandwidth}`;
 }
 
 function adapterOf(document: DiagnosticDocument): string {

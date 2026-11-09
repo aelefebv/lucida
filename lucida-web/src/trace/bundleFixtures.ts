@@ -84,6 +84,7 @@ export function fixtureServices(overrides: Partial<BundleServices> = {}): Bundle
         datasets: [fixtureHealth()],
         // A local source read under the remote profile, which is what the throttle is for.
         sourceThrottle: { profile: "remote", latency_ms: 180, jitter_ms: 100, bytes_per_sec: 18874368 },
+        linkThrottle: { profile: "broadband", latency_ms: 40, bytes_per_sec: 12500000 },
       }),
     captureFrame: () =>
       Promise.resolve({
