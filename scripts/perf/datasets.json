@@ -12,6 +12,10 @@
       "description": "large 3D volume, one channel",
       "generate": "--size 256,1024,1024 --levels 4 --chunk 64"
     },
+    "deep-volume": {
+      "description": "multi-channel 3D volume 600 planes deep, whose finest level outgrows the memory budgets",
+      "generate": "--size 600,1024,1024 --channels 3 --levels 4 --chunk 64"
+    },
     "volume": {
       "description": "multi-channel 3D volume",
       "generate": "--size 128,512,512 --channels 3 --levels 3 --chunk 64"

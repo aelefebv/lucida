@@ -13,11 +13,17 @@
  */
 export const MAX_RENDER_PIXEL_RATIO = 2;
 
-/** A gesture's frame slower than this, dispatch to done, lowers the resolution. */
-export const LONG_FRAME_MS = 33;
+/**
+ * A gesture's frame slower than this, dispatch to done, lowers the
+ * resolution: a display frame and the trip to the render worker and back.
+ */
+export const LONG_FRAME_MS = 20;
 
-/** Each long frame scales the resolution by this. */
-const STEP_DOWN = 0.8;
+/** What a long frame's step down aims its frames at, within a display frame. */
+export const TARGET_FRAME_MS = 12;
+
+/** Each gesture starts this much above the scale the gesture before it ended at. */
+export const GESTURE_START_STEP_UP = 1.25;
 
 /** The lowest share of the capped resolution a gesture is drawn at. */
 export const MIN_ADAPTIVE_SCALE = 0.5;
@@ -37,6 +43,14 @@ export function cappedPixelRatioScale(devicePixelRatio: number): number {
  */
 export class AdaptiveResolution {
   private factor = 1;
+  /**
+   * The scale a gesture starts at: a step above where the gesture before it
+   * ended. A GPU left idle drops its clocks, so a gesture's first frames
+   * are its slowest, and starting a heavy view at full resolution makes them
+   * slower still. A view that turns cheap works back to full a gesture at a
+   * time.
+   */
+  private gestureStart = 1;
   private lastInputAt = Number.NEGATIVE_INFINITY;
   /**
    * The last frame dispatched before the latest step down or before the
@@ -66,12 +80,14 @@ export class AdaptiveResolution {
     const now = this.now();
     if (now - this.lastInputAt >= RESTORE_AFTER_MS) {
       this.settledAfterSeq = Math.max(this.settledAfterSeq, lastDispatchedSeq);
+      this.factor = Math.min(this.factor, this.gestureStart);
     }
     this.lastInputAt = now;
   }
 
   /**
-   * A frame finished. During a gesture a long one steps the resolution down;
+   * A frame finished. During a gesture a long one steps the resolution down,
+   * by as much as brings a frame like it to {@link TARGET_FRAME_MS};
    * `lastDispatchedSeq` is the newest frame already sent, which the step
    * cannot affect. True when the scale changed.
    */
@@ -79,7 +95,10 @@ export class AdaptiveResolution {
     if (this.now() - this.lastInputAt >= RESTORE_AFTER_MS) return false;
     if (frameSeq <= this.settledAfterSeq) return false;
     if (latencyMs <= LONG_FRAME_MS || this.factor <= MIN_ADAPTIVE_SCALE) return false;
-    this.factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * STEP_DOWN);
+    // A frame's cost goes with its pixels, the square of the scale, so one
+    // step reaches the target instead of creeping down a fixed share a step
+    // while every frame on the way holds the GPU for too long.
+    this.factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * Math.sqrt(TARGET_FRAME_MS / latencyMs));
     this.settledAfterSeq = lastDispatchedSeq;
     return true;
   }
@@ -94,6 +113,7 @@ export class AdaptiveResolution {
   restoreIfIdle(): boolean {
     const wait = this.msUntilRestore();
     if (wait === null || wait > 0) return false;
+    this.gestureStart = Math.min(1, this.factor * GESTURE_START_STEP_UP);
     this.factor = 1;
     return true;
   }

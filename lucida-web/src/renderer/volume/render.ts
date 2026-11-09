@@ -199,6 +199,7 @@ export async function handleVolumeRenderMultiPass(
   const timing = ctx.passTimer;
   timing.beginFrame();
   renderer.setPixelRatio(msg.pixelRatio ?? 1);
+  renderer.setMarchStepScale(msg.marchStepScale ?? 1);
   renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
 
   // What each drawn layer is, in message order: an intensity layer's index
@@ -295,6 +296,8 @@ export async function handleVolumeRenderMultiPass(
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
 
+  // The minimap and thumbnails draw with this renderer too, at full quality.
+  renderer.setMarchStepScale(1);
   timing.endFrame();
   // The frame can be read only here, after its last pass and before the
   // texture expires with this handler.

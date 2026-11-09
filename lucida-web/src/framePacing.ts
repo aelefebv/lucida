@@ -12,6 +12,8 @@
  * here.
  */
 
+import { LONG_FRAME_MS } from "./renderResolution.ts";
+
 /**
  * Frames a view change may have on the GPU at once. One drawing and one
  * queued keeps a GPU that needs about a frame interval per frame busy, where
@@ -30,9 +32,15 @@ export class FramePacer {
     this.lastFrameMs = frameMs;
   }
 
-  /** Whether a frame for a view change may go now. */
+  /**
+   * Whether a frame for a view change may go now. A second frame queues
+   * only behind one that keeps up: queued behind a long frame, it would hold
+   * the GPU, which the browser and the rest of the desktop draw with too,
+   * busy back to back.
+   */
   mayDrawInteractive(framesInFlight: number): boolean {
-    return framesInFlight < MAX_INTERACTIVE_FRAMES_IN_FLIGHT;
+    const limit = this.lastFrameMs > LONG_FRAME_MS ? 1 : MAX_INTERACTIVE_FRAMES_IN_FLIGHT;
+    return framesInFlight < limit;
   }
 
   /**

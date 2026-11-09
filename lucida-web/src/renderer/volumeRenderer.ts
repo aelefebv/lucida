@@ -16,7 +16,7 @@ import type { PixelRect } from "./layerBatches.ts";
 export const VOLUME_UNIFORM_OFFSETS = {
   invViewProj: 0,           // mat4x4f (64B)
   cameraPos: 64,            // vec4f (16B)
-  stepInfo: 80,             // vec4f (16B) — x=opacityScale, y=renderMode, z=pixelRatio
+  stepInfo: 80,             // vec4f (16B) — x=opacityScale, y=renderMode, z=pixelRatio, w=marchStepScale
   levelAtlasSlotDims: 96,   // array<vec4u, 4> (64B) — xyz=slots per axis per level pool binding
   coarseAtlasSlotDims: 160, // vec4u (16B)
   viewProj: 176,            // mat4x4f (64B)
@@ -108,6 +108,7 @@ export class VolumeRenderer {
   private dummyIndirectionBuffer: GPUBuffer;
   private renderMode = 0;
   private pixelRatio = 1;
+  private marchStepScale = 1;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private levelBindings: Array<VolumePoolBinding | null> = [];
@@ -363,6 +364,11 @@ export class VolumeRenderer {
     this.pixelRatio = ratio;
   }
 
+  /** How many of its sampled level's steps each ray-march step takes, from the next draw on. */
+  setMarchStepScale(scale: number) {
+    this.marchStepScale = scale;
+  }
+
   /** Per-frame view-projection, eye, and clip params. Model matrices live in the descriptor. */
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
@@ -462,9 +468,9 @@ export class VolumeRenderer {
     f32.fill(0, base, base + VOLUME_UNIFORM_SIZE / 4);
     f32.set(this.invViewProj, base + O.invViewProj / 4);
     f32.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], base + O.cameraPos / 4);
-    // stepInfo = (opacityScale, renderMode, pixelRatio, _). The march step
-    // comes from the sampled level's dims in the descriptor.
-    f32.set([0.08, renderMode, this.pixelRatio, 0], base + O.stepInfo / 4);
+    // stepInfo = (opacityScale, renderMode, pixelRatio, marchStepScale). The
+    // march step comes from the sampled level's dims in the descriptor.
+    f32.set([0.08, renderMode, this.pixelRatio, this.marchStepScale], base + O.stepInfo / 4);
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       const b = levels[i] ?? null;
       u32.set(b ? [b.slotsX, b.slotsY, b.slotsZ, 0] : [0, 0, 0, 0], base + O.levelAtlasSlotDims / 4 + i * 4);

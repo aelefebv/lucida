@@ -13,7 +13,8 @@ struct Uniforms {
   cameraPos: vec4f,                    // offset 64  (16 bytes)
   // stepInfo.x=opacityScale (translucent compositing constant),
   // stepInfo.y=renderMode (0=translucent,1=MIP),
-  // stepInfo.z=render pixels per CSS pixel, w=reserved.
+  // stepInfo.z=render pixels per CSS pixel, stepInfo.w=march step scale
+  // (level steps per ray-march step; 1 except while a gesture draws).
   stepInfo: vec4f,                     // offset 80  (16 bytes)
   levelAtlasSlotDims: array<vec4u, 4>, // offset 96  (64 bytes) — xyz=slots per axis, one per level pool binding
   coarseAtlasSlotDims: vec4u,          // offset 160 (16 bytes) — xyz=slots per axis
@@ -490,9 +491,11 @@ fn fs(input: VSOut) -> FsOut {
   let range = intensityMax - intensityMin;
 
   let rayLen = tEnd - tStart;
-  // The march advances by the sampled level's own spacing, floored so the
-  // ray always reaches tEnd within the step budget.
-  let maxSteps = select(512, 256, renderMode == 1);
+  // The march advances by the sampled level's own spacing, `stepScale` of
+  // them at a time, floored so the ray always reaches tEnd within the step
+  // budget, which a coarser march shrinks to match.
+  let stepScale = max(u.stepInfo.w, 1.0);
+  let maxSteps = i32(f32(select(512, 256, renderMode == 1)) / stepScale);
   let minStep = rayLen / f32(maxSteps);
 
   // Categorical label overlay: a first-hit colored surface, NOT translucent
@@ -593,14 +596,16 @@ fn fs(input: VSOut) -> FsOut {
       // MIP: track maximum intensity
       maxVal = max(maxVal, normalized);
     } else {
-      // Translucent: front-to-back blending
-      let sampleAlpha = normalized * opacityScale;
+      // Translucent: front-to-back blending. A sample of a coarser march
+      // stands for `stepScale` steps, so it is as opaque as they are together.
+      let stepAlpha = normalized * opacityScale;
+      let sampleAlpha = select(1.0 - pow(1.0 - stepAlpha, stepScale), stepAlpha, stepScale == 1.0);
       let sampleColor = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
       color += (1.0 - alpha) * sampleAlpha * sampleColor;
       alpha += (1.0 - alpha) * sampleAlpha;
     }
 
-    t += advance;
+    t += max(s.step * stepScale, minStep);
   }
 
   let layerOpacity = entity.opacity;

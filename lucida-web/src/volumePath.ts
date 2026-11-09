@@ -16,6 +16,13 @@ import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 
 /**
+ * Ray-march steps a gesture's frame takes per step of its sampled level.
+ * Half the samples halves a frame's GPU time, at the cost of fine structure
+ * along the ray while the view moves.
+ */
+export const INTERACTION_MARCH_STEP_SCALE = 2;
+
+/**
  * The scene bindings {@link pushLabelVolumeLayers} needs to place a label.
  * Narrow so the function stays unit-testable without wasm.
  */
@@ -181,7 +188,11 @@ function uploadAndRenderVolume(
   }
 
   const pixelRatio = devicePixelRatio * ctx.renderScale * ctx.resolutionScale;
-  const frameSeq = client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode, pixelRatio);
+  // The viewer draws a gesture at a reduced render scale and restores it,
+  // with a frame, once input stops. The coarser march rides the same switch,
+  // so that restored frame is drawn at full quality, as every settled one is.
+  const marchStepScale = ctx.renderScale < 1 ? INTERACTION_MARCH_STEP_SCALE : 1;
+  const frameSeq = client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode, pixelRatio, marchStepScale);
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.

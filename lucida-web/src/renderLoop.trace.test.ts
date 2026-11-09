@@ -75,6 +75,21 @@ describe("render loop trace wiring", () => {
     expect(published.reason).toBe("interactive_dirty");
   });
 
+  it("leaves a lowered render scale for the next frame asked for, and redraws for none it never drew at", () => {
+    const { loop } = makeLoop();
+    const frame = vi.spyOn(globalThis, "requestAnimationFrame").mockReturnValue(1);
+    try {
+      loop.setRenderScale(0.5);
+      expect(frame).not.toHaveBeenCalled();
+      // Raised again before a frame was drawn at it: the canvas already
+      // shows the full scale.
+      loop.setRenderScale(1);
+      expect(frame).not.toHaveBeenCalled();
+    } finally {
+      frame.mockRestore();
+    }
+  });
+
   it("asks for a frame along with a frame capture, since the worker takes the frame from inside one", async () => {
     const { loop } = makeLoop();
     const capture = loop.captureFrame();
