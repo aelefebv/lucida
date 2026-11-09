@@ -5,6 +5,7 @@ import {
   chunkSamples,
   fitHistograms,
   fitValues,
+  lattice,
   type ChannelFit,
   type FitCache,
   type FitHistograms,
@@ -49,7 +50,7 @@ describe("fitHistograms", () => {
 
   it("takes the percentiles fitValues takes", () => {
     const values = Array.from({ length: 10_000 }, (_, i) => i % 120);
-    expect(fitHistograms([exact(values)])).toEqual(fitValues([Float32Array.from(values)]));
+    expect(fitHistograms([exact(values)])).toEqual(fitValues([lattice(Float32Array.from(values))]));
   });
 
   it("takes a bin's near edge, so a limit is a sample and clips no more than its percentile", () => {
@@ -81,26 +82,62 @@ describe("fitHistograms", () => {
 });
 
 describe("fitValues", () => {
-  const ramp = (from: number, count: number) => Float32Array.from({ length: count }, (_, i) => from + i);
+  const ramp = (from: number, count: number) => lattice(Float32Array.from({ length: count }, (_, i) => from + i));
 
   it("takes the 0.1st and 99.9th percentiles and the full range", () => {
     expect(fitValues([ramp(0, 10_000)])).toEqual({ limits: { min: 9, max: 9990 }, range: { min: 0, max: 9999 } });
   });
 
   it("gives one answer whatever order the chunks come in", () => {
-    const parts = [ramp(0, 3000), ramp(5000, 2000), ramp(-700, 1500), Float32Array.of(90_000)];
-    const reversed = [...parts].reverse().map((p) => p.slice().reverse());
+    const parts = [ramp(0, 3000), ramp(5000, 2000), ramp(-700, 1500), lattice(Float32Array.of(90_000))];
+    const reversed = [...parts].reverse().map((p) => lattice(p.values.slice().reverse()));
     expect(fitValues(reversed)).toEqual(fitValues(parts));
   });
 
   it("widens to the range when the percentiles meet", () => {
     const mostlyZero = new Float32Array(10_000);
     mostlyZero[17] = 300;
-    expect(fitValues([mostlyZero])?.limits).toEqual({ min: 0, max: 300 });
+    expect(fitValues([lattice(mostlyZero)])?.limits).toEqual({ min: 0, max: 300 });
   });
 
   it("has nothing to fit without values", () => {
-    expect(fitValues([new Float32Array(0)])).toBeNull();
+    expect(fitValues([lattice(new Float32Array(0))])).toBeNull();
+  });
+
+  it("finds the percentiles a sort of the thinned samples finds, for wide and signed fits", () => {
+    let seed = 11;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const kinds: Array<() => number> = [
+      () => Math.round(random() * 60_000),
+      () => (random() - 0.5) * 1e6,
+      () => (random() < 0.5 ? -0 : 0),
+      () => (random() < 0.999 ? 100 : random() * 1e9),
+      () => random() * 1e-30 - 5e-31,
+    ];
+    for (const value of kinds) {
+      // Wide enough that every chunk is thinned.
+      const parts = Array.from({ length: 300 }, () => Float32Array.from({ length: 4096 }, value));
+      const total = parts.length * 4096;
+      const thin = Math.ceil(total / (1 << 20));
+      const sample = parts.flatMap((p) => Array.from(p).filter((_, i) => i % thin === 0)).sort((a, b) => a - b);
+      const low = sample[Math.floor(0.001 * (sample.length - 1))];
+      const high = sample[Math.ceil(0.999 * (sample.length - 1))];
+      let min = Infinity;
+      let max = -Infinity;
+      for (const p of parts) {
+        for (const v of p) {
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
+      }
+
+      const fit = fitValues(parts.map(lattice));
+      expect(fit?.range).toEqual({ min, max });
+      expect(fit?.limits).toEqual(high > low ? { min: low, max: high } : { min, max });
+    }
   });
 });
 

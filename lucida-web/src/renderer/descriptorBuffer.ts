@@ -131,12 +131,14 @@ export function computeMemberIndexMap(
 
 /**
  * Build a per-dataset descriptor buffer from cold state, one entry per
- * member in canonical order, with dense colormap indices.
+ * member in canonical order, with dense colormap indices. Writes into
+ * `reuse` when it is big enough.
  */
 export function buildDescriptorBuffer(
   device: GPUDevice,
   cold: ColdStateMessage,
   sourcesByMember: Map<string, EntitySource[]>,
+  reuse?: GPUBuffer,
 ): EntityDescriptorIndex {
   const indexByMember = new Map<string, number>();
   const sourceBindingByMember = new Map<string, MemberSourceBinding>();
@@ -192,10 +194,12 @@ export function buildDescriptorBuffer(
     );
   }
 
-  const buffer = device.createBuffer({
-    size: bufferSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
+  const buffer = reuse && reuse.size >= bufferSize
+    ? reuse
+    : device.createBuffer({
+      size: bufferSize,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
   device.queue.writeBuffer(buffer, 0, cpuBuffer);
 
   return {
@@ -243,6 +247,23 @@ export function resolveMemberPools<A extends { entityMetas: Map<string, unknown[
     coarse: resident(coarsePoolKey),
     coarsePoolKey,
   };
+}
+
+/**
+ * Replace a dataset's descriptor buffer with one built from `cold`, written
+ * into the buffer it had when that is big enough. Every member draw's bind
+ * group names the buffer, so a new one on each view move or display edit
+ * would remake one per member on the next frame.
+ */
+export function rebuildDescriptorBuffer(
+  device: GPUDevice,
+  previous: EntityDescriptorIndex | undefined,
+  cold: ColdStateMessage,
+  sourcesByMember: Map<string, EntitySource[]>,
+): EntityDescriptorIndex {
+  const next = buildDescriptorBuffer(device, cold, sourcesByMember, previous?.buffer);
+  if (previous && previous.buffer !== next.buffer) destroyDescriptorBuffer(previous);
+  return next;
 }
 
 export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
