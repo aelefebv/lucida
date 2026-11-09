@@ -8,6 +8,8 @@ all-features = true
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa is a dev-dependency of lucida-server, used only to sign test tokens; no fixed release exists" },
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint comes from p256, a dev-dependency of lucida-server used only to sign test tokens" },
+    # No sqlx release accepts libsqlite3-sys 0.39 yet. Drop this once one does.
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys comes from sqlx's SQLite driver in lucida-server, which opens only its own database, the one LUCIDA_DB_URL names; the advisory needs a crafted database and -wal pair written by a less trusted party" },
 ]
 
 [licenses]
