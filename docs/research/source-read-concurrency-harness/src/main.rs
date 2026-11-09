@@ -26,7 +26,12 @@
 //! ```text
 //! cargo run --release -- gs://bucket/prefix.zarr [--levels 4,8,12,...] \
 //!     [--per-cell 120] [--passes 4]
+//! cargo run --release -- https://host/prefix.zarr --keys keys.txt [...]
 //! ```
+//!
+//! An HTTP store cannot be listed, so it takes `--keys`: a file of object
+//! keys relative to the URL, one per line, in the order to read them. The
+//! size band does not apply to it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,7 +39,9 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, gcp::GoogleCloudStorageBuilder};
+use object_store::{
+    ObjectStore, ObjectStoreExt, gcp::GoogleCloudStorageBuilder, http::HttpBuilder,
+};
 
 /// One completed read.
 #[derive(Clone, Copy)]
@@ -98,7 +105,7 @@ fn parse_gs(url: &str) -> (String, Option<String>) {
 async fn main() {
     let mut args = std::env::args().skip(1);
     let url = args.next().unwrap_or_else(|| {
-        eprintln!("usage: source-read-sweep gs://bucket/prefix [--levels ..] [--per-cell N] [--passes N]");
+        eprintln!("usage: source-read-sweep gs://bucket/prefix | https://host/prefix --keys FILE [--levels ..] [--per-cell N] [--passes N]");
         std::process::exit(2);
     });
 
@@ -112,6 +119,7 @@ async fn main() {
     // actually governs.
     let mut min_bytes: usize = 64 * 1024;
     let mut max_bytes: usize = 1024 * 1024;
+    let mut keys: Option<String> = None;
     while let Some(flag) = args.next() {
         let value = args.next().unwrap_or_default();
         match flag.as_str() {
@@ -125,11 +133,42 @@ async fn main() {
             "--passes" => passes = value.parse().expect("--passes wants a number"),
             "--min-bytes" => min_bytes = value.parse().expect("--min-bytes wants a number"),
             "--max-bytes" => max_bytes = value.parse().expect("--max-bytes wants a number"),
+            "--keys" => keys = Some(value),
             other => {
                 eprintln!("unknown flag {other}");
                 std::process::exit(2);
             }
         }
+    }
+
+    // Distinct objects needed for the whole run, one read each.
+    let wanted = levels.len() * per_cell * passes;
+
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let Some(keys) = keys else {
+            eprintln!("[sweep] FATAL: an HTTP store cannot be listed; pass --keys");
+            std::process::exit(2);
+        };
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            HttpBuilder::new()
+                .with_url(&url)
+                .build()
+                .expect("build http store"),
+        );
+        let paths: Vec<(Path, usize)> = std::fs::read_to_string(&keys)
+            .expect("read --keys")
+            .lines()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .take(wanted)
+            .map(|key| (Path::from(key), 0))
+            .collect();
+        if paths.len() < wanted {
+            eprintln!("[sweep] FATAL: wanted {wanted} distinct objects, found {}", paths.len());
+            std::process::exit(2);
+        }
+        sweep(&url, store, paths, &levels, per_cell, passes).await;
+        return;
     }
 
     let (bucket, prefix) = parse_gs(&url);
@@ -139,9 +178,6 @@ async fn main() {
             .build()
             .expect("build gcs store"),
     );
-
-    // Distinct objects needed for the whole run, one read each.
-    let wanted = levels.len() * per_cell * passes;
     let root = prefix.as_deref().map(Path::from);
 
     // Spread the sample across members rather than reading straight down one
@@ -222,14 +258,24 @@ async fn main() {
         eprintln!("[sweep] FATAL: wanted {wanted} distinct objects, found {}", paths.len());
         std::process::exit(2);
     }
+    sweep(&url, store, paths, &levels, per_cell, passes).await;
+}
 
+async fn sweep(
+    url: &str,
+    store: Arc<dyn ObjectStore>,
+    paths: Vec<(Path, usize)>,
+    levels: &[usize],
+    per_cell: usize,
+    passes: usize,
+) {
     let mut next_object = 0usize;
     let mut cells: Vec<Cell> = Vec::new();
 
     for pass in 0..passes {
         // Rotate the level order each pass so no level is systematically
         // measured early (cold connection) or late (drifted network).
-        let mut order: Vec<usize> = levels.clone();
+        let mut order: Vec<usize> = levels.to_vec();
         order.rotate_left(pass % levels.len());
         for level in order {
             let slice: Vec<(Path, usize)> = paths[next_object..next_object + per_cell].to_vec();
@@ -290,10 +336,19 @@ async fn main() {
     // Per-level summary: throughput as the median across passes (drift-robust),
     // latency pooled over every read at that level.
     println!("\n# source-read concurrency sweep — {url}");
-    println!("# {per_cell} distinct objects per cell, {passes} passes, levels interleaved\n");
+    let mut sizes: Vec<u128> = cells
+        .iter()
+        .flat_map(|c| c.ok_reads())
+        .map(|r| r.bytes as u128)
+        .collect();
+    sizes.sort_unstable();
+    println!(
+        "# {per_cell} distinct objects per cell, {passes} passes, levels interleaved, read size p50 {:.0} KiB\n",
+        pct(&sizes, 0.50) * 1000.0 / 1024.0
+    );
     println!("| level | reads/s (median of passes) | MiB/s | TTFB p50 ms | TTFB p95 ms | body p50 ms | body p95 ms | n | err |");
     println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-    for level in &levels {
+    for level in levels {
         let at: Vec<&Cell> = cells.iter().filter(|c| c.level == *level).collect();
         let mut ttfb: Vec<u128> = at.iter().flat_map(|c| c.ok_reads()).map(|r| r.ttfb_us).collect();
         let mut body: Vec<u128> = at.iter().flat_map(|c| c.ok_reads()).map(|r| r.body_us).collect();
