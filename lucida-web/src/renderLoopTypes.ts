@@ -72,6 +72,15 @@ export const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame
  */
 export const MINIMAP_OVERVIEW_SCAN_INTERVAL_MS = 100;
 
+/**
+ * How long the main camera must be still before the minimap redraws for a
+ * display edit. That redraw is one pass per member and channel, so on a
+ * collection it is hundreds of passes on the queue the viewport's frames wait
+ * behind, and auto-contrast, which follows the view, makes a display edit
+ * several times a second while the camera moves.
+ */
+export const MINIMAP_DISPLAY_HOLD_MS = 250;
+
 /** Shared dependency bag passed to all tick functions. */
 export interface TickContext {
   scene: WasmScene;

@@ -152,8 +152,10 @@ describe("the side a file hands the compare function", () => {
       cache: null,
       conditions: {},
       sourceThrottle: { settings: artifact.bundle.health!.sourceThrottle },
+      linkThrottle: { settings: artifact.bundle.health!.linkThrottle },
     });
     expect(side.sourceThrottle?.settings?.profile).toBe("remote");
+    expect(side.linkThrottle?.settings?.profile).toBe("broadband");
     const comparison = compareTraces(side, compareSideOf(artifact, "candidate.bundle.json"));
     expect(comparison.comparable).toBe(true);
     expect(comparison.left.label).toBe("baseline.bundle.json");
@@ -175,6 +177,7 @@ describe("the side a file hands the compare function", () => {
       cache: side.cache,
       conditions: side.conditions,
       sourceThrottle: side.sourceThrottle,
+      linkThrottle: side.linkThrottle,
     };
     const produced = JSON.parse(JSON.stringify(facts));
 
@@ -198,6 +201,7 @@ describe("the side a file hands the compare function", () => {
       cache: { maxConcurrentFetches: 8 },
       conditions: { "server warmth": "server warm: the dataset was open before the run" },
       sourceThrottle: null,
+      linkThrottle: null,
     });
 
     // A file that recorded the throttle says what it was, unthrottled included.
@@ -212,6 +216,12 @@ describe("the side a file hands the compare function", () => {
       "runs/on.json",
     );
     expect(compareSideOf(throttled, "runs/on.json").sourceThrottle).toEqual({ settings });
+    const link = { profile: "broadband", latency_ms: 40, bytes_per_sec: 12_500_000 };
+    const linked = readArtifact(
+      JSON.stringify(runFile({}, { linkThrottle: { settings: link, summary: "throttled" } })),
+      "runs/link.json",
+    );
+    expect(compareSideOf(linked, "runs/link.json").linkThrottle).toEqual({ settings: link });
 
     // A run file that set no knob ran at the page's defaults, and says so
     // with empty objects rather than with unknowns.
@@ -230,6 +240,7 @@ describe("the side a file hands the compare function", () => {
       cache: null,
       conditions: null,
       sourceThrottle: null,
+      linkThrottle: null,
     });
   });
 });

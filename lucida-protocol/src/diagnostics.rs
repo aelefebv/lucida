@@ -539,9 +539,68 @@ impl SourceThrottleReport {
     }
 }
 
+/// The throttle a server puts on the link to its clients, so a page on the
+/// same machine waits for its messages the way a page across a network
+/// does. A dev setting like [`SourceThrottleReport`], and reported beside
+/// it for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkThrottleReport {
+    /// The named profile, absent when the values are not a profile's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Added to every round trip on the session socket, half each way.
+    pub latency_ms: u64,
+    /// The cap on what the server sends one connection, absent when
+    /// uncapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_per_sec: Option<u64>,
+}
+
+impl LinkThrottleReport {
+    /// One line naming the profile and its numbers, and what a comparison
+    /// of two runs matches on, as [`SourceThrottleReport::label`] is.
+    pub fn label(&self) -> String {
+        let bandwidth = match self.bytes_per_sec {
+            Some(rate) => {
+                let mbit = rate as f64 * 8.0 / 1_000_000.0;
+                let mbit = (mbit * 10.0).round() / 10.0;
+                format!("{mbit} Mbit/s to each client")
+            }
+            None => "no bandwidth cap".to_string(),
+        };
+        format!(
+            "{}: {} ms round trip, {bandwidth}",
+            self.profile.as_deref().unwrap_or("custom"),
+            self.latency_ms
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_link_throttle_label_names_the_profile_and_its_numbers() {
+        let profiled = LinkThrottleReport {
+            profile: Some("broadband".into()),
+            latency_ms: 40,
+            bytes_per_sec: Some(12_500_000),
+        };
+        assert_eq!(
+            profiled.label(),
+            "broadband: 40 ms round trip, 100 Mbit/s to each client"
+        );
+        let custom = LinkThrottleReport {
+            profile: None,
+            latency_ms: 0,
+            bytes_per_sec: Some(3_000_000),
+        };
+        assert_eq!(
+            custom.label(),
+            "custom: 0 ms round trip, 24 Mbit/s to each client"
+        );
+    }
 
     #[test]
     fn a_throttle_label_names_the_profile_and_its_numbers() {

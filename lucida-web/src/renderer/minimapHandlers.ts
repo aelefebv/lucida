@@ -198,31 +198,51 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
   mmCanvas.width = msg.canvasW;
   mmCanvas.height = msg.canvasH;
 
-  const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
-  ensureMinimapOffscreenPool(ctx, msg.layers.length, msg.canvasW, msg.canvasH);
-
-  const renderedLayers: CompositeLayer[] = [];
-
-  for (const layer of msg.layers) {
-    const overview = minimapOverviewPerDataset.get(layer.datasetId);
-    if (!overview) continue;
-
-    const idx = renderedLayers.length;
-    bindOverviewLayer(ctx, overview, layer, msg.invViewProj, msg.eye, msg.pixelRatio);
-    const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
-    ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: layer.blendMode });
-  }
+  ensureMinimapOffscreenPool(ctx, 1, msg.canvasW, msg.canvasH);
+  const minimapView = minimapContext.getCurrentTexture().createView();
+  const drawn = drawOverviewLayers(ctx, msg, minimapView, minimapOffscreenPool[0], msg.canvasW, msg.canvasH);
 
   // Drawn even with no overview resident, so the minimap shows the canvas
   // background rather than whatever it last held.
   const compEncoder = ctx.device.createCommandEncoder();
-  const minimapView = minimapContext.getCurrentTexture().createView();
-  comp.composite(minimapView, renderedLayers, compEncoder);
+  if (drawn === 0) comp.composite(minimapView, [], compEncoder);
   comp.underlayBackground(minimapView, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
+}
+
+/**
+ * Draw each layer's overview into `scratch`, then composite it over `view`
+ * before the next layer reuses it, clearing `view` under the first. A
+ * collection draws one layer per member and channel, so a target per layer
+ * would hold GPU memory in proportion to the member count. Returns how many
+ * layers had an overview to draw.
+ */
+function drawOverviewLayers(
+  ctx: WorkerCtx,
+  msg: Pick<MinimapRenderMessage, "layers" | "invViewProj" | "eye" | "pixelRatio">,
+  view: GPUTextureView,
+  scratch: GPUTexture,
+  width: number,
+  height: number,
+): number {
+  const renderer = ctx.getVolumeRenderer();
+  const comp = ctx.getCompositor();
+  let drawn = 0;
+  for (const layer of msg.layers) {
+    const overview = minimapOverviewPerDataset.get(layer.datasetId);
+    if (!overview) continue;
+    bindOverviewLayer(ctx, overview, layer, msg.invViewProj, msg.eye, msg.pixelRatio);
+    // One submit per layer: each draw's uniforms and descriptor are written
+    // to the renderer's one buffer ahead of it.
+    const encoder = ctx.device.createCommandEncoder();
+    renderer.renderTo(scratch.createView(), encoder, undefined, undefined, width, height);
+    const composited: CompositeLayer = { view: scratch.createView(), blendMode: layer.blendMode };
+    comp.composite(view, [composited], encoder, drawn === 0);
+    ctx.device.queue.submit([encoder.finish()]);
+    drawn++;
+  }
+  return drawn;
 }
 
 /**
@@ -252,33 +272,19 @@ export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessag
 
 function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
   const size = Math.max(1, Math.round(msg.size));
-  const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
-  ensureThumbnailTargets(ctx, size, msg.layers.length);
+  ensureThumbnailTargets(ctx, size, 1);
 
-  const renderedLayers: CompositeLayer[] = [];
-  for (const layer of msg.layers) {
-    const overview = minimapOverviewPerDataset.get(layer.datasetId);
-    if (!overview) continue;
-
-    const idx = renderedLayers.length;
-    bindOverviewLayer(ctx, overview, layer, msg.invViewProj, msg.eye, msg.pixelRatio);
-    const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(thumbnailOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, size, size);
-    ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: thumbnailOffscreenPool[idx].createView(), blendMode: layer.blendMode });
-  }
-
-  if (renderedLayers.length === 0 || !thumbnailContext || !thumbnailCanvas) {
+  if (!msg.layers.some((layer) => minimapOverviewPerDataset.has(layer.datasetId)) || !thumbnailContext || !thumbnailCanvas) {
     // Nothing to draw. Reply anyway so the pending promise resolves and the
     // panel keeps its label-only row.
     ctx.post({ type: "thumbnailResult", id: msg.id, bitmap: null });
     return;
   }
 
-  const compEncoder = ctx.device.createCommandEncoder();
   const thumbnailView = thumbnailContext.getCurrentTexture().createView();
-  comp.composite(thumbnailView, renderedLayers, compEncoder);
+  drawOverviewLayers(ctx, msg, thumbnailView, thumbnailOffscreenPool[0], size, size);
+  const compEncoder = ctx.device.createCommandEncoder();
   comp.underlayBackground(thumbnailView, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
 

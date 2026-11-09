@@ -628,9 +628,10 @@ export class TickCoordinator {
       !structural && causes.every((c) => c === "selection" || c === "minimap");
     // A pure view move: only the camera moved, so the active set is a pure
     // function of the new view. This is the sole gate for the view-move
-    // cold-state delta. Anything bundled with the view change fails it and
-    // takes the full rebuild, so the delta's retained descriptors are safe.
-    const viewOnly = !structural && causes.length === 1 && causes[0] === "view";
+    // cold-state delta. Anything bundled with the view change, bar a display
+    // edit patched below, fails it and takes the full rebuild, so the delta's
+    // retained descriptors are safe.
+    let viewOnly = !structural && causes.length === 1 && causes[0] === "view";
 
     // Display-only fast path: a per-channel intensity edit with nothing else
     // changed. The active set and residency are then identical, so push a
@@ -657,6 +658,20 @@ export class TickCoordinator {
     ) {
       this.serveCachedTelemetry(tickStart);
       return this.cachedResult;
+    }
+
+    // Auto-contrast follows the view, so a camera move often lands with a
+    // display edit. Patching the display first leaves a pure view move, whose
+    // delta costs the entities that changed rather than a cold state of all
+    // of them.
+    if (
+      !structural &&
+      causes.length === 2 &&
+      causes.includes("view") &&
+      causes.includes("selection") &&
+      this.patchDisplayState(ctx, settings, layers)
+    ) {
+      viewOnly = true;
     }
 
     // Full rebuild. The settled state is applied now, so clear any deferral.
@@ -1021,11 +1036,9 @@ export class TickCoordinator {
 
   /**
    * Display-only fast path. Fires only when it can prove the sole change
-   * since the last rebuild is per-channel intensity display state. Every
-   * non-display signal must match the captured baseline and the settings
-   * fingerprint keeps unknown fields, so any other change fails the proof.
-   * When it fires it pushes a descriptor patch and reuses the cached roster,
-   * with no plan(), roster, or submit.
+   * since the last rebuild is per-channel intensity display state. When it
+   * fires it pushes a descriptor patch and reuses the cached roster, with no
+   * plan(), roster, or submit.
    *
    * Returns `true` when it handled the tick. On `false` no worker message is
    * sent.
@@ -1038,6 +1051,33 @@ export class TickCoordinator {
     tickStart: number;
   }): boolean {
     const { ctx, currentEpochs, settings, layers, tickStart } = args;
+    if (!this.patchDisplayState(ctx, settings, layers)) return false;
+
+    // Refresh the cached settings and layers so display readers such as the
+    // minimap see current values. The proof pinned everything else.
+    this.cachedResult = { ...this.cachedResult!, settings, layers };
+
+    // Applied: advance the epoch anchor so the loop can idle, re-anchor
+    // coalescing, and clear any owed deferral.
+    this.lastEpochs = currentEpochs;
+    this.lastRebuildAt = tickStart;
+    this.pendingDeferredRebuild = false;
+    return true;
+  }
+
+  /**
+   * Push a descriptor patch for each dataset whose per-channel intensity
+   * display state changed, when that is the only selection change since the
+   * last rebuild. Every non-display signal must match the captured baseline
+   * and the settings fingerprint keeps unknown fields, so any other change
+   * fails the proof. Returns `false`, having sent nothing, when the proof
+   * fails or no display changed.
+   */
+  private patchDisplayState(
+    ctx: TickContext,
+    settings: SceneSettings,
+    layers: ReadonlyMap<string, ResolvedLayer>,
+  ): boolean {
     if (
       this.cachedResult === null ||
       this.lastRebuildScalars === null ||
@@ -1111,16 +1151,6 @@ export class TickCoordinator {
       const sig = this.lastRebuildByDataset.get(u.dsId);
       if (sig) sig.displayState = u.displayState;
     }
-
-    // Refresh the cached settings and layers so display readers such as the
-    // minimap see current values. The proof above pinned everything else.
-    this.cachedResult = { ...this.cachedResult, settings, layers };
-
-    // Applied: advance the epoch anchor so the loop can idle, re-anchor
-    // coalescing, and clear any owed deferral.
-    this.lastEpochs = currentEpochs;
-    this.lastRebuildAt = tickStart;
-    this.pendingDeferredRebuild = false;
     return true;
   }
 

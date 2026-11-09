@@ -242,6 +242,30 @@ describe("compareTraces", () => {
     expect(same.comparable).toBe(true);
   });
 
+  it("warns when the two runs ran under different link throttles, as it does for source throttles", () => {
+    const broadband = { settings: { profile: "broadband", latency_ms: 40, bytes_per_sec: 12_500_000 } };
+    const differ = compareTraces(
+      { trace: healthyDocument(), linkThrottle: { settings: null } },
+      { trace: healthyDocument(), linkThrottle: broadband },
+    );
+    expect(differ.comparable).toBe(false);
+    expect(differ.warnings).toEqual(["link throttle off vs broadband: 40 ms round trip, 100 Mbit/s to each client"]);
+
+    const unknown = compareTraces({ trace: healthyDocument() }, { trace: healthyDocument(), linkThrottle: broadband });
+    expect(unknown.comparable).toBe(true);
+    expect(unknown.header.find((field) => field.field === "linkThrottle")).toMatchObject({
+      group: "condition",
+      left: null,
+      breaksComparability: false,
+    });
+
+    const same = compareTraces(
+      { trace: healthyDocument(), linkThrottle: broadband },
+      { trace: healthyDocument(), linkThrottle: { settings: { ...broadband.settings } } },
+    );
+    expect(same.comparable).toBe(true);
+  });
+
   it("reads the run a side names out of a document holding several, and labels sides by run id unless told otherwise", () => {
     const both = makeDocument([healthyLocalOpen(), coldRemoteOpen()]);
     const comparison = compareTraces(

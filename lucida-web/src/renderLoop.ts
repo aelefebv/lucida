@@ -120,6 +120,7 @@ export class RenderLoop implements TraceEnvironment {
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
+  private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly framePacer = new FramePacer();
   /** The last tick left decoded chunks undelivered for want of upload budget. */
   private deliveryBacklogged = false;
@@ -254,6 +255,10 @@ export class RenderLoop implements TraceEnvironment {
     if (this.resolutionRestoreTimer !== null) {
       clearTimeout(this.resolutionRestoreTimer);
       this.resolutionRestoreTimer = null;
+    }
+    if (this.minimapDisplayTimer !== null) {
+      clearTimeout(this.minimapDisplayTimer);
+      this.minimapDisplayTimer = null;
     }
     this.client.onChunkResidency = null;
     this.client.onWantedSetDelta = null;
@@ -552,6 +557,21 @@ export class RenderLoop implements TraceEnvironment {
     }, wait);
   }
 
+  /**
+   * Draw a minimap display edit the camera held once it has been still long
+   * enough. It redraws only the minimap, so it neither waits for a tick nor
+   * dirties the view, which may have settled by then.
+   */
+  private holdMinimapDisplay(heldForMs: number | null): void {
+    if (heldForMs === null || this.minimapDisplayTimer !== null) return;
+    this.minimapDisplayTimer = setTimeout(() => {
+      this.minimapDisplayTimer = null;
+      if (!this.session.scene) return;
+      const ctx = this.buildContext();
+      this.holdMinimapDisplay(tickMinimap(ctx, this.minimapState, ctx.scene.z(), performance.now()));
+    }, heldForMs);
+  }
+
   markResidencyDirty(source: string = "external"): void {
     this.setDirty("residency", source);
   }
@@ -755,7 +775,7 @@ export class RenderLoop implements TraceEnvironment {
     }
 
     if (tickMinimapOverview(ctx, this.minimapState, now)) this.setDirty("residency", "minimap_overview_continuation");
-    if (shouldRender) tickMinimap(ctx, this.minimapState, ctx.scene.z());
+    if (shouldRender) this.holdMinimapDisplay(tickMinimap(ctx, this.minimapState, ctx.scene.z(), now));
 
     // Before quiescence is published: limits the listener sets dirty the
     // loop, so a settled frame is never one drawn with the limits before.

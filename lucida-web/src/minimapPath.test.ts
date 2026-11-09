@@ -5,7 +5,7 @@ import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, 
 import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
 import type { MinimapState } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
-import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
+import { MINIMAP_DISPLAY_HOLD_MS, type TickContext, type MinimapOverlayData } from "./renderLoopTypes.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 
 function multiscale(coarseLevelIndex?: number | null): Pick<MultiscaleInfo, "levels" | "coarse_level_index"> {
@@ -448,6 +448,49 @@ describe("tickMinimap overview/overlay split", () => {
     expect(matSpy).not.toHaveBeenCalled();
     // The overlay (viewport/frustum) does not depend on display values.
     expect(overlay.mock.calls.length).toBe(overlayCallsBefore);
+  });
+
+  it("holds a display-only redraw while the camera moves and draws it once the camera is still", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    expect(tickMinimap(ctx, state, 0, 1000)).toBeNull();
+    expect(renderCount.n).toBe(1);
+
+    // A pan and a contrast edit in one tick, as auto-contrast makes them: the
+    // viewport rect follows the pan, the overview keeps its last display.
+    scene.center = [1000, 1000];
+    scene.settings = layersJson({ visible: true, opacity: 1, contrast_max: 100 });
+    expect(tickMinimap(ctx, state, 0, 1100)).toBe(MINIMAP_DISPLAY_HOLD_MS);
+    expect(renderCount.n).toBe(1);
+    expect(overlay).toHaveBeenCalledTimes(2);
+
+    // The camera keeps moving, so the edit stays held from the latest move.
+    scene.center = [1100, 1000];
+    expect(tickMinimap(ctx, state, 0, 1200)).toBe(MINIMAP_DISPLAY_HOLD_MS);
+    expect(tickMinimap(ctx, state, 0, 1300)).toBe(MINIMAP_DISPLAY_HOLD_MS - 100);
+    expect(renderCount.n).toBe(1);
+
+    // Still for the hold: the overview redraws, once.
+    expect(tickMinimap(ctx, state, 0, 1200 + MINIMAP_DISPLAY_HOLD_MS)).toBeNull();
+    expect(renderCount.n).toBe(2);
+    expect(tickMinimap(ctx, state, 0, 2000)).toBeNull();
+    expect(renderCount.n).toBe(2);
+  });
+
+  it("draws a display-only edit at once when the camera is still", () => {
+    const scene = makeScene();
+    const renderCount = { n: 0 };
+    const state = makeState(vi.fn());
+    const ctx = makeCtx(scene, "slice", renderCount);
+
+    tickMinimap(ctx, state, 0, 1000);
+    scene.settings = layersJson({ visible: true, opacity: 1, contrast_max: 100 });
+    expect(tickMinimap(ctx, state, 0, 1010)).toBeNull();
+    expect(renderCount.n).toBe(2);
   });
 
   it("rebuilds and re-reads members when a dataset's visibility changes", () => {

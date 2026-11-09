@@ -10,7 +10,7 @@
  * the one compare function the same input.
  */
 
-import type { SourceThrottleReport } from "../bridge.ts";
+import type { LinkThrottleReport, SourceThrottleReport } from "../bridge.ts";
 import type { CacheKnobs } from "../pipeline/fetch/cacheKnobs.ts";
 import type { PlanningConfig } from "../pipeline/planning/config.ts";
 import { BUNDLE_FORMAT, BUNDLE_VERSION, type TraceBundle } from "./bundle.ts";
@@ -52,6 +52,8 @@ export interface TraceRunFileHeader {
    * recorded it.
    */
   sourceThrottle?: { settings?: SourceThrottleReport | null; summary: string } | null;
+  /** The throttle the server put on the session socket, recorded as `sourceThrottle` is. */
+  linkThrottle?: { settings?: LinkThrottleReport | null; summary: string } | null;
   [field: string]: unknown;
 }
 
@@ -130,12 +132,16 @@ export function compareSideOf(artifact: TraceArtifact, label: string): CompareSi
         sourceThrottle: artifact.bundle.health
           ? { settings: artifact.bundle.health.sourceThrottle ?? null }
           : null,
+        linkThrottle: artifact.bundle.health
+          ? { settings: artifact.bundle.health.linkThrottle ?? null }
+          : null,
       };
     case "run-file": {
       // A run file that set no knob ran at the page's defaults, and an empty
       // object says so, where null would say the side could not tell.
       const knobs = artifact.file.header.knobs ?? {};
       const throttle = artifact.file.header.sourceThrottle;
+      const link = artifact.file.header.linkThrottle;
       return {
         trace: artifact.file.trace,
         runId: artifact.file.header.runId ?? undefined,
@@ -144,6 +150,7 @@ export function compareSideOf(artifact: TraceArtifact, label: string): CompareSi
         cache: knobs.cache ?? {},
         conditions: { "server warmth": artifact.file.header.serverWarmth.summary },
         sourceThrottle: throttle ? { settings: throttle.settings ?? null } : null,
+        linkThrottle: link ? { settings: link.settings ?? null } : null,
       };
     }
     case "saved-run":
@@ -155,6 +162,7 @@ export function compareSideOf(artifact: TraceArtifact, label: string): CompareSi
         cache: null,
         conditions: null,
         sourceThrottle: null,
+        linkThrottle: null,
       };
   }
 }
