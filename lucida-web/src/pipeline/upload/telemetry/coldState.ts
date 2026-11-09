@@ -18,8 +18,8 @@ import { SustainedCondition } from "./sustained.ts";
 
 /**
  * What a rebuild is attributed to: a scene epoch that moved, a dataset
- * manifest replaced with no epoch behind it, or minimap chunks no plan has
- * asked for.
+ * manifest replaced with no epoch behind it, minimap chunks no plan has
+ * asked for, or a GPU capacity report that admits more of the last plan.
  */
 export type ColdStateCauseKey =
   | "content"
@@ -27,7 +27,8 @@ export type ColdStateCauseKey =
   | "view"
   | "selection"
   | "manifest"
-  | "minimap";
+  | "minimap"
+  | "capacity";
 
 interface ColdStateEvent {
   at: number;

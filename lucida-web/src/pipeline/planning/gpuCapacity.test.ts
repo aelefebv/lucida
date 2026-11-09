@@ -7,6 +7,14 @@ import { gpuChunkRoomBytes, gpuSlotsFor } from "./gpuCapacity.ts";
 
 const MIB = 1024 * 1024;
 
+/** The WebGPU minimums. */
+const MIN_LIMITS = {
+  maxTextureDimension2D: 8192,
+  maxTextureDimension3D: 2048,
+  maxStorageBufferBindingSize: 128 * MIB,
+  maxBufferSize: 256 * MIB,
+};
+
 const manifest = {
   images: [{
     image_id: "img",
@@ -36,6 +44,7 @@ describe("gpuSlotsFor", () => {
       budgetBytes: 768 * MIB,
       reservedBytes: 40 * MIB,
       pools: [{ poolKey: "ds:ch1:128x128:detail", datasetId: "ds", tier: "detail", slotBytes: 32_768, slots: 64, maxSlots: 4096 }],
+      limits: MIN_LIMITS,
     };
     const slotOf = gpuSlotsFor(manifest, "slice", report, 1536 * MIB);
     expect(slotOf(request())).toEqual({ pool: "ds:ch1:128x128:detail", slots: 4096, slotBytes: 32_768 });
@@ -51,6 +60,22 @@ describe("gpuSlotsFor", () => {
     expect(volume?.slots).toBe(256);
   });
 
+  it("sizes a pool the worker has not made yet from the device limits it reports", () => {
+    const level1 = request({ level: 1 });
+    // 256 KiB slots: the minimums' largest buffer holds 1,024 of them, and
+    // this device's lets the pool grow to the 1.5 GiB total.
+    expect(gpuSlotsFor(manifest, "volume", null, 1536 * MIB)(level1)?.slots).toBe(1024);
+    const report: GpuCapacityReport = {
+      budgetBytes: 1536 * MIB,
+      reservedBytes: 0,
+      pools: [],
+      limits: { ...MIN_LIMITS, maxBufferSize: 2048 * MIB },
+    };
+    expect(gpuSlotsFor(manifest, "volume", report, 1536 * MIB)(level1)?.slots).toBe(6144);
+    // A total smaller than the largest buffer caps the pool at the total.
+    expect(gpuSlotsFor(manifest, "volume", { ...report, budgetBytes: 512 * MIB }, 1536 * MIB)(level1)?.slots).toBe(2048);
+  });
+
   it("puts no prefetch or minimap chunk in a pool", () => {
     const slotOf = gpuSlotsFor(manifest, "slice", null, 256 * MIB);
     expect(slotOf(request({ lane: "prefetch" }))).toBeNull();
@@ -60,7 +85,7 @@ describe("gpuSlotsFor", () => {
 
 describe("gpuChunkRoomBytes", () => {
   it("leaves the chunk pools what the other holders don't take of the total", () => {
-    expect(gpuChunkRoomBytes({ budgetBytes: 768 * MIB, reservedBytes: 68 * MIB, pools: [] }, 0)).toBe(700 * MIB);
+    expect(gpuChunkRoomBytes({ budgetBytes: 768 * MIB, reservedBytes: 68 * MIB, pools: [], limits: MIN_LIMITS }, 0)).toBe(700 * MIB);
     expect(gpuChunkRoomBytes(null, 1536 * MIB)).toBe(1536 * MIB);
   });
 });

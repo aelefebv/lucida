@@ -71,10 +71,11 @@ export const GPU_USAGE_GLOBALS = {
   },
 };
 
-/** A device that accepts every allocation and write and keeps nothing. */
-function simulatedDevice(): GPUDevice {
+/** A device that accepts every allocation and write and keeps nothing, at the WebGPU minimums but for `limits`. */
+function simulatedDevice(limits: Partial<GPUSupportedLimits>): GPUDevice {
   const resource = () => ({ createView: () => ({}), destroy: () => {} });
   return {
+    limits,
     createTexture: resource,
     createBuffer: (desc: GPUBufferDescriptor) => ({ size: desc.size, destroy: () => {} }),
     pushErrorScope: () => {},
@@ -133,14 +134,14 @@ export class SimulatedWorker {
   mostFramesDrawing = 0;
 
   /** `frameMs` 0 answers each viewport frame the moment it is handled. */
-  constructor(gpuTotalBytes: number, frameMs = 0) {
+  constructor(gpuTotalBytes: number, frameMs = 0, limits: Partial<GPUSupportedLimits> = {}) {
     this.frameMs = frameMs;
     const state = createInitialState(gpuTotalBytes);
     const post = (msg: WorkerToMainMessage): void => {
       this.outbox.push(msg);
     };
     this.ctx = {
-      device: simulatedDevice(),
+      device: simulatedDevice(limits),
       context: { canvas: { width: 0, height: 0 } } as unknown as GPUCanvasContext,
       format: "bgra8unorm",
       state,

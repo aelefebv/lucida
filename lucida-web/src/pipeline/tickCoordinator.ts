@@ -11,7 +11,7 @@ import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { getSceneSettings } from "../tickCommon.ts";
 import { readResolvedLayers, shownChannels, type ResolvedLayer } from "../resolvedLayers.ts";
 import { buildDisplayStateByChannel } from "./upload/coldState/displayState.ts";
-import type { ColdStateDisplayState } from "../renderer/workerProtocol.ts";
+import type { ColdStateDisplayState, GpuCapacityReport } from "../renderer/workerProtocol.ts";
 import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
 import {
   plan,
@@ -249,16 +249,22 @@ function displayStatesEqual(
   return true;
 }
 
+/** One dataset's requests as the planner made them, before admission. */
+interface DatasetRequests {
+  dsId: string;
+  requests: readonly ChunkRequest[];
+}
+
 /**
  * Admit each dataset's requests against what the CPU budgets and the GPU
- * pools hold between them, as the render worker last reported its pools, in
- * either view mode, so the wanted set the cache drives toward fits both.
+ * pools hold between them, as `report` gives the pools, in either view mode,
+ * so the wanted set the cache drives toward fits both.
  */
 function admitDatasetPlans(
   ctx: TickContext,
-  plans: readonly { dsId: string; requests: readonly ChunkRequest[] }[],
+  plans: readonly DatasetRequests[],
+  report: GpuCapacityReport | null,
 ): Admission[] {
-  const report = ctx.client.gpuCapacity();
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
   return admitPlans(
     plans.map(({ dsId, requests }) => {
@@ -272,6 +278,11 @@ function admitDatasetPlans(
     ctx.cpuCache.tierCapacity(),
     gpuChunkRoomBytes(report, gpuTotalBytes),
   );
+}
+
+/** Requests of the view's own lanes that admission left out, across datasets and tiers. */
+function shortfallOf(admissions: readonly Admission[]): number {
+  return admissions.reduce((sum, { shortfall }) => sum + shortfall.detail + shortfall.coarse, 0);
 }
 
 function emitViewerInterestHint(
@@ -487,6 +498,41 @@ export class TickCoordinator {
     });
   }
 
+  /**
+   * The last admission: the requests it took, the capacity report it took
+   * them against, and how many it left short. A report can raise what a pool
+   * may hold while nothing in the view changes, as when a plan sized a pool
+   * before the worker made it, so each report is weighed against this.
+   */
+  private lastAdmission: { plans: readonly DatasetRequests[]; report: GpuCapacityReport | null; short: number } | null = null;
+  /** A capacity report would admit part of the last shortfall, and no plan has used it yet. */
+  private capacityReplanOwed = false;
+
+  /** Admit against the worker's latest report, and keep what {@link noteGpuCapacity} weighs. */
+  private admit(ctx: TickContext, plans: readonly DatasetRequests[]): Admission[] {
+    const report = ctx.client.gpuCapacity();
+    const admissions = admitDatasetPlans(ctx, plans, report);
+    this.lastAdmission = { plans, report, short: shortfallOf(admissions) };
+    return admissions;
+  }
+
+  /**
+   * Whether the worker's latest capacity report would admit part of what the
+   * last plan left short. The caller wakes the loop when it would, and the
+   * next tick plans again; nothing else would, since the view did not change.
+   */
+  noteGpuCapacity(ctx: TickContext): boolean {
+    if (this.capacityReplanOwed) return true;
+    const last = this.lastAdmission;
+    const report = ctx.client.gpuCapacity();
+    if (!last || last.short === 0 || report === last.report) return false;
+    // A removed dataset plans again on its own.
+    if (last.plans.some(({ dsId }) => !ctx.datasets.has(dsId))) return false;
+    if (shortfallOf(admitDatasetPlans(ctx, last.plans, report)) >= last.short) return false;
+    this.capacityReplanOwed = true;
+    return true;
+  }
+
   /** Tear down subscriptions held by this orchestrator. */
   dispose(): void {
     this.configStoreUnsub();
@@ -524,6 +570,7 @@ export class TickCoordinator {
       if (currentEpochs.selection !== last.selection) causes.push("selection");
       if (this.manifestReplacedSinceRebuild(ctx)) causes.push("manifest");
       if (this.minimapHasUnplannedChunks(minimapPendingFetch)) causes.push("minimap");
+      if (this.capacityReplanOwed) causes.push("capacity");
       isHit = causes.length === 0;
     }
 
@@ -535,10 +582,11 @@ export class TickCoordinator {
     //     coarse cadence to fetch tiles that scroll into view.
     //   - selection: the leading change rebuilds promptly, and further
     //     changes within the window coalesce.
-    // Structural changes must render immediately.
+    // Structural changes must render immediately, and so does a capacity
+    // report, which comes once rather than as a stream.
     let coalescedSkip = false;
     if (!isHit && hasPrior) {
-      if (!isStructural(causes)) {
+      if (!isStructural(causes) && !causes.includes("capacity")) {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
           : VIEW_REPLAN_INTERVAL_MS;
@@ -614,6 +662,7 @@ export class TickCoordinator {
     // Full rebuild. The settled state is applied now, so clear any deferral.
     // `lastRebuildAt` is stamped at completion below, not here.
     this.pendingDeferredRebuild = false;
+    this.capacityReplanOwed = false;
 
     // CpuCache owns wanted-generation and delivery/rejection state, so the
     // rebuild lifecycle advances there exactly once before the per-dataset
@@ -736,7 +785,7 @@ export class TickCoordinator {
     // that no longer plan (turned invisible / scrolled fully out) drop out.
     this.lastRebuildByDataset.clear();
 
-    const admissions = admitDatasetPlans(
+    const admissions = this.admit(
       ctx,
       plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
     );
@@ -1237,7 +1286,7 @@ export class TickCoordinator {
     // reports any slot the new T/Z leaves stale. The active set is unchanged,
     // so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
-    const admissions = admitDatasetPlans(ctx, planned);
+    const admissions = this.admit(ctx, planned);
     for (const [index, scrubbed] of planned.entries()) {
       const admission = admissions[index];
       const p = { ...scrubbed, requests: admission.admitted };
