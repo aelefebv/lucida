@@ -48,6 +48,10 @@
       "description": "thin 3D volume whose levels downsample Y and X only",
       "generate": "--size 48,1024,1024 --levels 4 --factor 1,2,2 --chunk 16,128,128"
     },
+    "labeled-volume": {
+      "description": "3D volume with a label image on the same levels and chunks",
+      "generate": "--size 128,512,512 --levels 3 --chunk 64 --labels"
+    },
     "sparse": {
       "description": "3D volume with a checkerboard of chunks unwritten",
       "generate": "--size 128,512,512 --levels 3 --chunk 64 --sparse"

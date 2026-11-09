@@ -577,6 +577,7 @@ function Viewer({
     setSolo: layers.handleChannelSetSolo,
     setChannelVisible: layers.handleChannelSetVisible,
     setLayerVisible: layers.handleLayerSetVisible,
+    setLabelVisible: layers.handleLabelSetVisible,
     setChannelContrast: layers.handleChannelSetContrast,
     openDataset: datasets.handleUrlSubmit,
     removeDataset: layers.removeLayer,

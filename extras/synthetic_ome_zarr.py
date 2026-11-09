@@ -58,6 +58,10 @@ Options:
     --unwritten-level L  Declare level L in the multiscale metadata and write
                          its array metadata, but no chunk. Repeatable. Level 0
                          is always written.
+    --labels             Also write a label image, `balls`, beside each image:
+                         uint32 ids of a grid of balls, one ball per 32 level 0
+                         samples along each spatial axis, on the image's levels,
+                         chunks and shards. A label has no channel axis.
     --level-index        Give every sample at level L the value L, so a
                          screenshot names the level that rendered. Without it,
                          every level samples one smooth picture at its own
@@ -149,6 +153,11 @@ COMPRESSORS = ("zstd", "gzip", "blosc-lz4", "none")
 
 AXIS_TYPES = {"t": "time", "c": "channel", "z": "space", "y": "space", "x": "space"}
 
+LABEL_NAME = "balls"
+LABEL_DTYPE = "uint32"
+# Level 0 samples per ball of the label, along each spatial axis.
+LABEL_CUBE = 32
+
 
 @dataclass(frozen=True)
 class Options:
@@ -172,6 +181,7 @@ class Options:
     shard: tuple[int, ...] | None = None
     sparse: bool = False
     unwritten_levels: tuple[int, ...] = ()
+    labels: bool = False
     level_index: bool = False
     dtype: str = DEFAULT_DTYPE
     value_range: tuple[float, float] = DEFAULT_RANGE
@@ -225,9 +235,21 @@ class Options:
         return tuple(axes)
 
     @property
+    def label_leading_axes(self) -> tuple[tuple[str, int], ...]:
+        """The image's non-spatial axes a label keeps: all but the channel axis."""
+        return tuple(axis for axis in self.leading_axes if axis[0] != "c")
+
+    @property
+    def spatial_names(self) -> list[str]:
+        return ["z", "y", "x"] if self.ndim == 3 else ["y", "x"]
+
+    @property
     def axis_names(self) -> list[str]:
-        spatial = ["z", "y", "x"] if self.ndim == 3 else ["y", "x"]
-        return [name for name, _ in self.leading_axes] + spatial
+        return [name for name, _ in self.leading_axes] + self.spatial_names
+
+    @property
+    def label_axis_names(self) -> list[str]:
+        return [name for name, _ in self.label_leading_axes] + self.spatial_names
 
 
 @dataclass(frozen=True)
@@ -279,6 +301,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--shard", type=_positive_ints, metavar="S|S,S[,S]", help="shard shape in samples, a multiple of --chunk; presence means sharded")
     parser.add_argument("--sparse", action="store_true", help="leave a checkerboard of chunks unwritten")
     parser.add_argument("--unwritten-level", type=int, action="append", default=[], metavar="L", help="declare level L but write no chunk for it; repeatable")
+    parser.add_argument("--labels", action="store_true", help="also write a label image of uint32 balls beside each image")
     parser.add_argument("--level-index", action="store_true", help="give every sample at level L the value L")
     parser.add_argument("--dtype", choices=DTYPES, default=DEFAULT_DTYPE, help="sample data type (default uint16)")
     parser.add_argument("--range", type=_value_range, default=DEFAULT_RANGE, metavar="LO,HI", dest="value_range", help="values the picture spans (default 0,60000)")
@@ -346,6 +369,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         shard=shard,
         sparse=args.sparse,
         unwritten_levels=unwritten,
+        labels=args.labels,
         level_index=args.level_index,
         dtype=args.dtype,
         value_range=args.value_range,
@@ -382,9 +406,10 @@ def ome_attributes(opts: Options, blocks: dict) -> dict:
     return {"ome": {"version": "0.5", **blocks}}
 
 
-def multiscales_attributes(opts: Options, levels: list[Level], name: str) -> dict:
-    axes = [{"name": name, "type": AXIS_TYPES[name]} for name in opts.axis_names]
-    leading_scale = [1.0] * len(opts.leading_axes)
+def multiscale_block(opts: Options, levels: list[Level], name: str, axis_names: list[str]) -> dict:
+    """One multiscale over arrays with these axes, the leading ones unscaled."""
+    axes = [{"name": axis, "type": AXIS_TYPES[axis]} for axis in axis_names]
+    leading_scale = [1.0] * (len(axis_names) - opts.ndim)
     datasets = [
         {
             "path": f"{opts.level_prefix}{level.index}",
@@ -392,10 +417,30 @@ def multiscales_attributes(opts: Options, levels: list[Level], name: str) -> dic
         }
         for level in levels
     ]
-    multiscale = {"name": name, "axes": axes, "datasets": datasets}
+    return {"name": name, "axes": axes, "datasets": datasets}
+
+
+def multiscales_attributes(opts: Options, levels: list[Level], name: str) -> dict:
+    multiscale = multiscale_block(opts, levels, name, opts.axis_names)
     if opts.zarr_version == 2:
         return {"multiscales": [{"version": "0.4", **multiscale}]}
     return {"ome": {"version": "0.5", "multiscales": [multiscale]}}
+
+
+def labels_index_attributes(opts: Options) -> dict:
+    """The `labels` group's list of the label images under it."""
+    if opts.zarr_version == 2:
+        return {"labels": [LABEL_NAME]}
+    return {"ome": {"version": "0.5", "labels": [LABEL_NAME]}}
+
+
+def label_attributes(opts: Options, levels: list[Level]) -> dict:
+    """A label image's multiscale, and its image-label block naming the image it labels."""
+    multiscale = multiscale_block(opts, levels, LABEL_NAME, opts.label_axis_names)
+    image_label = {"source": {"image": "../../"}}
+    if opts.zarr_version == 2:
+        return {"multiscales": [{"version": "0.4", **multiscale}], "image-label": {"version": "0.4", **image_label}}
+    return {"ome": {"version": "0.5", "multiscales": [multiscale], "image-label": image_label}}
 
 
 def tile_grid(tiles: int) -> tuple[int, int]:
@@ -471,16 +516,73 @@ def picture_region(opts: Options, tile: int, t: int, c: int, level: Level, origi
     return scaled.astype(opts.dtype)
 
 
+def label_region(level: Level, origin: Sequence[int], extent: Sequence[int], size: Sequence[int]) -> np.ndarray:
+    """The label ids on one spatial region of one level, for an image of level 0 ``size``.
+
+    Level 0's space is cut into cubes of LABEL_CUBE samples, each holding one
+    ball whose id is one more than the cube's index, with 0 between the balls.
+    Like the picture, it is a function of position in level 0's space, so every
+    level labels the same balls.
+    """
+    cubes = [math.ceil(s / LABEL_CUBE) for s in size]
+    coordinates = [
+        (np.arange(origin[axis], origin[axis] + extent[axis], dtype=np.float64) + 0.5) * level.scale[axis] / LABEL_CUBE
+        for axis in range(len(size))
+    ]
+    grids = np.meshgrid(*coordinates, indexing="ij")
+    ids = np.ones(tuple(extent), dtype=np.int64)
+    distance_squared = np.zeros(tuple(extent))
+    stride = 1
+    for axis in reversed(range(len(size))):
+        cube = np.minimum(np.floor(grids[axis]).astype(np.int64), cubes[axis] - 1)
+        ids += cube * stride
+        stride *= cubes[axis]
+        distance_squared += (grids[axis] - cube - 0.5) ** 2
+    return np.where(distance_squared <= 0.4**2, ids, 0).astype(LABEL_DTYPE)
+
+
 def write_image(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int, name: str) -> None:
     """Write one multiscale image group and its level arrays under ``prefix``."""
     zarr.create_group(store=store, path=prefix, attributes=multiscales_attributes(opts, levels, name), zarr_format=opts.zarr_version)
     for level in levels:
         write_level(store, prefix, opts, level, tile)
+    if opts.labels:
+        write_labels(store, prefix, opts, levels, tile)
 
 
-def storage_arguments(opts: Options) -> dict:
-    """How each chunk is encoded, as `zarr.create_array` takes it for the version."""
-    ndim = len(opts.axis_names)
+def write_labels(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int) -> None:
+    """Write the label image of the image under ``prefix``, as `labels/` and `labels/<name>/` beside its levels."""
+    labels_path = f"{prefix}/labels" if prefix else "labels"
+    zarr.create_group(store=store, path=labels_path, attributes=labels_index_attributes(opts), zarr_format=opts.zarr_version)
+    group_path = f"{labels_path}/{LABEL_NAME}"
+    zarr.create_group(store=store, path=group_path, attributes=label_attributes(opts, levels), zarr_format=opts.zarr_version)
+    leading_shape = tuple(size for _, size in opts.label_leading_axes)
+    leading_ones = (1,) * len(leading_shape)
+    for level in levels:
+        chunk = opts.chunk_for(level)
+        array = zarr.create_array(
+            store=store,
+            name=f"{group_path}/{opts.level_prefix}{level.index}",
+            shape=leading_shape + level.shape,
+            chunks=leading_ones + chunk,
+            shards=(leading_ones + opts.shard) if opts.shard else None,
+            fill_value=0,
+            zarr_format=opts.zarr_version,
+            **storage_arguments(opts, LABEL_DTYPE, opts.label_axis_names),
+        )
+        unit = opts.shard or chunk
+        for grid_index in itertools.product(*[range(math.ceil(s / u)) for s, u in zip(level.shape, unit)]):
+            origin = [g * u for g, u in zip(grid_index, unit)]
+            extent = [min(u, s - o) for u, s, o in zip(unit, level.shape, origin)]
+            values = label_region(level, origin, extent, opts.size_of(tile))
+            region = (slice(None),) * len(leading_shape) + tuple(slice(o, o + e) for o, e in zip(origin, extent))
+            # Every timepoint holds the same balls.
+            array[region] = np.broadcast_to(values, leading_shape + values.shape)
+
+
+def storage_arguments(opts: Options, dtype: str, axis_names: list[str]) -> dict:
+    """How each chunk of an array of ``dtype`` with these axes is encoded, as `zarr.create_array` takes it for the version."""
+    ndim = len(axis_names)
     if opts.zarr_version == 2:
         compressor = {
             "zstd": numcodecs.Zstd(),
@@ -490,7 +592,7 @@ def storage_arguments(opts: Options) -> dict:
         }[opts.compressor]
         byte_order = "<" if opts.endian == "little" else ">"
         return {
-            "dtype": np.dtype(opts.dtype).newbyteorder(byte_order),
+            "dtype": np.dtype(dtype).newbyteorder(byte_order),
             "compressors": compressor,
             "order": opts.order,
             "chunk_key_encoding": {"name": "v2", "separator": opts.dimension_separator},
@@ -505,8 +607,8 @@ def storage_arguments(opts: Options) -> dict:
         compressors.append(Crc32cCodec())
     filters = [TransposeCodec(order=tuple(reversed(range(ndim))))] if opts.order == "F" else []
     return {
-        "dtype": opts.dtype,
-        "dimension_names": opts.axis_names,
+        "dtype": dtype,
+        "dimension_names": axis_names,
         "filters": filters,
         "serializer": BytesCodec(endian=opts.endian),
         "compressors": compressors,
@@ -530,7 +632,7 @@ def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
         # look unwritten.
         config={"write_empty_chunks": True},
         zarr_format=opts.zarr_version,
-        **storage_arguments(opts),
+        **storage_arguments(opts, opts.dtype, opts.axis_names),
     )
     if level.index in opts.unwritten_levels:
         return
@@ -595,6 +697,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     levels = generate(opts)
     layout = f"sharded {opts.shard}" if opts.shard else "unsharded"
     what = f"collection of {opts.tiles} tiles" if opts.tiles else "image"
+    if opts.labels:
+        what += f" with the label {LABEL_NAME}"
     shapes = ", ".join("x".join(str(s) for s in level.shape) for level in levels)
     chunks = ", ".join("x".join(str(s) for s in opts.chunk_for(level)) for level in levels)
     print(f"wrote {opts.out}: {what}, {layout}, chunks [{chunks}], levels [{shapes}]")

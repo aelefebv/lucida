@@ -49,6 +49,7 @@ def test_the_catalog_has_every_shape_the_matrix_needs() -> None:
     assert traits["timeseries-2d"] == {"time"}
     assert traits["timeseries-3d"] == {"volume", "time", "channels"}
     assert traits["collection"] == {"collection", "channels"}
+    assert traits["labeled-volume"] == {"volume", "labels"}
     for name in ("single-level", "sharded", "float32", "anisotropic", "sparse"):
         assert name in CATALOG
 
@@ -132,6 +133,8 @@ def test_scenarios_name_what_they_need() -> None:
     assert needs["orbit-sustained"] == {"volume"}
     assert needs["playback"] == {"time"}
     assert SCENARIOS["orbit-sustained"].camera == "arcball"
+    assert needs["label-open"] == {"labels"}
+    assert needs["label-z-scrub"] == {"volume", "labels"}
 
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:

@@ -106,7 +106,7 @@ export function plan(
   const effectiveZoom = snapshot.visibleRegion.effectiveZoom;
   const zoomDirection = resolveZoomDirection(state, effectiveZoom);
 
-  const zStep = isZStep(state.previousZ, snapshot.selection);
+  const zStep = isZStep(state.previousZ, snapshot.selection, config.sliceBandPlanes);
   const requests = emitPlanRequests(activeSet, snapshot, stats, config, zoomDirection, zStep);
 
   const epochs: SceneEpochs = {
