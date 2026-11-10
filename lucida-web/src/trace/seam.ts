@@ -327,6 +327,20 @@ export interface LucidaTraceSeam {
    */
   removeDataset(url: string): Promise<StepOutcome>;
   /**
+   * A scripted swipe: show the view's comparison as a swipe with its divider
+   * at `at`, a fraction of the view's width, or where it is when `at` is
+   * null. With no comparison it starts one between the two open datasets,
+   * or between the dataset in hand and the one opened from `withUrl`. The
+   * comparison controls are hidden on the capture surface, as the layer
+   * panel is for {@link select}.
+   */
+  swipe(at: number | null, withUrl?: string | null): Promise<StepOutcome>;
+  /**
+   * A scripted blink: show the comparison as a blink and flip it to the
+   * other dataset, starting one as {@link swipe} does.
+   */
+  blink(withUrl?: string | null): Promise<StepOutcome>;
+  /**
    * Close the run in progress without exporting: the *Stop & analyse* path.
    *
    * A driver that gave up on a run that never settled passes `"timeout"`:
@@ -440,7 +454,10 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     compareTracesText: (left: CompareSide, right: CompareSide) =>
       renderComparison(compareTraces(left, right)),
     view: () => scriptControls()?.view() ?? null,
-    viewSignature: () => viewSignature(scriptControls()?.view() ?? null),
+    viewSignature: () => {
+      const controls = scriptControls();
+      return viewSignature(controls?.view() ?? null, controls?.comparison() ?? null);
+    },
     inputScale: INPUT_SCALE,
     scrub: (axis: ScrubAxis, count: number) => {
       const controls = scriptControls();
@@ -492,6 +509,19 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       if (!controls) return noControls();
       if (typeof url !== "string" || url.trim() === "") return refused("a dataset is named by its source URL");
       return controls.removeDataset(url);
+    },
+    swipe: async (at: number | null, withUrl: string | null = null) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (at !== null && !(Number.isFinite(at) && at >= 0 && at <= 1)) {
+        return refused(`a divider is a fraction of the view's width from 0 to 1, not ${at}`);
+      }
+      return controls.swipe(at, withUrl);
+    },
+    blink: async (withUrl: string | null = null) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      return controls.blink(withUrl);
     },
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),

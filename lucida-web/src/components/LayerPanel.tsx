@@ -12,6 +12,7 @@ import {
   HeadphonesIcon,
   PencilSimpleIcon,
   PlusIcon,
+  SplitHorizontalIcon,
   TrashIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
@@ -22,6 +23,7 @@ import {
   IconButton,
   Menu,
   MenuItem,
+  MenuSection,
   MenuSeparator,
   PanelHeader,
   Select,
@@ -149,6 +151,10 @@ interface Props {
   onRemoveLayer: (id: string) => void;
   /** Opens whatever adds data to the workspace. */
   onAddData: () => void;
+  /** Why a layer can't be compared with another, or null when it can. */
+  comparisonBlocker?: (id: string, other: string) => string | null;
+  /** Compare a layer with another. Without it the layer menu offers no comparison. */
+  onCompare?: (id: string, other: string) => void;
   onSetBlendMode: (id: string, mode: BlendMode) => void;
   onSetRenderMode: (id: string, mode: RenderMode) => void;
   onSetLevelPin: (id: string, level: number | null) => void;
@@ -386,6 +392,27 @@ function LayerRow(props: LayerRowProps) {
           >
             Move down
           </MenuItem>
+          {props.onCompare && layers.length > 1 && <MenuSeparator />}
+          {props.onCompare && layers.length > 1 && (
+            <MenuSection title="Compare with">
+              {layers
+                .filter((other) => other.id !== layer.id)
+                .map((other) => {
+                  const blocker = props.comparisonBlocker?.(layer.id, other.id) ?? null;
+                  return (
+                    <MenuItem
+                      key={other.id}
+                      icon={SplitHorizontalIcon}
+                      description={blocker ?? undefined}
+                      isDisabled={blocker !== null}
+                      onAction={() => props.onCompare?.(layer.id, other.id)}
+                    >
+                      {other.name}
+                    </MenuItem>
+                  );
+                })}
+            </MenuSection>
+          )}
           <MenuSeparator />
           <MenuItem icon={TrashIcon} variant="danger" onAction={() => props.onRemoveLayer(layer.id)}>
             Remove

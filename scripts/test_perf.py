@@ -50,6 +50,7 @@ def test_the_catalog_has_every_shape_the_matrix_needs() -> None:
     assert traits["timeseries-3d"] == {"volume", "time", "channels"}
     assert traits["collection"] == {"collection", "channels"}
     assert traits["labeled-volume"] == {"volume", "labels"}
+    assert traits["physical-volume"] == {"volume", "physical"}
     for name in ("single-level", "sharded", "float32", "anisotropic", "sparse"):
         assert name in CATALOG
 
@@ -140,7 +141,7 @@ def test_scenarios_name_what_they_need() -> None:
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
     kinds = {step["kind"] for scenario in SCENARIOS.values() for step in scenario.steps}
-    assert {"mode", "fit", "resize", "contrast", "add", "remove", "minimap"} <= kinds
+    assert {"mode", "fit", "resize", "contrast", "add", "remove", "minimap", "swipe", "blink"} <= kinds
     paced = {
         name
         for name, scenario in SCENARIOS.items()
@@ -161,6 +162,10 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "phone-settle-then-orbit",
         "minimap-navigate",
         "minimap-orbit",
+        "blink",
+        "blink-volume",
+        "swipe-drag",
+        "swipe-drag-volume",
     }
 
 

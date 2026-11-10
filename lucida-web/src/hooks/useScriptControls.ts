@@ -3,7 +3,8 @@
  *
  * A script's scrub, select, contrast, and remove land on the handlers the
  * dimension controls and the layer panel call, its add on the one the
- * add-data dialog calls, and its view read is the share button's capture.
+ * add-data dialog calls, its swipe and blink on the comparison controls,
+ * and its view read is the share button's capture.
  * The capture surface hides those controls, so a synthesized click has
  * nothing to reach. From the handler on this is the same path a person's
  * input takes, and the recorder hears the input at the control as it does
@@ -13,16 +14,19 @@
 import { useEffect, type RefObject } from "react";
 import { normalize_dataset_url } from "lucida-core";
 import { Axis } from "../axes.ts";
+import { lineUpReason, type CompareMode, type ComparisonActions } from "../comparison.ts";
 import type { ResolvedLayers } from "../resolvedLayers.ts";
 import type { SavedView } from "../savedView/types.ts";
 import {
   awaitDatasetOpen,
+  comparisonPair,
   datasetIdForSource,
   scrubIndex,
   scrubSolo,
   selectDataset,
   setScriptControls,
   type SelectorState,
+  type StepOutcome,
 } from "../trace/steps.ts";
 import type { DatasetState } from "../types.ts";
 
@@ -51,6 +55,8 @@ export interface ScriptControlInputs {
   datasetHealth(): Promise<readonly { workspace_dataset_id: string; source_url?: string | null }[]>;
   /** The view as the page would save it, or null before a scene exists. */
   captureView(): SavedView | null;
+  /** What the comparison controls call. */
+  comparison: ComparisonActions;
   /** The dataset a channel step is about when several are open. */
   selectedDatasetId: string | null;
   /** The open datasets, read when a step lands rather than when it is registered. */
@@ -72,6 +78,7 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     removeDataset,
     datasetHealth,
     captureView,
+    comparison,
     selectedDatasetId,
     datasetsRef,
   } = inputs;
@@ -79,8 +86,38 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     const selectors: SelectorState = { z, t, dimZ, dimT, viewMode };
     const channelCountOf = (datasetId: string): number =>
       datasetsRef.current?.get(datasetId)?.manifest?.images[0]?.multiscale.levels[0]?.shape[Axis.C] ?? 1;
+    // Shows the comparison in `mode`, starting one when there is none or
+    // `withUrl` names a dataset it doesn't hold. A refusal, or null.
+    const compareIn = async (mode: CompareMode, withUrl: string | null): Promise<StepOutcome | null> => {
+      const open = new Set(datasetsRef.current?.keys() ?? []);
+      let withId: string | null = null;
+      if (withUrl !== null) {
+        const canonical = normalize_dataset_url(withUrl.trim());
+        try {
+          withId = datasetIdForSource(canonical, await datasetHealth(), normalize_dataset_url);
+        } catch (error) {
+          const why = error instanceof Error ? error.message : String(error);
+          return { applied: false, reason: `the page could not read which dataset ${canonical} is: ${why}` };
+        }
+        if (withId === null || !open.has(withId)) {
+          return { applied: false, reason: `no dataset opened from ${canonical} is open` };
+        }
+      }
+      const current = comparison.current();
+      if (current && (withId === null || withId === current.a || withId === current.b)) {
+        if (current.mode !== mode) comparison.setMode(mode);
+        return null;
+      }
+      // The panel lists the layers last drawn first.
+      const panelOrder = [...resolvedLayers.keys()].filter((id) => open.has(id)).reverse();
+      const pair = comparisonPair(selectedDatasetId, panelOrder, withId);
+      if ("refused" in pair) return { applied: false, reason: pair.refused };
+      const why = lineUpReason(comparison.start(pair.a, pair.b, mode), (id) => id);
+      return why === null ? null : { applied: false, reason: why };
+    };
     setScriptControls({
       view: captureView,
+      comparison: comparison.current,
       scrub: (axis, count) => {
         if (axis === "c") {
           const open = Array.from(datasetsRef.current?.keys() ?? []);
@@ -179,12 +216,24 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         removeDataset(datasetId);
         return { applied: true, reason: null };
       },
+      swipe: async (at, withUrl) => {
+        const refused = await compareIn("swipe", withUrl);
+        if (refused) return refused;
+        if (at !== null) comparison.setDivider(at);
+        return { applied: true, reason: null };
+      },
+      blink: async (withUrl) => {
+        const refused = await compareIn("blink", withUrl);
+        if (refused) return refused;
+        comparison.flip();
+        return { applied: true, reason: null };
+      },
     });
     return () => setScriptControls(null);
   }, [
     z, t, dimZ, dimT, viewMode, resolvedLayers,
     setZ, setT, setSolo, setChannelVisible, setLayerVisible, setLabelVisible,
     setChannelContrast, openDataset, removeDataset, datasetHealth,
-    captureView, selectedDatasetId, datasetsRef,
+    captureView, comparison, selectedDatasetId, datasetsRef,
   ]);
 }

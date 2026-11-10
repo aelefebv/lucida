@@ -8,7 +8,8 @@ use crate::framing::PlaneBox;
 use crate::placement::CameraSpace;
 use crate::saved_view::SavedView;
 use crate::scene::{
-    DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene, member_transform,
+    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene,
+    member_transform,
 };
 use crate::view::ViewState;
 
@@ -229,6 +230,68 @@ impl WasmScene {
     pub fn dataset_has_physical_scale(&self, dataset_id: &str) -> bool {
         self.inner
             .has_physical_scale(&DatasetId(dataset_id.to_string()))
+    }
+
+    /// Whether `a` and `b` line up in physical space ([`Scene::line_up`]),
+    /// as JSON: `{"verdict":"yes"}`, or the verdict that says why not.
+    pub fn datasets_line_up(&self, a: &str, b: &str) -> String {
+        let verdict = self
+            .inner
+            .line_up(&DatasetId(a.to_string()), &DatasetId(b.to_string()));
+        serde_json::to_string(&verdict).unwrap()
+    }
+
+    /// The comparison this view shows, as JSON, or `null`.
+    pub fn comparison(&self) -> String {
+        serde_json::to_string(&self.inner.comparison()).unwrap()
+    }
+
+    /// Compare `a` with `b` in `mode`, `"swipe"` or `"blink"`
+    /// ([`Scene::compare`]). Answers with the line-up verdict as
+    /// [`Self::datasets_line_up`] does; anything but `yes` started nothing.
+    pub fn compare(&mut self, a: &str, b: &str, mode: &str) -> Result<String, JsError> {
+        let mode = compare_mode(mode)?;
+        let verdict =
+            match self
+                .inner
+                .compare(DatasetId(a.to_string()), DatasetId(b.to_string()), mode)
+            {
+                Ok(()) => crate::placement::LineUp::Yes,
+                Err(verdict) => verdict,
+            };
+        Ok(serde_json::to_string(&verdict).unwrap())
+    }
+
+    pub fn end_comparison(&mut self) {
+        self.inner.end_comparison();
+    }
+
+    /// Show the comparison as a `"swipe"` or a `"blink"`.
+    pub fn set_comparison_mode(&mut self, mode: &str) -> Result<(), JsError> {
+        self.inner.set_comparison_mode(compare_mode(mode)?);
+        Ok(())
+    }
+
+    /// Put the swipe divider at `at`, a fraction of the view's width.
+    pub fn set_comparison_divider(&mut self, at: f64) {
+        self.inner.set_comparison_divider(at);
+    }
+
+    /// Show the other dataset in a blink.
+    pub fn flip_comparison(&mut self) {
+        self.inner.flip_comparison();
+    }
+
+    /// What of the view's width `dataset_id` shows under the comparison, as
+    /// `[from, to]` fractions from its left edge ([`Comparison::span`]).
+    /// Empty for a dataset it leaves alone, which shows everywhere.
+    ///
+    /// [`Comparison::span`]: crate::scene::Comparison::span
+    pub fn comparison_span(&self, dataset_id: &str) -> Vec<f64> {
+        self.inner
+            .comparison()
+            .and_then(|c| c.span(&DatasetId(dataset_id.to_string())))
+            .map_or_else(Vec::new, Vec::from)
     }
 
     /// The camera's framing: `"placed"`, `"framed"`, or `"unframed"`. An
@@ -1001,5 +1064,15 @@ impl WasmScene {
         }
 
         members
+    }
+}
+
+fn compare_mode(mode: &str) -> Result<CompareMode, JsError> {
+    match mode {
+        "swipe" => Ok(CompareMode::Swipe),
+        "blink" => Ok(CompareMode::Blink),
+        other => Err(JsError::new(&format!(
+            "a comparison is a swipe or a blink, not {other}"
+        ))),
     }
 }

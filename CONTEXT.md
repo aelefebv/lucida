@@ -280,6 +280,12 @@ changes, a placed camera moves into the new one and keeps its region, and a
 saved view records the one its camera was saved in.
 _Avoid_: world (unqualified; world space is the volume cameras' view of it)
 
+**Comparison**:
+Two datasets that line up shown against each other in one view: split by a
+divider dragged across it (swipe), or shown in turn (blink). Two datasets line
+up when each declares length units and their extents in the scene frame
+overlap. Both stay in the wanted set however they are shown.
+
 ## Surfaces
 
 **Monitor**:

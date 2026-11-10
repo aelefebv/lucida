@@ -11,6 +11,7 @@
  * run rather than a silence.
  */
 
+import type { Comparison } from "../comparison.ts";
 import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";
 
 /** The selectors a scrub moves. */
@@ -34,6 +35,8 @@ export interface StepOutcome {
 export interface ScriptControls {
   /** The view as the page would save it, or null before a scene exists. */
   view(): SavedView | null;
+  /** The comparison the view shows, which a saved view doesn't record. */
+  comparison(): Comparison | null;
   /** Move a selector by `count` positions through the handler the dimension control calls. */
   scrub(axis: ScrubAxis, count: number): StepOutcome;
   /** Show or hide a channel, a layer or a label through the handler the layer panel calls. */
@@ -48,6 +51,41 @@ export interface ScriptControls {
   addDataset(url: string, timeoutMs: number): Promise<StepOutcome>;
   /** Remove the dataset opened from a source URL through the handler the layer panel calls. */
   removeDataset(url: string): Promise<StepOutcome>;
+  /**
+   * Show the view's comparison as a swipe with its divider at `at`, a
+   * fraction of the view's width, or where it is when `at` is null. With no
+   * comparison, or with `withUrl` naming a dataset it doesn't hold, one
+   * starts first between the pair {@link comparisonPair} picks.
+   */
+  swipe(at: number | null, withUrl: string | null): Promise<StepOutcome>;
+  /** Show the comparison as a blink and flip it to the other dataset, starting one as `swipe` does. */
+  blink(withUrl: string | null): Promise<StepOutcome>;
+}
+
+/**
+ * The two datasets a scripted comparison compares, left first: the dataset
+ * in hand and the one `withId` names, or with none named, the two open
+ * datasets as the layer panel lists them, the upper one left. `open` is in
+ * the panel's order.
+ */
+export function comparisonPair(
+  inHand: string | null,
+  open: readonly string[],
+  withId: string | null,
+): { a: string; b: string } | { refused: string } {
+  if (withId === null) {
+    if (open.length !== 2) {
+      return {
+        refused: `${open.length} dataset(s) are open; a comparison names the one to compare with unless exactly two are`,
+      };
+    }
+    return { a: open[0], b: open[1] };
+  }
+  const a = inHand !== null && inHand !== withId && open.includes(inHand)
+    ? inHand
+    : open.find((id) => id !== withId);
+  if (a === undefined) return { refused: `nothing is open to compare ${withId} with` };
+  return { a, b: withId };
 }
 
 let registered: ScriptControls | null = null;
@@ -197,7 +235,8 @@ function invalidCount(count: number): string | null {
 /**
  * The part of a view a scripted step is judged by: the camera less its
  * viewport, the selectors, whether each dataset, channel, and label is
- * shown, each layer's solo, and the contrast windows a hand set. Contrast
+ * shown, each layer's solo, the contrast windows a hand set, and the
+ * comparison, which no saved view records but which changes what is drawn. Contrast
  * under auto-contrast is left out because it refits as data arrives, which
  * would make a hold look like a change of view. The driver reads this before
  * and after each step and compares the two; the rule lives here so the page,
@@ -214,9 +253,10 @@ export interface ViewSignature {
   }>;
   /** Each channel's `[min, max]`, for the datasets whose contrast a hand set. */
   contrast: Record<DatasetId, [number, number][]>;
+  comparison: Comparison | null;
 }
 
-export function viewSignature(view: SavedView | null): ViewSignature | null {
+export function viewSignature(view: SavedView | null, comparison: Comparison | null = null): ViewSignature | null {
   if (!view) return null;
   const { viewport: _viewport, ...camera } = view.camera ?? {};
   void _viewport;
@@ -238,6 +278,7 @@ export function viewSignature(view: SavedView | null): ViewSignature | null {
     view: view.view ?? null,
     visibility,
     contrast,
+    comparison,
   };
 }
 

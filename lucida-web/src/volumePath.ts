@@ -11,6 +11,8 @@ import { compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import type { ResolvedLayers } from "./resolvedLayers.ts";
 import { traceRecorder } from "./trace/recorder.ts";
+import { comparisonClip, intersectRects } from "./comparison.ts";
+import type { PixelRect } from "./renderer/layerBatches.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
@@ -101,6 +103,23 @@ export function pushLabelVolumeLayers(
   }
 }
 
+/**
+ * Narrow the layers from `start` on to `clip`, dropping any it leaves no
+ * pixels of. A layer marches only inside its scissor, so the clip saves the
+ * march as well as hiding what it would draw.
+ */
+export function clipVolumeLayers(layers: VolumeLayerParams[], start: number, clip: PixelRect): void {
+  let kept = start;
+  for (let i = start; i < layers.length; i++) {
+    const layer = layers[i];
+    const rect = intersectRects(layer.scissorRect ?? clip, clip);
+    if (!rect) continue;
+    layer.scissorRect = rect;
+    layers[kept++] = layer;
+  }
+  layers.length = kept;
+}
+
 export type VolumeState = Record<string, never>;
 
 export function createVolumeState(): VolumeState { return {}; }
@@ -157,6 +176,11 @@ function uploadAndRenderVolume(
     const dsSettings = allSettings[dsId];
     const resolved = resolvedLayers.get(dsId);
     if (!dsSettings || !resolved || !resolved.visible) continue;
+    // A comparison draws a dataset on its side of the divider, or not at all
+    // while a blink shows the other. Either way it stays planned and resident.
+    const clip = comparisonClip(scene, dsId, canvasW, canvasH);
+    if (clip === "hidden") continue;
+    const firstLayer = layers.length;
 
     const members = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
@@ -200,6 +224,7 @@ function uploadAndRenderVolume(
       dsSettings.label_settings,
       resolved.t,
     );
+    if (clip) clipVolumeLayers(layers, firstLayer, clip);
   }
 
   const pixelRatio = devicePixelRatio * ctx.renderScale * ctx.resolutionScale;

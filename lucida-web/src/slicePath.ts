@@ -15,6 +15,7 @@ import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { traceRecorder } from "./trace/recorder.ts";
+import { comparisonClip } from "./comparison.ts";
 
 export type SliceState = Record<string, never>;
 
@@ -339,6 +340,11 @@ function uploadAndRenderSlice(
     const dsSettings = allSettings[dsId];
     const resolved = resolvedLayers.get(dsId);
     if (!dsSettings || !resolved || !resolved.visible) continue;
+    // A comparison shows a dataset on its side of the divider, or not at all
+    // while a blink shows the other. Either way it stays planned and resident.
+    const clip = comparisonClip(scene, dsId, canvasW, canvasH);
+    if (clip === "hidden") continue;
+    const firstLayer = layers.length;
 
     const dsShapeL = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
     const fullResWidth = dsShapeL[Axis.X];
@@ -376,6 +382,7 @@ function uploadAndRenderSlice(
       t: resolved.t,
       z: resolved.z_range.start,
     });
+    if (clip) for (let i = firstLayer; i < layers.length; i++) layers[i].clip = clip;
   }
 
   client.resize(canvasW, canvasH);

@@ -22,4 +22,8 @@ pub struct SceneEpochs {
     /// `MoveAnnotation` / `AddComment` / `RemoveComment` / `EditComment`.
     #[serde(default)]
     pub annotation: u64,
+    /// The comparison the view shows changed. Planning reads it nowhere,
+    /// since a comparison changes only where each dataset is drawn.
+    #[serde(default)]
+    pub comparison: u64,
 }

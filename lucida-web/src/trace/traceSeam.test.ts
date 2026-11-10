@@ -616,6 +616,7 @@ describe("the trace seam", () => {
     const view = { v: 1, camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [8, 6] } };
     setScriptControls({
       view: () => view as never,
+      comparison: () => null,
       scrub: (axis, count) => {
         calls.push(["scrub", axis, count]);
         return { applied: true, reason: null };
@@ -636,6 +637,14 @@ describe("the trace seam", () => {
         calls.push(["remove", url]);
         return Promise.resolve({ applied: true, reason: null });
       },
+      swipe: (at, withUrl) => {
+        calls.push(["swipe", at, withUrl]);
+        return Promise.resolve({ applied: true, reason: null });
+      },
+      blink: (withUrl) => {
+        calls.push(["blink", withUrl]);
+        return Promise.resolve({ applied: true, reason: null });
+      },
     });
     try {
       expect(seam.view()).toBe(view);
@@ -644,6 +653,7 @@ describe("the trace seam", () => {
         view: null,
         visibility: {},
         contrast: {},
+        comparison: null,
       });
       // The viewers' own constants, so the driver's pixels are the page's.
       expect(seam.inputScale.orbitRadiansPerPixel).toBe(0.005);
@@ -656,6 +666,8 @@ describe("the trace seam", () => {
       await expect(seam.addDataset("/data/b.zarr", 5000)).resolves.toEqual({ applied: true, reason: null });
       await expect(seam.addDataset("/data/c.zarr")).resolves.toEqual({ applied: true, reason: null });
       await expect(seam.removeDataset("/data/b.zarr")).resolves.toEqual({ applied: true, reason: null });
+      await expect(seam.swipe(0.25)).resolves.toEqual({ applied: true, reason: null });
+      await expect(seam.blink("/data/b.zarr")).resolves.toEqual({ applied: true, reason: null });
       expect(calls).toEqual([
         ["scrub", "t", 3],
         ["select", { channel: 1 }, false],
@@ -665,6 +677,8 @@ describe("the trace seam", () => {
         ["add", "/data/b.zarr", 5000],
         ["add", "/data/c.zarr", 60_000],
         ["remove", "/data/b.zarr"],
+        ["swipe", 0.25, null],
+        ["blink", "/data/b.zarr"],
       ]);
     } finally {
       setScriptControls(null);
@@ -687,11 +701,14 @@ describe("the trace seam", () => {
 
     setScriptControls({
       view: () => null,
+      comparison: () => null,
       scrub: () => ({ applied: true, reason: null }),
       select: () => ({ applied: true, reason: null }),
       contrast: () => ({ applied: true, reason: null }),
       addDataset: () => Promise.resolve({ applied: true, reason: null }),
       removeDataset: () => Promise.resolve({ applied: true, reason: null }),
+      swipe: () => Promise.resolve({ applied: true, reason: null }),
+      blink: () => Promise.resolve({ applied: true, reason: null }),
     });
     try {
       // The arguments arrive over the DevTools protocol, so the seam checks
@@ -701,6 +718,10 @@ describe("the trace seam", () => {
         reason: "a contrast window is two finite numbers, the minimum below the maximum, not 5,5",
       });
       expect(seam.contrast(1.5, 0, 5).applied).toBe(false);
+      await expect(seam.swipe(1.5)).resolves.toEqual({
+        applied: false,
+        reason: "a divider is a fraction of the view's width from 0 to 1, not 1.5",
+      });
       await expect(seam.removeDataset("")).resolves.toEqual({
         applied: false,
         reason: "a dataset is named by its source URL",

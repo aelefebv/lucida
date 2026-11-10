@@ -335,6 +335,12 @@ export interface SliceLayerParams {
    * draws alone.
    */
   passGroup?: number;
+  /**
+   * The target pixels the layer may show, `[x, y, width, height]`; it
+   * composites as nothing outside them. Every layer of a pass group carries
+   * the same clip. Absent, the whole target.
+   */
+  clip?: readonly [number, number, number, number];
 }
 
 /**

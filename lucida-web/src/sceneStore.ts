@@ -14,6 +14,7 @@
  * the selectors.
  */
 import type { WasmScene } from "lucida-core";
+import { readComparison, type Comparison } from "./comparison.ts";
 import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { ViewMode } from "./types.ts";
 
@@ -29,13 +30,14 @@ export interface SceneView {
   readonly viewMode: ViewMode;
 }
 
-/** The epochs that can move what a saved view records. Annotations can't,
- *  so their epoch is left out. */
+/** The epochs that can move what a saved view records, and the comparison's.
+ *  Annotations can move neither, so their epoch is left out. */
 export interface ViewEpochs {
   readonly content: number;
   readonly layout: number;
   readonly view: number;
   readonly selection: number;
+  readonly comparison: number;
 }
 
 /** A scene before its first write, and the page before it has a scene. */
@@ -63,6 +65,7 @@ export class SceneStore {
   private scene: WasmScene | null = null;
   private epochs: ViewEpochs | null = null;
   private view: SceneView = NO_SCENE_VIEW;
+  private comparison: Comparison | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly getScene: () => WasmScene | null;
 
@@ -87,6 +90,10 @@ export class SceneStore {
    *  only when one of them does. */
   getView = (): SceneView => this.view;
 
+  /** The comparison the view shows, apart from the view so that a divider
+   *  drag re-renders only what draws the comparison. */
+  getComparison = (): Comparison | null => this.comparison;
+
   /** The epochs as last read, or null without a scene. A new object each
    *  time one of them moves. */
   getEpochs = (): ViewEpochs | null => this.epochs;
@@ -101,10 +108,12 @@ export class SceneStore {
     const layersJson = scene && scene === this.scene && sameLayerEpochs(epochs, this.epochs)
       ? layersJsonOf.get(this.view) ?? null
       : null;
+    const comparisonMoved = scene !== this.scene || epochs?.comparison !== this.epochs?.comparison;
     this.scene = scene;
     this.epochs = epochs;
     const view = scene ? readView(scene, layersJson, this.view) : NO_SCENE_VIEW;
     if (!sameView(view, this.view)) this.view = view;
+    if (comparisonMoved) this.comparison = scene ? readComparison(scene) : null;
     for (const listener of [...this.listeners]) listener();
   };
 }
@@ -116,12 +125,24 @@ function sameLayerEpochs(a: ViewEpochs | null, b: ViewEpochs | null): boolean {
 
 function readEpochs(scene: WasmScene): ViewEpochs {
   const all = JSON.parse(scene.epochs()) as ViewEpochs;
-  return { content: all.content, layout: all.layout, view: all.view, selection: all.selection };
+  return {
+    content: all.content,
+    layout: all.layout,
+    view: all.view,
+    selection: all.selection,
+    comparison: all.comparison,
+  };
 }
 
 function sameEpochs(a: ViewEpochs | null, b: ViewEpochs | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.content === b.content && a.layout === b.layout && a.view === b.view && a.selection === b.selection;
+  return (
+    a.content === b.content &&
+    a.layout === b.layout &&
+    a.view === b.view &&
+    a.selection === b.selection &&
+    a.comparison === b.comparison
+  );
 }
 
 /** Read the view. `knownLayersJson` is the current answer when the caller

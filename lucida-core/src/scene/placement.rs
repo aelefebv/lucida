@@ -5,7 +5,8 @@ use lucida_content::DatasetId;
 
 use crate::camera::{Camera, VisibleRegion};
 use crate::placement::{
-    Affine, CameraSpace, SceneFrame, SpaceMap, WorldSpace, member_cube_to_frame,
+    Affine, CameraSpace, LineUp, SceneFrame, SpaceMap, WorldSpace, boxes_overlap,
+    member_cube_to_frame,
 };
 use crate::transform::VolumeTransform;
 
@@ -138,6 +139,60 @@ impl Scene {
             .is_some_and(|d| d.frame.has_physical_scale())
     }
 
+    /// The box `dataset_id`'s members fill in the scene frame, on all three
+    /// axes. `None` for a dataset the scene doesn't hold or one with no image.
+    fn placed_extent(&self, dataset_id: &DatasetId) -> Option<([f64; 3], [f64; 3])> {
+        let to_scene = self.placement(dataset_id)?;
+        self.derived
+            .get(dataset_id)?
+            .members
+            .iter()
+            .filter_map(|member| {
+                let shape = member.levels.first()?.shape;
+                let [x, y] = member.position;
+                Some(to_scene.apply_box(
+                    [x, y, 0.0],
+                    [x + shape[4] as f64, y + shape[3] as f64, shape[2] as f64],
+                ))
+            })
+            .reduce(|a, b| {
+                (
+                    std::array::from_fn(|i| a.0[i].min(b.0[i])),
+                    std::array::from_fn(|i| a.1[i].max(b.1[i])),
+                )
+            })
+    }
+
+    /// Whether `a` and `b` line up in physical space: each declares length
+    /// units and their placed extents overlap. Only such a pair can stand in
+    /// for each other on one region of the screen.
+    pub fn line_up(&self, a: &DatasetId, b: &DatasetId) -> LineUp {
+        if a == b {
+            return LineUp::Same;
+        }
+        let (Some(a_box), Some(b_box)) = (self.placed_extent(a), self.placed_extent(b)) else {
+            let datasets = [a, b]
+                .into_iter()
+                .filter(|id| self.placed_extent(id).is_none())
+                .cloned()
+                .collect();
+            return LineUp::Missing { datasets };
+        };
+        let unscaled: Vec<DatasetId> = [a, b]
+            .into_iter()
+            .filter(|id| !self.has_physical_scale(id))
+            .cloned()
+            .collect();
+        if !unscaled.is_empty() {
+            return LineUp::NoPhysicalScale { datasets: unscaled };
+        }
+        if boxes_overlap(a_box, b_box) {
+            LineUp::Yes
+        } else {
+            LineUp::Apart
+        }
+    }
+
     /// What of `dataset_id` the camera shows, in the dataset's own frame:
     /// the samples planning enumerates. A slice view re-expresses its region
     /// of the scene frame there. A volume view culls against the box of the
@@ -197,6 +252,7 @@ mod tests {
     use crate::camera::{Camera, Framing};
     use crate::command::{DocumentCommand, ViewportCommand};
     use crate::framing::PlaneBox;
+    use crate::placement::LineUp;
     use crate::saved_view::SavedView;
     use crate::scene::{FrameTarget, Scene};
 
@@ -360,6 +416,58 @@ mod tests {
         // Its declared numbers compare with the reference's as they stand.
         let b = scene.dataset_plane_bounds("b").unwrap();
         assert!(close([b.max[0], b.max[1], 0.0], [128.0, 128.0, 0.0]));
+    }
+
+    #[test]
+    fn datasets_line_up_when_both_declare_lengths_and_overlap() {
+        let scene = two_over_one_region();
+        let [coarse, fine] = ["coarse", "fine"].map(DatasetId::from);
+        assert_eq!(scene.line_up(&coarse, &fine), LineUp::Yes);
+        assert_eq!(scene.line_up(&fine, &coarse), LineUp::Yes);
+        assert_eq!(scene.line_up(&coarse, &coarse), LineUp::Same);
+        let gone = DatasetId::from("gone");
+        assert_eq!(
+            scene.line_up(&coarse, &gone),
+            LineUp::Missing {
+                datasets: vec![gone]
+            }
+        );
+    }
+
+    #[test]
+    fn datasets_side_by_side_or_without_units_do_not_line_up() {
+        let mut scene = Scene::new([800, 600]);
+        let unit = Some("micrometer");
+        open(&mut scene, "a", [1, 64, 64], [1.0; 3], [0.0; 3], unit);
+        // Starts where A ends, so the two only touch.
+        open(
+            &mut scene,
+            "b",
+            [1, 64, 64],
+            [1.0; 3],
+            [0.0, 0.0, 64.0],
+            unit,
+        );
+        open(&mut scene, "bare", [1, 64, 64], [1.0; 3], [0.0; 3], None);
+        let [a, b, bare] = ["a", "b", "bare"].map(DatasetId::from);
+        assert_eq!(scene.line_up(&a, &b), LineUp::Apart);
+        assert_eq!(
+            scene.line_up(&a, &bare),
+            LineUp::NoPhysicalScale {
+                datasets: vec![bare]
+            }
+        );
+        // A plane deeper than the other's is apart too, though the two fill
+        // one rectangle on screen.
+        open(
+            &mut scene,
+            "deep",
+            [1, 64, 64],
+            [1.0; 3],
+            [5.0, 0.0, 0.0],
+            unit,
+        );
+        assert_eq!(scene.line_up(&a, &DatasetId::from("deep")), LineUp::Apart);
     }
 
     #[test]

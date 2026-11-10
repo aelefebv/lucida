@@ -3455,6 +3455,7 @@ mod tests {
             view: 3,
             selection: 4,
             annotation: 6,
+            comparison: 7,
         };
         let json = serde_json::to_string(&epochs).unwrap();
         let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();
