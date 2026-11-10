@@ -11,7 +11,7 @@
         "levels": [
           {
             "level_index": 0,
-            "path": "/data/kidney-multiplex.zarr/0"
+            "path": "/data/multichannel-volume.zarr/0"
           }
         ],
         "store_prefix": null

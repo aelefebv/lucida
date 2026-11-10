@@ -6,7 +6,7 @@ import type { Annotation } from "./annotationDocument.ts";
 // `is_closed()`, so the two implementations can't drift.
 
 function pin(kind: string, position: [number, number], end?: [number, number] | null): Annotation {
-  return { id: "a", position, end: end ?? null, author: "bio", kind };
+  return { id: "a", position, end: end ?? null, author: "ada", kind };
 }
 
 describe("annotationVertices", () => {
