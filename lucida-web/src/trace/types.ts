@@ -176,8 +176,9 @@ export interface RunCause {
  * The inputs that open an interaction run. A closed set, so a run's label is
  * comparable across runs and across machines. Two orbits are two orbits.
  *
- * Pan, zoom and orbit move the camera, and resize changes the viewport it
- * frames, so they bump the `view` epoch. Scrub moves a selector along an
+ * Pan, zoom and orbit move the camera, resize changes the viewport it
+ * frames, and plane cuts another plane with the slice camera, so they bump
+ * the `view` epoch. Scrub moves a selector along an
  * axis; select shows or hides a channel, a dataset, or a label; contrast
  * sets a channel's window; remove takes a dataset away; and compare moves a
  * comparison's divider, flips its blink, or starts or ends one. They change
@@ -185,11 +186,11 @@ export interface RunCause {
  * carries the `selection` epoch.
  */
 export const INPUT_KINDS = [
-  "pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove", "compare",
+  "pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove", "plane", "compare",
 ] as const;
 export type InputKind = (typeof INPUT_KINDS)[number];
 
-const VIEW_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "resize"];
+const VIEW_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "resize", "plane"];
 
 export function interactionCause(input: InputKind): RunCause {
   return {

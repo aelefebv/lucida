@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use lucida_core::saved_view::normalize_dataset_url;
+use lucida_core::slice_plane::SlicePlane;
 
 use crate::browser::{Page, Viewport};
 use crate::error::{CliError, ErrorKind};
@@ -45,11 +46,14 @@ use crate::trace::{CLOSE_AS_TIMEOUT, RunState, json_string, pin_run};
 // The steps
 // ---------------------------------------------------------------------------
 
-/// The selectors a scrub moves.
+/// The selectors a scrub moves. `y` and `x` are the cuts of an XZ and a YZ
+/// slice view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScrubAxis {
     Z,
+    Y,
+    X,
     T,
     C,
 }
@@ -60,10 +64,12 @@ impl std::str::FromStr for ScrubAxis {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
             "z" | "Z" => Ok(Self::Z),
+            "y" | "Y" => Ok(Self::Y),
+            "x" | "X" => Ok(Self::X),
             "t" | "T" => Ok(Self::T),
             "c" | "C" => Ok(Self::C),
             other => Err(format!(
-                "no selector is called {other}; the axes are z, t, and c"
+                "no selector is called {other}; the axes are z, y, x, t, and c"
             )),
         }
     }
@@ -73,6 +79,8 @@ impl std::fmt::Display for ScrubAxis {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Z => "z",
+            Self::Y => "y",
+            Self::X => "x",
             Self::T => "t",
             Self::C => "c",
         })
@@ -204,6 +212,8 @@ pub enum ScriptStep {
     },
     /// Switch to the 2D slice view or the 3D volume view.
     Mode { to: ViewMode },
+    /// Cut another plane with the slice view: `xy`, `xz` or `yz`.
+    Plane { to: SlicePlane },
     /// Fit the view to everything visible.
     Fit,
     /// Resize the viewport to this many CSS pixels, at the run's device pixel ratio.
@@ -278,6 +288,7 @@ impl ScriptStep {
             Self::Scrub { .. } => "scrub",
             Self::Select { .. } => "select",
             Self::Mode { .. } => "mode",
+            Self::Plane { .. } => "plane",
             Self::Fit => "fit",
             Self::Resize { .. } => "resize",
             Self::Contrast { .. } => "contrast",
@@ -363,7 +374,7 @@ impl ScriptStep {
                 }
                 _ => Err("a select names one channel, layer or label".to_string()),
             },
-            Self::Mode { .. } | Self::Fit => Ok(()),
+            Self::Mode { .. } | Self::Plane { .. } | Self::Fit => Ok(()),
             Self::Resize { width, height } => {
                 if *width == 0 || *height == 0 {
                     return Err(format!(
@@ -522,6 +533,7 @@ impl std::fmt::Display for ScriptStep {
                 off_suffix(*visible)
             ),
             Self::Mode { to } => write!(f, "mode {to}"),
+            Self::Plane { to } => write!(f, "plane {to}"),
             Self::Fit => f.write_str("fit"),
             Self::Resize { width, height } => write!(f, "resize {width}x{height}"),
             Self::Contrast { channel, min, max } => write!(f, "contrast {channel}:{min},{max}"),
@@ -600,8 +612,8 @@ impl Script {
         let steps: Vec<ScriptStep> = serde_json::from_value(steps).map_err(|error| {
             format!(
                 "a step could not be read: {error}; the kinds are wait, hold, pan, zoom, orbit, \
-                 scrub, select, mode, fit, resize, contrast, add, remove, minimap, swipe, and \
-                 blink"
+                 scrub, select, mode, plane, fit, resize, contrast, add, remove, minimap, \
+                 swipe, and blink"
             )
         })?;
         let script = Self { steps };
@@ -721,7 +733,7 @@ pub struct ScriptArgs {
 
 /// The flag ids, in the order their help prints. `wait`, `hold`, and `fit`
 /// carry no text to parse; the rest go through `step_from_flag`.
-const STEP_FLAGS: [&str; 16] = [
+const STEP_FLAGS: [&str; 17] = [
     "wait",
     "hold",
     "pan",
@@ -730,6 +742,7 @@ const STEP_FLAGS: [&str; 16] = [
     "scrub",
     "select",
     "mode",
+    "plane",
     "fit",
     "resize",
     "set_contrast",
@@ -840,6 +853,13 @@ impl clap::Args for ScriptArgs {
                     .value_name("2d|3d")
                     .action(ArgAction::Append)
                     .help("Switch to the slice view or the volume view, as the M key does"),
+            )
+            .arg(
+                Arg::new("plane")
+                    .long("plane")
+                    .value_name("xy|xz|yz")
+                    .action(ArgAction::Append)
+                    .help("Cut another plane with the slice view, as its plane toggle does"),
             )
             .arg(
                 Arg::new("fit")
@@ -1082,6 +1102,7 @@ pub fn step_from_flag(id: &str, text: &str) -> Result<ScriptStep, String> {
             })
         }
         "mode" => Ok(ScriptStep::Mode { to: text.parse()? }),
+        "plane" => Ok(ScriptStep::Plane { to: text.parse()? }),
         "resize" => {
             let (width, height) = text.split_once(['x', 'X']).ok_or_else(|| {
                 format!("a size is WIDTHxHEIGHT, for example 1280x720, not {text}")
@@ -1770,6 +1791,12 @@ async fn run_step(
                     other.map(|(mode, _)| mode),
                 ),
             });
+        }
+        // The capture surface hides the plane toggle, so the step calls the
+        // handler it would, which the recorder hears as the plane input.
+        ScriptStep::Plane { to } => {
+            let expression = seam_call("plane", &json_string(&to.to_string()));
+            input = Some(control_outcome(page, &expression, wait).await?);
         }
         // The volume view binds no fit key; a double tap is how a person
         // fits it there, and the slice view's double tap zooms instead.
@@ -2697,8 +2724,8 @@ mod tests {
         let unknown = Script::from_json(r#"[{"kind": "fly"}]"#).unwrap_err();
         assert!(
             unknown.contains(
-                "wait, hold, pan, zoom, orbit, scrub, select, mode, fit, resize, contrast, add, \
-                 remove, minimap, swipe, and blink"
+                "wait, hold, pan, zoom, orbit, scrub, select, mode, plane, fit, resize, contrast, \
+                 add, remove, minimap, swipe, and blink"
             ),
             "{unknown}"
         );
@@ -2846,7 +2873,23 @@ mod tests {
         );
         assert_eq!(
             step_from_flag("scrub", "q:1").unwrap_err(),
-            "no selector is called q; the axes are z, t, and c"
+            "no selector is called q; the axes are z, y, x, t, and c"
+        );
+        assert_eq!(
+            step_from_flag("scrub", "y:-3").unwrap(),
+            ScriptStep::Scrub {
+                axis: ScrubAxis::Y,
+                count: -3,
+                interval_ms: None,
+            }
+        );
+        assert_eq!(
+            step_from_flag("plane", "XZ").unwrap(),
+            ScriptStep::Plane { to: SlicePlane::Xz }
+        );
+        assert_eq!(
+            step_from_flag("plane", "zz").unwrap_err(),
+            "a slice plane is xy, xz or yz, not zz"
         );
         assert_eq!(
             step_from_flag("scrub", "t:1.5").unwrap_err(),

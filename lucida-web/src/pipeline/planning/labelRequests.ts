@@ -20,7 +20,8 @@ import type {
   LevelGeometry,
 } from "../../manifestTypes.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
-import { slicePlaneIn, type SlicePlane } from "./emit.ts";
+import { slicePlaneIn, type PlaneInChunks } from "./emit.ts";
+import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 import type { ChunkRequest } from "./types.ts";
 
 /** Cap on the chosen level's per-plane chunk count in slice mode. */
@@ -463,10 +464,15 @@ export interface LabelRequestArgs {
   config?: Pick<PlanningConfig, "sliceBandPlanes" | "prefetchLaneOffset">;
   /**
    * Whether the selection stepped along Z since the previous plan
-   * (`isZStep`). The slice view then also prefetches whole each chunk whose
+   * (`isCutStep`). The slice view then also prefetches whole each chunk whose
    * plane it draws, so the steps after it cost nothing.
    */
-  zStep?: boolean;
+  cutStep?: boolean;
+  /**
+   * The axis the slice view cuts. A label overlay is drawn only on an XY
+   * cut, so a side view fetches none. Absent: Z.
+   */
+  cutAxis?: SpatialAxis;
 }
 
 /**
@@ -476,6 +482,7 @@ export interface LabelRequestArgs {
  * do, and every (z, y, x) chunk of the chosen level, whole, in volume mode.
  */
 export function computeLabelChunkRequests(args: LabelRequestArgs): ChunkRequest[] {
+  if (args.mode !== "volume" && (args.cutAxis ?? "z") !== "z") return [];
   const resolvedList = resolveVisibleLabels(args.manifest, args.labelSettings, {
     mode: args.mode,
     maxLevelDim: args.maxLevelDim,
@@ -543,7 +550,7 @@ function appendLabelChunkRequests(
     z: number,
     y: number,
     x: number,
-    slice: SlicePlane | null = null,
+    slice: PlaneInChunks | null = null,
     lane: "detail" | "prefetch" = "detail",
     priority = 0,
   ): void => {
@@ -600,7 +607,7 @@ function appendLabelChunkRequests(
   }
   // After a step along Z the chunks come whole as well, in the prefetch
   // lane, as the image's do.
-  if (slice === null || !args.zStep) return;
+  if (slice === null || !args.cutStep) return;
   for (let y = 0; y < gy; y++) {
     for (let x = 0; x < gx; x++) {
       pushChunk(targetChunkZ, y, x, null, "prefetch", config.prefetchLaneOffset);

@@ -11,7 +11,7 @@ use lucida_core::protocol::{
     ChunkMessage, ClientId, ClientMessage, CommandRejection, MessageRejection, PeerIdentity,
     ServerMessage,
 };
-use lucida_protocol::codec::{BytesCodec, ChunkRelayReport, CodecSet};
+use lucida_protocol::codec::{BytesCodec, ChunkPlanes, ChunkRelayReport, CodecSet};
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
@@ -749,7 +749,12 @@ async fn handle_client_inner(
                             image_id,
                             key,
                             planes,
+                            plane_axis,
                         } => {
+                            let planes = planes.map(|range| ChunkPlanes {
+                                axis: plane_axis,
+                                range,
+                            });
                             let mut probe = RequestProbe::arrived(
                                 rid,
                                 TimingRowFamily::Chunk,
@@ -1518,7 +1523,7 @@ async fn serve_chunk_from_store(
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: &ChunkKey,
-    planes: Option<[u32; 2]>,
+    planes: Option<ChunkPlanes>,
     resolver: &ChunkResolver,
     cache: &CachedStore,
     client: &ClientSender,
@@ -1561,7 +1566,7 @@ async fn serve_chunk_from_store(
     // queued from there too, so the client's bytes never wait for this task
     // to be polled again.
     let cut = planes
-        .and_then(|planes| PlaneCut::new(planes, resolver.chunk_depth(image_id, chunk_key.level)?));
+        .and_then(|planes| PlaneCut::new(planes, resolver.chunk_dims(image_id, chunk_key.level)?));
     let (dataset, image, key, client_queue) = (
         dataset_id.clone(),
         image_id.clone(),
@@ -1849,7 +1854,7 @@ fn produced_frame(
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: impl std::fmt::Display,
-    planes: Option<[u32; 2]>,
+    planes: Option<ChunkPlanes>,
     codecs: CodecSet,
     bytes: &[u8],
 ) -> Vec<u8> {
@@ -1894,7 +1899,7 @@ fn plane_frame(
     };
     match read {
         ChunkRead::Present(bytes) => match cut.cut(&bytes) {
-            Some(planes) => frame(Some(cut.planes()), planes),
+            Some(planes) => frame(Some(cut.planes()), &planes),
             None => encode_chunk_frame(
                 client_id,
                 dataset_id,
@@ -1920,7 +1925,7 @@ fn encode_chunk_frame(
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: impl std::fmt::Display,
-    planes: Option<[u32; 2]>,
+    planes: Option<ChunkPlanes>,
     codecs: &[BytesCodec],
     bytes: &[u8],
 ) -> Vec<u8> {

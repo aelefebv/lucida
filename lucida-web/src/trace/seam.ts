@@ -29,8 +29,10 @@ import type { DiagnosticDocument, WindowRequest } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { LiveProgress } from "./liveProgress.ts";
 import type { SettleState } from "../pipeline/settle.ts";
+import type { SlicePlane } from "../renderer/slicePlane.ts";
 import {
   SCRUB_AXES,
+  SLICE_PLANES,
   scriptControls,
   viewSignature,
   type ScrubAxis,
@@ -299,6 +301,12 @@ export interface LucidaTraceSeam {
    */
   scrub(axis: ScrubAxis, count: number): StepOutcome;
   /**
+   * A scripted plane: cut `xy`, `xz` or `yz` with the slice view through the
+   * handler its plane toggle calls, which the capture surface hides. The
+   * view fits the data in the new plane. Refuses what the toggle would.
+   */
+  plane(plane: SlicePlane): StepOutcome;
+  /**
    * A scripted select: show or hide a channel of the dataset in hand, a
    * layer by dataset id, or a label of the dataset in hand by its index
    * among the labels, through the handler the layer panel calls. Shows
@@ -464,6 +472,12 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       if (!controls) return noControls();
       if (!SCRUB_AXES.includes(axis)) return refused(`no selector is called ${String(axis)}`);
       return controls.scrub(axis, count);
+    },
+    plane: (plane: SlicePlane) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (!SLICE_PLANES.includes(plane)) return refused(`a slice plane is xy, xz or yz, not ${String(plane)}`);
+      return controls.plane(plane);
     },
     select: (target: SelectTarget, visible: boolean = true) => {
       const controls = scriptControls();

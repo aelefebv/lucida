@@ -621,6 +621,10 @@ describe("the trace seam", () => {
         calls.push(["scrub", axis, count]);
         return { applied: true, reason: null };
       },
+      plane: (plane) => {
+        calls.push(["plane", plane]);
+        return { applied: true, reason: null };
+      },
       select: (target, visible) => {
         calls.push(["select", target, visible]);
         return { applied: true, reason: null };
@@ -659,6 +663,8 @@ describe("the trace seam", () => {
       expect(seam.inputScale.orbitRadiansPerPixel).toBe(0.005);
       expect(seam.inputScale.sliceZoomInPerNotch).toBe(1.1);
       expect(seam.scrub("t", 3)).toEqual({ applied: true, reason: null });
+      expect(seam.plane("xz")).toEqual({ applied: true, reason: null });
+      expect(seam.plane("zz" as never)).toEqual({ applied: false, reason: "a slice plane is xy, xz or yz, not zz" });
       expect(seam.select({ channel: 1 }, false)).toEqual({ applied: true, reason: null });
       expect(seam.select({ layer: "ds-2" })).toEqual({ applied: true, reason: null });
       expect(seam.select({ label: 0 }, false)).toEqual({ applied: true, reason: null });
@@ -670,6 +676,7 @@ describe("the trace seam", () => {
       await expect(seam.blink("/data/b.zarr")).resolves.toEqual({ applied: true, reason: null });
       expect(calls).toEqual([
         ["scrub", "t", 3],
+        ["plane", "xz"],
         ["select", { channel: 1 }, false],
         ["select", { layer: "ds-2" }, true],
         ["select", { label: 0 }, false],
@@ -703,6 +710,7 @@ describe("the trace seam", () => {
       view: () => null,
       comparison: () => null,
       scrub: () => ({ applied: true, reason: null }),
+      plane: () => ({ applied: true, reason: null }),
       select: () => ({ applied: true, reason: null }),
       contrast: () => ({ applied: true, reason: null }),
       addDataset: () => Promise.resolve({ applied: true, reason: null }),

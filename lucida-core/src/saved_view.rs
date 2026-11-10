@@ -235,6 +235,16 @@ impl SavedView {
         camera
     }
 
+    /// This view's selectors in `scene`'s spaces: its side-view axis positions
+    /// carried from the spaces it was saved in should they differ.
+    pub fn view_in(&self, scene: &Scene) -> ViewState {
+        let mut view = self.view.clone();
+        if let Some(from) = &self.camera_space {
+            scene.carry_view(&mut view, from);
+        }
+        view
+    }
+
     /// Clear the source-URL list (`datasets`), leaving every workspace-local
     /// id-keyed field intact.
     ///

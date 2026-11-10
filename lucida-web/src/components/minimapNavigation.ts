@@ -402,11 +402,16 @@ export class MinimapNavigator {
     return true;
   }
 
-  /** The scene and the frame to map through, or null when there is nothing to steer: no data, or the fly camera. */
+  /**
+   * The scene and the frame to map through, or null when there is nothing to
+   * steer: no data, the fly camera, or a side view, whose plane the minimap
+   * neither outlines nor maps.
+   */
   private target(): { scene: WasmScene; frame: MinimapFrame } | null {
     const scene = this.deps.scene();
     const frame = this.deps.frame();
     if (!scene || !frame || frame.members.length === 0 || scene.camera_mode() === "fly") return null;
+    if (frame.mode === "slice" && scene.slice_plane() !== "xy") return null;
     return { scene, frame };
   }
 

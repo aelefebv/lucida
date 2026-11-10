@@ -5,6 +5,7 @@
 
 import type { ProbeSample } from "../renderer/workerProtocol.ts";
 import { drawnAtFloat32Precision } from "../renderer/dataTypeUtil.ts";
+import type { SpatialAxis } from "../renderer/slicePlane.ts";
 
 /** What the readout needs to know about the datasets its samples come from. */
 export interface ReadoutContext {
@@ -14,6 +15,11 @@ export interface ReadoutContext {
   dataType(datasetId: string): string;
   /** Level-0 depth, so a flat image's position leaves Z out. */
   depth(datasetId: string): number;
+  /**
+   * The axis the view stands at a position on: the slice view's cut, and Z
+   * in the volume view. Absent: Z.
+   */
+  cutAxis?(): SpatialAxis;
   channel(datasetId: string, channel: number): { name: string; colormap: string };
   /** A label overlay by its label image id, or null when the manifest has none by that id. */
   label(datasetId: string, labelImageId: string): ReadoutLabel | null;
@@ -81,14 +87,15 @@ export function readoutBlocks(samples: readonly ProbeSample[], context: ReadoutC
     const levels = new Set(channels.flatMap((s) => (s.level === undefined ? [] : [s.level])));
     const sharedLevel = levels.size === 1 ? [...levels][0] : null;
     const depth = context.depth(datasetId);
-    const placed = ordered.flatMap((s) => (s.position ? [positionAxes(s.position, depth)] : []));
+    const cut = context.cutAxis?.() ?? "z";
+    const placed = ordered.flatMap((s) => (s.position ? [positionAxes(s.position, depth, cut)] : []));
     const sharedPosition = placed.length > 0 && placed.every((p) => sameAxes(p, placed[0])) ? placed[0] : null;
     const tile = context.entityName(datasetId, entityId);
     const name = context.datasetName(datasetId);
     const rows: ReadoutRow[] = [];
     for (const sample of ordered) {
       const position = sample.position && !sharedPosition
-        ? positionAxes(sample.position, depth).map((a) => `${a.label} ${a.value}`).join(" ")
+        ? positionAxes(sample.position, depth, cut).map((a) => `${a.label} ${a.value}`).join(" ")
         : null;
       const rowKey = `${key}\u0000${sample.labelImageId ?? sample.channel}`;
       if (sample.channel !== undefined) {
@@ -133,12 +140,20 @@ export function readoutBlocks(samples: readonly ProbeSample[], context: ReadoutC
   return blocks;
 }
 
-function positionAxes([x, y, z]: readonly number[], depth: number): { label: string; value: string }[] {
-  const axes = [
-    { label: "x", value: String(x) },
-    { label: "y", value: String(y) },
-  ];
-  if (depth > 1) axes.push({ label: "Z", value: String(z + 1) });
+/**
+ * A sample's place: the axes on screen as sample coordinates from 0, and the
+ * axis the view stands at a position on as that axis position, counted from
+ * 1 as its scrubber shows it.
+ */
+function positionAxes(
+  [x, y, z]: readonly number[],
+  depth: number,
+  cut: SpatialAxis = "z",
+): { label: string; value: string }[] {
+  const axis = (name: SpatialAxis, index: number) =>
+    name === cut ? { label: name.toUpperCase(), value: String(index + 1) } : { label: name, value: String(index) };
+  const axes = [axis("x", x), axis("y", y)];
+  if (depth > 1) axes.push(axis("z", z));
   return axes;
 }
 

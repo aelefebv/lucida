@@ -7,7 +7,7 @@
  * Axis order is `[T, C, Z, Y, X]`.
  */
 
-import { sliceLevelZ } from "./slicePlane.ts";
+import { sliceLevelPlane } from "./slicePlane.ts";
 
 /** Level-0 geometry: 5D `shape` and `scale`, canonical `[T, C, Z, Y, X]`. */
 export interface Level0 {
@@ -96,7 +96,7 @@ export function labelDepthZ(sourceZ: number, source: Level0, label: Level0): num
  * cell holding another plane is always one to send again.
  */
 export function labelLevelZ(sourceZ: number, source: Level0, label: Level0, levelDepth: number): number {
-  return sliceLevelZ(labelDepthZ(sourceZ, source, label), safeCount(label.shape, AXIS_Z), levelDepth);
+  return sliceLevelPlane(labelDepthZ(sourceZ, source, label), safeCount(label.shape, AXIS_Z), levelDepth);
 }
 
 /**

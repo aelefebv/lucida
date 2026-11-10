@@ -17,6 +17,7 @@ import type { ProbeSample } from "../renderer/workerProtocol.ts";
 import type { ResolvedLayers } from "../resolvedLayers.ts";
 import type { DatasetState } from "../types.ts";
 import { Axis } from "../axes.ts";
+import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { frameClock } from "../frameClock.ts";
 import { REVEAL_LINGER_MS } from "../ui/longPress.ts";
 import { channelDisplayName } from "./channels.ts";
@@ -217,6 +218,8 @@ function readoutContext(scene: WasmScene, datasets: Map<string, DatasetState>, l
     },
     dataType: (id) => multiscale(id)?.data_type ?? "uint16",
     depth: (id) => multiscale(id)?.levels[0]?.shape[Axis.Z] ?? 1,
+    // Read at each probe, since a plane switch moves no layer.
+    cutAxis: () => (scene.camera_mode() === "slice" ? cutAxis(scene.slice_plane() as SlicePlane) : "z"),
     channel: (id, channel) => ({
       name: channelDisplayName(
         channel,

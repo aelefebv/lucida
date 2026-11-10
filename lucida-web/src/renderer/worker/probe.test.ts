@@ -62,6 +62,7 @@ function fakePool(datasetId: string, chunk: number, cells: number): FakePool {
     entityMetas: new Map(),
     entityZInfo: new Map(),
     z: 0,
+    axis: "z",
     t: 0,
     c: 0,
     slotLevelZ: new Int32Array(slotsX * slotsY).fill(0),

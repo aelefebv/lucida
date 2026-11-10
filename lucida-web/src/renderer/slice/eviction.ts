@@ -75,5 +75,6 @@ export function sliceEvictionParams(
     targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
     isWanted: (memberId, chunkKey) => wantedChunksFor(state, memberId, tier)?.has(chunkKey) ?? false,
     is3D: false,
+    sliceAxis: atlas.axis,
   };
 }

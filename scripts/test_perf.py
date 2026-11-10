@@ -123,6 +123,7 @@ def test_scenarios_name_what_they_need() -> None:
     assert needs["pan-sweep"] == frozenset()
     assert needs["zoom-in-out"] == frozenset()
     assert needs["z-scrub"] == {"volume"}
+    assert needs["xz-scrub"] == {"volume"}
     assert needs["t-scrub"] == {"time"}
     assert needs["orbit"] == {"volume"}
     assert needs["channel-solo"] == {"channels"}
@@ -141,7 +142,7 @@ def test_scenarios_name_what_they_need() -> None:
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
     kinds = {step["kind"] for scenario in SCENARIOS.values() for step in scenario.steps}
-    assert {"mode", "fit", "resize", "contrast", "add", "remove", "minimap", "swipe", "blink"} <= kinds
+    assert {"mode", "plane", "fit", "resize", "contrast", "add", "remove", "minimap", "swipe", "blink"} <= kinds
     paced = {
         name
         for name, scenario in SCENARIOS.items()

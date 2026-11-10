@@ -12,7 +12,7 @@
  */
 
 import { Axis } from "../../axes.ts";
-import { sliceLevelZ } from "../../renderer/slicePlane.ts";
+import { sliceLevelPlane, tczyx, type SliceCut, type SpatialAxis } from "../../renderer/slicePlane.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
   MINIMAP_SEED_FAST_MAX_CHUNKS,
@@ -35,22 +35,25 @@ import type {
 const PREFETCH_STEP = 100;
 
 /**
- * Whether the selection stepped along Z since the previous plan: moved by no
- * more than `bandPlanes`, the planes the slice view fetches on each side of
- * the one it draws, as a key or a scrub moves it, rather than jumped. After
- * a step the slice view fetches the whole chunks its plane lies in, once, so
- * the steps after it cost nothing.
+ * Whether the selection stepped along its cut since the previous plan: moved
+ * along the same axis by no more than `bandPlanes`, the planes the slice view
+ * fetches on each side of the one it draws, as a key or a scrub moves it,
+ * rather than jumped. After a step the slice view fetches the whole chunks
+ * its plane lies in, once, so the steps after it cost nothing.
  */
-export function isZStep(previousZ: number | null, selection: SelectionState, bandPlanes: number): boolean {
-  if (selection.renderMode !== "slice" || previousZ === null) return false;
-  const moved = Math.abs(selection.z - previousZ);
+export function isCutStep(previousCut: SliceCut | null, selection: SelectionState, bandPlanes: number): boolean {
+  if (selection.renderMode !== "slice" || previousCut === null) return false;
+  if (previousCut.axis !== selection.cut.axis) return false;
+  const moved = Math.abs(selection.cut.index - previousCut.index);
   return moved > 0 && moved <= bandPlanes;
 }
 
 /** Where the slice view's plane falls in one level's chunks. */
-export interface SlicePlane {
-  /** The chunk index along Z that holds the plane. */
-  chunkZ: number;
+export interface PlaneInChunks {
+  /** The axis the view cuts. */
+  axis: SpatialAxis;
+  /** The chunk index along that axis that holds the plane. */
+  chunk: number;
   /** The plane, within that chunk. */
   plane: number;
   /** The band around it a fetch asks for, within that chunk. */
@@ -58,45 +61,53 @@ export interface SlicePlane {
 }
 
 /**
- * Where plane `levelZ` of a level `levelPlanes` deep falls in its chunks,
- * which are `depth` planes deep, with the band of `bandPlanes` on each side
- * that a fetch asks for. Null where the band would be the whole chunk, which
- * is then fetched whole.
+ * Where plane `levelPlane` of a level `levelPlanes` deep along the cut falls
+ * in its chunks, which are `depth` planes deep, with the band of
+ * `bandPlanes` on each side that a fetch asks for. Null where the band would
+ * be the whole chunk, which is then fetched whole.
  */
 export function slicePlaneIn(
-  levelZ: number,
+  levelPlane: number,
   levelPlanes: number,
   depth: number,
   bandPlanes: number,
-): SlicePlane | null {
+  axis: SpatialAxis = "z",
+): PlaneInChunks | null {
   if (!(depth > 1)) return null;
-  const chunkZ = Math.floor(levelZ / depth);
-  const plane = levelZ - chunkZ * depth;
+  const chunk = Math.floor(levelPlane / depth);
+  const plane = levelPlane - chunk * depth;
   // An edge chunk's planes past the level are padding, never drawn.
-  const held = Math.min(depth, levelPlanes - chunkZ * depth);
+  const held = Math.min(depth, levelPlanes - chunk * depth);
   const planes: [number, number] = [Math.max(0, plane - bandPlanes), Math.min(held, plane + bandPlanes + 1)];
   if (planes[1] - planes[0] >= depth) return null;
-  return { chunkZ, plane, planes };
+  return { axis, chunk, plane, planes };
 }
 
 /**
  * Where the slice view's plane falls at `level`, or null where the view
  * fetches whole chunks: in the volume view, at a level the server generates,
  * which it serves whole, and where the band would be the whole chunk. The
- * plane is the one the upload cuts (`sliceLevelZ`), so the two agree.
+ * plane is the one the upload cuts (`sliceLevelPlane`), so the two agree.
  */
 function slicePlaneAt(
   entity: EntitySnapshot,
   level: number,
   snapshot: PlanningSnapshot,
   config: PlanningConfig,
-): SlicePlane | null {
+): PlaneInChunks | null {
   if (snapshot.selection.renderMode !== "slice" || !entity.sourceLevels.includes(level)) return null;
   const full = entity.levels[0];
   const geo = entity.levels[level];
   if (full === undefined || geo === undefined) return null;
-  const levelZ = sliceLevelZ(snapshot.selection.z, full.shape[Axis.Z], geo.shape[Axis.Z]);
-  return slicePlaneIn(levelZ, geo.shape[Axis.Z], geo.chunk_shape[Axis.Z], config.sliceBandPlanes);
+  const { axis, index } = snapshot.selection.cut;
+  const a = tczyx(axis);
+  const levelPlane = sliceLevelPlane(index, full.shape[a], geo.shape[a]);
+  return slicePlaneIn(levelPlane, geo.shape[a], geo.chunk_shape[a], config.sliceBandPlanes, axis);
+}
+
+/** A chunk's index along `axis`. */
+function chunkAlong(axis: SpatialAxis, x: number, y: number, z: number): number {
+  return axis === "x" ? x : axis === "y" ? y : z;
 }
 
 /**
@@ -293,12 +304,12 @@ function emitQuery(
   tier: ChunkRequest["tier"],
   band: number,
   push: Push,
-  slice: SlicePlane | null = null,
+  slice: PlaneInChunks | null = null,
   whole = false,
 ): void {
   const channels = snapshot.selection.visibleChannels;
   chunks.found.forEach(query, (x, y, z, distance) => {
-    const holdsPlane = slice !== null && z === slice.chunkZ;
+    const holdsPlane = slice !== null && chunkAlong(slice.axis, x, y, z) === slice.chunk;
     if (whole && !holdsPlane) return;
     const key = inLaneKey(entity, distance, config);
     for (const c of channels) {
@@ -320,6 +331,7 @@ function emitQuery(
       if (holdsPlane && !whole) {
         req.plane = slice.plane;
         req.planes = slice.planes;
+        if (slice.axis !== "z") req.planeAxis = slice.axis;
       }
       push(req, key);
     }
@@ -433,7 +445,7 @@ function levelInZoomDirection(
  * Prefetch lane: for each visible tile, the detail chunks at future
  * timepoints, and chunks at the next level in the direction of the last
  * zoom change so that level is partly resident when the target crosses to
- * it. After a step along Z (`zStep`), the detail chunks the slice view's
+ * it. After a step along Z (`cutStep`), the detail chunks the slice view's
  * plane lies in come first, whole, so the steps after it find every plane
  * of them resident.
  *
@@ -451,11 +463,11 @@ export function emitPrefetchLane(
   stats: PlanStats,
   out: LaneRequests,
   config: PlanningConfig,
-  zStep = false,
+  cutStep = false,
 ): void {
   const push: Push = (req, key) => out.push(req, key);
   for (const { entity, entry, detail, timepointSteps, levelStep } of chunks.tiles) {
-    if (zStep) {
+    if (cutStep) {
       detail.forEach((query, i) => {
         const level = entry.detailLevels[i];
         const slice = slicePlaneAt(entity, level, snapshot, config);

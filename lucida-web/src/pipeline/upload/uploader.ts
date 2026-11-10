@@ -60,6 +60,7 @@ import { CountedPhaseIndex, PointEvent } from "../../trace/types.ts";
 import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
 import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
+import type { SliceCut } from "../../renderer/slicePlane.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
@@ -343,13 +344,14 @@ export class Uploader {
    * priority item is sent while `remaining > 0`, even if oversized, and
    * the loop stops after the send drives `remaining <= 0`.
    *
-   * `sliceZFor` names the plane each dataset's slice view shows, which is the
-   * scene's z clamped into that dataset; `null` in the volume view.
+   * `sliceCutFor` names the plane each dataset's slice view shows, the
+   * scene's axis position along the cut clamped into that dataset; `null` in
+   * the volume view.
    */
   deliverToWorker(
     ctx: TickContext,
     budget: number,
-    sliceZFor: ((datasetId: string) => number) | null,
+    sliceCutFor: ((datasetId: string) => SliceCut) | null,
   ): boolean {
     const tickStart = performance.now();
     if (this.heldBacklog) budget = Math.max(budget, HELD_UPLOAD_BUDGET_BYTES);
@@ -403,7 +405,7 @@ export class Uploader {
         delivery,
         ctx,
         manifestByImage,
-        sliceZFor,
+        sliceCutFor,
         epochs,
       });
       if (sent === 0) continue;
@@ -446,17 +448,17 @@ export class Uploader {
     delivery: ReadyChunkDelivery;
     ctx: TickContext;
     manifestByImage: Map<string, ManifestEntry>;
-    sliceZFor: ((datasetId: string) => number) | null;
+    sliceCutFor: ((datasetId: string) => SliceCut) | null;
     epochs: SceneEpochs;
   }): number {
-    const { delivery, ctx, manifestByImage, sliceZFor, epochs } = args;
+    const { delivery, ctx, manifestByImage, sliceCutFor, epochs } = args;
 
     const meta = manifestByImage.get(delivery.imageId);
     if (!meta || !meta.levels[delivery.level]) {
       this.currentUploadStats.skippedNoMeta++;
       return 0;
     }
-    const sliceZ = sliceZFor ? sliceZFor(meta.datasetId) : null;
+    const cut = sliceCutFor ? sliceCutFor(meta.datasetId) : null;
 
     // Label overlays go to the r32uint label pool. The slice view sends one
     // Z-plane of each chunk and the volume view the whole chunk. Every
@@ -465,10 +467,10 @@ export class Uploader {
     let sent: Dispatched | DispatchSkip;
     if (meta.isLabel) {
       sent = ctx.mode === "slice"
-        ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, sliceZ, epochs)
+        ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, cut, epochs)
         : dispatchLabelVolumeChunkDelivery(ctx.client, delivery, meta, epochs);
     } else {
-      sent = dispatchChunkDelivery(ctx.client, delivery, meta, ctx.mode, sliceZ, epochs);
+      sent = dispatchChunkDelivery(ctx.client, delivery, meta, ctx.mode, cut, epochs);
     }
     if (sent === "other-plane") {
       this.currentUploadStats.skippedOtherPlane++;

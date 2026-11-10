@@ -33,6 +33,8 @@ export function resolvedLayer(
     t: 0,
     z_clamped: false,
     t_clamped: false,
+    y: 0,
+    x: 0,
     ...over,
   };
 }

@@ -36,7 +36,7 @@ import type {
 } from "./planning/index.ts";
 import type { VisibleRegion } from "./viewport.ts";
 import type { LevelGeometry } from "../manifestTypes.ts";
-import { sliceChunkZ } from "../renderer/slicePlane.ts";
+import { sliceChunkIndex } from "../renderer/slicePlane.ts";
 import { loadWasm } from "../viewProperties.ts";
 
 beforeAll(loadWasm);
@@ -228,6 +228,7 @@ function makeSelection(overrides?: Partial<SelectionState>): SelectionState {
   return {
     t: 0,
     z: 0,
+    cut: { axis: "z", index: overrides?.z ?? 0 },
     visibleChannels: [0],
     renderMode: "slice",
     interactionState: "idle",
@@ -307,7 +308,7 @@ describe("chunk enumeration through the core", () => {
 
   it("asks a slice view for the chunk along Z that the render worker maps the plane to", () => {
     // Level 1 halves 100 planes to 50, in chunks 8 deep. Each plane wants
-    // exactly the chunk sliceChunkZ names, the one the worker files it under.
+    // exactly the chunk sliceChunkIndex names, the one the worker files it under.
     const levels = [
       makeLevelGeo(0, [1, 1, 100, 256, 256], [1, 1, 8, 256, 256]),
       makeLevelGeo(1, [1, 1, 50, 128, 128], [1, 1, 8, 128, 128]),
@@ -315,7 +316,7 @@ describe("chunk enumeration through the core", () => {
     for (let z = 0; z < 100; z++) {
       const snapshot = oneImage(levels, { xyBoundsVox: [0, 0, 256, 256], zRangeVox: [z, z + 1] }, { targetLevel: 1 }, { z });
       const zs = plan(snapshot, createSyntheticState()).requests.map((r) => r.z);
-      expect(zs).toEqual([sliceChunkZ(z, 100, 50, 8)]);
+      expect(zs).toEqual([sliceChunkIndex(z, 100, 50, 8)]);
     }
   });
 
@@ -388,6 +389,7 @@ describe("request scheduling", () => {
       selection: {
         t: 10,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -459,6 +461,7 @@ describe("request scheduling", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -569,6 +572,7 @@ describe("plan()", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -613,6 +617,7 @@ describe("plan()", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -698,6 +703,7 @@ describe("plan()", () => {
       selection: {
         t: 5,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -776,6 +782,7 @@ describe("plan() — depth-bias focal plane", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "volume",
         interactionState: "idle",
@@ -1219,6 +1226,7 @@ describe("plan() edge cases", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -1252,6 +1260,7 @@ describe("plan() edge cases", () => {
       selection: {
         t: 2,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -1560,6 +1569,7 @@ describe("plan() honors config tunables", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -1608,6 +1618,7 @@ describe("plan() honors config tunables", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -1654,6 +1665,7 @@ describe("plan() honors config tunables", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -1700,6 +1712,7 @@ describe("plan() honors config tunables", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",
@@ -1745,6 +1758,7 @@ describe("plan() honors config tunables", () => {
       selection: {
         t: 0,
         z: 0,
+        cut: { axis: "z", index: 0 },
         visibleChannels: [0],
         renderMode: "slice",
         interactionState: "idle",

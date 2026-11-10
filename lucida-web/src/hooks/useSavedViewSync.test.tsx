@@ -42,6 +42,8 @@ interface MockScene {
   epochs: () => string;
   z: () => number;
   t: () => number;
+  slice_plane: () => string;
+  cut_index: () => number;
   camera_mode: () => string;
   resolved_layers: () => string;
   comparison: () => string;
@@ -71,6 +73,8 @@ function makeMockScene(): MockScene {
     epochs: () => JSON.stringify({ content: 0, layout: 0, ...m.epochCounts }),
     z: () => m.zVal,
     t: () => m.tVal,
+    slice_plane: () => "xy",
+    cut_index: () => m.zVal,
     camera_mode: () => m.cameraModeVal,
     resolved_layers: () => "[]",
     comparison: () => "null",

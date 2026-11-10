@@ -61,6 +61,7 @@ function makeSelection(over: Partial<SelectionState> = {}): SelectionState {
   return {
     t: 0,
     z: 0,
+    cut: { axis: "z", index: over.z ?? 0 },
     visibleChannels: [0],
     renderMode: "slice",
     interactionState: "idle",
@@ -189,6 +190,53 @@ describe("buildColdState", () => {
     expect(msg.epochs).toEqual({ content: 1, layout: 2, view: 3, selection: 4, request: 6 });
     expect(msg.activeSet).toHaveLength(1);
     expect(msg.activeSet[0].entityId).toBe("ent-a");
+  });
+
+  it("hands a side view's slice worker the plane's frame: across, down, and the cut as Z", () => {
+    const tile = { ...makeTile("ent-a", "img-a", "group-0"), layoutPositionVox: [100, 200] as [number, number] };
+    const activeSet: ActiveSetEntry[] = [
+      { kind: "tile", entityId: "ent-a", imageId: "img-a", detailLevels: [0], coarseLevel: null } as ActiveSetEntry,
+    ];
+    const msg = buildColdState({
+      datasetId: "ds1",
+      activeSet,
+      entities: [tile],
+      selection: makeSelection({ z: 1, cut: { axis: "y", index: 3 } }),
+      visibleRegion: {
+        xyBoundsVox: [10, 3, 50, 4],
+        zRangeVox: [0, 2],
+        effectiveZoom: 1,
+        sortCenterVox: null,
+        frustumPlanes: null,
+        cutAxis: "y",
+      },
+      epochs: makeEpochs(),
+      wantedChunks: [],
+      matricesByEntity: makeMatrices(),
+      layer: undefined,
+      sampleFormat: "u16",
+    });
+    expect(msg.sliceAxis).toBe("y");
+    expect(msg.currentZ).toBe(3);
+    // Shape Z 2, Y 4, X 8 in chunks 1 x 2 x 4, as [cut, down, across].
+    expect(msg.activeSet[0].levels[0]).toMatchObject({
+      chunkShape: [2, 1, 4],
+      levelDims: [4, 2, 8],
+      gridShape: [2, 2, 2],
+    });
+    // The layout's X stays across; Z starts at 0; the cut has no offset.
+    expect(msg.activeSet[0].layoutPositionVox).toEqual([100, 0]);
+    expect(msg.visibleRegion).toMatchObject({ xyBoundsVox: [10, 0, 50, 2], zRangeVox: [3, 4] });
+
+    // An XY cut keeps the image's own frame and names no axis.
+    const xy = buildColdState({
+      datasetId: "ds1", activeSet, entities: [tile], selection: makeSelection({ z: 1 }),
+      visibleRegion: makeVisibleRegion(), epochs: makeEpochs(), wantedChunks: [],
+      matricesByEntity: makeMatrices(), layer: undefined, sampleFormat: "u16",
+    });
+    expect(xy.sliceAxis).toBeUndefined();
+    expect(xy.activeSet[0].levels[0].chunkShape).toEqual([1, 2, 4]);
+    expect(xy.activeSet[0].layoutPositionVox).toEqual([100, 200]);
   });
 
   it("bakes the resolved display state per shown channel", () => {

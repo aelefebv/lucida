@@ -1,16 +1,20 @@
 /** Canonical encoding for the chunk atlas pool keys. */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+import type { SpatialAxis } from "./slicePlane.ts";
 
 /**
  * Chunk-pool key for the worker's shared atlas pools, one per channel.
  * `chunkDims` is `[X, Y]` for slice or `[X, Y, Z]` for volume; any other
- * arity throws.
+ * arity throws. A slice pool of a side view, whose slots hold planes along
+ * `sliceAxis`, is a pool of its own: a slot cut along one axis must never be
+ * read as one cut along another.
  */
 export function chunkPoolKey(
   datasetId: string,
   channel: number,
   chunkDims: number[],
+  sliceAxis: SpatialAxis = "z",
 ): string {
   let chunkDimsKey: string;
   if (chunkDims.length === 3) {
@@ -22,7 +26,8 @@ export function chunkPoolKey(
       `chunkPoolKey: unsupported chunkDims arity ${chunkDims.length}; expected 2 (slice) or 3 (volume)`,
     );
   }
-  return `${datasetId}:ch${channel}:${chunkDimsKey}`;
+  const axisKey = sliceAxis === "z" ? "" : `@${sliceAxis}`;
+  return `${datasetId}:ch${channel}:${chunkDimsKey}${axisKey}`;
 }
 
 export function chunkTierPoolKey(
@@ -30,8 +35,9 @@ export function chunkTierPoolKey(
   tier: ResidencyTier,
   channel: number,
   chunkDims: number[],
+  sliceAxis: SpatialAxis = "z",
 ): string {
-  const base = chunkPoolKey(datasetId, channel, chunkDims);
+  const base = chunkPoolKey(datasetId, channel, chunkDims, sliceAxis);
   return `${base}:${tier}`;
 }
 

@@ -16,10 +16,11 @@ import type {
 } from "./workerProtocol.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";
-import { makeCompositeKey, parseChunkKey } from "./chunkKeys.ts";
+import { makeCompositeKey, parsePlaneChunkKey, planeChunkKey } from "./chunkKeys.ts";
+import type { SpatialAxis } from "./slicePlane.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
 import { detailTierLevels, targetLevelOf } from "./entitySources.ts";
-import { sliceChunkZ, sliceLevelZ } from "./slicePlane.ts";
+import { sliceChunkIndex, sliceLevelPlane } from "./slicePlane.ts";
 import { wantedEntryKey, type WantedChunkIndex } from "./wantedChunks.ts";
 
 /** One level's section metadata for a member in a shared pool. */
@@ -100,6 +101,9 @@ export function computeWantedSet(
   }
 
   const atlases = coldState.viewMode === "volume" ? volumeAtlases : sliceAtlases;
+  // The slice worker's frame: keys read across the screen, down it, and
+  // along the cut, as the cold state's geometry is laid out.
+  const sliceAxis = coldState.viewMode === "slice" ? coldState.sliceAxis ?? "z" : "z";
 
   for (const entry of coldState.activeSet) {
     const members = coldState.visibleChannels.map((channel) => ({
@@ -119,7 +123,7 @@ export function computeWantedSet(
         const keys = wanted.get(wantedEntryKey(tier, memberId));
         if (keys === undefined) continue;
         for (const chunkKey of keys) {
-          const chunk = parseChunkKey(chunkKey);
+          const chunk = parsePlaneChunkKey(chunkKey, sliceAxis);
           if (chunk === null) continue;
           const poolKey = poolFor(memberId, tier, chunk.level);
           if (!poolKey) continue;
@@ -134,6 +138,7 @@ export function computeWantedSet(
             t: coldState.currentT,
             viewMode: coldState.viewMode,
             sliceZ: atlas.z ?? 0,
+            sliceAxis,
           };
           if (!holdsCurrentData(atlas, grid, context, chunkKey)) {
             missing.push({
@@ -196,6 +201,8 @@ interface SampleContext {
   viewMode: ColdStateMessage["viewMode"];
   /** The pool's full-resolution plane; ignored in volume mode. */
   sliceZ: number;
+  /** The axis a slice view cuts, the frame its grids are in. */
+  sliceAxis: SpatialAxis;
 }
 
 /**
@@ -252,7 +259,7 @@ function hasSection(atlas: AtlasSnapshot, memberId: string, level: number): bool
 
 /** The half-open Z chunk range holding the current plane at one level: one chunk. */
 function sliceChunkRange(grid: LevelGrid, sliceZ: number): [number, number] {
-  const chunkIdx = sliceChunkZ(sliceZ, grid.fullDims[2], grid.levelDims[2], grid.chunkDims[2]);
+  const chunkIdx = sliceChunkIndex(sliceZ, grid.fullDims[2], grid.levelDims[2], grid.chunkDims[2]);
   return [Math.max(0, chunkIdx), Math.min(grid.grid[2], chunkIdx + 1)];
 }
 
@@ -270,7 +277,7 @@ function holdsCurrentData(
   const slot = atlas.slots.get(makeCompositeKey(context.memberId, chunkKey));
   if (slot === undefined) return false;
   if (context.viewMode !== "slice" || atlas.slotLevelZ === undefined) return true;
-  return atlas.slotLevelZ[slot] === sliceLevelZ(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
+  return atlas.slotLevelZ[slot] === sliceLevelPlane(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
 }
 
 /** One section the shader may sample for a member, with the pool it reads. */
@@ -342,7 +349,7 @@ function covers(
   for (let z = z0; z < z1; z++) {
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
-        const chunkKey = `${grid.level}/${context.t}/${context.channel}/${z}/${y}/${x}`;
+        const chunkKey = planeChunkKey(grid.level, context.t, context.channel, [x, y, z], context.sliceAxis);
         if (!holdsCurrentData(atlas, grid, context, chunkKey)) return false;
       }
     }

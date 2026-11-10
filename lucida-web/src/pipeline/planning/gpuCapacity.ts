@@ -17,6 +17,7 @@ import type { GpuSlot } from "./admission.ts";
 import { computeAtlasGeometry, poolCapBytes } from "../../renderer/atlasSizing.ts";
 import { chunkTierPoolKey } from "../../renderer/poolKeys.ts";
 import { bytesPerTexel, datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
+import { toPlaneFrame, type SpatialAxis } from "../../renderer/slicePlane.ts";
 
 /**
  * The WebGPU minimums, for a plan made before the worker's first report. No
@@ -44,6 +45,7 @@ export function gpuSlotsFor(
   mode: "slice" | "volume",
   report: GpuCapacityReport | null,
   fallbackTotalBytes: number,
+  sliceAxis: SpatialAxis = "z",
 ): (req: ChunkRequest) => GpuSlot | null {
   const reported = new Map(report?.pools.map((pool) => [pool.poolKey, pool]) ?? []);
   const texel = bytesPerTexel(datasetSampleFormat(manifest));
@@ -54,7 +56,8 @@ export function gpuSlotsFor(
     const byLevel = new Map<number, number[]>();
     for (const level of image.multiscale.levels) {
       const [, , z, y, x] = level.chunk_shape;
-      byLevel.set(level.level_index, mode === "volume" ? [x, y, z] : [x, y]);
+      // A slice pool's slots are the plane's chunk across and down the screen.
+      byLevel.set(level.level_index, mode === "volume" ? [x, y, z] : toPlaneFrame([x, y, z], sliceAxis).slice(0, 2));
     }
     chunkDims.set(image.image_id, byLevel);
   }
@@ -63,7 +66,7 @@ export function gpuSlotsFor(
     if (req.lane !== "detail" && req.lane !== "coarse") return null;
     const dims = chunkDims.get(req.imageId)?.get(req.level);
     if (!dims) return null;
-    const pool = chunkTierPoolKey(req.datasetId, req.tier, req.c, dims);
+    const pool = chunkTierPoolKey(req.datasetId, req.tier, req.c, dims, mode === "volume" ? "z" : sliceAxis);
     const known = reported.get(pool);
     if (known) return { pool, slots: known.maxSlots, slotBytes: known.slotBytes };
     let slot = sized.get(pool);

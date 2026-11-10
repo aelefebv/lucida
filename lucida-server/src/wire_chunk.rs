@@ -6,7 +6,10 @@
 
 use std::net::IpAddr;
 
-use lucida_protocol::codec::{BytesCodec, ChunkCodec, ChunkRelaySetting, CodecSet};
+use std::borrow::Cow;
+
+use lucida_content::SpatialAxis;
+use lucida_protocol::codec::{BytesCodec, ChunkCodec, ChunkPlanes, ChunkRelaySetting, CodecSet};
 
 /// Whether a connection is sent chunks still encoded once it declares the
 /// codecs it decodes.
@@ -71,45 +74,81 @@ pub fn compress_produced(codecs: CodecSet, decoded: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The planes of a wire chunk a request asked for in place of all of it,
-/// half-open along the chunk's own Z.
+/// half-open along one of the chunk's own axes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaneCut {
-    first: u32,
-    end: u32,
-    depth: u32,
+    planes: ChunkPlanes,
+    /// The chunk's samples along Z, Y and X, the order its bytes run in.
+    dims: [usize; 3],
 }
 
 impl PlaneCut {
-    /// The cut of `planes` from a chunk `depth` planes deep, or `None` when
-    /// the range is empty, reaches past the chunk, or covers all of it. Each
-    /// of those is answered with the whole chunk, which holds every plane.
-    pub fn new([first, end]: [u32; 2], depth: u64) -> Option<Self> {
-        let depth = u32::try_from(depth).ok()?;
-        (first < end && end <= depth && end - first < depth).then_some(PlaneCut {
-            first,
-            end,
-            depth,
+    /// The cut of `planes` from a chunk of `dims` samples along Z, Y and X,
+    /// or `None` when the range is empty, reaches past the chunk, or covers
+    /// all of it. Each of those is answered with the whole chunk, which holds
+    /// every plane.
+    pub fn new(planes: ChunkPlanes, dims: [u64; 3]) -> Option<Self> {
+        let dims = dims.map(|d| usize::try_from(d).unwrap_or(usize::MAX));
+        let depth = dims[2 - planes.axis.xyz()];
+        let [first, end] = planes.range.map(|p| p as usize);
+        (first < end && end <= depth && end - first < depth).then_some(PlaneCut { planes, dims })
+    }
+
+    pub fn planes(self) -> ChunkPlanes {
+        self.planes
+    }
+
+    /// The samples the chunk holds along the cut axis.
+    fn depth(self) -> usize {
+        self.dims[2 - self.planes.axis.xyz()]
+    }
+
+    /// The bytes of one run of a plane, and how many runs a plane takes, in a
+    /// chunk of `len` bytes, or `None` when the chunk does not split evenly.
+    /// A plane along Z is one run. One along Y is a row for each Z, and one
+    /// along X a sample for each Z and Y.
+    fn runs(self, len: usize) -> Option<(usize, usize)> {
+        let [z, y, x] = self.dims;
+        if self.planes.axis.is_z() {
+            return len.is_multiple_of(z).then(|| (len / z, 1));
+        }
+        let samples = z.checked_mul(y)?.checked_mul(x)?;
+        if samples == 0 || !len.is_multiple_of(samples) {
+            return None;
+        }
+        let sample = len / samples;
+        Some(match self.planes.axis {
+            SpatialAxis::Y => (x * sample, z),
+            _ => (sample, z * y),
         })
     }
 
-    pub fn planes(self) -> [u32; 2] {
-        [self.first, self.end]
+    fn width(self) -> usize {
+        (self.planes.range[1] - self.planes.range[0]) as usize
     }
 
     /// The bytes the planes take of a chunk of `len` bytes, or `None` when
     /// the chunk does not split into its planes evenly.
     pub fn len_of(self, len: usize) -> Option<usize> {
-        let depth = self.depth as usize;
-        len.is_multiple_of(depth)
-            .then(|| len / depth * (self.end - self.first) as usize)
+        let (run, count) = self.runs(len)?;
+        Some(run * self.width() * count)
     }
 
     /// The planes out of the whole chunk's bytes, or `None` when the chunk
-    /// does not split into its planes evenly.
-    pub fn cut(self, chunk: &[u8]) -> Option<&[u8]> {
-        let len = self.len_of(chunk.len())?;
-        let start = chunk.len() / self.depth as usize * self.first as usize;
-        chunk.get(start..start + len)
+    /// does not split into its planes evenly. Planes along Z lie together;
+    /// planes along Y or X are gathered from every row they cross.
+    pub fn cut(self, chunk: &[u8]) -> Option<Cow<'_, [u8]>> {
+        let (run, count) = self.runs(chunk.len())?;
+        let first = run * self.planes.range[0] as usize;
+        let taken = run * self.width();
+        if count == 1 {
+            return chunk.get(first..first + taken).map(Cow::Borrowed);
+        }
+        let mut out = Vec::with_capacity(taken * count);
+        for row in chunk.chunks_exact(run * self.depth()) {
+            out.extend_from_slice(&row[first..first + taken]);
+        }
+        Some(Cow::Owned(out))
     }
 }
 
@@ -117,25 +156,57 @@ impl PlaneCut {
 mod tests {
     use super::*;
 
+    fn along(axis: SpatialAxis, range: [u32; 2]) -> ChunkPlanes {
+        ChunkPlanes { axis, range }
+    }
+
     #[test]
     fn a_plane_cut_takes_its_planes_of_the_chunk() {
         let chunk: Vec<u8> = (0..16).collect();
-        let cut = PlaneCut::new([1, 3], 4).unwrap();
-        assert_eq!(cut.planes(), [1, 3]);
-        assert_eq!(cut.cut(&chunk), Some(&chunk[4..12]));
+        let cut = PlaneCut::new(ChunkPlanes::z([1, 3]), [4, 2, 2]).unwrap();
+        assert_eq!(cut.planes(), ChunkPlanes::z([1, 3]));
+        assert_eq!(cut.cut(&chunk).as_deref(), Some(&chunk[4..12]));
         assert_eq!(cut.len_of(16), Some(8));
         // A chunk that is not four equal planes is served whole.
         assert_eq!(cut.cut(&chunk[..15]), None);
     }
 
     #[test]
+    fn a_cut_along_y_or_x_gathers_its_planes_from_every_row() {
+        // Two planes along Z of 3 rows of 2 samples, a byte each.
+        let chunk: Vec<u8> = (0..12).collect();
+        let rows = PlaneCut::new(along(SpatialAxis::Y, [1, 2]), [2, 3, 2]).unwrap();
+        assert_eq!(rows.cut(&chunk).as_deref(), Some(&[2, 3, 8, 9][..]));
+        assert_eq!(rows.len_of(12), Some(4));
+        let columns = PlaneCut::new(along(SpatialAxis::X, [1, 2]), [2, 3, 2]).unwrap();
+        assert_eq!(
+            columns.cut(&chunk).as_deref(),
+            Some(&[1, 3, 5, 7, 9, 11][..])
+        );
+        // Two-byte samples keep their bytes together.
+        let wide: Vec<u8> = (0..24).collect();
+        assert_eq!(
+            columns.cut(&wide).as_deref(),
+            Some(&[2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23][..])
+        );
+        // A chunk that is not a whole number of samples is served whole.
+        assert_eq!(rows.cut(&chunk[..11]), None);
+    }
+
+    #[test]
     fn a_range_the_chunk_cannot_cut_is_served_whole() {
-        assert_eq!(PlaneCut::new([2, 2], 4), None);
-        assert_eq!(PlaneCut::new([3, 1], 4), None);
-        assert_eq!(PlaneCut::new([3, 5], 4), None);
-        assert_eq!(PlaneCut::new([0, 4], 4), None);
-        assert_eq!(PlaneCut::new([0, 1], 1), None);
-        assert!(PlaneCut::new([3, 4], 4).is_some());
+        let z = |range| PlaneCut::new(ChunkPlanes::z(range), [4, 8, 8]);
+        assert_eq!(z([2, 2]), None);
+        assert_eq!(z([3, 1]), None);
+        assert_eq!(z([3, 5]), None);
+        assert_eq!(z([0, 4]), None);
+        assert_eq!(PlaneCut::new(ChunkPlanes::z([0, 1]), [1, 8, 8]), None);
+        assert!(z([3, 4]).is_some());
+        assert!(PlaneCut::new(along(SpatialAxis::Y, [5, 8]), [4, 8, 8]).is_some());
+        assert_eq!(
+            PlaneCut::new(along(SpatialAxis::X, [5, 9]), [4, 8, 8]),
+            None
+        );
     }
 
     fn lz4() -> CodecSet {

@@ -64,10 +64,11 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
   const datasets = new Map<string, DatasetState>();
   datasets.set("ds-1", dataset("ds-1"));
   return {
-    selectors: { z: 2, t: 0, dimZ: 8, dimT: 3, viewMode: "2d" },
+    selectors: { z: 2, t: 0, dimZ: 8, dimT: 3, viewMode: "2d", slicePlane: "xy", cutIndex: 2, dimCut: 8 },
     resolvedLayers: resolvedLayers(resolvedLayer("ds-1", [0, 1])),
-    setZ: vi.fn(),
+    setCut: vi.fn(),
     setT: vi.fn(),
+    setSlicePlane: vi.fn(),
     setSolo: vi.fn(),
     setChannelVisible: vi.fn(),
     setLayerVisible: vi.fn(),
@@ -105,7 +106,7 @@ describe("useScriptControls", () => {
     const given = inputs();
     const { unmount } = renderHook(() => useScriptControls(given));
     expect(scriptControls()!.scrub("z", 3)).toEqual({ applied: true, reason: null });
-    expect(given.setZ).toHaveBeenCalledWith(5);
+    expect(given.setCut).toHaveBeenCalledWith(5);
     expect(scriptControls()!.scrub("t", 10)).toEqual({ applied: true, reason: null });
     expect(given.setT).toHaveBeenCalledWith(2);
     unmount();

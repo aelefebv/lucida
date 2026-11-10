@@ -9,6 +9,7 @@ pub mod label;
 pub mod layout;
 pub mod normalize;
 pub mod space;
+pub mod spatial_axis;
 pub mod transform;
 pub mod url;
 
@@ -23,4 +24,5 @@ pub use label::*;
 pub use layout::*;
 pub use normalize::*;
 pub use space::*;
+pub use spatial_axis::SpatialAxis;
 pub use transform::*;

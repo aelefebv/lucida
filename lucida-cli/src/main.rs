@@ -30,6 +30,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use lucida_core::command::ViewportCommand;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
+use lucida_core::slice_plane::SlicePlane;
 use lucida_core::view_transform::{self, ExplorationSidecar};
 use lucida_protocol::DatasetSourceHealth;
 use serde_json::Value;
@@ -670,6 +671,9 @@ enum ViewCommand {
     },
     /// Set one selected dimension index. Channels are per layer: see `channel solo`
     Slice { axis: SliceAxis, index: u32 },
+    /// Cut the 2D slice view along another plane: xy, xz or yz. An xz view
+    /// moves along Y, and a yz view along X
+    Plane { plane: SlicePlane },
     /// Set the selected Z slab range
     ZRange { start: u32, end: u32 },
     /// Set camera viewport size in pixels
@@ -695,8 +699,11 @@ impl ViewCommand {
             ViewCommand::Center { x, y } => ViewportCommand::SetCenter { x: *x, y: *y },
             ViewCommand::Slice { axis, index } => match axis {
                 SliceAxis::Z => ViewportCommand::SetZ { z: *index },
+                SliceAxis::Y => ViewportCommand::SetY { y: *index },
+                SliceAxis::X => ViewportCommand::SetX { x: *index },
                 SliceAxis::T => ViewportCommand::SetT { t: *index },
             },
+            ViewCommand::Plane { plane } => ViewportCommand::SetSlicePlane { plane: *plane },
             ViewCommand::ZRange { start, end } => {
                 if end <= start {
                     return Err(CliError::config(
@@ -727,6 +734,8 @@ impl ViewCommand {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum SliceAxis {
     Z,
+    Y,
+    X,
     T,
 }
 
@@ -6588,6 +6597,7 @@ mod tests {
             "scrub",
             "select",
             "mode",
+            "plane",
             "fit",
             "resize",
             "set_contrast",

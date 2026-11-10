@@ -53,8 +53,9 @@ shard. Not unique alone, since one key can be resident in both residency tiers.
 `{dataset_id}/{image_id}/{chunk_key}`, a chunk's address across a session.
 
 **Axis position**:
-Where a view stands on the Z, T, or C axis. People see it counted from 1, as
-`Z 5` or `Z 5/40`, while the wire, URLs, and CLI flags carry the 0-based index.
+Where a view stands on the Z, T, or C axis, or on the Y or X axis a side view
+cuts. People see it counted from 1, as `Z 5` or `Z 5/40`, while the wire,
+URLs, and CLI flags carry the 0-based index.
 _Avoid_: position (unqualified; an entity's position is its place in a layout)
 
 **Level**:
@@ -279,6 +280,14 @@ views it directly, and the volume cameras view it as world space. When either
 changes, a placed camera moves into the new one and keeps its region, and a
 saved view records the one its camera was saved in.
 _Avoid_: world (unqualified; world space is the volume cameras' view of it)
+
+**Slice plane**:
+The plane of the scene frame a slice view cuts: `xy`, `xz` or `yz`. The two
+axes it names are on screen, Z always drawn down, and the third is cut at an
+axis position. An `xz` or `yz` view is a side view: it shows Z as the scene
+frame places it, at its physical spacing, and cuts Y or X at a place in the
+scene frame, so datasets over one region cut the same plane.
+_Avoid_: orientation, section (unqualified)
 
 **Comparison**:
 Two datasets that line up shown against each other in one view: split by a

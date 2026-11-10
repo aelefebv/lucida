@@ -10,10 +10,13 @@ import { Card } from "../ui/Card.tsx";
 import { Popover } from "../ui/Popover.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { useShortcut, type KeyCombo } from "../ui/shortcuts.ts";
+import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { AxisScrubber } from "./AxisScrubber.tsx";
 import "./DimensionBar.css";
 
 const MODE_KEYS: readonly KeyCombo[] = ["M"];
+const PLANE_KEYS: readonly KeyCombo[] = ["Shift+M"];
+const PLANES: readonly SlicePlane[] = ["xy", "xz", "yz"];
 const PREVIOUS_Z_KEYS: readonly KeyCombo[] = ["PageUp", "Shift+ArrowUp"];
 const NEXT_Z_KEYS: readonly KeyCombo[] = ["PageDown", "Shift+ArrowDown"];
 const PREVIOUS_T_KEYS: readonly KeyCombo[] = [","];
@@ -36,10 +39,16 @@ export type CameraMode = "arcball" | "fly";
 export interface DimensionBarProps {
   viewMode: "2d" | "3d";
   onViewModeToggle: () => void;
-  z: number;
-  /** Planes along Z; the Z scrubber shows only in 2D, and only with more than one. */
+  /** The plane the 2D view cuts. Its choice shows only in 2D, and only with depth to cut. */
+  slicePlane: SlicePlane;
+  onSlicePlaneChange: (plane: SlicePlane) => void;
+  /** Planes along Z, the depth a side view cuts through. */
   dimZ: number;
-  onZChange: (z: IndexChange) => void;
+  /** The axis position along the plane's cut axis: Z, or Y or X for a side view. */
+  cut: number;
+  /** Positions along the cut axis; its scrubber shows only in 2D, and only with more than one. */
+  dimCut: number;
+  onCutChange: (index: IndexChange) => void;
   t: number;
   /** Timepoints; the T scrubber shows only with more than one. */
   dimT: number;
@@ -59,9 +68,12 @@ export interface DimensionBarProps {
 export function DimensionBar({
   viewMode,
   onViewModeToggle,
-  z,
+  slicePlane,
+  onSlicePlaneChange,
   dimZ,
-  onZChange,
+  cut,
+  dimCut,
+  onCutChange,
   t,
   dimT,
   onTChange,
@@ -69,12 +81,14 @@ export function DimensionBar({
   onCameraModeToggle,
   clipDepth,
 }: DimensionBarProps) {
-  const showZ = viewMode === "2d" && dimZ > 1;
+  const showPlane = viewMode === "2d" && dimZ > 1;
+  const showCut = viewMode === "2d" && dimCut > 1;
   const showT = dimT > 1;
   const [playRequested, setPlayRequested] = useState(false);
   const playing = playRequested && showT;
+  const cutLetter = cutAxis(slicePlane).toUpperCase();
 
-  const stepZ = (delta: number) => onZChange(stepIndex(delta, dimZ));
+  const stepCut = (delta: number) => onCutChange(stepIndex(delta, dimCut));
   // A scrub is the user taking over, so it stops playback.
   const scrubT = (next: IndexChange) => {
     setPlayRequested(false);
@@ -91,22 +105,30 @@ export function DimensionBar({
     onTrigger: onViewModeToggle,
   });
   useShortcut({
+    id: "view.cyclePlane",
+    keys: PLANE_KEYS,
+    label: "Cut the next plane: XY, XZ, YZ",
+    group: "View",
+    enabled: showPlane,
+    onTrigger: () => onSlicePlaneChange(PLANES[(PLANES.indexOf(slicePlane) + 1) % PLANES.length]),
+  });
+  useShortcut({
     id: "dimensions.previousZ",
     keys: PREVIOUS_Z_KEYS,
-    label: "Previous Z plane",
+    label: `Previous ${cutLetter} plane`,
     group: "Dimensions",
     repeat: true,
-    enabled: showZ,
-    onTrigger: () => stepZ(-1),
+    enabled: showCut,
+    onTrigger: () => stepCut(-1),
   });
   useShortcut({
     id: "dimensions.nextZ",
     keys: NEXT_Z_KEYS,
-    label: "Next Z plane",
+    label: `Next ${cutLetter} plane`,
     group: "Dimensions",
     repeat: true,
-    enabled: showZ,
-    onTrigger: () => stepZ(1),
+    enabled: showCut,
+    onTrigger: () => stepCut(1),
   });
   useShortcut({
     id: "dimensions.previousT",
@@ -152,14 +174,23 @@ export function DimensionBar({
           }}
         />
         {viewMode === "3d" && <CameraPopover mode={cameraMode} onToggle={onCameraModeToggle} clipDepth={clipDepth} />}
+        {showPlane && (
+          <SegmentedControl
+            label="Slice plane"
+            size="sm"
+            options={PLANES.map((plane) => ({ value: plane, label: plane.toUpperCase() }))}
+            value={slicePlane}
+            onChange={onSlicePlaneChange}
+          />
+        )}
       </div>
-      {showZ && (
+      {showCut && (
         <AxisScrubber
-          axis="Z"
-          name="Z plane"
-          value={z}
-          count={dimZ}
-          onChange={onZChange}
+          axis={cutLetter}
+          name={`${cutLetter} plane`}
+          value={cut}
+          count={dimCut}
+          onChange={onCutChange}
           previousShortcut={PREVIOUS_Z_KEYS}
           nextShortcut={NEXT_Z_KEYS}
         />

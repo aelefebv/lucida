@@ -15,6 +15,8 @@ function fakeScene() {
   const scene = {
     z: () => state.z,
     t: () => state.t,
+    slice_plane: () => "xy",
+    cut_index: () => state.z,
     resolved_layers: () => JSON.stringify(state.layers),
     camera_mode: () => state.mode,
     comparison: () => JSON.stringify(state.comparison),

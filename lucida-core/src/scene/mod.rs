@@ -24,13 +24,13 @@ use crate::epoch::SceneEpochs;
 use crate::framing::{FitBounds, PlaneBox, WorldBox};
 use crate::placement::{Affine, CameraSpace, DeclaredFrame};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
-use crate::target_level::{
-    self, IN_PLANE_AXES, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios,
-};
+use crate::slice_plane::SlicePlane;
+use crate::target_level::{self, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios};
 use crate::transform::VolumeTransform;
 use crate::view::ViewState;
-use placement::Placed;
+use lucida_content::SpatialAxis;
 pub use placement::member_transform;
+use placement::{Placed, slice_box};
 
 /// Per-dataset derived state for fast hot-path lookups.
 /// Rebuilt on register/remove. Not serialized.
@@ -227,6 +227,42 @@ impl Scene {
         };
         let d: [f64; 3] = std::array::from_fn(|i| bounds.world.max[i] - bounds.world.min[i]);
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    /// The plane the slice camera cuts, whether it is active or parked. A
+    /// scene that never had one cuts XY.
+    pub fn slice_plane(&self) -> SlicePlane {
+        match (&self.camera, &self.parked_camera) {
+            (Camera::Slice(s), _) | (_, Some(Camera::Slice(s))) => s.plane,
+            _ => SlicePlane::Xy,
+        }
+    }
+
+    /// Cut `plane` with the active slice camera and fit it to the data again,
+    /// since its center and zoom are in the plane of the scene frame it cut.
+    /// The first view of an X or Y cut stands in the middle of what is
+    /// visible. A volume camera ignores it.
+    pub fn set_slice_plane(&mut self, plane: SlicePlane) {
+        let Camera::Slice(slice) = &mut self.camera else {
+            return;
+        };
+        if slice.plane == plane {
+            return;
+        }
+        slice.plane = plane;
+        slice.framing = Framing::Framed;
+        let cut = plane.cut();
+        let middle = self.cut_middle(cut);
+        match cut {
+            SpatialAxis::Y => {
+                self.view.y.get_or_insert(middle);
+            }
+            SpatialAxis::X => {
+                self.view.x.get_or_insert(middle);
+            }
+            SpatialAxis::Z => {}
+        }
+        self.reframe();
     }
 
     /// Switch to the slice camera: the one this scene last had, or a new one
@@ -516,31 +552,21 @@ impl Scene {
     /// [`Self::dataset_world_bounds`].
     ///
     /// Each member with a level 0 contributes its layout box, its level-0
-    /// shape from its position, placed in the world in X and Y. Z counts the
-    /// member's planes, since the axis position steps through planes.
+    /// shape from its position, placed in the scene frame on the two axes
+    /// the slice plane draws. The third counts the member's planes along the
+    /// cut, since the axis position steps through planes ([`slice_box`]).
     /// Returns `None` when no member has levels.
     pub fn dataset_plane_bounds(&self, dataset_id: &str) -> Option<PlaneBox> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
         let to_scene = self.placement(&ds_id)?;
+        let plane = self.slice_plane();
         derived
             .members
             .iter()
             .filter_map(|member| {
-                let level0 = member.levels.first()?;
-                let [x0, y0] = member.position;
-                let (min, max) = to_scene.apply_box(
-                    [x0, y0, 0.0],
-                    [
-                        x0 + level0.shape[4] as f64,
-                        y0 + level0.shape[3] as f64,
-                        0.0,
-                    ],
-                );
-                Some(PlaneBox::new(
-                    [min[0], min[1], 0.0],
-                    [max[0], max[1], level0.shape[2] as f64],
-                ))
+                let (min, max) = slice_box(plane, &to_scene, member)?;
+                Some(PlaneBox::new(min, max))
             })
             .reduce(PlaneBox::union)
     }
@@ -635,7 +661,7 @@ impl Scene {
         let before = self.camera.clone();
         let reached = match &mut self.camera {
             Camera::Slice(slice) => {
-                let zoom = pixels_per_sample / to_scene.plane_sample();
+                let zoom = pixels_per_sample / slice.plane.sample_extent(&to_scene);
                 slice.set_zoom(zoom);
                 slice.zoom == zoom
             }
@@ -689,8 +715,8 @@ impl Scene {
     /// through a level boundary.
     ///
     /// For multi-member datasets (collections), each member's AABB is checked
-    /// against the visible region, and chunk planning is done in
-    /// member-local coordinates.
+    /// against the visible region, and its chunks are enumerated at its
+    /// layout position.
     pub fn chunk_plan_for(&self, dataset_id: &DatasetId) -> Option<Vec<MemberChunkPlan>> {
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
@@ -714,9 +740,12 @@ impl Scene {
             let tile_w = level0.shape[4] as f64; // X
             let tile_h = level0.shape[3] as f64; // Y
 
-            // AABB culling (same logic as current but using member.position)
-            let pos_x = member.position[0];
-            let pos_y = member.position[1];
+            // AABB culling (same logic as current but using member.position).
+            // A slice view's cut is in the member's own samples.
+            let cut = (!self.camera.is_volume()).then_some(region.cut_axis);
+            let placed_at = |axis: SpatialAxis, at: f64| if cut == Some(axis) { 0.0 } else { at };
+            let pos_x = placed_at(SpatialAxis::X, member.position[0]);
+            let pos_y = placed_at(SpatialAxis::Y, member.position[1]);
             let member_max_x = pos_x + tile_w;
             let member_max_y = pos_y + tile_h;
 
@@ -731,25 +760,6 @@ impl Scene {
                 continue; // member is fully outside the visible region
             }
 
-            // Offset visible region by member position
-            let local_region = crate::camera::VisibleRegion {
-                xy_bounds: [
-                    vis_min_x - pos_x,
-                    vis_min_y - pos_y,
-                    vis_max_x - pos_x,
-                    vis_max_y - pos_y,
-                ],
-                z_range: region.z_range.clone(),
-                effective_zoom: region.effective_zoom,
-                radius_basis_vox: region.radius_basis_vox,
-                sort_center: region
-                    .sort_center
-                    .map(|[cx, cy, cz]| [cx - pos_x, cy - pos_y, cz]),
-                frustum_planes: region
-                    .frustum_planes
-                    .map(|planes| planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])),
-            };
-
             let (level, _) = self.member_target_level(
                 member,
                 multiscale_by_image[&member.image_id],
@@ -759,11 +769,16 @@ impl Scene {
             );
             let level_geo = &member.levels[level as usize];
 
-            let query =
-                ChunkQuery::new(level_geo, level0, [0.0, 0.0], chunk::RENDER_RADIUS_DISABLED);
+            // The query places the member, as the browser's planner does.
+            let query = ChunkQuery::new(
+                level_geo,
+                level0,
+                member.position,
+                chunk::RENDER_RADIUS_DISABLED,
+            );
             let mut cells = Vec::new();
             chunk::enumerate_chunks(
-                &ChunkView::new(&local_region, 0.0),
+                &ChunkView::new(&region, 0.0),
                 &query,
                 &mut CullCounts::default(),
                 &mut cells,
@@ -850,23 +865,17 @@ impl Scene {
         let mut closest: Option<crate::ray::RayHit> = None;
 
         for member in &derived.members {
-            let level0 = match member.levels.first() {
-                Some(l) => l,
-                None => continue,
-            };
+            if member.levels.is_empty() {
+                continue;
+            }
 
             let hit_result = if is_2d {
-                // Slice mode: the ray stands at a world point, which the
-                // member's placed box holds or doesn't.
-                let [x0, y0] = member.position;
-                let (min, max) = placed.to_scene.apply_box(
-                    [x0, y0, 0.0],
-                    [
-                        x0 + level0.shape[4] as f64,
-                        y0 + level0.shape[3] as f64,
-                        0.0,
-                    ],
-                );
+                // Slice mode: the ray stands at a point of the slice plane,
+                // which the member's placed box holds or doesn't.
+                let Some((min, max)) = slice_box(self.slice_plane(), &placed.to_scene, member)
+                else {
+                    continue;
+                };
 
                 let rx = world_ray.origin[0];
                 let ry = world_ray.origin[1];
@@ -947,6 +956,13 @@ impl Scene {
         y: f64,
         z: f64,
     ) -> Option<[f64; 2]> {
+        if let Camera::Slice(slice) = &self.camera
+            && !slice.plane.is_xy()
+        {
+            // A pin's place is an XY point at a Z, which a side view has no
+            // place to draw, so it hides there.
+            return None;
+        }
         let point = self.annotation_point_in_view(dataset_id, [x, y, z])?;
         self.camera.project_to_screen(point)
     }
@@ -1249,8 +1265,10 @@ impl Scene {
     /// view measures where the center-screen ray meets the box the renderer
     /// draws for the member, so placement counts there too.
     fn member_pixels_per_sample(&self, placed: &Placed, member: &MemberState) -> f64 {
-        match self.camera {
-            Camera::Slice(_) => self.camera.effective_zoom() * placed.to_scene.plane_sample(),
+        match &self.camera {
+            Camera::Slice(slice) => {
+                self.camera.effective_zoom() * slice.plane.sample_extent(&placed.to_scene)
+            }
             _ => self.camera.pixels_per_sample(
                 &member_transform(&placed.to_world, member),
                 level0_shape(member),
@@ -1290,11 +1308,15 @@ impl Scene {
             .and_then(|entries| entries.get(&member.image_id))
             .filter(|entry| entry.visible)
             .map(|entry| entry.target_level);
-        let axes: &[usize] = match self.camera {
-            Camera::Slice(_) => &IN_PLANE_AXES,
-            _ => &VOLUME_AXES,
+        let ratios = match &self.camera {
+            // A slice view resolves the two axes it draws: a level that only
+            // downsamples the cut axis is no coarser on screen.
+            Camera::Slice(slice) => {
+                let [across, down, _] = slice.plane.axes();
+                level_shape_ratios(&member.levels, &[across.tczyx(), down.tczyx()])
+            }
+            _ => level_shape_ratios(&member.levels, &VOLUME_AXES),
         };
-        let ratios = level_shape_ratios(&member.levels, axes);
         target_level::target_level(
             pixels_per_sample * self.render_ratio_scale(),
             &ratios,
@@ -1407,8 +1429,6 @@ impl Scene {
         let last_query = self.last_query_entries(dataset_id);
 
         for member in &derived.members {
-            let pos = member.position;
-
             // Compute screen-space bounding box.
             // 2D: corners of the member's layout box, placed in the world.
             // 3D: corners from rendering_transform, placed in world space.
@@ -1419,24 +1439,22 @@ impl Scene {
             let centroid;
 
             let pixels_per_sample = if is_2d {
-                let level0 = member.levels.first();
-                let (fw, fh, fd) = level0
-                    .map(|l| (l.shape[4] as f64, l.shape[3] as f64, l.shape[2] as f64))
-                    .unwrap_or((1.0, 1.0, 1.0));
-                let [cx, cy, _] =
-                    placed
-                        .to_scene
-                        .apply([pos[0] + fw / 2.0, pos[1] + fh / 2.0, 0.0]);
-                centroid = [cx, cy, fd / 2.0];
+                // Corners and centroid in the slice camera's space.
+                let (min, max) = slice_box(self.slice_plane(), &placed.to_scene, member)
+                    .unwrap_or(([0.0; 3], [1.0; 3]));
+                centroid = [
+                    (min[0] + max[0]) / 2.0,
+                    (min[1] + max[1]) / 2.0,
+                    max[2] / 2.0,
+                ];
                 let corners = [
-                    [pos[0], pos[1], 0.0],
-                    [pos[0] + fw, pos[1], 0.0],
-                    [pos[0], pos[1] + fh, 0.0],
-                    [pos[0] + fw, pos[1] + fh, 0.0],
+                    [min[0], min[1], 0.0],
+                    [max[0], min[1], 0.0],
+                    [min[0], max[1], 0.0],
+                    [max[0], max[1], 0.0],
                 ];
                 for corner in &corners {
-                    let corner = placed.to_scene.apply(*corner);
-                    if let Some([sx, sy]) = self.camera.project_to_screen(corner) {
+                    if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
                         screen_min[0] = screen_min[0].min(sx);
                         screen_min[1] = screen_min[1].min(sy);
                         screen_max[0] = screen_max[0].max(sx);
@@ -4505,6 +4523,74 @@ mod tests {
     }
 
     #[test]
+    fn a_side_view_fits_its_plane_at_physical_aspect_and_cuts_the_middle() {
+        use crate::command::ViewportCommand::*;
+        let ds = DatasetId("vol".into());
+        // Planes four times as deep as a sample is wide.
+        let mut opened = test_helpers::make_dataset_opened_with_shape(
+            "vol",
+            "vol",
+            1,
+            [1, 1, 128, 512, 512],
+            [1, 1, 64, 128, 128],
+            3,
+        );
+        for image in opened.manifest.images_mut() {
+            for level in image.multiscale.levels.iter_mut() {
+                level.scale[2] *= 4.0;
+            }
+        }
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(DocumentCommand::DatasetOpened(opened).into());
+        let epochs = scene.epochs.clone();
+        apply_vp(
+            &mut scene,
+            SetSlicePlane {
+                plane: SlicePlane::Xz,
+            },
+        );
+        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
+        assert_eq!(scene.view.y, Some(256));
+        assert!(scene.epochs.view > epochs.view);
+        assert!(scene.epochs.selection > epochs.selection);
+        assert_eq!(scene.camera.framing(), Framing::Framed);
+        // 128 planes four times as deep as a sample is wide draw as tall as
+        // the 512 samples across.
+        let bounds = scene.dataset_plane_bounds("vol").unwrap();
+        assert_eq!((bounds.min, bounds.max), ([0.0; 3], [512.0, 512.0, 512.0]));
+        let Camera::Slice(slice) = &scene.camera else {
+            panic!("a slice camera");
+        };
+        assert_eq!(slice.center, [256.0, 256.0]);
+
+        // The plan cuts chunk row 2 along Y, through both chunks along Z.
+        let plans = scene.chunk_plan_for(&ds).unwrap();
+        let needed = &plans[0].needed;
+        assert!(!needed.is_empty());
+        assert!(needed.iter().all(|c| c.y == 2), "{needed:?}");
+        let zs: std::collections::BTreeSet<u32> = needed.iter().map(|c| c.z).collect();
+        assert_eq!(zs.into_iter().collect::<Vec<_>>(), [0, 1]);
+
+        // Scrubbing moves the cut along Y; the plane survives a trip to 3D.
+        apply_vp(&mut scene, SetY { y: 400 });
+        assert_eq!(scene.layer_cut(&ds, SlicePlane::Xz), 400..401);
+        apply_vp(&mut scene, SetMode3D);
+        apply_vp(&mut scene, SetMode2D);
+        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
+        apply_vp(
+            &mut scene,
+            SetSlicePlane {
+                plane: SlicePlane::Xy,
+            },
+        );
+        assert_eq!(
+            scene.dataset_plane_bounds("vol").unwrap().max,
+            [512.0, 512.0, 128.0]
+        );
+        assert_eq!(scene.view.y, Some(400));
+    }
+
+    #[test]
     fn opening_a_dataset_frames_a_new_scene() {
         let scene = opened_volume([800, 600]);
         assert_eq!(scene.camera.framing(), Framing::Framed);
@@ -4795,6 +4881,7 @@ mod tests {
             zoom: 2.0,
             viewport: [1920, 1080],
             framing: Framing::Placed,
+            plane: SlicePlane::Xy,
         });
         let mut remote_view = ViewState::new();
         remote_view.t = 3;
@@ -4844,6 +4931,7 @@ mod tests {
             zoom: 0.0,
             viewport: [64, 64],
             framing: Framing::Placed,
+            plane: SlicePlane::Xy,
         });
         scene.import_presence(zero_zoom.clone(), ViewState::new(), DisplayState::default());
         match &scene.camera {

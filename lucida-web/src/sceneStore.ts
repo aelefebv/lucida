@@ -17,12 +17,17 @@ import type { WasmScene } from "lucida-core";
 import { readComparison, type Comparison } from "./comparison.ts";
 import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { ViewMode } from "./types.ts";
+import type { SlicePlane } from "./renderer/slicePlane.ts";
 
 export type CameraMode = "slice" | "arcball" | "fly";
 
 export interface SceneView {
   readonly z: number;
   readonly t: number;
+  /** The plane the slice view cuts. */
+  readonly slicePlane: SlicePlane;
+  /** The axis position along the slice plane's cut axis: `z` for an XY cut. */
+  readonly cutIndex: number;
   /** What each layer shows, by dataset id in panel order. */
   readonly layers: ResolvedLayers;
   readonly cameraMode: CameraMode;
@@ -44,6 +49,8 @@ export interface ViewEpochs {
 const NO_SCENE_VIEW: SceneView = {
   z: 0,
   t: 0,
+  slicePlane: "xy",
+  cutIndex: 0,
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
@@ -157,6 +164,8 @@ function readView(scene: WasmScene, knownLayersJson: string | null, previous: Sc
   const view: SceneView = {
     z: scene.z(),
     t: scene.t(),
+    slicePlane: scene.slice_plane() as SlicePlane,
+    cutIndex: scene.cut_index(),
     layers,
     cameraMode,
     viewMode: cameraMode === "slice" ? "2d" : "3d",
@@ -169,6 +178,8 @@ function sameView(a: SceneView, b: SceneView): boolean {
   return (
     a.z === b.z &&
     a.t === b.t &&
+    a.slicePlane === b.slicePlane &&
+    a.cutIndex === b.cutIndex &&
     a.layers === b.layers &&
     a.cameraMode === b.cameraMode
   );
