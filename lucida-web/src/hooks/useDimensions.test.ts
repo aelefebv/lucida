@@ -58,6 +58,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
       state.selection++;
     }),
     epochs: () => JSON.stringify({ content: 0, layout: 0, view: 0, selection: state.selection }),
+    active_view: () => 0,
     resolved_layers: () => JSON.stringify(state.layers),
     comparison: () => "null",
     z: () => state.z,

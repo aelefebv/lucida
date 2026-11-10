@@ -261,6 +261,7 @@ describe("input on the minimap", () => {
     const state = { center: [500, 500] as [number, number] };
     const scene = {
       camera_mode: () => "slice",
+      active_view: () => 0,
       slice_plane: () => "xy",
       center: () => state.center,
       zoom: () => 1,

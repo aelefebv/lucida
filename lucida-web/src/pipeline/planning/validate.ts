@@ -1,6 +1,7 @@
 /**
  * Dev-mode validator for `plan()`'s snapshot and state: producer
- * invariants the type system can't express but the planner relies on.
+ * invariants the type system can't express but the planner relies on,
+ * checked for each view.
  * Each check throws an `Error` naming the invariant and the offending id.
  *
  * Throw, don't degrade: the point is to surface the producer bug at the
@@ -8,15 +9,15 @@
  * Vite strips it from production builds.
  */
 
-import type { ActiveSetEntry, EntitySnapshot, PlanningSnapshot, PlanningState } from "./types.ts";
+import type { ActiveSetEntry, EntitySnapshot, PlanningSnapshot, PlanningState, ViewSnapshot } from "./types.ts";
 
 /**
- * Check 1: a tile's `parentId`, when that entity is in the snapshot,
+ * Check 1: a tile's `parentId`, when that entity is in the view,
  * names a Group. A missing parent is fine: the snapshot holds only this
  * tick's `view_query` entities, so a visible tile's group can be absent,
  * and `groupMembers` handles that with `groupEntity: null`.
  */
-export function checkTileParentRefs(snapshot: PlanningSnapshot): void {
+export function checkTileParentRefs(snapshot: ViewSnapshot): void {
   const byId = new Map<string, EntitySnapshot>();
   for (const e of snapshot.entities) byId.set(e.entityId, e);
   for (const e of snapshot.entities) {
@@ -32,10 +33,10 @@ export function checkTileParentRefs(snapshot: PlanningSnapshot): void {
 }
 
 /**
- * Check 2: `entityId` is unique across `snapshot.entities`. Duplicates
+ * Check 2: `entityId` is unique across a view's entities. Duplicates
  * make entity-keyed maps silently drop earlier values.
  */
-export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
+export function checkUniqueEntityIds(snapshot: ViewSnapshot): void {
   const seen = new Set<string>();
   for (const e of snapshot.entities) {
     if (seen.has(e.entityId)) {
@@ -52,7 +53,7 @@ export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
  * `minimapPending` and other image-keyed lookups. Groups carry
  * `imageId: ""`, so a multi-group snapshot repeats the empty id legitimately.
  */
-export function checkUniqueImageIds(snapshot: PlanningSnapshot): void {
+export function checkUniqueImageIds(snapshot: ViewSnapshot): void {
   const seen = new Set<string>();
   for (const e of snapshot.entities) {
     if (e.imageId === "") continue;
@@ -70,7 +71,7 @@ export function checkUniqueImageIds(snapshot: PlanningSnapshot): void {
  * The queries the planner sends the core's chunk enumerator, and every
  * `Axis`-indexed read in the planner, assume it.
  */
-export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
+export function checkLevelShapeArity(snapshot: ViewSnapshot): void {
   for (const e of snapshot.entities) {
     for (let i = 0; i < e.levels.length; i++) {
       const lvl = e.levels[i];
@@ -93,7 +94,7 @@ export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
  * `zRangeVox` are ordered. A degenerate box yields no chunks, which would
  * hide a producer bug behind an empty plan.
  */
-export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
+export function checkVisibleRegionBounds(snapshot: ViewSnapshot): void {
   const [xMin, yMin, xMax, yMax] = snapshot.visibleRegion.xyBoundsVox;
   if (xMin > xMax) {
     throw new Error(
@@ -133,13 +134,13 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
 
 /**
  * Check 9: each previous active-set entry whose entity is still in the
- * snapshot agrees with that entity's kind. `tile` accepts Tile or Image,
+ * view agrees with that entity's kind. `tile` accepts Tile or Image,
  * because `groupMembers` wraps each Image in a synthetic one-tile group.
  * `invisible` accepts any kind. An entity missing from the snapshot is not
  * a violation; entities come and go across ticks.
  */
 export function checkPrevActiveSetKindAgreement(
-  snapshot: PlanningSnapshot,
+  snapshot: ViewSnapshot,
   state: PlanningState,
 ): void {
   const byId = new Map<string, EntitySnapshot>();
@@ -181,11 +182,13 @@ export function validatePlanningInputs(
   snapshot: PlanningSnapshot,
   state: PlanningState,
 ): void {
-  checkTileParentRefs(snapshot);
-  checkUniqueEntityIds(snapshot);
-  checkUniqueImageIds(snapshot);
-  checkLevelShapeArity(snapshot);
-  checkVisibleRegionBounds(snapshot);
+  for (const view of snapshot.views) {
+    checkTileParentRefs(view);
+    checkUniqueEntityIds(view);
+    checkUniqueImageIds(view);
+    checkLevelShapeArity(view);
+    checkVisibleRegionBounds(view);
+    checkPrevActiveSetKindAgreement(view, state);
+  }
   checkPrevActiveSetUnique(state);
-  checkPrevActiveSetKindAgreement(snapshot, state);
 }

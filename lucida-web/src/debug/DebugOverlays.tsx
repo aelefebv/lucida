@@ -841,7 +841,7 @@ export function DebugOverlays({
 
       if (showGrid && plans && cpuCache) {
         const out: ChunkCell[] = [];
-        const resolvedLayers = readResolvedLayers(ws);
+        const resolvedLayers = readResolvedLayers(ws, ws.active_view());
         const planningConfig = configStore.get();
         const snap = cpuCache.snapshot();
         // Rank lookup for "planned" color gradient. Built once per

@@ -123,6 +123,19 @@ export interface MinimapChunkCoord {
   key: string;
 }
 
+/** What one view sees of a dataset, and where the view stands. */
+export interface ViewSnapshot {
+  /** The scene's id for the view. */
+  view: number;
+  /** Every member of the dataset, each as this view sees it. */
+  entities: EntitySnapshot[];
+  visibleRegion: VisibleRegion;
+  selection: SelectionState;
+}
+
+/** One dataset as one view sees it: what each lane plans from. */
+export type DatasetView = ViewSnapshot & { datasetId: string };
+
 export interface PlanningSnapshot {
   /**
    * The planner stamps it onto every emitted {@link ChunkRequest}; the
@@ -130,9 +143,11 @@ export interface PlanningSnapshot {
    */
   datasetId: string;
   epochs: SceneEpochs;
-  entities: EntitySnapshot[];
-  visibleRegion: VisibleRegion;
-  selection: SelectionState;
+  /**
+   * Every view that shows the dataset. The plan serves them together, within
+   * the page-wide budgets.
+   */
+  views: ViewSnapshot[];
   /**
    * Minimap chunks not yet on the GPU minimap atlas, keyed by
    * `EntitySnapshot.imageId`. An empty map means no minimap requests
@@ -147,11 +162,22 @@ export interface PlanningSnapshot {
  * planner. The caller stores {@link RequestPlan.nextState} and passes it to
  * the next `plan` call without reading it. It holds the previous active
  * set, which the dev-mode validator checks and the cold-state delta diffs
- * against, and the zoom memory the prefetch lane reads to pick the next
- * level.
+ * against, and each view's own memory.
  */
 export interface PlanningState {
+  /** Every view's active set merged, which is what the worker holds. */
   previousActiveSet: ActiveSetEntry[];
+  /** Per view, by its id. A view with none starts from {@link initialViewPlanningState}. */
+  views: ReadonlyMap<number, ViewPlanningState>;
+}
+
+/**
+ * What one view's plan leaves for the next: its own active set, which a
+ * request-only replan reuses, and the zoom and cut memory the prefetch lane
+ * reads to pick the next level and to tell a step.
+ */
+export interface ViewPlanningState {
+  activeSet: ActiveSetEntry[];
   /**
    * `visibleRegion.effectiveZoom` as the previous plan saw it, or `null`
    * before the first plan. The core reports device pixels per level-0
@@ -177,9 +203,14 @@ export interface PlanningState {
 /** Which way the last zoom change moved: toward level 0 or away from it. */
 export type ZoomDirection = "in" | "out";
 
-/** The state before the first plan: nothing held, no zoom seen. */
+/** The state before the first plan: nothing held, no view seen. */
 export function initialPlanningState(): PlanningState {
-  return { previousActiveSet: [], previousEffectiveZoom: null, zoomDirection: null, previousCut: null };
+  return { previousActiveSet: [], views: new Map() };
+}
+
+/** A view's state before its first plan: nothing held, no zoom seen. */
+export function initialViewPlanningState(): ViewPlanningState {
+  return { activeSet: [], previousEffectiveZoom: null, zoomDirection: null, previousCut: null };
 }
 
 export interface RequestPlan {

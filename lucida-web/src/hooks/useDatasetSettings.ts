@@ -371,7 +371,7 @@ export function useDatasetSettings({
   const handleSoloChannel = useCallback((id: string, channel: number) => {
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    const solo = readResolvedLayers(scene).get(id)?.solo ?? null;
+    const solo = readResolvedLayers(scene, scene.active_view()).get(id)?.solo ?? null;
     handleChannelSetSolo(id, solo === channel ? null : channel);
   }, [wasmSceneRef, handleChannelSetSolo]);
 

@@ -44,7 +44,7 @@ function renderSettings() {
       datasetLevels: new Map(),
     }),
   );
-  const shown = (id: string) => shownChannels(readResolvedLayers(scene).get(id));
+  const shown = (id: string) => shownChannels(readResolvedLayers(scene, scene.active_view()).get(id));
   return { result, shown, loop, bridge };
 }
 

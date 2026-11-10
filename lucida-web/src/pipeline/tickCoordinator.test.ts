@@ -175,7 +175,7 @@ function createMockContent(): DatasetManifest {
     kind: "Single",
     // TileSnapshot.parentId is required (non-null). The mock scene
     // reports `tile-0` as a Tile, so the manifest must carry the
-    // matching parent edge or `buildPlanningSnapshot` throws.
+    // matching parent edge or `buildViewSnapshot` throws.
     entities: [
       { id: "group-0", kind: "Group", parent: null, labels: {} },
       { id: "tile-0", kind: "Tile", parent: "group-0", labels: {} },
@@ -528,8 +528,10 @@ describe("epoch caching", () => {
     orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
 
     expect(planSpy).toHaveBeenCalledTimes(1);
-    const snapshot = planSpy.mock.calls[planSpy.mock.calls.length - 1][0] as { entities: Array<{ entityId: string; coarseLevel: number | null }> };
-    const entity = snapshot.entities.find((e) => e.entityId === "tile-0");
+    const snapshot = planSpy.mock.calls[planSpy.mock.calls.length - 1][0] as {
+      views: Array<{ entities: Array<{ entityId: string; coarseLevel: number | null }> }>;
+    };
+    const entity = snapshot.views[0].entities.find((e) => e.entityId === "tile-0");
     // A stale (epoch-only) cache would serve the v1 ImageSpec → coarseLevel null.
     expect(entity?.coarseLevel).toBe(1);
 
@@ -2057,9 +2059,9 @@ describe("incremental delta fold", () => {
       expect(planSpy).toHaveBeenCalledTimes(1);
 
       const snapshot = planSpy.mock.calls[0][0] as {
-        entities: Array<{ imageId: string; targetLevel: number }>;
+        views: Array<{ entities: Array<{ imageId: string; targetLevel: number }> }>;
       };
-      const byImage = new Map(snapshot.entities.map((e) => [e.imageId, e]));
+      const byImage = new Map(snapshot.views[0].entities.map((e) => [e.imageId, e]));
       expect(byImage.get("img-1")?.targetLevel).toBe(2); // changed row applied
       expect(byImage.has("img-2")).toBe(true); // entered row present
       expect(byImage.has("img-0")).toBe(false); // left row absent
@@ -2133,9 +2135,9 @@ describe("incremental delta fold", () => {
 
       expect(planSpy).toHaveBeenCalledTimes(1);
       const snapshot = planSpy.mock.calls[0][0] as {
-        entities: Array<{ imageId: string; targetLevel: number }>;
+        views: Array<{ entities: Array<{ imageId: string; targetLevel: number }> }>;
       };
-      const byImage = new Map(snapshot.entities.map((e) => [e.imageId, e]));
+      const byImage = new Map(snapshot.views[0].entities.map((e) => [e.imageId, e]));
       // Equals a fresh full build: no ghost left record (img-0), the change
       // applied (img-1 at its new LOD), the correct entered record (img-3).
       expect([...byImage.keys()].sort()).toEqual(["img-1", "img-3"]);

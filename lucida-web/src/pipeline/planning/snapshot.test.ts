@@ -3,16 +3,14 @@ import type { WasmScene } from "lucida-core";
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../../manifestTypes.ts";
 import { resolvedLayer } from "../../resolvedLayerFixtures.ts";
 import type { ResolvedLayer } from "../../resolvedLayers.ts";
-import type { SceneEpochs } from "../epochs.ts";
-import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
-  buildPlanningSnapshot,
+  buildViewSnapshot,
   resolveCoarseLevel,
-  type BuildPlanningSnapshotArgs,
+  type BuildViewSnapshotArgs,
   type SnapshotDatasetEntry,
 } from "./snapshot.ts";
 
-// `buildPlanningSnapshot` reads only `view_query`, `member_positions`,
+// `buildViewSnapshot` reads only `view_query`, `member_positions`,
 // `visible_region`, and `c() / t() / z()`, so the stub covers just those
 // and is cast to `WasmScene`; no WASM bundle is needed.
 
@@ -127,7 +125,7 @@ function makeDataset(
     kind: "Single",
     // The default stub scene returns `tile-0` as a Tile, so the
     // default manifest must carry the matching parent edge or
-    // `buildPlanningSnapshot` throws. Tests that exercise the
+    // `buildViewSnapshot` throws. Tests that exercise the
     // missing-edge throw branch override `entities` with `[]`.
     entities: [
       { id: "group-0", kind: "Group", parent: null, labels: {} },
@@ -143,10 +141,6 @@ function makeDataset(
 }
 
 
-function makeEpochs(): SceneEpochs {
-  return { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
-}
-
 interface MakeArgsOverrides {
   scene?: WasmScene;
   dataset?: SnapshotDatasetEntry;
@@ -154,34 +148,29 @@ interface MakeArgsOverrides {
   mode?: "slice" | "volume";
 }
 
-function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
+function makeArgs(overrides?: MakeArgsOverrides): BuildViewSnapshotArgs {
   return {
     scene: overrides?.scene ?? makeStubScene(),
     view: 0,
     datasetId: "ds1",
     dataset: overrides?.dataset ?? makeDataset(),
     layer: overrides && "layer" in overrides ? overrides.layer : resolvedLayer("ds1"),
-    minimapPending: new Map(),
     mode: overrides?.mode ?? "slice",
-    currentEpochs: makeEpochs(),
-    requestEpoch: 0,
-    config: DEFAULT_PLANNING_CONFIG,
   };
 }
 
-describe("buildPlanningSnapshot — typical case", () => {
+describe("buildViewSnapshot — typical case", () => {
   it("produces an EntitySnapshot joined with manifest data", () => {
-    const built = buildPlanningSnapshot(makeArgs());
+    const built = buildViewSnapshot(makeArgs());
     expect(built).not.toBeNull();
-    const { snapshot, entities } = built!;
+    const { view, entities } = built!;
+    expect(view).toBe(0);
     expect(entities).toHaveLength(1);
     expect(entities[0].entityId).toBe("tile-0");
     expect(entities[0].imageId).toBe("img-0");
     expect(entities[0].kind).toBe("Tile");
     expect(entities[0].levels).toHaveLength(2);
     expect(entities[0].layoutPositionVox).toEqual([256, 512]);
-    // Snapshot embeds the same entities as a freshly-built array.
-    expect(snapshot.entities).toBe(entities);
   });
 
   it("returns null when view_query has no visible entities", () => {
@@ -193,12 +182,12 @@ describe("buildPlanningSnapshot — typical case", () => {
       ...(scene as unknown as Record<string, unknown>),
       view_query: () => JSON.stringify(null),
     } as unknown as WasmScene;
-    const built = buildPlanningSnapshot(makeArgs({ scene: stub }));
+    const built = buildViewSnapshot(makeArgs({ scene: stub }));
     expect(built).toBeNull();
   });
 });
 
-describe("buildPlanningSnapshot — snake_case → camelCase", () => {
+describe("buildViewSnapshot — snake_case → camelCase", () => {
   it("renames every wire tile to its camelCase counterpart", () => {
     const scene = makeStubScene({
       visibleEntities: [
@@ -218,7 +207,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
       positions: { "img-7": [11, 22] },
     });
     const dataset = makeDataset({ images: [makeImageSpec("img-7")] });
-    const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
+    const built = buildViewSnapshot(makeArgs({ scene, dataset }));
     const e = built!.entities[0];
     expect(e.entityId).toBe("img-7");
     expect(e.imageId).toBe("img-7");
@@ -230,7 +219,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
   });
 });
 
-describe("buildPlanningSnapshot — parent-id stitching", () => {
+describe("buildViewSnapshot — parent-id stitching", () => {
   it("populates parentId for tiles with a manifest parent edge", () => {
     const scene = makeStubScene({
       visibleEntities: [
@@ -256,7 +245,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
         { id: "tile-A", kind: "Tile", parent: "group-1", labels: {} },
       ],
     });
-    const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
+    const built = buildViewSnapshot(makeArgs({ scene, dataset }));
     const ent = built!.entities[0];
     // Narrow on `kind === "Tile"` to read parentId.
     expect(ent.kind).toBe("Tile");
@@ -272,7 +261,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
     // default `tile-0` scene entity.
     const dataset = makeDataset({ entities: [] });
     expect(() =>
-      buildPlanningSnapshot(makeArgs({ dataset })),
+      buildViewSnapshot(makeArgs({ dataset })),
     ).toThrow(/TileSnapshot\.parentId is required/);
   });
 
@@ -297,7 +286,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
       positions: { "img-7": [0, 0] },
     });
     const dataset = makeDataset({ images: [makeImageSpec("img-7")] });
-    const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
+    const built = buildViewSnapshot(makeArgs({ scene, dataset }));
     const ent = built!.entities[0];
     expect(ent.kind).toBe("Image");
     // No `parentId` key on Image / Group variants — confirm absence
@@ -306,10 +295,10 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
   });
 });
 
-describe("buildPlanningSnapshot — visible region fallback", () => {
+describe("buildViewSnapshot — visible region fallback", () => {
   it("falls back to the default region when scene.visible_region returns null", () => {
     const scene = makeStubScene({ visibleRegion: null });
-    const built = buildPlanningSnapshot(makeArgs({ scene }));
+    const built = buildViewSnapshot(makeArgs({ scene }));
     expect(built!.visibleRegion).toEqual({
       xyBoundsVox: [0, 0, 1024, 1024],
       zRangeVox: [0, 1],
@@ -333,7 +322,7 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
         ],
       },
     });
-    const built = buildPlanningSnapshot(makeArgs({ scene }));
+    const built = buildViewSnapshot(makeArgs({ scene }));
     expect(built!.visibleRegion).toEqual({
       xyBoundsVox: [10, 20, 30, 40],
       zRangeVox: [5, 6],
@@ -348,16 +337,16 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
   });
 });
 
-describe("buildPlanningSnapshot — selection state", () => {
+describe("buildViewSnapshot — selection state", () => {
   it("plans the channels the resolved layer shows", () => {
-    const built = buildPlanningSnapshot(
+    const built = buildViewSnapshot(
       makeArgs({ layer: resolvedLayer("ds1", [0, 2]) }),
     );
     expect(built!.selection.visibleChannels).toEqual([0, 2]);
   });
 
   it("plans a solo's one channel", () => {
-    const built = buildPlanningSnapshot(
+    const built = buildViewSnapshot(
       makeArgs({ layer: resolvedLayer("ds1", [3], { solo: 3, channel_count: 4 }) }),
     );
     expect(built!.selection.visibleChannels).toEqual([3]);
@@ -368,43 +357,30 @@ describe("buildPlanningSnapshot — selection state", () => {
     const layer = resolvedLayer("ds1", [0], {
       t: 1, z_range: { start: 4, end: 5 }, t_clamped: true, z_clamped: true,
     });
-    const built = buildPlanningSnapshot(makeArgs({ scene, layer }));
+    const built = buildViewSnapshot(makeArgs({ scene, layer }));
     expect(built!.selection.t).toBe(1);
     expect(built!.selection.z).toBe(4);
   });
 
   it("falls back to channel 0 at the scene's selectors for a layer the scene lacks", () => {
-    const built = buildPlanningSnapshot(makeArgs({ layer: undefined }));
+    const built = buildViewSnapshot(makeArgs({ layer: undefined }));
     expect(built!.selection.visibleChannels).toEqual([0]);
   });
 
   it("threads renderMode from the args mode tile", () => {
-    const builtSlice = buildPlanningSnapshot(makeArgs({ mode: "slice" }));
-    const builtVolume = buildPlanningSnapshot(makeArgs({ mode: "volume" }));
+    const builtSlice = buildViewSnapshot(makeArgs({ mode: "slice" }));
+    const builtVolume = buildViewSnapshot(makeArgs({ mode: "volume" }));
     expect(builtSlice!.selection.renderMode).toBe("slice");
     expect(builtVolume!.selection.renderMode).toBe("volume");
   });
 
   it("interactionState is always idle", () => {
-    const built = buildPlanningSnapshot(makeArgs());
+    const built = buildViewSnapshot(makeArgs());
     expect(built!.selection.interactionState).toBe("idle");
   });
 });
 
-describe("buildPlanningSnapshot — pass-through tiles", () => {
-
-  it("threads the epoch counters through into the snapshot", () => {
-    const built = buildPlanningSnapshot(makeArgs());
-    expect(built!.snapshot.epochs).toEqual(makeEpochs());
-  });
-
-  it("returns the same visibleRegion object embedded in the snapshot", () => {
-    const built = buildPlanningSnapshot(makeArgs());
-    expect(built!.snapshot.visibleRegion).toBe(built!.visibleRegion);
-  });
-});
-
-describe("buildPlanningSnapshot — target level", () => {
+describe("buildViewSnapshot — target level", () => {
   function sceneAtScreenLevel(screenLevel: number): WasmScene {
     return makeStubScene({
       visibleEntities: [
@@ -429,7 +405,7 @@ describe("buildPlanningSnapshot — target level", () => {
     // two-level manifest lacks.
     for (const level of [0, 1, 7]) {
       expect(
-        buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(level) }))!.entities[0]
+        buildViewSnapshot(makeArgs({ scene: sceneAtScreenLevel(level) }))!.entities[0]
           .targetLevel,
       ).toBe(level);
     }
@@ -439,12 +415,12 @@ describe("buildPlanningSnapshot — target level", () => {
     const dataset = makeDataset({
       images: [makeImageSpec("img-0", { coarse_level_index: 1 })],
     });
-    const built = buildPlanningSnapshot(makeArgs({ dataset }));
+    const built = buildViewSnapshot(makeArgs({ dataset }));
     expect(built!.entities[0].coarseLevel).toBe(1);
   });
 
   it("does not guess a coarse level when metadata omits the pointer", () => {
-    const built = buildPlanningSnapshot(makeArgs());
+    const built = buildViewSnapshot(makeArgs());
     expect(built!.entities[0].coarseLevel).toBeNull();
   });
 
@@ -454,47 +430,14 @@ describe("buildPlanningSnapshot — target level", () => {
   });
 });
 
-describe("buildPlanningSnapshot — minimapPending tile", () => {
-  it("threads a non-empty minimapPending through into the snapshot unchanged", () => {
-    const minimapPending = new Map([
-      [
-        "img-0",
-        [{ level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0" }],
-      ],
-    ]);
-    const built = buildPlanningSnapshot({
-      ...makeArgs(),
-      minimapPending,
-    });
-    expect(built).not.toBeNull();
-    // The slot is on the snapshot so `plan()`'s `emitMinimapLane` can read it.
-    expect(built!.snapshot.minimapPending).toBe(minimapPending);
-    expect(built!.snapshot.minimapPending.get("img-0")).toEqual([
-      { level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0" },
-    ]);
-  });
-
-  it("empty minimapPending is forwarded as an empty map", () => {
-    const empty = new Map();
-    const built = buildPlanningSnapshot({
-      ...makeArgs(),
-      minimapPending: empty,
-    });
-    expect(built!.snapshot.minimapPending).toBe(empty);
-    expect(built!.snapshot.minimapPending.size).toBe(0);
-  });
-});
-
-describe("buildPlanningSnapshot — purity", () => {
+describe("buildViewSnapshot — purity", () => {
   it("produces identical output across two calls with identical inputs", () => {
     const args = makeArgs();
-    const a = buildPlanningSnapshot(args)!;
-    const b = buildPlanningSnapshot(args)!;
+    const a = buildViewSnapshot(args)!;
+    const b = buildViewSnapshot(args)!;
     // Different object references, identical wire-shape content.
-    expect(JSON.stringify(a.snapshot.entities)).toBe(
-      JSON.stringify(b.snapshot.entities),
-    );
-    expect(a.snapshot.visibleRegion).toEqual(b.snapshot.visibleRegion);
-    expect(a.snapshot.selection).toEqual(b.snapshot.selection);
+    expect(JSON.stringify(a.entities)).toBe(JSON.stringify(b.entities));
+    expect(a.visibleRegion).toEqual(b.visibleRegion);
+    expect(a.selection).toEqual(b.selection);
   });
 });

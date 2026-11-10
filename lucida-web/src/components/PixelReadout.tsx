@@ -219,7 +219,7 @@ function readoutContext(scene: WasmScene, datasets: Map<string, DatasetState>, l
     dataType: (id) => multiscale(id)?.data_type ?? "uint16",
     depth: (id) => multiscale(id)?.levels[0]?.shape[Axis.Z] ?? 1,
     // Read at each probe, since a plane switch moves no layer.
-    cutAxis: () => (scene.camera_mode() === "slice" ? cutAxis(scene.slice_plane() as SlicePlane) : "z"),
+    cutAxis: () => (scene.camera_mode() === "slice" ? cutAxis(scene.slice_plane(scene.active_view()) as SlicePlane) : "z"),
     channel: (id, channel) => ({
       name: channelDisplayName(
         channel,

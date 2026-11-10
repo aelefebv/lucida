@@ -12,9 +12,8 @@ import { describeTiming, expectWithinBudget, timeStep } from "../../test/perfBud
 import { parseResolvedLayers } from "../../resolvedLayers.ts";
 import { loadWasm } from "../../viewProperties.ts";
 import { collection, singleImage, type DatasetFixture } from "../simulation/fixtures.ts";
-import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import { plan } from "./plan.ts";
-import { buildPlanningSnapshot } from "./snapshot.ts";
+import { buildViewSnapshot } from "./snapshot.ts";
 import { initialPlanningState, type PlanningSnapshot } from "./types.ts";
 
 beforeAll(loadWasm);
@@ -75,21 +74,24 @@ function snapshotFor(c: Case, dpr: number): { snapshot: PlanningSnapshot; scene:
   scene.set_viewport(CANVAS[0] * dpr, CANVAS[1] * dpr, dpr);
   if (c.mode === "volume") scene.apply_command(JSON.stringify({ type: "set_mode_arcball" }));
   for (const command of c.commands) scene.apply_command(JSON.stringify(command));
-  const layer = parseResolvedLayers(scene.resolved_layers()).get(c.dataset.datasetId);
-  const built = buildPlanningSnapshot({
+  const view = scene.active_view();
+  const layer = parseResolvedLayers(scene.resolved_layers(view)).get(c.dataset.datasetId);
+  const built = buildViewSnapshot({
     scene,
-    view: scene.active_view(),
+    view,
     datasetId: c.dataset.datasetId,
     dataset: { manifest: c.dataset.manifest },
     layer,
-    minimapPending: new Map(),
     mode: c.mode,
-    currentEpochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
-    requestEpoch: 1,
-    config: DEFAULT_PLANNING_CONFIG,
   });
   if (!built) throw new Error(`${c.name}: no snapshot`);
-  return { snapshot: built.snapshot, scene };
+  const snapshot: PlanningSnapshot = {
+    datasetId: c.dataset.datasetId,
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
+    views: [built],
+    minimapPending: new Map(),
+  };
+  return { snapshot, scene };
 }
 
 describe("planning cost per pass", () => {

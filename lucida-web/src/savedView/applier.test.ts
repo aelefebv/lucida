@@ -718,7 +718,7 @@ describe("SavedViewApplier", () => {
       bridge, () => scene, fakeIdForUrl, 1000, "workspace-dataset-id", "local",
     );
     const shown = () => {
-      const layers = JSON.parse(scene.resolved_layers()) as {
+      const layers = JSON.parse(scene.resolved_layers(scene.active_view())) as {
         dataset_id: string;
         channels: { channel: number }[];
       }[];

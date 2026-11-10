@@ -9,10 +9,11 @@ import {
   createSyntheticEntity,
   createSyntheticSnapshot,
   createSyntheticState,
+  createSyntheticView,
 } from "./synthetic.ts";
 import type {
-  PlanningSnapshot,
   PlanningState,
+  ViewSnapshot,
 } from "./types.ts";
 import {
   checkTileParentRefs,
@@ -44,7 +45,12 @@ function makeLevel(
  * baseline for the per-check tests; each test mutates the result to
  * inject the specific violation it wants to assert.
  */
-function makeValidSnapshot(): PlanningSnapshot {
+/** A snapshot of `view` alone. */
+function snapshotOf(view: ViewSnapshot) {
+  return createSyntheticSnapshot({ views: [view] });
+}
+
+function makeValidSnapshot(): ViewSnapshot {
   const group = createSyntheticEntity({
     entityId: "group-A",
     imageId: "img-group-A",
@@ -58,7 +64,7 @@ function makeValidSnapshot(): PlanningSnapshot {
     parentId: "group-A",
     levels: [makeLevel([1, 1, 1, 1, 1], [1, 1, 1, 1, 1])],
   });
-  return createSyntheticSnapshot({ entities: [group, tile] });
+  return createSyntheticView({ entities: [group, tile] });
 }
 
 describe("checkTileParentRefs", () => {
@@ -308,8 +314,7 @@ describe("checkPrevActiveSetKindAgreement", () => {
     // Image entities are treated as singleton "groups with one tile" by
     // groupMembers — the active-set entry is a TileEntry even though the
     // entity is an ImageSnapshot. See activeSet.ts::groupMembers.
-    const snap = createSyntheticSnapshot({
-      datasetId: "ds-singleton",
+    const snap = createSyntheticView({
       entities: [
         createSyntheticEntity({
           entityId: "img-only",
@@ -336,7 +341,7 @@ describe("checkPrevActiveSetKindAgreement", () => {
 describe("validatePlanningInputs (composing)", () => {
   it("passes when the snapshot and state are fully valid", () => {
     expect(() =>
-      validatePlanningInputs(makeValidSnapshot(), createSyntheticState()),
+      validatePlanningInputs(snapshotOf(makeValidSnapshot()), createSyntheticState()),
     ).not.toThrow();
   });
 
@@ -351,7 +356,7 @@ describe("validatePlanningInputs (composing)", () => {
         kind: "Group",
       }),
     );
-    expect(() => validatePlanningInputs(snap, createSyntheticState())).toThrow(
+    expect(() => validatePlanningInputs(snapshotOf(snap), createSyntheticState())).toThrow(
       /duplicate imageId/,
     );
   });
@@ -363,7 +368,7 @@ describe("validatePlanningInputs (composing)", () => {
         { kind: "invisible", entityId: "group-X", imageId: "img-group-X", coarsestLod: 0 },
       ],
     });
-    expect(() => validatePlanningInputs(makeValidSnapshot(), state)).toThrow(
+    expect(() => validatePlanningInputs(snapshotOf(makeValidSnapshot()), state)).toThrow(
       /duplicate entityId group-X in state\.previousActiveSet/,
     );
   });
