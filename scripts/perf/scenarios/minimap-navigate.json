@@ -1,0 +1,10 @@
+{
+  "description": "on the full viewer page, zoom in by 4, click a far spot on the minimap, then drag the view rectangle across it at a person's pace",
+  "camera": "slice",
+  "fullUi": true,
+  "steps": [
+    { "kind": "zoom", "factor": 4 },
+    { "kind": "minimap", "action": "click", "at": [60, 80] },
+    { "kind": "minimap", "action": "drag", "at": [60, 80], "to": [140, 120], "durationMs": 1500 }
+  ]
+}

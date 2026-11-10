@@ -565,14 +565,14 @@ fn single_manifest() -> DatasetManifest {
 
     DatasetManifest::new(
         DatasetId(SINGLE_DATASET_ID.into()),
-        "kidney-multiplex.zarr".into(),
+        "multichannel-volume.zarr".into(),
         DatasetKind::Single,
         vec![Entity {
             id: entity_id.clone(),
             kind: EntityKind::Image,
             parent: None,
             labels: EntityLabels {
-                name: Some("kidney-multiplex.zarr".into()),
+                name: Some("multichannel-volume.zarr".into()),
                 ..Default::default()
             },
         }],
@@ -740,7 +740,7 @@ fn collection_dataset_opened() -> DatasetOpened {
 
     let manifest = DatasetManifest::new(
         DatasetId("wds-collection-77".into()),
-        "screening-collection-01.zarr".into(),
+        "grid-collection-01.zarr".into(),
         DatasetKind::Collection {
             rows: vec!["A".into(), "B".into()],
             columns: vec!["1".into(), "2".into(), "3".into()],
@@ -958,7 +958,7 @@ fn snapshot_annotations() -> Vec<Annotation> {
             comments: vec![Comment {
                 id: "comment-91".into(),
                 author: "grace@example".into(),
-                text: "glomerulus boundary looks off here".into(),
+                text: "region boundary looks off here".into(),
             }],
             anchor: Some(EntityId(SINGLE_ENTITY_ID.into())),
             view: Some(pin_saved_view()),
@@ -1139,9 +1139,9 @@ fn generated_delta() -> GeneratedAvailabilityDelta {
 fn source_health() -> DatasetSourceHealth {
     DatasetSourceHealth {
         workspace_dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
-        name: "kidney-multiplex.zarr".into(),
+        name: "multichannel-volume.zarr".into(),
         status: DatasetHealthStatus::Degraded,
-        source_url: Some("gs://lucida-fixtures/kidney-multiplex.zarr".into()),
+        source_url: Some("gs://lucida-fixtures/multichannel-volume.zarr".into()),
         backend: Some("gcs".into()),
         binding: DatasetHealthComponent {
             status: DatasetHealthStatus::Healthy,
@@ -1539,7 +1539,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             "session/server_dataset_open_progress.json",
             ServerMessage::DatasetOpenProgress {
                 request_id: "web-7d2f45aa".into(),
-                url: "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
+                url: "gs://lucida-fixtures/multichannel-volume.zarr".into(),
                 diagnostic: DatasetOpenProgressDiagnostic {
                     stage: DatasetOpenStage::GeneratedCoarsePlanning,
                     message: "planning generated coarse levels".into(),
@@ -1599,12 +1599,12 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             "session/server_open_dataset_succeeded.json",
             ServerMessage::OpenDatasetSucceeded {
                 request_id: "web-7d2f45aa".into(),
-                url: "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
+                url: "gs://lucida-fixtures/multichannel-volume.zarr".into(),
                 seq: 43,
                 opened: single_dataset_opened(),
                 diagnostic: Some(DatasetOpenSuccessDiagnostic {
                     stage: DatasetOpenStage::Complete,
-                    source_url: "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
+                    source_url: "gs://lucida-fixtures/multichannel-volume.zarr".into(),
                     workspace_dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
                     dataset_source_id: Some("source-9b31".into()),
                     message: "dataset opened".into(),
@@ -2071,7 +2071,7 @@ fn command_goldens() -> Vec<(&'static str, DocumentCommand, Vec<&'static str>)> 
                 dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
                 annotation_id: "pin-4c1d".into(),
                 id: "comment-91".into(),
-                text: "glomerulus boundary confirmed".into(),
+                text: "region boundary confirmed".into(),
             },
             vec!["/dataset_id", "/annotation_id", "/id", "/text"],
         ),
@@ -2108,7 +2108,7 @@ fn command_goldens() -> Vec<(&'static str, DocumentCommand, Vec<&'static str>)> 
             "session/client_command_rename_dataset.json",
             DocumentCommand::RenameDataset {
                 id: DatasetId(SINGLE_DATASET_ID.into()),
-                name: "kidney multiplex (deconvolved)".into(),
+                name: "multichannel volume (processed)".into(),
             },
             vec!["/id", "/name"],
         ),
@@ -2171,7 +2171,7 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
             "session/client_open_remote_dataset.json",
             ClientMessage::OpenRemoteDataset {
                 request_id: "web-7d2f45aa".into(),
-                url: "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
+                url: "gs://lucida-fixtures/multichannel-volume.zarr".into(),
             },
             req("", &["/type", "/request_id", "/url"]),
         ),
@@ -2523,11 +2523,11 @@ fn dataset_open_payloads_match_goldens() {
                 levels: vec![
                     LevelAddress {
                         level_index: 0,
-                        path: "kidney-multiplex.zarr/0".into(),
+                        path: "multichannel-volume.zarr/0".into(),
                     },
                     LevelAddress {
                         level_index: 1,
-                        path: "kidney-multiplex.zarr/1".into(),
+                        path: "multichannel-volume.zarr/1".into(),
                     },
                 ],
                 store_prefix: Some("gs://lucida-fixtures".into()),
@@ -2557,7 +2557,7 @@ fn dataset_open_payloads_match_goldens() {
                 },
                 levels: vec![LevelAddress {
                     level_index: 0,
-                    path: "/data/kidney-multiplex.zarr/0".into(),
+                    path: "/data/multichannel-volume.zarr/0".into(),
                 }],
                 store_prefix: None,
             }],
@@ -2673,7 +2673,7 @@ fn payload_saved_view() -> SavedView {
         one.clone(),
         DatasetDisplaySettings {
             channel_settings: vec![ChannelSettings {
-                colormap: Colormap::default_for_channel(0, 1),
+                colormap: Colormap::defaults_for_channels(1, &[])[0],
                 contrast_max: 4000.0,
                 ..Default::default()
             }],
@@ -2689,9 +2689,11 @@ fn payload_saved_view() -> SavedView {
         three,
         DatasetDisplaySettings {
             opacity: 0.8,
-            channel_settings: (0..3)
-                .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i, 3),
+            channel_settings: Colormap::defaults_for_channels(3, &[])
+                .into_iter()
+                .enumerate()
+                .map(|(i, colormap)| ChannelSettings {
+                    colormap,
                     name: (i == 1).then(|| "Region B".into()),
                     ..Default::default()
                 })

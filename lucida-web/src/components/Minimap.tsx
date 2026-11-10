@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
+import type { Engine } from "../engine.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
 import { CanvasCard } from "./CanvasCard.tsx";
 import { minimapCardPreference, useCanvasCardState } from "./canvasCards.ts";
+import { MinimapNavigator, type MinimapCursor } from "./minimapNavigation.ts";
 import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, readMinimapColors, zPlaneLayerDirty } from "./minimapOverlay.ts";
 import "./Minimap.css";
 
@@ -20,9 +22,13 @@ const MINIMAP_SIZE = 200;
 interface Props {
   client: RenderClient;
   activeLoop: RenderLoop | null;
+  /** The scene minimap input moves, and the main canvas that frames it. */
+  engine: Pick<Engine, "scene" | "canvas">;
+  emitPresence: () => void;
+  breakFollow: () => void;
 }
 
-export function Minimap({ client, activeLoop }: Props) {
+export function Minimap({ client, activeLoop, engine, emitPresence, breakFollow }: Props) {
   // Folded or hidden, the loop stops rendering it. The canvases stay mounted,
   // since the GPU context is bound to this canvas for the worker's life.
   const [cardState] = useCanvasCardState(minimapCardPreference);
@@ -39,6 +45,13 @@ export function Minimap({ client, activeLoop }: Props) {
   const zLayerRef = useRef<HTMLCanvasElement | null>(null);
   const zReadyRef = useRef(false);
   const prevZRef = useRef<number | null>(null);
+  // The frame last drawn, which input maps through, so the minimap does no
+  // work of its own for a pointer move.
+  const frameRef = useRef<MinimapOverlayData | null>(null);
+  const depsRef = useRef({ activeLoop, engine, emitPresence, breakFollow });
+  useEffect(() => {
+    depsRef.current = { activeLoop, engine, emitPresence, breakFollow };
+  });
 
   // Effect 1: GPU init
   useEffect(() => {
@@ -128,6 +141,7 @@ export function Minimap({ client, activeLoop }: Props) {
     // lands outside the open's first frame (see the note above `Props`).
     let heldBack: MinimapOverlayData | null = null;
     const overlayCallback = (data: MinimapOverlayData) => {
+      frameRef.current = data;
       if (!client.pipelinesCompiled) {
         heldBack = data;
         return;
@@ -143,6 +157,7 @@ export function Minimap({ client, activeLoop }: Props) {
     return () => {
       withdraw();
       activeLoop.setMinimap(false);
+      frameRef.current = null;
     };
   }, [activeLoop, client, drawing]);
 
@@ -158,6 +173,87 @@ export function Minimap({ client, activeLoop }: Props) {
     overlayCanvas.getContext("2d")?.clearRect(0, 0, backing, backing);
   }, []);
 
+  // Effect 4: input. One pointer at a time, so a second finger neither
+  // steers nor ends the first's gesture.
+  useEffect(() => {
+    const surface = overlayCanvasRef.current;
+    if (!surface) return;
+    const navigator = new MinimapNavigator(
+      {
+        scene: () => depsRef.current.engine.scene(),
+        canvas: () => depsRef.current.engine.canvas(),
+        loop: () => depsRef.current.activeLoop,
+        frame: () => frameRef.current,
+        emitPresence: () => depsRef.current.emitPresence(),
+        breakFollow: () => depsRef.current.breakFollow(),
+      },
+      MINIMAP_SIZE,
+    );
+    let pointerId: number | null = null;
+    let cursor: MinimapCursor | null = null;
+    const local = (e: MouseEvent): [number, number] => {
+      const rect = surface.getBoundingClientRect();
+      return [e.clientX - rect.left, e.clientY - rect.top];
+    };
+    const showCursor = (x: number, y: number) => {
+      const next = navigator.cursorAt(x, y);
+      if (next === cursor) return;
+      cursor = next;
+      surface.style.cursor = next;
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      if (pointerId !== null || e.button !== 0) return;
+      const [x, y] = local(e);
+      if (!navigator.pressAt(x, y, e.pointerType, e.timeStamp)) return;
+      pointerId = e.pointerId;
+      surface.setPointerCapture?.(e.pointerId);
+      showCursor(x, y);
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      const [x, y] = local(e);
+      if (pointerId === e.pointerId) navigator.moveTo(x, y, e.timeStamp);
+      else if (pointerId !== null) return;
+      showCursor(x, y);
+    };
+    const onPointerUp = (e: PointerEvent) => {
+      if (pointerId !== e.pointerId) return;
+      pointerId = null;
+      const [x, y] = local(e);
+      navigator.releaseAt(x, y, e.timeStamp);
+      showCursor(x, y);
+    };
+    const onPointerCancel = (e: PointerEvent) => {
+      if (pointerId !== e.pointerId) return;
+      pointerId = null;
+      navigator.cancel();
+    };
+    const onWheel = (e: WheelEvent) => {
+      const [x, y] = local(e);
+      if (navigator.wheelAt(x, y, e.deltaY, e.timeStamp)) e.preventDefault();
+    };
+    // Handled here, the arrows never reach the window's shortcuts, which pan
+    // the slice view by a share of the canvas instead.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (navigator.key(e.key, e.timeStamp)) e.preventDefault();
+    };
+    surface.addEventListener("pointerdown", onPointerDown);
+    surface.addEventListener("pointermove", onPointerMove);
+    surface.addEventListener("pointerup", onPointerUp);
+    surface.addEventListener("pointercancel", onPointerCancel);
+    surface.addEventListener("wheel", onWheel, { passive: false });
+    surface.addEventListener("keydown", onKeyDown);
+    return () => {
+      surface.removeEventListener("pointerdown", onPointerDown);
+      surface.removeEventListener("pointermove", onPointerMove);
+      surface.removeEventListener("pointerup", onPointerUp);
+      surface.removeEventListener("pointercancel", onPointerCancel);
+      surface.removeEventListener("wheel", onWheel);
+      surface.removeEventListener("keydown", onKeyDown);
+      navigator.cancel();
+    };
+  }, []);
+
   return (
     <CanvasCard title="Minimap" label="Minimap" preference={minimapCardPreference}>
       <div className="minimap-panel" style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}>
@@ -165,9 +261,13 @@ export function Minimap({ client, activeLoop }: Props) {
           ref={gpuCanvasRef}
           style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
         />
+        {/* The input surface, which the trace driver finds by its class. */}
         <canvas
           ref={overlayCanvasRef}
           className="minimap-overlay"
+          role="application"
+          aria-label="Minimap: click or drag to move the view, arrow keys pan"
+          tabIndex={0}
           style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
         />
       </div>

@@ -140,7 +140,7 @@ def test_scenarios_name_what_they_need() -> None:
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
     kinds = {step["kind"] for scenario in SCENARIOS.values() for step in scenario.steps}
-    assert {"mode", "fit", "resize", "contrast", "add", "remove"} <= kinds
+    assert {"mode", "fit", "resize", "contrast", "add", "remove", "minimap"} <= kinds
     paced = {
         name
         for name, scenario in SCENARIOS.items()
@@ -159,6 +159,8 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "large-canvas-orbit",
         "settle-then-orbit",
         "phone-settle-then-orbit",
+        "minimap-navigate",
+        "minimap-orbit",
     }
 
 
