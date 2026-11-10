@@ -49,11 +49,13 @@ pub struct MultiscaleInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChannelInfo {
     /// Non-empty channel label (e.g. `"Channel 0"`). The parse layer drops blank /
-    /// whitespace-only labels, so any value present here is meaningful.
+    /// whitespace-only labels, and gives a channel without one its positional
+    /// `Channel n` name.
     pub label: String,
-    /// Optional color hint, as the raw omero hex string without a leading `#`
-    /// (e.g. `"00FF00"`). Carried through verbatim for future use; it is not
-    /// applied to colormaps.
+    /// The color the dataset declares for the channel, as the raw omero string,
+    /// usually hex without a leading `#` (e.g. `"00FF00"`). Carried verbatim,
+    /// since it may be malformed; a new view seeds the channel's colormap from
+    /// it when it parses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }

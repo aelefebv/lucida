@@ -134,11 +134,12 @@ def test_layer_changes_persist_with_the_core_defaults(tmp_path):
     settings = stored_view(server)["dataset_settings"][DATASET]
     assert settings["opacity"] == 0.25
     assert settings["visible"] is False
-    # Seeded by the core: one entry per channel with the default colormaps,
-    # and the label list with its names.
+    # Seeded by the core: one entry per channel, in the colormap nearest the
+    # color it declares or else the first one free, and the label list with
+    # its names.
     assert [channel["colormap"] for channel in settings["channel_settings"]] == [
+        "blue",
         "magenta",
-        "green",
     ]
     assert settings["label_names"] == ["region-a"]
     assert settings["label_settings"] == [{"visible": False, "opacity": 0.5}]

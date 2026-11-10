@@ -2673,7 +2673,7 @@ fn payload_saved_view() -> SavedView {
         one.clone(),
         DatasetDisplaySettings {
             channel_settings: vec![ChannelSettings {
-                colormap: Colormap::default_for_channel(0, 1),
+                colormap: Colormap::defaults_for_channels(1, &[])[0],
                 contrast_max: 4000.0,
                 ..Default::default()
             }],
@@ -2689,9 +2689,11 @@ fn payload_saved_view() -> SavedView {
         three,
         DatasetDisplaySettings {
             opacity: 0.8,
-            channel_settings: (0..3)
-                .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i, 3),
+            channel_settings: Colormap::defaults_for_channels(3, &[])
+                .into_iter()
+                .enumerate()
+                .map(|(i, colormap)| ChannelSettings {
+                    colormap,
                     name: (i == 1).then(|| "Region B".into()),
                     ..Default::default()
                 })

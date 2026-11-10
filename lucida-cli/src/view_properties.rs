@@ -34,7 +34,7 @@ fn montage(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
         .cells
         .iter()
         .map(|cell| {
-            let view = build_cell_view(&id.0, cell, vp.css, None, dims[1]);
+            let view = build_cell_view(&id.0, cell, vp.css, None, dims[1], &[]);
             Produced::framing(cell.label.clone(), restore(&view, f, vp, dpr))
         })
         .collect()
