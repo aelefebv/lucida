@@ -1,7 +1,9 @@
+mod comparison;
 mod layers;
 mod placement;
 mod types;
 
+pub use comparison::{CompareMode, Comparison, Side};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 pub use types::{
@@ -121,6 +123,10 @@ pub struct Scene {
     /// has said. Client-local, like the canvas size.
     #[serde(skip)]
     pub(crate) pixel_ratio: Option<f64>,
+    /// Two datasets this view shows against each other. View state, like
+    /// the camera, and client-local: nothing shares or saves it yet.
+    #[serde(skip)]
+    pub(crate) comparison: Option<Comparison>,
 }
 
 /// The camera's geometry family. A change between families routes the entity
@@ -205,6 +211,7 @@ impl Scene {
             epochs: SceneEpochs::default(),
             view_query_cursors: HashMap::new(),
             pixel_ratio: None,
+            comparison: None,
         }
     }
 
@@ -452,6 +459,7 @@ impl Scene {
         if carried || changed {
             self.epochs.view += 1;
         }
+        self.keep_comparison_lined_up();
     }
 
     pub fn remove_dataset(&mut self, id: &DatasetId) {

@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { SavedView } from "../savedView/types.ts";
 import {
   awaitDatasetOpen,
+  comparisonPair,
   datasetIdForSource,
   noteDatasetOpened,
   noteDatasetOpenFailed,
@@ -153,6 +154,13 @@ describe("what a step is judged by", () => {
     expect(JSON.stringify(viewSignature(manual(250)))).not.toBe(handSet);
   });
 
+  it("changes with the comparison, which no saved view records", () => {
+    const swipe = { a: "ds-1", b: "ds-2", mode: "swipe", divider: 0.5, showing: "a" } as const;
+    const signature = (comparison: typeof swipe | null) => JSON.stringify(viewSignature(base, comparison));
+    expect(signature(swipe)).not.toBe(signature(null));
+    expect(signature({ ...swipe, divider: 0.25 } as never)).not.toBe(signature(swipe));
+  });
+
   it("is null before a scene exists", () => {
     expect(viewSignature(null)).toBeNull();
   });
@@ -195,15 +203,26 @@ describe("a scripted add's answer", () => {
 describe("the registration", () => {
   beforeEach(() => setScriptControls(null));
 
+  it("compares the two open datasets, or the one in hand with the one named", () => {
+    expect(comparisonPair(null, ["a", "b"], null)).toEqual({ a: "a", b: "b" });
+    expect(comparisonPair("b", ["a", "b", "c"], "c")).toEqual({ a: "b", b: "c" });
+    expect(comparisonPair("c", ["a", "b", "c"], "c")).toEqual({ a: "a", b: "c" });
+    expect(comparisonPair(null, ["a", "b", "c"], null)).toHaveProperty("refused");
+    expect(comparisonPair(null, ["c"], "c")).toEqual({ refused: "nothing is open to compare c with" });
+  });
+
   it("holds the controls the viewer registered and forgets them when withdrawn", () => {
     const controls = {
       view: () => null,
+      comparison: () => null,
       scrub: () => ({ applied: true, reason: null }),
       plane: () => ({ applied: true, reason: null }),
       select: () => ({ applied: true, reason: null }),
       contrast: () => ({ applied: true, reason: null }),
       addDataset: () => Promise.resolve({ applied: true, reason: null }),
       removeDataset: () => Promise.resolve({ applied: true, reason: null }),
+      swipe: () => Promise.resolve({ applied: true, reason: null }),
+      blink: () => Promise.resolve({ applied: true, reason: null }),
     };
     expect(scriptControls()).toBeNull();
     setScriptControls(controls);

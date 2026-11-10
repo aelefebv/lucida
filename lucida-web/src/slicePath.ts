@@ -16,6 +16,8 @@ import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { traceRecorder } from "./trace/recorder.ts";
+import { comparisonClip } from "./comparison.ts";
+import type { PixelRect } from "./renderer/layerBatches.ts";
 
 export type SliceState = Record<string, never>;
 
@@ -284,6 +286,11 @@ export function pushLabelLayers(
   }
 }
 
+/** Give the layers from `start` on the clip a comparison sets their dataset, if any. */
+function clipSliceLayers(layers: SliceLayerParams[], start: number, clip: PixelRect | null): void {
+  if (clip) for (let i = start; i < layers.length; i++) layers[i].clip = clip;
+}
+
 /** Result of the plan+fetch phase, passed to the upload+render phase. */
 interface SlicePlanResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
@@ -343,6 +350,11 @@ function uploadAndRenderSlice(
     // Nor is a layer the cut misses drawn, so the readout, which probes the
     // drawn frame, finds no value for it.
     if (outsideCut(resolved, plane)) continue;
+    // A comparison shows a dataset on its side of the divider, or not at all
+    // while a blink shows the other. Either way it stays planned and resident.
+    const clip = comparisonClip(scene, dsId, canvasW, canvasH);
+    if (clip === "hidden") continue;
+    const firstLayer = layers.length;
 
     // Each image's extent across the screen and down it, in its dataset's
     // frame, and the frame's placement on those two axes of the scene frame.
@@ -376,6 +388,7 @@ function uploadAndRenderSlice(
         zoom: currentZoom,
       });
     }
+    clipSliceLayers(layers, firstLayer, clip);
     // A label overlay is drawn on an XY cut only, and its planner fetches
     // nothing in a side view.
     if (plane !== "xy") continue;
@@ -388,10 +401,12 @@ function uploadAndRenderSlice(
         labelMemberPositions = undefined;
       }
     }
+    const firstLabel = layers.length;
     pushLabelLayers(layers, ds.manifest, members, placement, dsSettings.label_settings, labelMemberPositions, {
       t: resolved.t,
       z: resolved.z_range.start,
     });
+    clipSliceLayers(layers, firstLabel, clip);
   }
 
   client.resize(canvasW, canvasH);

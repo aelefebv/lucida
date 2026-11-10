@@ -59,7 +59,7 @@ GENERATOR = REPO / "extras" / "synthetic_ome_zarr.py"
 EXE = ".exe" if os.name == "nt" else ""
 
 # What a scenario can require of a dataset.
-TRAITS = ("volume", "time", "channels", "collection", "labels")
+TRAITS = ("volume", "time", "channels", "collection", "labels", "physical")
 CAMERAS = ("slice", "arcball")
 SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "mobile", "fullUi", "steps"}
 DEFAULT_SUITE = "quick"
@@ -175,6 +175,9 @@ def traits_from_options(options: tuple[str, ...]) -> frozenset[str]:
             traits.add("collection")
     if "--labels" in options:
         traits.add("labels")
+    # Length units let a dataset line up with others that declare them.
+    if "--unit" in options:
+        traits.add("physical")
     return frozenset(traits)
 
 

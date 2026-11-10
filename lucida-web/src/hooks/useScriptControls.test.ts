@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import initWasm, { normalize_dataset_url } from "lucida-core";
 
+import type { Comparison, ComparisonActions, LineUp } from "../comparison.ts";
 import { resolvedLayer, resolvedLayers } from "../resolvedLayerFixtures.ts";
 import { noteDatasetOpened, noteDatasetOpenFailed, scriptControls } from "../trace/steps.ts";
 import type { DatasetState } from "../types.ts";
@@ -24,6 +25,39 @@ function dataset(id: string, channels = 2, labels = 1): DatasetState {
       labels: Array.from({ length: labels }, (_, i) => ({ name: `label-${i}` })),
     },
   } as unknown as DatasetState;
+}
+
+/** Comparison controls over a comparison of their own, recording each call. */
+function fakeComparison(verdict: LineUp = { verdict: "yes" }) {
+  let current: Comparison | null = null;
+  const calls: unknown[][] = [];
+  const edit = (change: Partial<Comparison>) => {
+    if (current) current = { ...current, ...change };
+  };
+  const actions: ComparisonActions = {
+    current: () => current,
+    start: (a, b, mode) => {
+      calls.push(["start", a, b, mode]);
+      if (verdict.verdict === "yes") current = { a, b, mode, divider: 0.5, showing: "a" };
+      return verdict;
+    },
+    end: () => {
+      current = null;
+    },
+    setMode: (mode) => {
+      calls.push(["mode", mode]);
+      edit({ mode });
+    },
+    setDivider: (divider) => {
+      calls.push(["divider", divider]);
+      edit({ divider });
+    },
+    flip: () => {
+      calls.push(["flip"]);
+      edit({ showing: current?.showing === "a" ? "b" : "a" });
+    },
+  };
+  return { actions, calls };
 }
 
 function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInputs {
@@ -44,6 +78,7 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
     removeDataset: vi.fn(),
     datasetHealth: () => Promise.resolve([]),
     captureView: () => null,
+    comparison: fakeComparison().actions,
     selectedDatasetId: null,
     datasetsRef: { current: datasets },
     ...overrides,
@@ -215,6 +250,60 @@ describe("useScriptControls", () => {
     });
     expect(given.removeDataset).not.toHaveBeenCalled();
     unmount();
+  });
+
+  /** Two open datasets, `a` above `b` in the layer panel, which lists the last drawn first. */
+  function twoOpen(comparison: ComparisonActions, extra: string[] = []): ScriptControlInputs {
+    const datasets = new Map<string, DatasetState>();
+    for (const id of ["a", "b", ...extra]) datasets.set(id, dataset(id));
+    return inputs({
+      comparison,
+      datasetsRef: { current: datasets },
+      resolvedLayers: resolvedLayers(
+        ...extra.map((id) => resolvedLayer(id, [0])),
+        resolvedLayer("b", [0]),
+        resolvedLayer("a", [0]),
+      ),
+    });
+  }
+
+  it("swipes and blinks the two open datasets, the upper one left", async () => {
+    const fake = fakeComparison();
+    const { unmount } = renderHook(() => useScriptControls(twoOpen(fake.actions)));
+    await expect(scriptControls()!.swipe(0.3, null)).resolves.toEqual({ applied: true, reason: null });
+    await expect(scriptControls()!.swipe(null, null)).resolves.toEqual({ applied: true, reason: null });
+    await expect(scriptControls()!.blink(null)).resolves.toEqual({ applied: true, reason: null });
+    expect(fake.calls).toEqual([
+      ["start", "a", "b", "swipe"],
+      ["divider", 0.3],
+      ["mode", "blink"],
+      ["flip"],
+    ]);
+    expect(fake.actions.current()).toMatchObject({ mode: "blink", divider: 0.3, showing: "b" });
+    unmount();
+  });
+
+  it("says why a pair can't be compared, and names the one to compare with past two", async () => {
+    const apart = fakeComparison({ verdict: "apart" });
+    const first = renderHook(() => useScriptControls(twoOpen(apart.actions)));
+    await expect(scriptControls()!.blink(null)).resolves.toEqual({
+      applied: false,
+      reason: "They don't overlap in physical space.",
+    });
+    first.unmount();
+
+    const fake = fakeComparison();
+    const url = normalize_dataset_url("/data/c.zarr");
+    const given = {
+      ...twoOpen(fake.actions, ["c"]),
+      selectedDatasetId: "b",
+      datasetHealth: () => Promise.resolve([{ workspace_dataset_id: "c", source_url: url }]),
+    };
+    const second = renderHook(() => useScriptControls(given));
+    await expect(scriptControls()!.swipe(0.5, null)).resolves.toMatchObject({ applied: false });
+    await expect(scriptControls()!.swipe(0.5, "/data/c.zarr")).resolves.toEqual({ applied: true, reason: null });
+    expect(fake.calls[0]).toEqual(["start", "b", "c", "swipe"]);
+    second.unmount();
   });
 
   it("hands the view read straight through", () => {

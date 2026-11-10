@@ -1,0 +1,31 @@
+{
+  "description": "swipe-drag in the volume view: the divider dragged to a fifth, a shift-drag pan, then the divider dragged to four fifths, each at a person's pace",
+  "requires": [
+    "physical",
+    "volume"
+  ],
+  "camera": "arcball",
+  "fullUi": true,
+  "steps": [
+    {
+      "kind": "add",
+      "url": "dataset:physical-volume-coarse"
+    },
+    {
+      "kind": "swipe",
+      "at": 0.2,
+      "durationMs": 1500
+    },
+    {
+      "kind": "pan",
+      "dx": -300,
+      "dy": -100,
+      "durationMs": 1500
+    },
+    {
+      "kind": "swipe",
+      "at": 0.8,
+      "durationMs": 1500
+    }
+  ]
+}

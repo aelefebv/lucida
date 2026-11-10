@@ -273,6 +273,34 @@ pub struct SpaceMap {
     pub world: Affine,
 }
 
+/// Whether two datasets line up in physical space, so either one shows the
+/// same region wherever it is drawn.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum LineUp {
+    /// Both declare length units and their placed extents overlap.
+    Yes,
+    /// The same dataset twice.
+    Same,
+    /// The scene holds no image for these.
+    Missing {
+        datasets: Vec<lucida_content::DatasetId>,
+    },
+    /// These declare no length units, so where they sit says nothing
+    /// physical.
+    NoPhysicalScale {
+        datasets: Vec<lucida_content::DatasetId>,
+    },
+    /// Both declare lengths, and their extents share no region.
+    Apart,
+}
+
+/// Whether two placed boxes, `[min, max]` per axis, share a region of some
+/// size on every axis. Boxes that only touch don't.
+pub fn boxes_overlap(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3])) -> bool {
+    (0..3).all(|i| a.0[i] < b.1[i] && b.0[i] < a.1[i])
+}
+
 /// The map from a member's unit cube to its box in the dataset's frame. The
 /// box starts at the member's layout `position` and spans its level-0 `shape`
 /// `[z, y, x]`. The cube's Y points up, so its top face is the image's first
@@ -418,6 +446,14 @@ mod tests {
         let json = serde_json::to_string(&bare).unwrap();
         assert!(!json.contains("meters"), "{json}");
         assert_eq!(serde_json::from_str::<SceneFrame>(&json).unwrap(), bare);
+    }
+
+    #[test]
+    fn boxes_overlap_only_when_they_share_a_region_on_every_axis() {
+        let unit = ([0.0; 3], [1.0; 3]);
+        assert!(boxes_overlap(unit, ([0.5; 3], [2.0; 3])));
+        assert!(!boxes_overlap(unit, ([1.0, 0.0, 0.0], [2.0, 1.0, 1.0])));
+        assert!(!boxes_overlap(unit, ([0.0, 0.0, 3.0], [1.0, 1.0, 4.0])));
     }
 
     #[test]
