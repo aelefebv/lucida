@@ -541,6 +541,13 @@ export interface LagReading {
    * Null when none did.
    */
   inputToFrame: TimingSummary | null;
+  /**
+   * The window's first input, from its event to the GPU finishing the first
+   * frame dispatched after it: what the start of a gesture waits for, which
+   * a long gesture's p95 hides. Null when that frame had not finished when
+   * the run closed.
+   */
+  firstInputMs: number | null;
   /** Inputs whose frame had not finished when the run closed, left out of the timing. */
   unanswered: number;
   longTasks: {

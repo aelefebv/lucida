@@ -141,7 +141,7 @@ def test_scenarios_name_what_they_need() -> None:
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
     kinds = {step["kind"] for scenario in SCENARIOS.values() for step in scenario.steps}
-    assert {"mode", "plane", "fit", "resize", "contrast", "add", "remove"} <= kinds
+    assert {"mode", "plane", "fit", "resize", "contrast", "add", "remove", "minimap"} <= kinds
     paced = {
         name
         for name, scenario in SCENARIOS.items()
@@ -158,6 +158,10 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "slice-zoom",
         "slice-zoomed-pan",
         "large-canvas-orbit",
+        "settle-then-orbit",
+        "phone-settle-then-orbit",
+        "minimap-navigate",
+        "minimap-orbit",
     }
 
 
@@ -401,6 +405,7 @@ def test_the_phone_suite_opens_cold_on_a_phone_at_ratio_3_on_both_pages() -> Non
         "large-image.phone-full-ui.dpr3",
         "volume.phone-cold-open.dpr3",
         "volume.phone-full-ui.dpr3",
+        "volume.phone-settle-then-orbit.dpr3",
     ]
     assert perf.viewport_args(SCENARIOS["phone-cold-open"]) == ["--width", "390", "--height", "844", "--mobile"]
     assert perf.viewport_args(SCENARIOS["phone-full-ui"]) == [
@@ -526,6 +531,7 @@ def lag(p95: float, longest: float, dropped: int | None) -> dict:
     return {
         "inputs": 40,
         "inputToFrame": {"samples": 40, "p50Ms": p95 / 2, "p95Ms": p95, "maxMs": p95 * 2},
+        "firstInputMs": p95 * 2,
         "unanswered": 0,
         "longTasks": {"count": 1 if longest else 0, "longestMs": longest, "totalMs": longest},
         "frames": {"presented": 80, "dropped": dropped, "displayIntervalMs": 17.6},
@@ -576,10 +582,11 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
     assert fields["topLimiter"] == "fetch.wire"
     assert fields["verdict"] == "clear"
     assert fields["sourceThrottle"] == REMOTE
-    assert (fields["inputToFrameP95Ms"], fields["longestTaskMs"], fields["droppedFrames"]) == (28.4, 61, 2)
+    assert (fields["firstInputMs"], fields["inputToFrameP95Ms"]) == (56.8, 28.4)
+    assert (fields["longestTaskMs"], fields["droppedFrames"]) == (61, 2)
     # Every error the allow list does not name, repeats included, wherever it fell.
     assert fields["errors"] == 4
-    no_lag = {"inputToFrameP95Ms": None, "longestTaskMs": None, "droppedFrames": None}
+    no_lag = {"firstInputMs": None, "inputToFrameP95Ms": None, "longestTaskMs": None, "droppedFrames": None}
     no_load = dict.fromkeys(
         ("firstFrameMs", "settleMs", "prefetchMs", "bytesFetched", "bytesWire", "chunksFetched", "chunksShort", "topLimiter")
     )
@@ -613,6 +620,7 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
             "verdict": "stall",
             "durationMs": None,
             **no_load,
+            "firstInputMs": 56.8,
             "inputToFrameP95Ms": 28.4,
             "longestTaskMs": 61,
             "droppedFrames": 2,
@@ -639,7 +647,7 @@ def test_a_field_the_diagnostic_lacks_is_a_dash_not_a_number(tmp_path: Path) -> 
     assert cells["first frame"] == cells["settle"] == cells["prefetch"] == cells["fetched"] == "-"
     assert cells["short"] == cells["top limiter"] == "-"
     # A run that took no input has no lag reading, not one of zeros.
-    assert cells["input to frame p95"] == cells["longest task"] == cells["dropped"] == "-"
+    assert cells["first input to frame"] == cells["input to frame p95"] == cells["longest task"] == cells["dropped"] == "-"
     assert cells["errors"] == "0"
     assert cells["verdict"] == "unsettled"
     assert cells["run"] == "run.json"
@@ -665,7 +673,7 @@ def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path
     assert lines[0] == "adapter: nvidia ampere (hardware adapter)"
     assert (
         "| image | cold-open | 1 | - | 212 ms | 1,840 ms | 2,410 ms | - | 12.4 MB | 5.1 MB | 96 | 7 | 512 "
-        "| fetch.wire (attributed) | - | - | - | 0 | clear |"
+        "| fetch.wire (attributed) | - | - | - | - | 0 | clear |"
     ) in markdown
     assert "| error: the server refused \\| the open |" in markdown
     # The header, its rule, and one row per run.
@@ -776,6 +784,14 @@ def test_the_server_keeps_the_callers_throttles(monkeypatch) -> None:
     assert env["LUCIDA_SOURCE_THROTTLE"] == "remote"
     assert env["LUCIDA_LINK_THROTTLE"] == "broadband"
     assert "LUCIDA_DB_URL" not in env
+
+
+def test_the_cli_keeps_the_callers_browser_and_its_flags(monkeypatch) -> None:
+    monkeypatch.setenv("LUCIDA_BROWSER", "/opt/chrome")
+    monkeypatch.setenv("LUCIDA_BROWSER_ARGS", "--use-webgpu-adapter=swiftshader")
+    env = perf._scrubbed_env()
+    assert env["LUCIDA_BROWSER"] == "/opt/chrome"
+    assert env["LUCIDA_BROWSER_ARGS"] == "--use-webgpu-adapter=swiftshader"
 
 
 # -- repeats, baselines and comparison ---------------------------------------

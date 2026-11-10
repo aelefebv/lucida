@@ -59,6 +59,8 @@ function makeData(mode: "slice" | "volume", overrides: Partial<MinimapOverlayDat
   const model = identity();
   return {
     viewProj: identity(),
+    invViewProj: identity(),
+    members: [],
     layers: [
       { datasetId: "ds", modelMatrix: model, invModelMatrix: model },
       { datasetId: "ds", modelMatrix: model, invModelMatrix: model },

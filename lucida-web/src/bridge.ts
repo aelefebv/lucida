@@ -38,6 +38,8 @@ export interface DatasetSourceCacheStats {
   misses: number;
   evictions: number;
   backend_errors: number;
+  /** Chunk reads that found nothing written, served as fill: valid data, not a failure. */
+  absent_reads: number;
   source_reads: number;
   source_read_millis: number;
 }

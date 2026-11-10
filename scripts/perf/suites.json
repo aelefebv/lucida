@@ -20,9 +20,9 @@
       "ratios": [1, 2]
     },
     "phone": {
-      "description": "a large 2D image and a 3D volume opened cold on a phone, at its ratio of 3, on the capture surface and on the full viewer page",
+      "description": "a large 2D image and a 3D volume opened cold on a phone, at its ratio of 3, on the capture surface and on the full viewer page, and the volume orbited after it settles",
       "datasets": ["large-image", "volume"],
-      "scenarios": ["phone-cold-open", "phone-full-ui"],
+      "scenarios": ["phone-cold-open", "phone-full-ui", "phone-settle-then-orbit"],
       "ratios": [3]
     }
   }

@@ -2,7 +2,7 @@
   "manifest": {
     "format_version": 2,
     "dataset_id": "wds-collection-77",
-    "name": "screening-collection-01.zarr",
+    "name": "grid-collection-01.zarr",
     "kind": {
       "Collection": {
         "rows": [

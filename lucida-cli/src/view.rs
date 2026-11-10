@@ -9,7 +9,7 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
     BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
-    RenderMode, Scene,
+    RenderMode, Scene, declared_channels,
 };
 use lucida_core::view::ViewState;
 use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
@@ -1657,12 +1657,16 @@ fn layer_states(scene: &Scene) -> Vec<LayerState> {
                 &default_settings
             };
             let shown = layer.channel_indices();
+            let defaults = Colormap::defaults_for_channels(
+                layer.channel_count as usize,
+                declared_channels(manifest),
+            );
             let channels = (0..layer.channel_count)
                 .map(|channel| {
                     channel_state(
                         settings,
                         channel,
-                        layer.channel_count,
+                        defaults[channel as usize],
                         shown.contains(&channel),
                     )
                 })
@@ -1691,10 +1695,12 @@ fn layer_states(scene: &Scene) -> Vec<LayerState> {
         .collect()
 }
 
+/// `default_colormap` is what the channel opens with, for a channel the
+/// settings hold no entry for.
 fn channel_state(
     settings: &DatasetDisplaySettings,
     channel: u32,
-    channel_count: u32,
+    default_colormap: Colormap,
     shown: bool,
 ) -> ChannelState {
     let default_settings;
@@ -1702,7 +1708,7 @@ fn channel_state(
         settings
     } else {
         default_settings = ChannelSettings {
-            colormap: Colormap::default_for_channel(channel as usize, channel_count as usize),
+            colormap: default_colormap,
             ..Default::default()
         };
         &default_settings

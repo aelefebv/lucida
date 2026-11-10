@@ -3,6 +3,6 @@
   "command": {
     "type": "rename_dataset",
     "id": "wds-0f3a",
-    "name": "kidney multiplex (deconvolved)"
+    "name": "multichannel volume (processed)"
   }
 }

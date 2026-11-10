@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
+import type { WasmScene } from "lucida-core";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { MinimapOverlayData, RenderLoop } from "../renderLoop.ts";
 import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
@@ -71,6 +72,8 @@ function overlayData(currentZ = 3): MinimapOverlayData {
   const model = identityMatrix();
   return {
     viewProj: identityMatrix(),
+    invViewProj: identityMatrix(),
+    members: [],
     layers: [{ datasetId: "ds", modelMatrix: model, invModelMatrix: model }],
     datasetLayers: [
       { datasetId: "ds", modelMatrix: model, invModelMatrix: model, width: 64, height: 64, depth: 32 },
@@ -116,6 +119,13 @@ function makeLoop(): { loop: RenderLoop; overlay: () => (data: MinimapOverlayDat
   };
 }
 
+/** Minimap input's targets, none of which these tests steer. */
+const NAVIGATION = {
+  engine: { scene: () => null, canvas: () => null },
+  emitPresence: () => {},
+  breakFollow: () => {},
+};
+
 /** A client whose readiness report the test delivers by hand. */
 type ClientStub = RenderClient & {
   pipelinesCompiled: boolean;
@@ -159,7 +169,7 @@ describe("the minimap overlay at mount", () => {
     const recorder = recordContextRequests(() => spyingContext({ clearRect }));
     try {
       const { loop } = makeLoop();
-      render(<Minimap client={makeClient(false)} activeLoop={loop} />);
+      render(<Minimap client={makeClient(false)} activeLoop={loop} {...NAVIGATION} />);
 
       const twoD = recorder.requests.filter((request) => request.kind === "2d");
       expect(twoD).toHaveLength(1);
@@ -179,7 +189,7 @@ describe("the minimap overlay's content draws", () => {
     try {
       const { loop, overlay } = makeLoop();
       const client = makeClient(false);
-      render(<Minimap client={client} activeLoop={loop} />);
+      render(<Minimap client={client} activeLoop={loop} {...NAVIGATION} />);
       expect(client.handler).not.toBeNull();
       const twoD = () => recorder.requests.filter((request) => request.kind === "2d");
       const atMount = twoD().length;
@@ -206,7 +216,7 @@ describe("the minimap overlay's content draws", () => {
     const recorder = recordContextRequests();
     try {
       const { loop, overlay } = makeLoop();
-      render(<Minimap client={makeClient(true)} activeLoop={loop} />);
+      render(<Minimap client={makeClient(true)} activeLoop={loop} {...NAVIGATION} />);
       overlay()(overlayData(4));
       expect(drawViewportOverlays).toHaveBeenCalledOnce();
     } finally {
@@ -217,7 +227,7 @@ describe("the minimap overlay's content draws", () => {
   it("stops the loop drawing it while folded or hidden, and keeps its canvases", () => {
     const { loop } = makeLoop();
     const client = makeClient(true);
-    const { container } = render(<Minimap client={client} activeLoop={loop} />);
+    const { container } = render(<Minimap client={client} activeLoop={loop} {...NAVIGATION} />);
     const drawingOn = () => expect(loop.setMinimap).toHaveBeenLastCalledWith(true, expect.any(Number), expect.any(Function));
     drawingOn();
 
@@ -238,9 +248,77 @@ describe("the minimap overlay's content draws", () => {
   it("withdraws its handler when it unmounts", () => {
     const { loop } = makeLoop();
     const client = makeClient(false);
-    const { unmount } = render(<Minimap client={client} activeLoop={loop} />);
+    const { unmount } = render(<Minimap client={client} activeLoop={loop} {...NAVIGATION} />);
     expect(client.handler).not.toBeNull();
     unmount();
     expect(client.handler).toBeNull();
+  });
+});
+
+describe("input on the minimap", () => {
+  /** A slice scene whose camera only records where it was centred. */
+  function sliceScene() {
+    const state = { center: [500, 500] as [number, number] };
+    const scene = {
+      camera_mode: () => "slice",
+      slice_plane: () => "xy",
+      center: () => state.center,
+      zoom: () => 1,
+      apply_command: (json: string) => {
+        const command = JSON.parse(json);
+        if (command.type === "set_center") state.center = [command.x, command.y];
+      },
+    };
+    return { scene: scene as unknown as WasmScene, state };
+  }
+
+  /** A frame whose minimap camera is the identity, over one 100 × 100 member at the scene origin. */
+  function identityFrame(): MinimapOverlayData {
+    const model = identityMatrix();
+    return {
+      ...overlayData(0),
+      members: [
+        { datasetId: "ds", memberId: "m0", modelMatrix: model, invModelMatrix: model, position: [0, 0], width: 100, height: 100, depth: 1 },
+      ],
+    };
+  }
+
+  function mount() {
+    const { loop, overlay } = makeLoop();
+    Object.assign(loop, { markInput: vi.fn(), setRenderScale: vi.fn() });
+    const { scene, state } = sliceScene();
+    const emitPresence = vi.fn();
+    const mainCanvas = { clientWidth: 10, clientHeight: 10 } as unknown as HTMLCanvasElement;
+    render(
+      <Minimap
+        client={makeClient(true)}
+        activeLoop={loop}
+        engine={{ scene: () => scene, canvas: () => mainCanvas }}
+        emitPresence={emitPresence}
+        breakFollow={() => {}}
+      />,
+    );
+    overlay()(identityFrame());
+    const surface = screen.getByRole("application", { name: /Minimap/ });
+    return { loop, state, emitPresence, surface };
+  }
+
+  it("centres the view where a click lands, as an input the loop and peers hear of", () => {
+    const { loop, state, emitPresence, surface } = mount();
+    // The member fills the minimap's top-right quarter, so this is its (75, 25).
+    const at = { clientX: 175, clientY: 25, button: 0, pointerId: 1, pointerType: "mouse" };
+    fireEvent.pointerDown(surface, at);
+    fireEvent.pointerUp(surface, at);
+    expect(state.center[0]).toBeCloseTo(75, 6);
+    expect(state.center[1]).toBeCloseTo(25, 6);
+    expect(loop.markInput).toHaveBeenCalledWith("pan", expect.any(Number));
+    expect(emitPresence).toHaveBeenCalled();
+  });
+
+  it("keeps the arrow keys from the window's shortcuts while it has focus", () => {
+    const { surface } = mount();
+    expect(surface.tabIndex).toBe(0);
+    expect(fireEvent.keyDown(surface, { key: "ArrowLeft" })).toBe(false);
+    expect(fireEvent.keyDown(surface, { key: "Enter" })).toBe(true);
   });
 });

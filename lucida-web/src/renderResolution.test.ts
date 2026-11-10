@@ -4,6 +4,7 @@ import {
   cappedPixelRatioScale,
   GESTURE_START_STEP_UP,
   LONG_FRAME_MS,
+  MAX_MARCH_COARSENING,
   MIN_ADAPTIVE_SCALE,
   RESTORE_AFTER_MS,
   TARGET_FRAME_MS,
@@ -139,5 +140,77 @@ describe("AdaptiveResolution", () => {
     res.noteInput(1000);
     expect(res.scale).toBe(1);
     expect(res.msUntilRestore()).toBeNull();
+  });
+
+  describe("a gesture's first frame", () => {
+    // A gesture frame at the interaction render scale of 0.5 and a march of
+    // twice the step costs an eighth of a full-quality frame.
+    const SHARE = 0.25 / 2;
+
+    it("starts as low as the last full-quality frame says it must, before any frame is measured", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(200);
+      res.noteInput(5);
+      res.fitGestureStart(SHARE);
+      // 200 ms / 8 is 25 ms at full scale: the scale that brings it to the target.
+      expect(res.scale).toBeCloseTo(Math.sqrt(TARGET_FRAME_MS / 25), 6);
+      expect(res.marchCoarsening).toBe(1);
+      // Once per gesture.
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBeCloseTo(Math.sqrt(TARGET_FRAME_MS / 25), 6);
+    });
+
+    it("never starts below the floor, however slow the full-quality frame, and coarsens the march past it", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(11_000);
+      res.noteInput(5);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+      expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+      // Restored with the resolution.
+      c.advance(RESTORE_AFTER_MS);
+      expect(res.restoreIfIdle()).toBe(true);
+      expect(res.marchCoarsening).toBe(1);
+    });
+
+    it("coarsens the march only as far as the frame at the floor needs", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      // At the floor a quarter of the pixels: 704 / 8 / 4 is 22 ms.
+      res.noteFullQualityFrame(704);
+      res.noteInput(5);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+      expect(res.marchCoarsening).toBeCloseTo(22 / TARGET_FRAME_MS, 6);
+    });
+
+    it("keeps the gesture's starting scale where its frames would keep up", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(LONG_FRAME_MS / SHARE);
+      res.noteInput(5);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(1);
+    });
+
+    it("fits only the first frame of a gesture, not the frames after its first input", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteInput(5);
+      // No full-quality frame finished yet, so the fit has nothing to go on.
+      res.fitGestureStart(SHARE);
+      res.noteFullQualityFrame(400);
+      c.advance(16);
+      res.noteInput(6);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(1);
+      // A new gesture is fitted again.
+      c.advance(RESTORE_AFTER_MS);
+      res.noteInput(7);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBeLessThan(1);
+    });
   });
 });

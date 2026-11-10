@@ -6,7 +6,7 @@ pub use layers::{ResolvedLayer, ShownChannel, in_channel_context};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
-    RenderMode,
+    RenderMode, declared_channels,
 };
 
 use std::collections::HashMap;

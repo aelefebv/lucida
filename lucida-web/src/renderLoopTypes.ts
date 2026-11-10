@@ -4,6 +4,7 @@ import type { DatasetManifest } from "./manifestTypes.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
 import type { Session } from "./session.ts";
+import type { SliceViewportMemberInput } from "./minimapPath.ts";
 
 export interface DatasetEntry {
   manifest: DatasetManifest;
@@ -19,8 +20,11 @@ export interface RenderLoopOptions {
 
 export interface MinimapOverlayData {
   viewProj: Float32Array;
+  invViewProj: Float32Array;
   /** Per-member layers (for bounding boxes, slice planes). */
   layers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[];
+  /** Every drawn member's placement in the scene and the minimap's world, which minimap input inverts. */
+  members: readonly SliceViewportMemberInput[];
   /** Per-dataset layers (for volume frustum overlays). Uses dataset-level model matrix and full volume extent. */
   datasetLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array; width: number; height: number; depth: number }[];
   /** Per-member slice viewport intersections in member-local voxel coordinates. */
@@ -96,6 +100,10 @@ export interface TickContext {
    * keep the full device-pixel viewport.
    */
   resolutionScale: number;
+  /** Level steps per ray-march step in the volume path's frame: 1 for full quality. */
+  marchStepScale: number;
+  /** Bands the volume path draws a frame in; 1 draws it whole. */
+  bands: number;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
 }

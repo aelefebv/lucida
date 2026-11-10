@@ -2,7 +2,7 @@
 import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { bootstrapWorker } from "./worker/bootstrap.ts";
-import { dispatchMessage } from "./worker/dispatch.ts";
+import { dispatchMessage, noteAbandonedFrame } from "./worker/dispatch.ts";
 import { handleDestroy } from "./worker/lifecycle.ts";
 import { inOrder } from "./worker/inOrder.ts";
 import { reportWorkerErrors } from "../pageErrors.ts";
@@ -55,5 +55,11 @@ async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
 // and replacing a lost device takes its turn in the same order.
 const enqueue = inOrder((task: () => Promise<void>) => task(), postError);
 self.onmessage = (e: MessageEvent<MainToWorkerMessage>) => {
+  // Read now, not in turn: it stops the frame being drawn, which holds every
+  // message behind it.
+  if (e.data.type === "abandonFrame") {
+    if (ctx) noteAbandonedFrame(ctx, e.data.frameSeq);
+    return;
+  }
   enqueue(() => handleMessage(e.data));
 };

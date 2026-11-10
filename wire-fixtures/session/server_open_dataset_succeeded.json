@@ -1,12 +1,12 @@
 {
   "type": "open_dataset_succeeded",
   "request_id": "web-7d2f45aa",
-  "url": "gs://lucida-fixtures/kidney-multiplex.zarr",
+  "url": "gs://lucida-fixtures/multichannel-volume.zarr",
   "seq": 43,
   "opened": {
     "manifest": {
       "dataset_id": "wds-0f3a",
-      "name": "kidney-multiplex.zarr",
+      "name": "multichannel-volume.zarr",
       "kind": "Single",
       "entities": [
         {
@@ -14,7 +14,7 @@
           "kind": "Image",
           "parent": null,
           "labels": {
-            "name": "kidney-multiplex.zarr"
+            "name": "multichannel-volume.zarr"
           }
         }
       ],
@@ -330,7 +330,7 @@
   },
   "diagnostic": {
     "stage": "complete",
-    "source_url": "gs://lucida-fixtures/kidney-multiplex.zarr",
+    "source_url": "gs://lucida-fixtures/multichannel-volume.zarr",
     "workspace_dataset_id": "wds-0f3a",
     "dataset_source_id": "source-9b31",
     "message": "dataset opened"

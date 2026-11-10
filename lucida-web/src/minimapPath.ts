@@ -260,10 +260,27 @@ export interface SliceViewportMemberInput {
   datasetId: string;
   memberId: string;
   modelMatrix: Float32Array;
+  invModelMatrix: Float32Array;
+  /** Where the member's top-left corner sits in the slice view's scene XY. */
   position: [number, number];
   width: number;
   height: number;
   depth: number;
+}
+
+/**
+ * The scene XY the slice view shows: its center, out by half a canvas of
+ * `widthPx` × `heightPx` device pixels at `zoom` device pixels per unit.
+ */
+export function sliceViewSceneBounds(
+  center: ArrayLike<number>,
+  zoom: number,
+  widthPx: number,
+  heightPx: number,
+): SliceViewBounds {
+  const halfW = widthPx / (2 * zoom);
+  const halfH = heightPx / (2 * zoom);
+  return { minX: center[0] - halfW, minY: center[1] - halfH, maxX: center[0] + halfW, maxY: center[1] + halfH };
 }
 
 export function intersectSliceViewWithMember(
@@ -612,6 +629,7 @@ function buildMinimapOverview(
           datasetId: dsId,
           memberId,
           modelMatrix: model,
+          invModelMatrix: invModel,
           position: memberPositions[img.owner] ?? memberPositions[memberId] ?? [0, 0],
           width: level0.shape[Axis.X],
           height: level0.shape[Axis.Y],
@@ -801,11 +819,7 @@ export function tickMinimap(
     if (mode === "slice" && scene.slice_plane() === "xy") {
       const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
       const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
-      const z = scene.zoom();
-      const c = scene.center();
-      const halfW = mainW / (2 * z);
-      const halfH = mainH / (2 * z);
-      const sceneBounds = { minX: c[0] - halfW, minY: c[1] - halfH, maxX: c[0] + halfW, maxY: c[1] + halfH };
+      const sceneBounds = sliceViewSceneBounds(scene.center(), scene.zoom(), mainW, mainH);
       sliceViewports = cache.sliceViewportMembers
         .map((member) => intersectSliceViewWithMember(sceneBounds, member))
         .filter((viewport): viewport is MinimapOverlayData["sliceViewports"][number] => viewport !== null);
@@ -816,7 +830,9 @@ export function tickMinimap(
 
     state.overlayCallback({
       viewProj: cache.viewProj,
+      invViewProj: cache.invViewProj,
       layers: cache.overlayLayers,
+      members: cache.sliceViewportMembers,
       datasetLayers: cache.datasetOverlayLayers,
       sliceViewports,
       mode,

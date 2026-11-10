@@ -795,8 +795,8 @@ mod tests {
     /// The sparse fixture leaves a checkerboard of inner chunks out of every
     /// shard's index. Those read as the not-found a missing object reads as,
     /// which is the answer the fill path already serves. The cached store
-    /// counts no failure for them, because the index read succeeded and
-    /// nothing else was read.
+    /// counts neither a failure nor an absent read for them, because the
+    /// index read succeeded and nothing else was read.
     #[tokio::test]
     async fn an_inner_chunk_absent_from_the_index_reads_as_not_found_and_not_as_a_failure() {
         let (layout, shards, store) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 0);
@@ -820,12 +820,14 @@ mod tests {
             }
         }
         assert_eq!(store.stats().backend_errors, 0);
+        assert_eq!(store.stats().absent_reads, 0);
     }
 
     /// Level 2 of the sparse fixture is declared and never written, so its
     /// shard object is not there. Every inner chunk of it is then not found,
     /// as every chunk of an unwritten unsharded level is. The absence is
-    /// remembered, so after the first inner chunk the rest cost no read.
+    /// remembered, so after the first inner chunk the rest cost no read, and
+    /// the one read is absent rather than failed.
     #[tokio::test]
     async fn every_inner_chunk_of_a_missing_shard_object_reads_as_not_found_after_one_read() {
         let (layout, shards, store) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 2);
@@ -843,11 +845,13 @@ mod tests {
                 read.result
             );
         }
+        let stats = store.stats();
         assert_eq!(
-            store.stats().source_reads,
-            1,
+            stats.source_reads, 1,
             "one read answered for the whole shard"
         );
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.absent_reads, 1);
     }
 
     /// A 2x2 shard of raw inner chunks with position 2 left unwritten.
@@ -1139,6 +1143,32 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("crc32c"), "{message}");
         assert!(message.contains("0/c/0/0"), "{message}");
+    }
+
+    /// A shard index read that fails for any reason but absence is a failed
+    /// read, counted as one. It is not remembered as a missing shard, so the
+    /// next read tries again and finds the inner chunk.
+    #[tokio::test]
+    async fn a_failed_index_read_counts_as_failed_and_is_not_remembered_as_missing() {
+        for location in [IndexLocation::End, IndexLocation::Start] {
+            let layout = hand_built_layout(location);
+            let (shards, cached, store) = hand_built_cache(location, 0).await;
+            store.fail.store(true, Ordering::SeqCst);
+
+            let failed = read_position(&shards, &cached, &layout, 0).await;
+            assert!(
+                matches!(failed.result, Err(object_store::Error::Generic { .. })),
+                "{location:?}: {:?}",
+                failed.result
+            );
+            let stats = cached.stats();
+            assert_eq!(stats.backend_errors, 1, "{location:?}");
+            assert_eq!(stats.absent_reads, 0, "{location:?}");
+
+            store.fail.store(false, Ordering::SeqCst);
+            let read = read_position(&shards, &cached, &layout, 0).await;
+            assert_eq!(&read.result.unwrap()[..], b"first", "{location:?}");
+        }
     }
 
     /// An object shorter than the index the metadata declares is not a

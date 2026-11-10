@@ -7,5 +7,10 @@
   position: absolute;
   top: 0;
   left: 0;
-  pointer-events: none;
+  /* A drag steers the view rather than scrolling the page. */
+  touch-action: none;
+}
+.minimap-overlay:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
 }

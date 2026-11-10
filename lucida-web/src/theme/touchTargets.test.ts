@@ -20,6 +20,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   ".lc-saved-view-visibility-option": "a whole card with a title and a hint line",
   ".lc-toast": "a whole toast",
   ".lc-ws-card-link": "a whole dashboard card",
+  ".minimap-overlay": "the whole minimap, a fixed 200px square",
 };
 
 /** Controls that fall short under a finger. Take one out once it is sized. */

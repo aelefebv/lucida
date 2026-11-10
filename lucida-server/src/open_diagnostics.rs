@@ -365,6 +365,7 @@ mod tests {
             misses: 7,
             evictions: 0,
             backend_errors: 0,
+            absent_reads: 0,
             coalesced: 0,
             source_reads: 7,
             source_read_millis: 900,

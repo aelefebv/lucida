@@ -170,7 +170,7 @@ describe("computeLabelChunkRequests", () => {
 
   it("skips a giant single-scale label with no fitting level", () => {
     const manifest: DatasetManifest = {
-      dataset_id: "ds-0", name: "wsi", kind: "Single",
+      dataset_id: "ds-0", name: "large-plane", kind: "Single",
       entities: [], transforms: [], source_layouts: [], default_layout_id: null,
       images: [image5("img-0", [1, 1, 1, 20000, 20000], [1, 1, 1, 512, 512], [1, 1, 1, 1, 1])],
       labels: [{

@@ -205,14 +205,14 @@ const IDENTITY_TRANSLATION = (tx: number, ty: number): number[] => [
 
 const expectedManifestSingle: DatasetManifest = {
   dataset_id: "wds-0f3a",
-  name: "kidney-multiplex.zarr",
+  name: "multichannel-volume.zarr",
   kind: "Single",
   entities: [
     {
       id: "img-0",
       kind: "Image",
       parent: null,
-      labels: { name: "kidney-multiplex.zarr" },
+      labels: { name: "multichannel-volume.zarr" },
     },
   ],
   transforms: [
@@ -388,7 +388,7 @@ const expectedCollectionSharedMultiscale = {
 const expectedManifestCollection: DatasetManifestWire = {
   format_version: 2,
   dataset_id: "wds-collection-77",
-  name: "screening-collection-01.zarr",
+  name: "grid-collection-01.zarr",
   kind: {
     Collection: {
       rows: ["A", "B"],
@@ -643,7 +643,7 @@ const expectedBoxAnnotation: WireAnnotation = {
     {
       id: "comment-91",
       author: "grace@example",
-      text: "glomerulus boundary looks off here",
+      text: "region boundary looks off here",
     },
   ],
   anchor: "img-0",
@@ -814,9 +814,9 @@ const expectedLinkThrottle: LinkThrottleReport = {
 
 const expectedSourceHealth: DatasetSourceHealth = {
   workspace_dataset_id: "wds-0f3a",
-  name: "kidney-multiplex.zarr",
+  name: "multichannel-volume.zarr",
   status: "degraded",
-  source_url: "gs://lucida-fixtures/kidney-multiplex.zarr",
+  source_url: "gs://lucida-fixtures/multichannel-volume.zarr",
   backend: "gcs",
   binding: { status: "healthy", message: "bound to gcs source" },
   source_cache: {
@@ -828,6 +828,7 @@ const expectedSourceHealth: DatasetSourceHealth = {
     misses: 421,
     evictions: 17,
     backend_errors: 2,
+    absent_reads: 64,
     source_reads: 430,
     source_read_millis: 51280,
   },
@@ -1096,7 +1097,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(JSON.parse(raw)).toStrictEqual({
       type: "dataset_open_progress",
       request_id: "web-7d2f45aa",
-      url: "gs://lucida-fixtures/kidney-multiplex.zarr",
+      url: "gs://lucida-fixtures/multichannel-volume.zarr",
       diagnostic: expectedProgressDiagnostic,
     });
 
@@ -1107,7 +1108,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     // boolean before delivery, so the handler sees `warning: false`.
     expect(onDatasetOpenProgress).toHaveBeenCalledWith(
       "web-7d2f45aa",
-      "gs://lucida-fixtures/kidney-multiplex.zarr",
+      "gs://lucida-fixtures/multichannel-volume.zarr",
       { ...expectedProgressDiagnostic, warning: false },
     );
   });
@@ -1153,12 +1154,12 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(JSON.parse(raw)).toStrictEqual({
       type: "open_dataset_succeeded",
       request_id: "web-7d2f45aa",
-      url: "gs://lucida-fixtures/kidney-multiplex.zarr",
+      url: "gs://lucida-fixtures/multichannel-volume.zarr",
       seq: 43,
       opened: expectedDatasetOpenedSingle,
       diagnostic: {
         stage: "complete",
-        source_url: "gs://lucida-fixtures/kidney-multiplex.zarr",
+        source_url: "gs://lucida-fixtures/multichannel-volume.zarr",
         workspace_dataset_id: "wds-0f3a",
         dataset_source_id: "source-9b31",
         message: "dataset opened",
@@ -1581,7 +1582,7 @@ const commandCases: [string, ClaimedFixture, Record<string, unknown>][] = [
       dataset_id: "wds-0f3a",
       annotation_id: "pin-4c1d",
       id: "comment-91",
-      text: "glomerulus boundary confirmed",
+      text: "region boundary confirmed",
     },
   ],
   [
@@ -1614,7 +1615,7 @@ const commandCases: [string, ClaimedFixture, Record<string, unknown>][] = [
     "rename_dataset",
     claimFixture("session/client_command_rename_dataset.json"),
     // hooks/useDatasetSettings.ts handleLayerRename.
-    { type: "rename_dataset", id: "wds-0f3a", name: "kidney multiplex (deconvolved)" },
+    { type: "rename_dataset", id: "wds-0f3a", name: "multichannel volume (processed)" },
   ],
 ];
 
@@ -1693,7 +1694,7 @@ describe("wire goldens: client messages through Bridge senders", () => {
   const clientOpenRemoteDataset = claimFixture("session/client_open_remote_dataset.json");
   it("sendOpenRemoteDataset emits the open envelope with a fresh request id", () => {
     const { bridge, ws } = openBridge();
-    bridge.sendOpenRemoteDataset("gs://lucida-fixtures/kidney-multiplex.zarr");
+    bridge.sendOpenRemoteDataset("gs://lucida-fixtures/multichannel-volume.zarr");
     const sent = lastSent(ws) as { request_id: string };
     expect(sent.request_id).toMatch(/^web-/);
     const golden = clientOpenRemoteDataset.json() as {
@@ -1937,8 +1938,8 @@ describe("wire goldens: dataset-open payloads", () => {
             image_id: "multiscale-0",
             wire_format: { Zstd: { data_type: "Uint16" } },
             levels: [
-              { level_index: 0, path: "kidney-multiplex.zarr/0" },
-              { level_index: 1, path: "kidney-multiplex.zarr/1" },
+              { level_index: 0, path: "multichannel-volume.zarr/0" },
+              { level_index: 1, path: "multichannel-volume.zarr/1" },
             ],
             store_prefix: "gs://lucida-fixtures",
           },
@@ -1953,7 +1954,7 @@ describe("wire goldens: dataset-open payloads", () => {
           {
             image_id: "multiscale-0",
             wire_format: { Raw: { data_type: "Float32" } },
-            levels: [{ level_index: 0, path: "/data/kidney-multiplex.zarr/0" }],
+            levels: [{ level_index: 0, path: "/data/multichannel-volume.zarr/0" }],
             store_prefix: null,
           },
         ],
