@@ -51,8 +51,9 @@ export interface MultiscaleInfo {
 
 /**
  * Display metadata for one channel (mirrors `lucida-content`'s `ChannelInfo`).
- * `label` is non-empty when present; `color` is the raw omero hex with no
- * leading `#`.
+ * `label` is non-empty when present; `color` is the color the dataset
+ * declares, verbatim, usually hex with no leading `#`. The core seeds the
+ * channel's colormap from it.
  */
 export interface ChannelInfo {
   label: string;
