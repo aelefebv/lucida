@@ -820,13 +820,11 @@ impl Scene {
 
     /// Pick the closest entity hit by a ray cast from screen coordinates.
     ///
-    /// For Slice (2D) mode: tests the voxel-space ray against each member's
-    /// voxel-space AABB (position + shape). The Slice camera operates in
-    /// voxel coordinates, so the ray and member bounds are in the same space.
+    /// For Slice (2D) mode: tests the ray's scene-frame point against each
+    /// member's layout box, placed in the scene frame as its dataset is.
     ///
-    /// For 3D modes (Arcball/Fly): uses the rendering transform (which
-    /// includes Y-flip, global correction, and top-alignment) so the ray
-    /// test matches what the camera actually sees.
+    /// For 3D modes (Arcball/Fly): uses the rendering transform, placed in
+    /// world space, so the ray test matches what the camera actually sees.
     pub fn ray_pick(
         &self,
         dataset_id: &DatasetId,
@@ -3813,7 +3811,7 @@ mod tests {
     /// the identity (within fp epsilon) — picking/upload run the inverse, the
     /// render runs the forward, so a broken round-trip would desync them. Check
     /// it for an offset, anisotropic member inside a multi-dataset scene (the
-    /// hardest case: non-zero translation + global correction + top-align).
+    /// hardest case: a non-zero translation, scaled into a shared world space).
     #[test]
     fn rendering_transform_forward_inverse_round_trips_to_identity() {
         let mut scene = Scene::new([800, 600]);
@@ -3870,9 +3868,9 @@ mod tests {
 
     /// Open a 512-voxel-cube dataset ("big") next to a two-group collection whose
     /// groups are 256 voxels across ("collection", first group at the layout origin,
-    /// second offset). With isotropic unit spacing the collection's global
-    /// correction is a real 0.5 and its top-align term is (512-200)/512 —
-    /// non-trivial placement on every axis this module corrects.
+    /// second offset). With isotropic unit spacing the collection measures a
+    /// real 0.5 of world space and its top row sits (512-200)/512 above its
+    /// bottom: non-trivial placement on every axis.
     fn scene_with_big_and_collection() -> Scene {
         let mut scene = Scene::new([800, 600]);
         scene.apply(
@@ -4107,9 +4105,10 @@ mod tests {
 
     #[test]
     fn fit_camera_to_dataset_centers_slice_on_voxel_xy_midpoint() {
-        // The Slice camera lives in voxel space (see ray_pick), so the 2D fit
-        // centers on the voxel midpoint [W/2, H/2]. The normalized midpoint
-        // (~0.5) would frame a sub-pixel speck at the origin.
+        // The Slice camera lives in the scene frame, which a lone dataset's
+        // samples measure, so the 2D fit centers on [W/2, H/2]. The
+        // normalized midpoint (~0.5) would frame a sub-pixel speck at the
+        // origin.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1); // 256x256 XY
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -4345,7 +4344,7 @@ mod tests {
     #[test]
     fn dataset_fit_bounds_follows_the_camera_space() {
         // The box a Home move frames must be the one the viewer's own fit
-        // uses: voxel space for the slice camera, normalized world space for 3D.
+        // uses: the scene frame for the slice camera, normalized world space for 3D.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1",
@@ -5170,7 +5169,7 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_grouped_collection_opened("coll", 3, 5);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        // 3D mode so the global correction + top-alignment terms are exercised.
+        // 3D mode so placement into world space is exercised.
         scene.set_mode_3d();
 
         let ids = scene.member_render_ids("coll");
