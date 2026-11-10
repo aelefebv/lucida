@@ -1,7 +1,7 @@
 import type { MinimapOverlayData } from "../renderLoop.ts";
 import { paint, tokenColors } from "../theme/tokenColors.ts";
 import type { ResolvedColor, TokenName } from "../theme/tokens.ts";
-import { transformPoint, projectToCanvas } from "./minimapMath.ts";
+import { transformPoint, projectToCanvas, sliceLocalToUnit, sliceUnitDepth } from "./minimapMath.ts";
 import { drawOrientationCube, type CubeColors } from "./orientationCube.ts";
 import { drawFrustumIntersection } from "./frustumOverlay.ts";
 
@@ -162,7 +162,7 @@ function drawSlicePlane(
   canvasW: number, canvasH: number,
   color: ResolvedColor,
 ) {
-  const nz = currentZ / Math.max(depth - 1, 1);
+  const nz = sliceUnitDepth(currentZ, depth);
   const overhang = 0.1;
   const corners: [number, number, number][] = [
     [-overhang, -overhang, nz], [1 + overhang, -overhang, nz],
@@ -201,16 +201,14 @@ function drawSliceViewportRect(
   canvasW: number, canvasH: number,
   color: ResolvedColor,
 ) {
-  const nz = currentZ / Math.max(depth - 1, 1);
-  // Normalize voxel bounds to unit space (unbounded).
-  // Y is flipped: voxel Y=0 is image-top, but unit Y=0 is 3D-bottom (Y-up convention).
-  const uMinX = sliceViewBounds.minX / width;
-  const uMaxX = sliceViewBounds.maxX / width;
-  const uMinY = 1 - sliceViewBounds.maxY / height;
-  const uMaxY = 1 - sliceViewBounds.minY / height;
-
+  const nz = sliceUnitDepth(currentZ, depth);
+  // Minimap input inverts this mapping (`minimapNavigation.ts`).
+  const { minX, minY, maxX, maxY } = sliceViewBounds;
   const corners: [number, number, number][] = [
-    [uMinX, uMinY, nz], [uMaxX, uMinY, nz], [uMaxX, uMaxY, nz], [uMinX, uMaxY, nz],
+    sliceLocalToUnit(minX, maxY, width, height, nz),
+    sliceLocalToUnit(maxX, maxY, width, height, nz),
+    sliceLocalToUnit(maxX, minY, width, height, nz),
+    sliceLocalToUnit(minX, minY, width, height, nz),
   ];
 
   const projected = corners.map(([ux, uy, uz]) => {

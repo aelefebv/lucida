@@ -1,0 +1,10 @@
+{
+  "description": "on the full viewer page, orbit the volume by dragging across the minimap at a person's pace, then click the data to recentre on it",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "fullUi": true,
+  "steps": [
+    { "kind": "minimap", "action": "drag", "at": [60, 100], "to": [140, 100], "durationMs": 1500 },
+    { "kind": "minimap", "action": "click", "at": [90, 110] }
+  ]
+}

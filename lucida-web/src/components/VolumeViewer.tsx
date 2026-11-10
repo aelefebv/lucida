@@ -24,7 +24,7 @@ import { frameClock } from "../frameClock.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CameraMode } from "../sceneStore.ts";
 import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
-import { RESTORE_AFTER_MS } from "../renderResolution.ts";
+import { FULL_RENDER_SCALE, GESTURE_RESTORE_DELAY_MS, INTERACTION_RENDER_SCALE, SCALE_RESTORE_DELAY_MS } from "./volumeRenderScale.ts";
 
 interface Props {
   session: Session;
@@ -62,17 +62,6 @@ interface Props {
 }
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
-const INTERACTION_RENDER_SCALE = 0.5;
-const FULL_RENDER_SCALE = 1.0;
-/** After a press ends, the gesture is over. */
-const SCALE_RESTORE_DELAY_MS = 50;
-/**
- * A wheel or a touch gesture sends nothing when it ends, so its scale holds
- * until input has been quiet as long as the adaptive resolution waits before
- * it counts a gesture over. A slow wheel's notches are then one gesture, not
- * a full-resolution frame between each.
- */
-const GESTURE_RESTORE_DELAY_MS = RESTORE_AFTER_MS;
 
 function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, cameraMode, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
