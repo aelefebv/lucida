@@ -508,8 +508,9 @@ mod tests {
             (
                 "three",
                 layer(
-                    (0..3)
-                        .map(|i| channel(Colormap::default_for_channel(i, 3, &[])))
+                    Colormap::defaults_for_channels(3, &[])
+                        .into_iter()
+                        .map(channel)
                         .collect(),
                 ),
             ),
@@ -544,8 +545,9 @@ mod tests {
         let view = view_with(&[(
             "three",
             layer(
-                (0..3)
-                    .map(|i| channel(Colormap::default_for_channel(i, 3, &declared)))
+                Colormap::defaults_for_channels(3, &declared)
+                    .into_iter()
+                    .map(channel)
                     .collect(),
             ),
         )]);

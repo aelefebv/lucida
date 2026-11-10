@@ -53,31 +53,64 @@ pub enum Colormap {
 }
 
 impl Colormap {
-    /// The colormap channel `index` of `channel_count` opens with: the one
-    /// nearest the color `declared` gives for that channel, else gray for an
-    /// image with one channel, else magenta, green and cyan in turn, so the
-    /// channels of a composite stay apart.
+    /// The colormaps a layer's `channel_count` channels open with, given the
+    /// channel metadata it `declared`, decided for the whole layer at once so
+    /// the channels of a composite stay apart.
+    ///
+    /// A channel alone takes the colormap nearest its declared color, else
+    /// gray. Among several, each channel takes the colormap nearest its
+    /// declared color unless an earlier channel holds it already. Every other
+    /// channel, with no usable color or a colliding one, takes the first
+    /// colormap no channel holds yet: magenta, green and cyan, then red, blue
+    /// and yellow. Once all six are held they are handed out again in order.
     ///
     /// This seeds new views only. A saved view leaves out the colormaps of its
     /// own frozen table, not these, so changing this never changes how a
     /// stored view restores.
-    pub fn default_for_channel(
-        index: usize,
-        channel_count: usize,
-        declared: &[ChannelInfo],
-    ) -> Self {
-        const CYCLE: [Colormap; 3] = [Colormap::Magenta, Colormap::Green, Colormap::Cyan];
-        if let Some(colormap) = declared
-            .get(index)
-            .and_then(|info| info.color.as_deref())
-            .and_then(Colormap::nearest_to_color)
-        {
-            colormap
-        } else if channel_count == 1 {
-            Colormap::Gray
-        } else {
-            CYCLE[index % CYCLE.len()]
+    pub fn defaults_for_channels(channel_count: usize, declared: &[ChannelInfo]) -> Vec<Self> {
+        const FREE_ORDER: [Colormap; 6] = [
+            Colormap::Magenta,
+            Colormap::Green,
+            Colormap::Cyan,
+            Colormap::Red,
+            Colormap::Blue,
+            Colormap::Yellow,
+        ];
+        let nearest = |i: usize| {
+            declared
+                .get(i)
+                .and_then(|info| info.color.as_deref())
+                .and_then(Colormap::nearest_to_color)
+        };
+        if channel_count == 1 {
+            return vec![nearest(0).unwrap_or(Colormap::Gray)];
         }
+        // Declared colors are placed before any free colormap is handed out,
+        // so a channel's own color never goes to an earlier channel without one.
+        let mut held: Vec<Colormap> = Vec::with_capacity(channel_count);
+        let placed: Vec<Option<Colormap>> = (0..channel_count)
+            .map(|i| {
+                let colormap = nearest(i).filter(|c| !held.contains(c))?;
+                held.push(colormap);
+                Some(colormap)
+            })
+            .collect();
+        placed
+            .into_iter()
+            .map(|colormap| {
+                colormap.unwrap_or_else(|| {
+                    if FREE_ORDER.iter().all(|c| held.contains(c)) {
+                        held.clear();
+                    }
+                    let free = FREE_ORDER
+                        .into_iter()
+                        .find(|c| !held.contains(c))
+                        .unwrap_or(FREE_ORDER[0]);
+                    held.push(free);
+                    free
+                })
+            })
+            .collect()
     }
 
     /// The colormap nearest `color`, an `rrggbb` hex color with or without a
@@ -263,19 +296,24 @@ impl DatasetDisplaySettings {
 
     /// Get a mutable reference to channel settings at the given index of a
     /// layer with `channel_count` channels and the `declared` channel
-    /// metadata, growing the vec with defaults if needed.
+    /// metadata, growing the vec with defaults if needed. A grown entry takes
+    /// the colormap [`Colormap::defaults_for_channels`] gives its index, so
+    /// it agrees with a freshly seeded layer.
     pub fn ensure_channel(
         &mut self,
         index: usize,
         channel_count: usize,
         declared: &[ChannelInfo],
     ) -> &mut ChannelSettings {
-        while self.channel_settings.len() <= index {
-            let i = self.channel_settings.len();
-            self.channel_settings.push(ChannelSettings {
-                colormap: Colormap::default_for_channel(i, channel_count, declared),
-                ..Default::default()
-            });
+        if self.channel_settings.len() <= index {
+            let defaults = Colormap::defaults_for_channels(channel_count.max(index + 1), declared);
+            let grown = defaults[self.channel_settings.len()..=index]
+                .iter()
+                .map(|&colormap| ChannelSettings {
+                    colormap,
+                    ..Default::default()
+                });
+            self.channel_settings.extend(grown);
         }
         &mut self.channel_settings[index]
     }
@@ -295,7 +333,7 @@ impl DatasetDisplaySettings {
 
     /// Build the complete default display settings for a freshly opened or
     /// restored dataset: one channel entry per channel (in
-    /// [`Colormap::default_for_channel`]) and one label entry per attached
+    /// [`Colormap::defaults_for_channels`]) and one label entry per attached
     /// label. Both the `DatasetOpened` apply path and `load_document` seed
     /// from here, because the layer panel and render path need full-length
     /// `channel_settings` and `label_settings` however the dataset entered
@@ -312,15 +350,18 @@ impl DatasetDisplaySettings {
             .and_then(|img| img.multiscale.levels.first())
             .map(|l| l.shape[1] as usize)
             .unwrap_or(1);
-        let declared = declared_channels(manifest);
         let labels = manifest.label_specs();
         Self {
-            channel_settings: (0..channel_count)
-                .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i, channel_count, declared),
-                    ..Default::default()
-                })
-                .collect(),
+            channel_settings: Colormap::defaults_for_channels(
+                channel_count,
+                declared_channels(manifest),
+            )
+            .into_iter()
+            .map(|colormap| ChannelSettings {
+                colormap,
+                ..Default::default()
+            })
+            .collect(),
             label_settings: labels
                 .iter()
                 .map(|_| LabelSettings {
@@ -1621,7 +1662,8 @@ mod annotation_view_tests {
 #[cfg(test)]
 mod declared_color_tests {
     //! A channel opens in the colormap nearest the color its dataset declares,
-    //! and in the cycle when it declares none that parses.
+    //! unless an earlier channel holds it, and otherwise in the first one no
+    //! channel holds, so the channels of a composite stay apart.
 
     use super::*;
 
@@ -1713,65 +1755,105 @@ mod declared_color_tests {
         }
     }
 
+    /// What a layer whose channels declare `colors` opens with.
+    fn defaults(colors: &[Option<&str>]) -> Vec<Colormap> {
+        Colormap::defaults_for_channels(colors.len(), &declared(colors))
+    }
+
     #[test]
-    fn a_declared_color_wins_over_the_cycle_and_a_bad_one_falls_back_to_it() {
+    fn a_declared_color_wins_and_a_bad_or_missing_one_takes_a_free_colormap() {
         let infos = declared(&[Some("00FFFF"), Some("not-a-color"), None, Some("FFFFFF")]);
-        let colormaps: Vec<Colormap> = (0..5)
-            .map(|i| Colormap::default_for_channel(i, 5, &infos))
-            .collect();
         assert_eq!(
-            colormaps,
+            Colormap::defaults_for_channels(5, &infos),
             [
                 Colormap::Cyan,
+                Colormap::Magenta,
                 Colormap::Green,
-                Colormap::Cyan,
                 Colormap::Gray,
-                // Past the declared list.
-                Colormap::Green,
+                // Past the declared list, and cyan is held.
+                Colormap::Red,
             ]
+        );
+    }
+
+    #[test]
+    fn channels_that_all_declare_white_open_apart() {
+        assert_eq!(
+            defaults(&[Some("FFFFFF"); 3]),
+            [Colormap::Gray, Colormap::Magenta, Colormap::Green]
+        );
+    }
+
+    #[test]
+    fn a_second_channel_declaring_nearly_the_same_color_takes_the_next_free_one() {
+        assert_eq!(
+            defaults(&[Some("00ff00"), Some("10f010")]),
+            [Colormap::Green, Colormap::Magenta]
+        );
+    }
+
+    #[test]
+    fn distinct_declared_colors_keep_their_colormaps() {
+        assert_eq!(
+            defaults(&[Some("ffff00"), Some("00ff00"), Some("ffffff")]),
+            [Colormap::Yellow, Colormap::Green, Colormap::Gray]
+        );
+    }
+
+    #[test]
+    fn a_channel_keeps_its_declared_color_over_an_earlier_channel_without_one() {
+        assert_eq!(
+            defaults(&[None, Some("ff00ff")]),
+            [Colormap::Green, Colormap::Magenta]
         );
     }
 
     #[test]
     fn a_one_channel_image_opens_in_its_declared_color_else_gray() {
-        assert_eq!(
-            Colormap::default_for_channel(0, 1, &declared(&[Some("00FF00")])),
-            Colormap::Green
-        );
-        assert_eq!(
-            Colormap::default_for_channel(0, 1, &declared(&[None])),
-            Colormap::Gray
-        );
-        assert_eq!(Colormap::default_for_channel(0, 1, &[]), Colormap::Gray);
+        assert_eq!(defaults(&[Some("FFFFFF")]), [Colormap::Gray]);
+        assert_eq!(defaults(&[Some("00FF00")]), [Colormap::Green]);
+        assert_eq!(defaults(&[None]), [Colormap::Gray]);
+        assert_eq!(Colormap::defaults_for_channels(1, &[]), [Colormap::Gray]);
     }
 
     #[test]
-    fn no_declared_colors_open_in_the_cycle() {
-        let colormaps: Vec<Colormap> = (0..4)
-            .map(|i| Colormap::default_for_channel(i, 4, &[]))
-            .collect();
+    fn no_declared_colors_open_in_the_cycle_then_the_other_hues() {
         assert_eq!(
-            colormaps,
+            Colormap::defaults_for_channels(3, &[]),
+            [Colormap::Magenta, Colormap::Green, Colormap::Cyan]
+        );
+        assert_eq!(
+            Colormap::defaults_for_channels(8, &[]),
             [
                 Colormap::Magenta,
                 Colormap::Green,
                 Colormap::Cyan,
-                Colormap::Magenta
+                Colormap::Red,
+                Colormap::Blue,
+                Colormap::Yellow,
+                // All six held, so they are handed out again.
+                Colormap::Magenta,
+                Colormap::Green,
             ]
         );
     }
 
     #[test]
-    fn a_grown_channel_takes_its_declared_color() {
-        let infos = declared(&[Some("FF0000"), Some("0000FF")]);
-        let mut settings = DatasetDisplaySettings::default();
-        settings.ensure_channel(1, 2, &infos);
-        let colormaps: Vec<Colormap> = settings
-            .channel_settings
-            .iter()
-            .map(|c| c.colormap)
-            .collect();
-        assert_eq!(colormaps, [Colormap::Red, Colormap::Blue]);
+    fn a_grown_channel_agrees_with_a_seeded_layer() {
+        for colors in [
+            vec![Some("FF0000"), Some("0000FF")],
+            vec![Some("FFFFFF"), Some("FFFFFF"), Some("FFFFFF")],
+        ] {
+            let infos = declared(&colors);
+            let mut settings = DatasetDisplaySettings::default();
+            settings.ensure_channel(colors.len() - 1, colors.len(), &infos);
+            let grown: Vec<Colormap> = settings
+                .channel_settings
+                .iter()
+                .map(|c| c.colormap)
+                .collect();
+            assert_eq!(grown, defaults(&colors));
+        }
     }
 }
 

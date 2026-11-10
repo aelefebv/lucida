@@ -165,8 +165,8 @@ pub fn plan_montage(
 /// sheet of a densely-labelled stack). `Some([lo, hi])` pins one **shared**
 /// window across all cells (auto off) so brightness is comparable and a clipped
 /// `lo` suppresses the background — and restores each channel's natural colormap
-/// (`default_for_channel`, from the `declared` channel metadata), which an
-/// explicit window would otherwise reset to gray.
+/// (`Colormap::defaults_for_channels`, from the `declared` channel metadata),
+/// which an explicit window would otherwise reset to gray.
 pub fn build_cell_view(
     ds_id: &str,
     cell: &MontageCell,
@@ -190,9 +190,10 @@ pub fn build_cell_view(
             // setting otherwise resets it to gray) and the same window, for
             // every channel of the composite.
             let channel_count = channel_count.max(1) as usize;
-            let channel_settings = (0..channel_count)
-                .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i, channel_count, declared),
+            let channel_settings = Colormap::defaults_for_channels(channel_count, declared)
+                .into_iter()
+                .map(|colormap| ChannelSettings {
+                    colormap,
                     contrast_min: lo,
                     contrast_max: hi,
                     ..ChannelSettings::default()
@@ -407,7 +408,7 @@ mod tests {
         assert_eq!(settings.channel_settings.len(), 2);
         assert_eq!(
             settings.channel_settings[1].colormap,
-            Colormap::default_for_channel(1, 2, &[])
+            Colormap::defaults_for_channels(2, &[])[1]
         );
         assert_eq!(settings.channel_settings[1].contrast_min, 60.0);
         assert_eq!(settings.channel_settings[1].contrast_max, 196.0);

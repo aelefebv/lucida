@@ -1646,9 +1646,9 @@ pub fn pin_display(
         let channel_count = channel_count.max(1);
         for index in 0..channel_count {
             let channel = settings.ensure_channel(index, channel_count, declared);
-            channel.colormap = pins
-                .colormap
-                .unwrap_or_else(|| Colormap::default_for_channel(index, channel_count, declared));
+            if let Some(colormap) = pins.colormap {
+                channel.colormap = colormap;
+            }
             if let Some((min, max)) = pins.contrast {
                 channel.contrast_min = min;
                 channel.contrast_max = max;
@@ -5224,12 +5224,10 @@ mod tests {
         let settings = &view.dataset_settings[&id];
         assert_eq!((settings.contrast_min, settings.contrast_max), (1.0, 3.0));
         assert_eq!(settings.channel_settings.len(), 2);
-        for (index, channel) in settings.channel_settings.iter().enumerate() {
+        let defaults = Colormap::defaults_for_channels(2, &[]);
+        for (channel, default) in settings.channel_settings.iter().zip(defaults) {
             assert_eq!((channel.contrast_min, channel.contrast_max), (1.0, 3.0));
-            assert_eq!(
-                channel.colormap,
-                Colormap::default_for_channel(index, 2, &[])
-            );
+            assert_eq!(channel.colormap, default);
         }
         assert!(settings.visible);
         assert_eq!(settings.render_mode, RenderMode::Translucent);
@@ -5237,7 +5235,7 @@ mod tests {
     }
 
     /// A pinned window keeps each channel in the colormap the page opens it
-    /// with, which follows the color the dataset declares for it.
+    /// with: its declared color, else the first colormap no channel holds.
     #[test]
     fn a_pinned_window_keeps_the_colormaps_the_dataset_declares() {
         let id = volume_id();
@@ -5268,7 +5266,7 @@ mod tests {
             .iter()
             .map(|channel| channel.colormap)
             .collect();
-        assert_eq!(colormaps, [Colormap::Cyan, Colormap::Green]);
+        assert_eq!(colormaps, [Colormap::Cyan, Colormap::Magenta]);
     }
 
     #[test]

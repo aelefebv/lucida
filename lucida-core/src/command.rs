@@ -2091,11 +2091,11 @@ mod tests {
         let ds_id = DatasetId("ds1".into());
         let ch = &scene.dataset_settings[&ds_id].channel_settings;
         assert_eq!(ch.len(), 4);
-        // Cycling: Magenta, Green, Cyan, Magenta
+        // Each channel apart: the cycle, then the next free hue.
         assert_eq!(ch[0].colormap, Colormap::Magenta);
         assert_eq!(ch[1].colormap, Colormap::Green);
         assert_eq!(ch[2].colormap, Colormap::Cyan);
-        assert_eq!(ch[3].colormap, Colormap::Magenta);
+        assert_eq!(ch[3].colormap, Colormap::Red);
         // All visible by default
         for c in ch {
             assert!(c.visible);
