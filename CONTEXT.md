@@ -264,6 +264,13 @@ _Avoid_: personal view (a saved view with `personal` visibility)
 
 ## Views
 
+**View**:
+One camera onto a scene: its 2D or 3D mode, its slice plane and axis
+positions, the datasets it shows, and the rectangle of the canvas it draws in.
+A scene holds a list of views, one by default, and they share its datasets,
+display settings and memory budgets. Commands steer the active view.
+_Avoid_: viewport (the canvas size a camera is fitted to)
+
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on
 another canvas it keeps the region it showed. A *framed* camera is the fit of
