@@ -1599,6 +1599,56 @@ mod tests {
         assert!(health.import_warnings.is_empty());
     }
 
+    /// A chunk that was never written reads as fill, and the health the
+    /// server reports counts it as absent: no failed read, nothing degraded.
+    #[tokio::test]
+    async fn dataset_health_counts_an_unwritten_chunk_as_absent_and_stays_healthy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("unwritten-chunk.zarr");
+        fs::create_dir_all(&data_dir).unwrap();
+        write_minimal_zarr(&data_dir);
+        let url = location(&data_dir);
+
+        let ctx = test_context(tmp.path()).await;
+        let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+        open_dataset(16, &url, &ctx, &progress_tx)
+            .await
+            .expect("open");
+
+        let sess = ctx.session().lock().await;
+        let manifest = sess
+            .document
+            .manifests
+            .values()
+            .next()
+            .expect("one manifest");
+        let binding = &sess.server_bindings[&manifest.dataset_id];
+        let before = binding.cache.stats().absent_reads;
+        let read = crate::chunk_read::read_chunk(
+            &binding.resolver,
+            &binding.cache,
+            &manifest.images()[0].image_id,
+            &lucida_content::ChunkKey::parse("0/0/0/0/0/0").unwrap(),
+            lucida_store::source_limiter::ReaderId::UNATTRIBUTED,
+            lucida_store::source_limiter::RequestLabel::UNATTRIBUTED,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(read, crate::chunk_read::ChunkRead::Absent { .. }));
+
+        let health = crate::handler::dataset_health_for_manifest(&sess, manifest);
+        assert_eq!(
+            health.status,
+            DatasetHealthStatus::Healthy,
+            "{:?}",
+            health.messages
+        );
+        let cache = health.source_cache.expect("a bound dataset has a cache");
+        assert_eq!(cache.backend_errors, 0);
+        assert_eq!(cache.absent_reads, before + 1);
+        assert!(health.messages.is_empty(), "{:?}", health.messages);
+    }
+
     /// A collection whose tiles differ in shape opens degraded, and health
     /// carries the warning apart from the cache notes, flagged as the reason.
     #[tokio::test]
