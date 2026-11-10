@@ -226,6 +226,28 @@ export interface SetXCommand {
   x: number;
 }
 
+/** How the canvas divides among the views: one across it, two side by side, or two stacked. */
+export type ViewLayoutName = "single" | "columns" | "rows";
+
+/** Divide the canvas as `layout` does. A view the layout adds starts showing nothing. */
+export interface SetViewLayoutCommand {
+  type: "set_view_layout";
+  layout: ViewLayoutName;
+}
+
+/** Make `view` the one every other viewport command steers. */
+export interface SetActiveViewCommand {
+  type: "set_active_view";
+  view: number;
+}
+
+/** Show these datasets in `view`, or every dataset, including ones opened later. */
+export interface SetViewDatasetsCommand {
+  type: "set_view_datasets";
+  view: number;
+  datasets: "all" | { only: string[] };
+}
+
 /** Cut another plane with the slice camera, which fits the data again. */
 export interface SetSlicePlaneCommand {
   type: "set_slice_plane";
@@ -358,6 +380,9 @@ export interface SetLabelOpacityCommand {
 }
 
 export type ViewportCommand =
+  | SetViewLayoutCommand
+  | SetActiveViewCommand
+  | SetViewDatasetsCommand
   | SetModeSliceCommand
   | SetModeArcballCommand
   | SetModeFlyCommand

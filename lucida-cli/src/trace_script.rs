@@ -270,7 +270,19 @@ pub enum ScriptStep {
         )]
         interval_ms: Option<u64>,
     },
+    /// Divide the canvas among views as `layout` does, `single`, `columns`
+    /// or `rows`, then show in each view, in order, the open datasets whose
+    /// source URLs `show` lists for it. A view `show` leaves out keeps what
+    /// it shows. Only a script file can name the datasets.
+    Views {
+        layout: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        show: Vec<Vec<String>>,
+    },
 }
+
+/// The view layouts, as a views step spells them, and how many views each holds.
+const VIEW_LAYOUTS: [(&str, usize); 3] = [("single", 1), ("columns", 2), ("rows", 2)];
 
 fn visible_by_default() -> bool {
     true
@@ -297,6 +309,7 @@ impl ScriptStep {
             Self::Minimap { .. } => "minimap",
             Self::Swipe { .. } => "swipe",
             Self::Blink { .. } => "blink",
+            Self::Views { .. } => "views",
         }
     }
 
@@ -452,6 +465,20 @@ impl ScriptStep {
                     .to_string(),
             ),
             Self::Blink { with, .. } => validate_with(with.as_deref()),
+            Self::Views { layout, show } => {
+                let Some((_, views)) = VIEW_LAYOUTS.iter().find(|(name, _)| name == layout) else {
+                    return Err(format!("a layout is single, columns or rows, not {layout}"));
+                };
+                if show.len() > *views {
+                    return Err(format!(
+                        "a {layout} layout has {views} view(s), not {}",
+                        show.len()
+                    ));
+                }
+                show.iter()
+                    .flatten()
+                    .try_for_each(|url| validate_with(Some(url)))
+            }
         }
     }
 
@@ -571,6 +598,7 @@ impl std::fmt::Display for ScriptStep {
                 pace_suffix(*interval_ms),
                 with_suffix(with.as_deref())
             ),
+            Self::Views { layout, .. } => write!(f, "views {layout}"),
         }
     }
 }
@@ -646,10 +674,15 @@ impl Script {
     /// resolve before they leave this process: a relative path means this
     /// process's working directory, which the server cannot know.
     pub fn dataset_urls_mut(&mut self) -> impl Iterator<Item = &mut String> {
-        self.steps.iter_mut().filter_map(|step| match step {
-            ScriptStep::Add { url } | ScriptStep::Remove { url } => Some(url),
-            ScriptStep::Swipe { with, .. } | ScriptStep::Blink { with, .. } => with.as_mut(),
-            _ => None,
+        self.steps.iter_mut().flat_map(|step| -> Vec<&mut String> {
+            match step {
+                ScriptStep::Add { url } | ScriptStep::Remove { url } => vec![url],
+                ScriptStep::Swipe { with, .. } | ScriptStep::Blink { with, .. } => {
+                    with.as_mut().into_iter().collect()
+                }
+                ScriptStep::Views { show, .. } => show.iter_mut().flatten().collect(),
+                _ => Vec::new(),
+            }
         })
     }
 
@@ -1872,6 +1905,11 @@ async fn run_step(
             let expression = seam_call("blink", &with_arg(with.as_deref()));
             let interval = Duration::from_millis(interval_ms.unwrap_or(0));
             input = Some(repeat_control(page, &expression, *count, interval, "flips", wait).await?);
+        }
+        ScriptStep::Views { layout, show } => {
+            let show = serde_json::to_string(show).expect("a list of URL lists serializes");
+            let expression = seam_call("views", &format!("{}, {show}", json_string(layout)));
+            input = Some(control_outcome(page, &expression, wait).await?);
         }
         // The minimap steers the slice view and the orbit camera; the fly
         // camera ignores it.
@@ -4049,6 +4087,33 @@ mod tests {
         assert_eq!(
             refused(r#"[{"kind": "blink", "count": 2, "with": " "}]"#),
             "step 1 (blink): a comparison names the dataset to compare with by its source URL"
+        );
+    }
+
+    #[test]
+    fn a_views_step_names_a_layout_and_the_datasets_each_view_shows() {
+        let mut script = Script::from_json(
+            r#"[{"kind": "views", "layout": "columns", "show": [["a.zarr"], ["b.zarr"]]}]"#,
+        )
+        .unwrap();
+        let views = ScriptStep::Views {
+            layout: "columns".to_string(),
+            show: vec![vec!["a.zarr".to_string()], vec!["b.zarr".to_string()]],
+        };
+        assert_eq!(script.steps, vec![views.clone()]);
+        assert_eq!(views.to_string(), "views columns");
+        // The datasets a layout shows resolve as an add's do.
+        let urls: Vec<&mut String> = script.dataset_urls_mut().collect();
+        assert_eq!(urls, vec!["a.zarr", "b.zarr"]);
+
+        let refused = |json: &str| Script::from_json(json).unwrap_err();
+        assert_eq!(
+            refused(r#"[{"kind": "views", "layout": "grid"}]"#),
+            "step 1 (views): a layout is single, columns or rows, not grid"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "views", "layout": "single", "show": [["a.zarr"], ["b.zarr"]]}]"#),
+            "step 1 (views): a single layout has 1 view(s), not 2"
         );
     }
 

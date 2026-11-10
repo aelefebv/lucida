@@ -649,6 +649,10 @@ describe("the trace seam", () => {
         calls.push(["blink", withUrl]);
         return Promise.resolve({ applied: true, reason: null });
       },
+      views: (layout, show) => {
+        calls.push(["views", layout, show]);
+        return Promise.resolve({ applied: true, reason: null });
+      },
     });
     try {
       expect(seam.view()).toBe(view);
@@ -717,6 +721,7 @@ describe("the trace seam", () => {
       removeDataset: () => Promise.resolve({ applied: true, reason: null }),
       swipe: () => Promise.resolve({ applied: true, reason: null }),
       blink: () => Promise.resolve({ applied: true, reason: null }),
+      views: () => Promise.resolve({ applied: true, reason: null }),
     });
     try {
       // The arguments arrive over the DevTools protocol, so the seam checks

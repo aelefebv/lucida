@@ -349,6 +349,12 @@ export interface LucidaTraceSeam {
    */
   blink(withUrl?: string | null): Promise<StepOutcome>;
   /**
+   * A scripted layout: divide the canvas as `layout` does, `"single"`,
+   * `"columns"` or `"rows"`, and show in each view, in order, the datasets
+   * opened from the source URLs `show` lists for it.
+   */
+  views(layout: string, show?: string[][]): Promise<StepOutcome>;
+  /**
    * Close the run in progress without exporting: the *Stop & analyse* path.
    *
    * A driver that gave up on a run that never settled passes `"timeout"`:
@@ -536,6 +542,16 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       const controls = scriptControls();
       if (!controls) return noControls();
       return controls.blink(withUrl);
+    },
+    views: async (layout: string, show: string[][] = []) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (layout !== "single" && layout !== "columns" && layout !== "rows") {
+        return refused(`a layout is single, columns or rows, not ${layout}`);
+      }
+      const urls = Array.isArray(show) && show.every((urls) => Array.isArray(urls) && urls.every((url) => typeof url === "string"));
+      if (!urls) return refused("a layout shows a list of source URLs for each view");
+      return controls.views(layout, show);
     },
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),
