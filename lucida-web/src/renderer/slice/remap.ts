@@ -33,6 +33,7 @@ export function remapSliceIndirection(
     renderRadiusView: options.renderRadiusView,
     entryByMember: options.entryByMember,
     failed: options.failed,
+    sliceAxis: atlas.axis,
     targetChunkZFor: (memberId, level) =>
       computeTargetChunkZ(atlas.entityZInfo.get(memberId)?.get(level), currentZ),
     holdsCurrentPlane: (memberId, level, slotIndex) => {

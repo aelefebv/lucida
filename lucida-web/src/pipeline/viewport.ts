@@ -1,3 +1,5 @@
+import type { SpatialAxis } from "../renderer/slicePlane.ts";
+
 /**
  * Viewport-derived visible-region descriptor. Computed by WASM each tick
  * from camera + selection; consumed by planning and the renderer for
@@ -16,4 +18,9 @@ export interface VisibleRegion {
   sortCenterVox: [number, number, number] | null;
   /** Six frustum half-planes, or null for 2-D views. */
   frustumPlanes: [number, number, number, number][] | null;
+  /**
+   * The axis a 2-D view cuts. Its extent here is the planes the view cuts,
+   * in each image's own samples. Absent: Z.
+   */
+  cutAxis?: SpatialAxis;
 }

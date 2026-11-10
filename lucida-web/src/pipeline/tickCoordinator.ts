@@ -16,13 +16,14 @@ import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
 import {
   plan,
   emitPlanRequests,
-  isZStep,
+  isCutStep,
   emptyPlanStats,
   initialPlanningState,
   type PlanningConfig,
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
-import { buildPlanningSnapshot } from "./planning/snapshot.ts";
+import { buildPlanningSnapshot, sliceCut } from "./planning/snapshot.ts";
+import { cutAxis, type SlicePlane, type SpatialAxis } from "../renderer/slicePlane.ts";
 import {
   applyViewQueryDelta,
   makeEntitySnapshot,
@@ -54,6 +55,7 @@ export type { MinimapChunkCoord } from "./planning/index.ts";
 import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
 import { orchTelemetryActive } from "./upload/telemetry/active.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
+import { regionInWorkerFrame, workerCutAxis, workerCutIndex } from "./upload/coldState/build.ts";
 import {
   computeActiveSetIndexMap,
   iterateActiveSetMembers,
@@ -103,8 +105,8 @@ interface PlannedDataset {
    * it. The view-move delta diffs `result.activeSet` against this.
    */
   previousActiveSet: ActiveSetEntry[];
-  /** Whether the selection stepped along Z since the previous plan ({@link isZStep}). */
-  zStep: boolean;
+  /** Whether the selection stepped along Z since the previous plan ({@link isCutStep}). */
+  cutStep: boolean;
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -148,8 +150,11 @@ interface DatasetRebuildSignature {
   visibleChannels: number[];
   /** Per-channel intensity display state emitted to the worker. */
   displayState: Record<number, ColdStateDisplayState>;
-  /** Full [start, end) voxel z-range this rebuild planned for. */
-  zRangeVox: [number, number];
+  /**
+   * The [start, end) planes along its cut axis this rebuild planned for: the
+   * z-range of an XY view, the Y or X plane of a side view.
+   */
+  cut: RegionCut;
   /**
    * Serialized dataset settings minus the pure intensity-display fields.
    * Every other field, including one added later, stays in, so it forces a
@@ -208,21 +213,62 @@ function nonDisplayKeyForDataset(ds: DatasetSettings | undefined): string {
   return JSON.stringify(ds ? nonDisplayDatasetShape(ds) : null);
 }
 
+/** The axis a region cuts and the [start, end) planes it spans along it. */
+interface RegionCut {
+  axis: SpatialAxis;
+  range: [number, number];
+}
+
+/** The planes `region` spans along its cut axis. */
+function regionCut(region: VisibleRegion): RegionCut {
+  const axis = region.cutAxis ?? "z";
+  const [minX, minY, maxX, maxY] = region.xyBoundsVox;
+  const range: [number, number] =
+    axis === "x" ? [minX, maxX] : axis === "y" ? [minY, maxY] : region.zRangeVox;
+  return { axis, range };
+}
+
+/** `region` with its planes along its cut axis replaced by `range`. */
+function withCutRange(region: VisibleRegion, range: [number, number]): VisibleRegion {
+  const axis = region.cutAxis ?? "z";
+  if (axis === "z") return { ...region, zRangeVox: range };
+  const [minX, minY, maxX, maxY] = region.xyBoundsVox;
+  const xyBoundsVox: [number, number, number, number] =
+    axis === "x" ? [range[0], minY, range[1], maxY] : [minX, range[0], maxX, range[1]];
+  return { ...region, xyBoundsVox };
+}
+
+function sameCut(a: RegionCut, b: RegionCut): boolean {
+  return a.axis === b.axis && a.range[0] === b.range[0] && a.range[1] === b.range[1];
+}
+
 /**
- * The [start, end) voxel z-range WASM reports for a dataset, with the same
- * null handling as {@link buildPlanningSnapshot} so it compares exactly
- * against the captured range. Read directly rather than from `scene.z()`,
- * which is only the slab start, so the fast paths notice a slab extension
- * that moves the end.
+ * The planes WASM reports a dataset's region spans along its cut axis, with
+ * the same null handling as {@link buildPlanningSnapshot} so it compares
+ * exactly against the captured cut. Read directly rather than from
+ * `scene.z()`, which is only the slab start, so the fast paths notice a slab
+ * extension that moves the end.
  */
-function readZRangeVox(
+function readCut(
   scene: TickContext["scene"],
   datasetId: string,
-): [number, number] {
+): RegionCut {
   const raw = scene.visible_region(datasetId);
-  if (!raw || raw === "null") return [0, 1];
-  const parsed = JSON.parse(raw) as { z_range?: [number, number] } | null;
-  return parsed?.z_range ?? [0, 1];
+  const parsed = raw && raw !== "null"
+    ? (JSON.parse(raw) as {
+      xy_bounds?: [number, number, number, number];
+      z_range?: [number, number];
+      cut_axis?: SpatialAxis;
+    } | null)
+    : null;
+  return regionCut({
+    xyBoundsVox: parsed?.xy_bounds ?? [0, 0, 0, 0],
+    zRangeVox: parsed?.z_range ?? [0, 1],
+    effectiveZoom: 1,
+    sortCenterVox: null,
+    frustumPlanes: null,
+    ...(parsed?.cut_axis !== undefined ? { cutAxis: parsed.cut_axis } : {}),
+  });
 }
 
 /**
@@ -278,13 +324,14 @@ function admitDatasetPlans(
   report: GpuCapacityReport | null,
 ): Admission[] {
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
+  const sliceAxis = cutAxis(ctx.scene.slice_plane() as SlicePlane);
   return admitPlans(
     plans.map(({ dsId, requests }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
-        slotOf: gpuSlotsFor(manifest, ctx.mode, report, gpuTotalBytes),
+        slotOf: gpuSlotsFor(manifest, ctx.mode, report, gpuTotalBytes, sliceAxis),
       };
     }),
     ctx.cpuCache.tierCapacity(),
@@ -792,7 +839,7 @@ export class TickCoordinator {
       // Capture what the worker holds before `nextState` overwrites it. The
       // view-move delta diffs the fresh active set against this.
       const previousActiveSet = planningStateForDataset.previousActiveSet;
-      const zStep = isZStep(planningStateForDataset.previousZ, selection, planningConfig.sliceBandPlanes);
+      const cutStep = isCutStep(planningStateForDataset.previousCut, selection, planningConfig.sliceBandPlanes);
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
@@ -820,7 +867,7 @@ export class TickCoordinator {
         selection,
         result,
         previousActiveSet,
-        zStep,
+        cutStep,
       });
     }
 
@@ -833,7 +880,7 @@ export class TickCoordinator {
       plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
     );
     for (const [index, planned] of plannedDatasets.entries()) {
-      const { dsId, dsSettings, layer, entities, visibleRegion, selection, zStep } = planned;
+      const { dsId, dsSettings, layer, entities, visibleRegion, selection, cutStep } = planned;
       const admission = admissions[index];
       const result: RequestPlan = {
         ...planned.result,
@@ -951,7 +998,8 @@ export class TickCoordinator {
         labelSettings: dsSettings?.label_settings,
         mode: ctx.mode as "slice" | "volume",
         config: planningConfig,
-        zStep,
+        cutStep,
+        cutAxis: selection.cut.axis,
       });
       const requestsWithLabels =
         labelRequests.length > 0
@@ -980,7 +1028,7 @@ export class TickCoordinator {
       this.lastRebuildByDataset.set(dsId, {
         visibleChannels: selection.visibleChannels,
         displayState: buildDisplayStateByChannel(layer),
-        zRangeVox: visibleRegion.zRangeVox,
+        cut: regionCut(visibleRegion),
         nonDisplayKey: nonDisplayKeyForDataset(dsSettings),
       });
     }
@@ -1156,10 +1204,7 @@ export class TickCoordinator {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) return false;
       if (nonDisplayKeyForDataset(dsSettings) !== sig.nonDisplayKey) return false;
-      const zRange = readZRangeVox(ctx.scene, dsId);
-      if (zRange[0] !== sig.zRangeVox[0] || zRange[1] !== sig.zRangeVox[1]) {
-        return false;
-      }
+      if (!sameCut(readCut(ctx.scene, dsId), sig.cut)) return false;
       const layer = layers.get(dsId);
       if (!numberArraysEqual(shownChannels(layer), sig.visibleChannels)) return false;
       const displayState = buildDisplayStateByChannel(layer);
@@ -1254,7 +1299,7 @@ export class TickCoordinator {
       planningState: PlanningState;
       entities: EntitySnapshot[];
       cachedRegion: VisibleRegion;
-      newZRange: [number, number];
+      newCut: RegionCut;
     }
     const perDataset: ScrubDataset[] = [];
     for (const [dsId, sig] of this.lastRebuildByDataset) {
@@ -1266,13 +1311,12 @@ export class TickCoordinator {
       if (!numberArraysEqual(visibleChannels, sig.visibleChannels)) return false;
       const displayState = buildDisplayStateByChannel(layer);
       if (!displayStatesEqual(displayState, sig.displayState)) return false;
-      const zRange = readZRangeVox(ctx.scene, dsId);
-      const oldWidth = sig.zRangeVox[1] - sig.zRangeVox[0];
-      const newWidth = zRange[1] - zRange[0];
+      const cut = readCut(ctx.scene, dsId);
+      if (cut.axis !== sig.cut.axis) return false;
+      const oldWidth = sig.cut.range[1] - sig.cut.range[0];
+      const newWidth = cut.range[1] - cut.range[0];
       if (newWidth !== oldWidth) return false;
-      if (zRange[0] !== sig.zRangeVox[0] || zRange[1] !== sig.zRangeVox[1]) {
-        anyScrub = true;
-      }
+      if (!sameCut(cut, sig.cut)) anyScrub = true;
 
       const planningState = this.planningState.get(dsId);
       const entities = this._lastEntities.get(dsId);
@@ -1281,7 +1325,7 @@ export class TickCoordinator {
 
       perDataset.push({
         dsId, dsSettings, layer, visibleChannels, planningState, entities, cachedRegion,
-        newZRange: zRange,
+        newCut: cut,
       });
     }
     if (!anyScrub && !args.minimapChanged) return false;
@@ -1301,17 +1345,15 @@ export class TickCoordinator {
       planningState: PlanningState;
       requests: ChunkRequest[];
       stats: PlanStats;
-      zStep: boolean;
+      cutStep: boolean;
     }
     const planned: ScrubPlanned[] = perDataset.map((pd) => {
-      const visibleRegion: VisibleRegion = {
-        ...pd.cachedRegion,
-        zRangeVox: pd.newZRange,
-      };
+      const visibleRegion = withCutRange(pd.cachedRegion, pd.newCut.range);
       // Each layer scrubs to the scene's t and z clamped into it.
       const selection: SelectionState = {
         t: pd.layer?.t ?? newT,
         z: pd.layer?.z_range.start ?? ctx.scene.z(),
+        cut: sliceCut(ctx.scene, pd.layer),
         visibleChannels: pd.visibleChannels,
         renderMode: "slice",
         interactionState: "idle",
@@ -1325,14 +1367,14 @@ export class TickCoordinator {
         minimapPending: minimapPendingFetch,
       };
       const stats = emptyPlanStats();
-      const zStep = isZStep(pd.planningState.previousZ, selection, planningConfig.sliceBandPlanes);
+      const cutStep = isCutStep(pd.planningState.previousCut, selection, planningConfig.sliceBandPlanes);
       const requests = emitPlanRequests(
         pd.planningState.previousActiveSet,
         snapshot,
         stats,
         planningConfig,
         pd.planningState.zoomDirection,
-        zStep,
+        cutStep,
       );
       return {
         dsId: pd.dsId,
@@ -1340,10 +1382,10 @@ export class TickCoordinator {
         snapshot,
         visibleRegion,
         selection,
-        planningState: { ...pd.planningState, previousZ: selection.z },
+        planningState: { ...pd.planningState, previousCut: selection.cut },
         requests,
         stats,
-        zStep,
+        cutStep,
       };
     });
 
@@ -1380,7 +1422,8 @@ export class TickCoordinator {
         labelSettings: p.dsSettings?.label_settings,
         mode,
         config: planningConfig,
-        zStep: p.zStep,
+        cutStep: p.cutStep,
+        cutAxis: p.selection.cut.axis,
       });
       const requestsWithLabels =
         labelRequests.length > 0
@@ -1401,9 +1444,9 @@ export class TickCoordinator {
         ctx,
         datasetId: p.dsId,
         currentT: p.selection.t,
-        currentZ: p.selection.z,
+        currentZ: workerCutIndex(p.selection),
         requests: p.requests,
-        visibleRegion: p.visibleRegion,
+        visibleRegion: regionInWorkerFrame(p.visibleRegion, workerCutAxis(p.selection)),
         epochs: scrubEpochs,
       });
 
@@ -1411,7 +1454,7 @@ export class TickCoordinator {
       // display edit compares against the scrubbed value; the display state,
       // channels, and non-display fingerprint were proven unchanged above.
       const scrubSig = this.lastRebuildByDataset.get(p.dsId);
-      if (scrubSig) scrubSig.zRangeVox = p.visibleRegion.zRangeVox;
+      if (scrubSig) scrubSig.cut = regionCut(p.visibleRegion);
     }
 
     // Reuse the cached roster and entity index, refreshing only the epochs.

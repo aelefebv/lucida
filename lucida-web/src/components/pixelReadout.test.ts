@@ -34,6 +34,15 @@ function sample(overrides: Partial<ProbeSample> = {}): ProbeSample {
 }
 
 describe("readoutBlocks", () => {
+  it("counts the axis a side view cuts from 1, as its scrubber does, and its screen axes from 0", () => {
+    const [block] = readoutBlocks([sample({ position: [162, 384, 140] })], context({ cutAxis: () => "y" }));
+    expect(block.position).toEqual([
+      { label: "x", value: "162" },
+      { label: "Y", value: "385" },
+      { label: "z", value: "140" },
+    ]);
+  });
+
   it("lists each channel's value under one position, Z counted from 1, and the level they share", () => {
     const blocks = readoutBlocks([sample({ channel: 1, value: 7 }), sample()], context());
     expect(blocks).toHaveLength(1);

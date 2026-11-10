@@ -11,7 +11,7 @@ import {
   emitMinimapLane,
   emitPrefetchLane,
   enumeratePlanChunks,
-  isZStep,
+  isCutStep,
   LaneRequests,
 } from "./emit.ts";
 import { buildActiveSet } from "./activeSet.ts";
@@ -40,10 +40,10 @@ function resolveZoomDirection(
 /**
  * Emit the chunk requests for an already-resolved active set. Lets a caller regenerate requests for a T scrub or Z-plane move
  * without `buildActiveSet`. Pure in `(activeSet, snapshot, config,
- * zoomDirection, zStep)`, so the result matches a full {@link plan} for
+ * zoomDirection, cutStep)`, so the result matches a full {@link plan} for
  * that selection. A scrub is not a zoom, so the stored `zoomDirection`
- * applies. `zStep` says the selection stepped along Z since the last plan
- * ({@link isZStep}). Postconditions match {@link plan}; mutates only `stats`.
+ * applies. `cutStep` says the selection stepped along its cut since the last plan
+ * ({@link isCutStep}). Postconditions match {@link plan}; mutates only `stats`.
  */
 export function emitPlanRequests(
   activeSet: ActiveSetEntry[],
@@ -51,7 +51,7 @@ export function emitPlanRequests(
   stats: PlanStats,
   config: PlanningConfig,
   zoomDirection: ZoomDirection | null,
-  zStep = false,
+  cutStep = false,
 ): ChunkRequest[] {
   const entityById = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) {
@@ -63,7 +63,7 @@ export function emitPlanRequests(
 
   emitDetailLane(chunks, snapshot, stats, lanes, config);
 
-  emitPrefetchLane(chunks, snapshot, stats, lanes, config, zStep);
+  emitPrefetchLane(chunks, snapshot, stats, lanes, config, cutStep);
 
   emitCoarseLane(chunks, snapshot, stats, lanes, config);
 
@@ -106,8 +106,8 @@ export function plan(
   const effectiveZoom = snapshot.visibleRegion.effectiveZoom;
   const zoomDirection = resolveZoomDirection(state, effectiveZoom);
 
-  const zStep = isZStep(state.previousZ, snapshot.selection, config.sliceBandPlanes);
-  const requests = emitPlanRequests(activeSet, snapshot, stats, config, zoomDirection, zStep);
+  const cutStep = isCutStep(state.previousCut, snapshot.selection, config.sliceBandPlanes);
+  const requests = emitPlanRequests(activeSet, snapshot, stats, config, zoomDirection, cutStep);
 
   const epochs: SceneEpochs = {
     ...snapshot.epochs,
@@ -118,7 +118,7 @@ export function plan(
     previousActiveSet: activeSet,
     previousEffectiveZoom: effectiveZoom,
     zoomDirection,
-    previousZ: snapshot.selection.z,
+    previousCut: snapshot.selection.cut,
   };
   return { requests, activeSet, epochs, stats, nextState };
 }

@@ -10,6 +10,7 @@
  */
 
 import type { LayoutSpec } from "./manifestTypes.ts";
+import type { SlicePlane } from "./renderer/slicePlane.ts";
 import type {
   BlendMode,
   Colormap,
@@ -213,6 +214,24 @@ export interface SetTCommand {
   t: number;
 }
 
+/** The plane an XZ view cuts along Y. */
+export interface SetYCommand {
+  type: "set_y";
+  y: number;
+}
+
+/** The plane a YZ view cuts along X. */
+export interface SetXCommand {
+  type: "set_x";
+  x: number;
+}
+
+/** Cut another plane with the slice camera, which fits the data again. */
+export interface SetSlicePlaneCommand {
+  type: "set_slice_plane";
+  plane: SlicePlane;
+}
+
 export interface SetContrastCommand {
   type: "set_contrast";
   min: number;
@@ -354,6 +373,9 @@ export type ViewportCommand =
   | SetZCommand
   | SetZRangeCommand
   | SetTCommand
+  | SetYCommand
+  | SetXCommand
+  | SetSlicePlaneCommand
   | SetContrastCommand
   | SetGammaCommand
   | SetDatasetOrderCommand

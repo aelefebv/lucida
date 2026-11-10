@@ -100,6 +100,8 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     view_query_delta: () => JSON.stringify({ Full: config.viewQuery }),
     member_positions: () => JSON.stringify(config.memberPositions),
     visible_region: () => JSON.stringify(config.visibleRegion),
+    slice_plane: () => "xy",
+    cut_index: () => 0,
     t: () => config.t,
     z: () => config.z,
     resolved_layers: () => resolvedLayersJson(config.datasetOrder, config.allSettings, config),
@@ -276,7 +278,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(markSent.mock.calls.map(c => c[0])).toEqual([chunk]);
@@ -292,7 +294,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
@@ -308,7 +310,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
@@ -327,10 +329,10 @@ describe("Uploader unified delivery", () => {
     });
     const uploader = new Uploader();
 
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
       uploader.handleChunkResidency("img-0", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
-      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     }
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
     const held = recordPointEvent.mock.calls.filter(([kind]) => kind === PointEvent.Held);
@@ -339,11 +341,11 @@ describe("Uploader unified delivery", () => {
     ]);
 
     // Held: the next ticks send nothing and ask for no further tick.
-    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0)).toBe(false);
+    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }))).toBe(false);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", displayStateByChannel: {} });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateSelection({
@@ -355,7 +357,7 @@ describe("Uploader unified delivery", () => {
       visibleRegion: { xyBoundsVox: [0, 0, 1, 1], zRangeVox: [1, 2], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
       epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
     });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 2);
     recordPointEvent.mockRestore();
   });
@@ -459,7 +461,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
 
     expect(sliceChunkData.mock.calls[0][1][0].data.byteLength).toBe(PLANE_BYTES);
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(PLANE_BYTES);
@@ -490,7 +492,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
 
     // The send loop itself is unaffected by the telemetry gate.
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
@@ -508,7 +510,7 @@ describe("Uploader unified delivery", () => {
     uploader.deliverToWorker(
       makeCtx({ cpuCache, scene, client: { sliceChunkData } }),
       8 * 1024 * 1024,
-      () => 0,
+      () => ({ axis: "z", index: 0 }),
     );
 
     expect(sliceChunkData.mock.calls[0][0]).toBe("img-0:ch2");

@@ -6,6 +6,7 @@ import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import type { BlendMode } from "./layerCompositor.ts";
 import type { DeviceLimits } from "./gpuContext.ts";
+import type { SpatialAxis } from "./slicePlane.ts";
 
 export interface InitMessage {
   type: "init";
@@ -58,9 +59,11 @@ export interface Chunk {
 }
 
 /**
- * One Z-plane of each of a member's chunks: each `chunk.data` is the
+ * One plane of each of a member's chunks: each `chunk.data` is the
  * `chunkY*chunkX` samples of the plane `fullResZ` maps to at `level`, cut
- * from the 3D chunk the page keeps.
+ * from the 3D chunk the page keeps. Geometry and chunk coordinates are in
+ * the worker's frame for the plane drawn (`ColdStateMessage.sliceAxis`), so
+ * "Z" is the cut axis.
  */
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
@@ -573,7 +576,15 @@ export interface ColdStateMessage {
   epochs: SceneEpochs;
   datasetId: string;
   currentT: number;
+  /** The plane the slice view cuts along {@link sliceAxis}, or Z in the volume view. */
   currentZ: number;
+  /**
+   * The axis a slice view of XZ or YZ cuts. Its geometry, region and
+   * `currentZ` then come in the frame of the plane drawn: X across the
+   * screen, Y down it, Z the cut. Chunk keys stay as the image names them.
+   * Absent: Z, where the two frames agree.
+   */
+  sliceAxis?: SpatialAxis;
   /** The channels the layer shows. Each has its own member ids and pools. */
   visibleChannels: number[];
   visibleRegion: VisibleRegion;

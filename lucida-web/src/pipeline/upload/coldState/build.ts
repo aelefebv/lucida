@@ -2,7 +2,6 @@
  * Pure end-to-end cold-state message builder. `Uploader.sendColdState`
  * wraps this and owns the side effect (post the message).
  */
-import { Axis } from "../../../axes.ts";
 import type { LevelGeometry } from "../../../manifestTypes.ts";
 import type {
   ColdStateActiveEntry,
@@ -20,8 +19,51 @@ import type {
   SelectionState,
 } from "../../planning/index.ts";
 import type { VisibleRegion } from "../../viewport.ts";
+import { planeAxes, planeCutting, tczyx, toPlaneFrame, type SpatialAxis } from "../../../renderer/slicePlane.ts";
 import { identityMatrix } from "./identity.ts";
 import { buildDisplayStateByChannel } from "./displayState.ts";
+
+/**
+ * The axis the worker's frame cuts. The slice worker works in the frame of
+ * the plane it draws: its X is the axis across the screen, its Y the one
+ * down it, and its Z the cut, so an XZ or YZ view reuses every 2-D path an
+ * XY one takes. The volume view, and an XY cut, keep X, Y and Z.
+ */
+export function workerCutAxis(selection: SelectionState): SpatialAxis {
+  return selection.renderMode === "slice" ? selection.cut.axis : "z";
+}
+
+/**
+ * The worker's current Z: the plane the slice view cuts along its cut axis,
+ * or the scene's Z in the volume view.
+ */
+export function workerCutIndex(selection: SelectionState): number {
+  return selection.renderMode === "slice" ? selection.cut.index : selection.z;
+}
+
+/** `region` in the worker's frame for a view cutting `axis`. */
+export function regionInWorkerFrame(region: VisibleRegion, axis: SpatialAxis): VisibleRegion {
+  if (axis === "z") return region;
+  const [minX, minY, maxX, maxY] = region.xyBoundsVox;
+  const [u0, v0, w0] = toPlaneFrame([minX, minY, region.zRangeVox[0]], axis);
+  const [u1, v1, w1] = toPlaneFrame([maxX, maxY, region.zRangeVox[1]], axis);
+  return {
+    ...region,
+    xyBoundsVox: [u0, v0, u1, v1],
+    zRangeVox: [w0, w1],
+    sortCenterVox: region.sortCenterVox && toPlaneFrame(region.sortCenterVox, axis),
+    cutAxis: "z",
+  };
+}
+
+/**
+ * A `[T, C, Z, Y, X]` shape as the worker's frame orders it, `[Z, Y, X]`:
+ * the cut, the axis down the screen, the axis across it.
+ */
+function zyxInWorkerFrame(shape: readonly number[], axis: SpatialAxis): [number, number, number] {
+  const [across, down, cut] = planeAxes(planeCutting(axis));
+  return [shape[tczyx(cut)], shape[tczyx(down)], shape[tczyx(across)]];
+}
 
 /**
  * Map an `ActiveSetEntry` (discriminated union from the planner) into a
@@ -33,22 +75,25 @@ export function buildColdActiveEntry(
   entityById: Map<string, EntitySnapshot>,
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>,
   displayStateByChannel: Record<number, ColdStateDisplayState>,
+  cutAxis: SpatialAxis = "z",
 ): ColdStateActiveEntry {
   const entity = entityById.get(entry.entityId);
   const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
-    const chunkShape: [number, number, number] = [
-      lvl.chunk_shape[Axis.Z], lvl.chunk_shape[Axis.Y], lvl.chunk_shape[Axis.X],
-    ];
+    const chunkShape = zyxInWorkerFrame(lvl.chunk_shape, cutAxis);
+    const levelDims = zyxInWorkerFrame(lvl.shape, cutAxis);
     const gridShape: [number, number, number] = [
-      Math.ceil(lvl.shape[Axis.Z] / lvl.chunk_shape[Axis.Z]),
-      Math.ceil(lvl.shape[Axis.Y] / lvl.chunk_shape[Axis.Y]),
-      Math.ceil(lvl.shape[Axis.X] / lvl.chunk_shape[Axis.X]),
-    ];
-    const levelDims: [number, number, number] = [
-      lvl.shape[Axis.Z], lvl.shape[Axis.Y], lvl.shape[Axis.X],
+      Math.ceil(levelDims[0] / chunkShape[0]),
+      Math.ceil(levelDims[1] / chunkShape[1]),
+      Math.ceil(levelDims[2] / chunkShape[2]),
     ];
     return { level: idx, chunkShape, gridShape, levelDims };
   });
+  // The layout places an image along X and Y. Along the cut it is in its
+  // own samples, so only the axes on screen keep their offset.
+  const position = entity?.layoutPositionVox;
+  const layoutPositionVox = position && cutAxis !== "z"
+    ? toPlaneFrame([position[0], position[1], 0], cutAxis).slice(0, 2) as [number, number]
+    : position;
 
   // Identity fallback is defensive: a missing roster match renders at
   // the unit cube — a clear visual failure, not a silent off-screen one.
@@ -58,7 +103,7 @@ export function buildColdActiveEntry(
 
   return {
     entityId: entry.entityId,
-    layoutPositionVox: entity?.layoutPositionVox,
+    layoutPositionVox,
     imageId: entry.imageId,
     // An invisible entity keeps only its coarsest level and no coarse tier.
     detailLevels: entry.kind === "invisible" ? [entry.coarsestLod] : entry.detailLevels,
@@ -92,17 +137,19 @@ export function buildColdState(args: {
   const displayStateByChannel = buildDisplayStateByChannel(
     args.layer,
   );
+  const cutAxis = workerCutAxis(args.selection);
   const coldActiveSet = args.activeSet.map(entry =>
-    buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
+    buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel, cutAxis),
   );
   return {
     type: "coldState",
     epochs: args.epochs,
     datasetId: args.datasetId,
     currentT: args.selection.t,
-    currentZ: args.selection.z,
+    currentZ: workerCutIndex(args.selection),
+    ...(cutAxis !== "z" ? { sliceAxis: cutAxis } : {}),
     visibleChannels: args.selection.visibleChannels,
-    visibleRegion: args.visibleRegion,
+    visibleRegion: regionInWorkerFrame(args.visibleRegion, cutAxis),
     renderRadiusView: args.renderRadiusView,
     wantedChunks: args.wantedChunks,
     activeSet: coldActiveSet,
@@ -189,6 +236,7 @@ export function buildColdStateDelta(args: {
   const displayStateByChannel = buildDisplayStateByChannel(
     args.layer,
   );
+  const cutAxis = workerCutAxis(args.selection);
 
   const oldKeyByEntity = new Map<string, string>();
   for (const e of args.previousActiveSet) {
@@ -203,7 +251,7 @@ export function buildColdStateDelta(args: {
     present.add(entry.entityId);
     if (oldKeyByEntity.get(entry.entityId) !== activeEntryReuseKey(entry)) {
       upserts.push(
-        buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
+        buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel, cutAxis),
       );
     }
   }
@@ -218,8 +266,8 @@ export function buildColdStateDelta(args: {
     epochs: args.epochs,
     datasetId: args.datasetId,
     currentT: args.selection.t,
-    currentZ: args.selection.z,
-    visibleRegion: args.visibleRegion,
+    currentZ: workerCutIndex(args.selection),
+    visibleRegion: regionInWorkerFrame(args.visibleRegion, cutAxis),
     renderRadiusView: args.renderRadiusView,
     wantedChunks: args.wantedChunks,
     removedEntityIds,

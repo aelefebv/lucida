@@ -19,9 +19,10 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use common::workspace_rig::WorkspaceRig;
+use lucida_content::SpatialAxis;
 use lucida_core::chunk_codec::decode_relayed;
 use lucida_core::protocol::ServerMessage;
-use lucida_protocol::codec::{BytesCodec, ChunkRelaySetting, parse_chunk_frame};
+use lucida_protocol::codec::{BytesCodec, ChunkPlanes, ChunkRelaySetting, parse_chunk_frame};
 use lucida_server::GeneratedConfig;
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
 use lucida_server::workspace::WorkspaceRuntimeConfig;
@@ -143,6 +144,17 @@ async fn request(
     key: &str,
     planes: Option<[u32; 2]>,
 ) -> Vec<u8> {
+    request_along(ws, rid, opened, key, planes.map(ChunkPlanes::z)).await
+}
+
+/// [`request`] for planes along any axis.
+async fn request_along(
+    ws: &mut WsClient,
+    rid: u32,
+    opened: &Opened,
+    key: &str,
+    planes: Option<ChunkPlanes>,
+) -> Vec<u8> {
     let mut request = serde_json::json!({
         "type": "chunk_request",
         "rid": rid,
@@ -151,7 +163,10 @@ async fn request(
         "key": key,
     });
     if let Some(planes) = planes {
-        request["planes"] = serde_json::json!(planes);
+        request["planes"] = serde_json::json!(planes.range);
+        if !planes.axis.is_z() {
+            request["plane_axis"] = serde_json::json!(planes.axis);
+        }
     }
     ws.send(WsMessage::Text(request.to_string().into()))
         .await
@@ -225,7 +240,7 @@ async fn a_request_for_planes_is_sent_those_planes_and_one_without_the_whole_chu
     let planes = request(&mut ws, 1, &opened, "0/0/0/0/0/0", Some([3, 5])).await;
     let planes = parse_chunk_frame(&planes).unwrap();
     assert_eq!(planes.composite_key, whole.composite_key);
-    assert_eq!(planes.planes, Some([3, 5]));
+    assert_eq!(planes.planes, Some(ChunkPlanes::z([3, 5])));
     assert!(
         planes.codecs.is_empty(),
         "a connection that is not relayed to gets decoded planes"
@@ -235,8 +250,49 @@ async fn a_request_for_planes_is_sent_those_planes_and_one_without_the_whole_chu
     // An absent chunk's planes are its fill.
     let absent = request(&mut ws, 2, &opened, "0/0/0/0/0/1", Some([0, 1])).await;
     let absent = parse_chunk_frame(&absent).unwrap();
-    assert_eq!(absent.planes, Some([0, 1]));
+    assert_eq!(absent.planes, Some(ChunkPlanes::z([0, 1])));
     assert_eq!(absent.payload, 7u16.to_le_bytes().repeat(PLANE_BYTES / 2));
+    let _ = fs::remove_dir_all(&opened.root);
+}
+
+#[tokio::test]
+async fn a_request_for_rows_or_columns_is_sent_them_gathered_from_every_plane() {
+    let opened = open("rows", ChunkRelaySetting::Never).await;
+    let mut ws = connect(&opened.server).await;
+    let sample = |z: usize, y: usize, x: usize| {
+        let at = 2 * (z * 256 + y * 16 + x);
+        [samples()[at], samples()[at + 1]]
+    };
+
+    let rows = ChunkPlanes {
+        axis: SpatialAxis::Y,
+        range: [5, 6],
+    };
+    let frame = request_along(&mut ws, 0, &opened, "0/0/0/0/0/0", Some(rows)).await;
+    let frame = parse_chunk_frame(&frame).unwrap();
+    assert_eq!(frame.planes, Some(rows));
+    let expected: Vec<u8> = (0..DEPTH)
+        .flat_map(|z| (0..16).flat_map(move |x| sample(z, 5, x)))
+        .collect();
+    assert_eq!(frame.payload, expected);
+
+    let columns = ChunkPlanes {
+        axis: SpatialAxis::X,
+        range: [2, 3],
+    };
+    let frame = request_along(&mut ws, 1, &opened, "0/0/0/0/0/0", Some(columns)).await;
+    let frame = parse_chunk_frame(&frame).unwrap();
+    assert_eq!(frame.planes, Some(columns));
+    let expected: Vec<u8> = (0..DEPTH)
+        .flat_map(|z| (0..16).flat_map(move |y| sample(z, y, 2)))
+        .collect();
+    assert_eq!(frame.payload, expected);
+
+    // An absent chunk's rows are its fill.
+    let frame = request_along(&mut ws, 2, &opened, "0/0/0/0/0/1", Some(rows)).await;
+    let frame = parse_chunk_frame(&frame).unwrap();
+    assert_eq!(frame.planes, Some(rows));
+    assert_eq!(frame.payload, 7u16.to_le_bytes().repeat(DEPTH * 16));
     let _ = fs::remove_dir_all(&opened.root);
 }
 
@@ -265,7 +321,7 @@ async fn a_relayed_connection_that_decodes_lz4_gets_its_planes_compressed() {
 
     let frame = request(&mut ws, 0, &opened, "0/0/0/0/0/0", Some([1, 4])).await;
     let frame = parse_chunk_frame(&frame).unwrap();
-    assert_eq!(frame.planes, Some([1, 4]));
+    assert_eq!(frame.planes, Some(ChunkPlanes::z([1, 4])));
     assert_eq!(frame.codecs, [BytesCodec::Lz4]);
     let expected = &samples()[PLANE_BYTES..4 * PLANE_BYTES];
     assert!(frame.payload.len() * 4 <= expected.len() * 3);

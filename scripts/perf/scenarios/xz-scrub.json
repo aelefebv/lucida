@@ -1,0 +1,11 @@
+{
+  "description": "cut XZ, step Y by one twice, then jump 150 planes, or to the last, past the chunks along Y the steps loaded",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "plane", "to": "xz" },
+    { "kind": "scrub", "axis": "y", "count": 1 },
+    { "kind": "scrub", "axis": "y", "count": 1 },
+    { "kind": "scrub", "axis": "y", "count": 150 }
+  ]
+}

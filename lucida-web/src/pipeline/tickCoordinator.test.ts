@@ -139,6 +139,8 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     view_query_delta: (_dsId: string) => JSON.stringify({ Full: config.viewQuery }),
     member_positions: (_dsId: string) => JSON.stringify(config.memberPositions),
     visible_region: (_dsId: string) => JSON.stringify(config.visibleRegion),
+    slice_plane: () => "xy",
+    cut_index: () => 0,
     t: () => config.t,
     z: () => config.z,
     resolved_layers: () => resolvedLayersJson(config.datasetOrder, config.allSettings, config),

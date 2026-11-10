@@ -1,15 +1,17 @@
 //! The scene's placement of each dataset in the scene frame and world space.
 //! None of it depends on a camera, so every view of the scene shares it.
 
-use lucida_content::DatasetId;
+use lucida_content::{DatasetId, SpatialAxis};
 
 use crate::camera::{Camera, VisibleRegion};
 use crate::placement::{
     Affine, CameraSpace, SceneFrame, SpaceMap, WorldSpace, member_cube_to_frame,
 };
+use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
+use crate::view::ViewState;
 
-use super::{MemberState, Scene};
+use super::{LayerExtent, MemberState, Scene};
 
 impl Scene {
     /// The scene frame, fixed by the first dataset in the document with an
@@ -80,6 +82,14 @@ impl Scene {
         }
     }
 
+    /// Carry `view`'s side-view axis positions, recorded in `from`, into this
+    /// scene's spaces, so they cut the planes they cut there.
+    pub fn carry_view(&self, view: &mut ViewState, from: &CameraSpace) {
+        if let Some(map) = self.map_from(from) {
+            view.map_cut_positions(&map.scene);
+        }
+    }
+
     /// Carry this scene's placed cameras, the active one and the parked one,
     /// from `from`, its spaces before its datasets changed, into its spaces
     /// now. Says whether the active camera moved. A framed camera is the
@@ -94,6 +104,12 @@ impl Scene {
             if camera.framing().is_placed() {
                 camera.change_space(&map);
             }
+        }
+        // A side view's axis positions are places in the scene frame too.
+        let view_before = self.view.clone();
+        self.view.map_cut_positions(&map.scene);
+        if self.view != view_before {
+            self.epochs.selection += 1;
         }
         self.camera != before
     }
@@ -129,6 +145,49 @@ impl Scene {
         }
     }
 
+    /// The visible datasets' extent along `axis` in the scene frame, as
+    /// `(min, max)`, or `None` with nothing visible.
+    fn visible_scene_extent(&self, axis: SpatialAxis) -> Option<(f64, f64)> {
+        let a = axis.xyz();
+        self.visible_dataset_ids()
+            .filter_map(|id| Some((self.placement(id)?, self.derived.get(id)?)))
+            .flat_map(|(to_scene, derived)| {
+                derived.members.iter().filter_map(move |member| {
+                    let (lo, hi) = frame_box(member)?;
+                    let (min, max) = to_scene.apply_box(lo, hi);
+                    Some((min[a], max[a]))
+                })
+            })
+            .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
+    }
+
+    /// How many axis positions a view cutting `axis` steps through, at least
+    /// one. Z counts the planes of the deepest visible layer, since each
+    /// layer steps through its own. A side view's position is a place in the
+    /// scene frame, so datasets over one region cut the same plane, and it
+    /// counts the frame's whole units up to the far edge of what is visible.
+    pub fn cut_extent(&self, axis: SpatialAxis) -> u32 {
+        if axis.is_z() {
+            return self
+                .visible_dataset_ids()
+                .filter_map(|id| self.document.manifests.get(id))
+                .map(|manifest| LayerExtent::of(manifest).z)
+                .max()
+                .unwrap_or(1);
+        }
+        // An edge a rounding error puts just past a whole unit stays on it.
+        self.visible_scene_extent(axis).map_or(1, |(_, max)| {
+            (max - max.abs() * 1e-12).ceil().clamp(1.0, u32::MAX as f64) as u32
+        })
+    }
+
+    /// The axis position in the middle of what is visible along `axis`.
+    pub(crate) fn cut_middle(&self, axis: SpatialAxis) -> u32 {
+        self.visible_scene_extent(axis).map_or(0, |(min, max)| {
+            ((min + max) / 2.0).floor().clamp(0.0, u32::MAX as f64) as u32
+        })
+    }
+
     /// Whether `dataset_id` declares physical lengths, so it lines up with
     /// other datasets that do. One without is placed by its declared numbers
     /// alone, which the layer panel says.
@@ -150,11 +209,10 @@ impl Scene {
         let placed = self.placed(dataset_id)?;
         // A layer shallower than the scene's slab plans its nearest plane.
         let z_range = self.layer_z_range(dataset_id);
-        Some(match self.camera {
-            Camera::Slice(_) => self
-                .camera
-                .visible_region(&z_range, None, None)
-                .in_frame(&placed.to_scene),
+        Some(match &self.camera {
+            Camera::Slice(slice) => {
+                slice.visible_region(&placed.to_scene, &self.layer_cut(dataset_id, slice.plane))
+            }
             Camera::Arcball(_) | Camera::Fly(_) => {
                 let cube = member_cube_to_frame([0.0, 0.0], level0.shape)
                     .then(&placed.to_world)
@@ -176,6 +234,39 @@ impl Scene {
 pub(crate) struct Placed {
     pub to_scene: Affine,
     pub to_world: Affine,
+}
+
+/// `member`'s box in its dataset's frame, as `[x, y, z]` minima and maxima:
+/// its level-0 shape from its layout position. `None` without levels.
+pub(crate) fn frame_box(member: &MemberState) -> Option<([f64; 3], [f64; 3])> {
+    let level0 = member.levels.first()?;
+    let [x0, y0] = member.position;
+    Some((
+        [x0, y0, 0.0],
+        [
+            x0 + level0.shape[4] as f64,
+            y0 + level0.shape[3] as f64,
+            level0.shape[2] as f64,
+        ],
+    ))
+}
+
+/// `member`'s box in the slice camera's space, as `[across, down, cut]`
+/// minima and maxima: the axes `plane` draws as `to_scene` places them, and
+/// along the cut its own planes, which an axis position steps through.
+/// `None` without levels.
+pub(crate) fn slice_box(
+    plane: SlicePlane,
+    to_scene: &Affine,
+    member: &MemberState,
+) -> Option<([f64; 3], [f64; 3])> {
+    let (lo, hi) = frame_box(member)?;
+    let (min, max) = to_scene.apply_box(lo, hi);
+    let [across, down, cut] = plane.axes().map(SpatialAxis::xyz);
+    Some((
+        [min[across], min[down], 0.0],
+        [max[across], max[down], hi[cut] - lo[cut]],
+    ))
 }
 
 /// `member`'s unit cube in the space `frame_to_space` maps its dataset's
@@ -278,6 +369,31 @@ mod tests {
         assert!(close(coarse.world.max, fine.world.max));
         // The first dataset fixes the scene frame: its samples are its units.
         assert!(close(coarse.plane.max, [64.0, 64.0, 16.0]));
+    }
+
+    #[test]
+    fn datasets_over_one_region_cut_the_same_plane_in_a_side_view() {
+        let mut scene = two_over_one_region();
+        scene.apply(
+            ViewportCommand::SetSlicePlane {
+                plane: crate::slice_plane::SlicePlane::Xz,
+            }
+            .into(),
+        );
+        // The middle of the region along Y, in the coarse dataset's samples.
+        assert_eq!(scene.view.y, Some(32));
+        let plane = crate::slice_plane::SlicePlane::Xz;
+        let [coarse, fine] =
+            ["coarse", "fine"].map(|id| scene.layer_cut(&DatasetId::from(id), plane));
+        // Coarse sample 32 spans 64 to 66 micrometers, which fine samples
+        // 128 to 131 cover; the fine plane is one of them.
+        assert_eq!(coarse, 32..33);
+        assert!((128..132).contains(&fine.start), "{fine:?}");
+        // Both draw over the same X and Z of the scene frame.
+        let [a, b] = ["coarse", "fine"].map(|id| scene.dataset_plane_bounds(id).unwrap());
+        assert!(close([a.min[0], a.min[1], 0.0], [b.min[0], b.min[1], 0.0]));
+        assert!(close([a.max[0], a.max[1], 0.0], [b.max[0], b.max[1], 0.0]));
+        assert_eq!(scene.cut_extent(lucida_content::SpatialAxis::Y), 64);
     }
 
     #[test]
@@ -561,6 +677,47 @@ mod tests {
         document.remove_dataset(&DatasetId::from("a"));
         scene.load_document(document);
         assert_same_region(on_screen(&scene, "b"), before);
+    }
+
+    #[test]
+    fn a_side_view_keeps_its_plane_cut_and_region_when_the_scene_frame_changes() {
+        use crate::slice_plane::SlicePlane;
+        let mut scene = a_then_b();
+        scene.apply(
+            ViewportCommand::SetSlicePlane {
+                plane: SlicePlane::Xz,
+            }
+            .into(),
+        );
+        scene.apply(
+            ViewportCommand::Pan {
+                dx: 30.0,
+                dy: -20.0,
+            }
+            .into(),
+        );
+        assert!(scene.camera.framing().is_placed());
+        let b = DatasetId::from("b");
+        // B's samples where an XZ view draws them: X across, Z down.
+        let side = |scene: &Scene| -> Vec<[f64; 2]> {
+            let to_scene = scene.placement(&b).unwrap();
+            [[64.0, 64.0, 8.0], [192.0, 80.0, 16.0], [100.0, 200.0, 24.0]]
+                .iter()
+                .map(|p| {
+                    let at = to_scene.apply(*p);
+                    scene.camera.project_to_screen([at[0], at[2], 0.0]).unwrap()
+                })
+                .collect()
+        };
+        let (cut, before) = (scene.layer_cut(&b, SlicePlane::Xz), side(&scene));
+
+        // A's going makes B the scene frame's reference.
+        let mut document = scene.document.clone();
+        document.remove_dataset(&DatasetId::from("a"));
+        scene.load_document(document);
+        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
+        assert_same_region(side(&scene), before);
+        assert_eq!(scene.layer_cut(&b, SlicePlane::Xz), cut);
     }
 
     #[test]

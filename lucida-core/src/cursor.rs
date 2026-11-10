@@ -7,6 +7,7 @@ use crate::camera::ray_aabb_hit;
 use crate::mat4::{invert4_f64, normalize3, unproject};
 use crate::placement::Affine;
 use crate::scene::Scene;
+use crate::slice_plane::SlicePlane;
 
 /// The one peer palette, in 8-bit sRGB. The page reads it through
 /// [`peer_palette_css`] for the labels it draws beside each cursor, so a
@@ -290,9 +291,9 @@ pub fn compute_peer_cursors(
     screen_w: f64,
     screen_h: f64,
 ) -> CursorOutput {
-    let local_mode = match &scene.camera {
-        Camera::Slice(_) => "slice",
-        Camera::Arcball(_) | Camera::Fly(_) => "arcball",
+    let (local_mode, local_plane) = match &scene.camera {
+        Camera::Slice(slice) => ("slice", slice.plane),
+        Camera::Arcball(_) | Camera::Fly(_) => ("arcball", SlicePlane::Xy),
     };
 
     let cursor_box = CursorBox::of(scene);
@@ -318,6 +319,19 @@ pub fn compute_peer_cursors(
             "arcball" | "fly" => "arcball",
             other => other,
         };
+
+        // A side view's cursor is a point in its own plane, which only a view
+        // of the same plane can place: the lifts between 2D and 3D read a
+        // slice cursor as XY at a Z.
+        let peer_plane = match &peer.camera {
+            Some(Camera::Slice(slice)) => slice.plane,
+            _ => SlicePlane::Xy,
+        };
+        let side = |mode: &str, plane: SlicePlane| mode == "slice" && !plane.is_xy();
+        let same_view = peer_mode == local_mode && peer_plane == local_plane;
+        if !same_view && (side(peer_mode, peer_plane) || side(local_mode, local_plane)) {
+            continue;
+        }
 
         if peer_mode == local_mode {
             if local_mode == "slice" {
@@ -662,6 +676,32 @@ mod tests {
         assert_eq!(gpu[1], 200.0); // pos_y
         assert_eq!(gpu[3], 0.0); // type=crosshair
         assert_eq!(gpu[7], 0.9); // alpha
+    }
+
+    #[test]
+    fn a_side_view_cursor_shows_only_in_a_view_of_the_same_plane() {
+        let side = |plane| {
+            let mut camera = Camera::new_2d([800, 600]);
+            if let Camera::Slice(s) = &mut camera {
+                s.plane = plane;
+            }
+            camera
+        };
+        let xz_peer = peer_with_camera(2, Some([100.0, 50.0]), side(SlicePlane::Xz));
+        let xy = scene_2d([800, 600]);
+        let none = compute_peer_cursors(&xy, std::slice::from_ref(&xz_peer), 1, 800.0, 600.0);
+        assert!(none.gpu.is_empty() && none.labels.is_empty());
+
+        let mut xz = scene_2d([800, 600]);
+        xz.camera = side(SlicePlane::Xz);
+        let shown = compute_peer_cursors(&xz, &[xz_peer], 1, 800.0, 600.0);
+        assert_eq!(shown.gpu.len(), 1);
+        let xy_peer = peer(3, Some([100.0, 50.0]), "slice");
+        assert!(
+            compute_peer_cursors(&xz, &[xy_peer], 1, 800.0, 600.0)
+                .gpu
+                .is_empty()
+        );
     }
 
     #[test]

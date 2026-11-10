@@ -10,7 +10,7 @@ import {
   createSyntheticEntity,
   createSyntheticSnapshot,
   createSyntheticState,
-  isZStep,
+  isCutStep,
   mergeConfig,
   plan,
   SLICE_BAND_PLANES,
@@ -57,6 +57,7 @@ function snapshot(selection: Partial<SelectionState>, sourceLevels?: number[]): 
     selection: {
       t: 0,
       z: 0,
+      cut: { axis: "z", index: selection.z ?? 0 },
       visibleChannels: [0],
       renderMode: "slice",
       interactionState: "idle",
@@ -90,6 +91,34 @@ describe("the slice view's requests", () => {
     expect(edge[0]).toMatchObject({ z: 3, plane: 3, planes: [1, 4] });
   });
 
+  it("cut a side view's plane along its axis, through every chunk along Z", () => {
+    // An XZ cut at Y 70 of 128, in 64-row chunks: row 6 of chunk row 1.
+    const xz = createSyntheticSnapshot({
+      ...snapshot({ z: 0 }),
+      visibleRegion: {
+        xyBoundsVox: [0, 70, 128, 71],
+        zRangeVox: [0, 100],
+        effectiveZoom: 1,
+        sortCenterVox: null,
+        frustumPlanes: null,
+        cutAxis: "y",
+      },
+    });
+    xz.selection = { ...xz.selection, cut: { axis: "y", index: 70 } };
+    const detail = lane(plan(xz, createSyntheticState(), noPrefetch).requests, "detail");
+    // Two chunks across, four deep.
+    expect(detail).toHaveLength(8);
+    expect(new Set(detail.map((req) => req.z))).toEqual(new Set([0, 1, 2, 3]));
+    for (const req of detail) {
+      expect(req).toMatchObject({
+        y: 1,
+        plane: 6,
+        planes: [6 - SLICE_BAND_PLANES, 7 + SLICE_BAND_PLANES],
+        planeAxis: "y",
+      });
+    }
+  });
+
   it("leave the coarse tier, the volume view and a generated level whole", () => {
     const slice = plan(snapshot({ z: 40 }), createSyntheticState(), noPrefetch).requests;
     // The coarse chunk is 25 planes deep, but the coarse tier is read whole.
@@ -106,19 +135,22 @@ describe("the slice view's requests", () => {
 describe("a step along Z", () => {
   it("is a move of a few planes in the slice view, and not a jump or the first plan", () => {
     const at = (z: number, renderMode: SelectionState["renderMode"] = "slice") =>
-      ({ t: 0, z, visibleChannels: [0], renderMode, interactionState: "idle" }) as SelectionState;
-    expect(isZStep(10, at(11), SLICE_BAND_PLANES)).toBe(true);
-    expect(isZStep(10, at(10 - SLICE_BAND_PLANES), SLICE_BAND_PLANES)).toBe(true);
-    expect(isZStep(10, at(10 + SLICE_BAND_PLANES + 1), SLICE_BAND_PLANES)).toBe(false);
-    expect(isZStep(10, at(10), SLICE_BAND_PLANES)).toBe(false);
-    expect(isZStep(null, at(11), SLICE_BAND_PLANES)).toBe(false);
-    expect(isZStep(10, at(11, "volume"), SLICE_BAND_PLANES)).toBe(false);
+      ({ t: 0, z, cut: { axis: "z", index: z }, visibleChannels: [0], renderMode, interactionState: "idle" }) as SelectionState;
+    const was = { axis: "z", index: 10 } as const;
+    expect(isCutStep(was, at(11), SLICE_BAND_PLANES)).toBe(true);
+    expect(isCutStep(was, at(10 - SLICE_BAND_PLANES), SLICE_BAND_PLANES)).toBe(true);
+    expect(isCutStep(was, at(10 + SLICE_BAND_PLANES + 1), SLICE_BAND_PLANES)).toBe(false);
+    expect(isCutStep(was, at(10), SLICE_BAND_PLANES)).toBe(false);
+    expect(isCutStep(null, at(11), SLICE_BAND_PLANES)).toBe(false);
+    expect(isCutStep(was, at(11, "volume"), SLICE_BAND_PLANES)).toBe(false);
+    // A move along another axis is a new cut, not a step.
+    expect(isCutStep({ axis: "y", index: 10 }, at(11), SLICE_BAND_PLANES)).toBe(false);
   });
 
   it("prefetches the whole chunks the plane lies in, ahead of every other prefetch", () => {
     const opened = plan(snapshot({ z: 40 }), createSyntheticState(), noPrefetch);
     expect(lane(opened.requests, "prefetch")).toHaveLength(0);
-    expect(opened.nextState.previousZ).toBe(40);
+    expect(opened.nextState.previousCut).toEqual({ axis: "z", index: 40 });
 
     const stepped = plan(snapshot({ z: 41 }), opened.nextState, noPrefetch);
     const prefetch = lane(stepped.requests, "prefetch");

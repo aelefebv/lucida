@@ -155,7 +155,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     } as unknown as UploadClient;
 
     // sliceZ=1 → the delivery path extracts the z=1 plane (last 4 ids).
-    const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
+    const result = dispatchLabelChunkDelivery(client, delivery, meta!, { axis: "z", index: 1 }, EPOCHS);
     // Only ONE 2x2 plane crosses (16 bytes), never the whole 8-id chunk (32).
     expect(result).toEqual({ memberId: "img-0:label:region-b", bytes: 16 });
     // The delivery stamped the owning dataset id (from the ManifestEntry key).
@@ -192,7 +192,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       residencyTier: "detail",
     };
     const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
-    const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
+    const result = dispatchLabelChunkDelivery(client, delivery, meta!, { axis: "z", index: 1 }, EPOCHS);
     expect(result).toBe("other-plane");
     expect(client.labelSliceChunkData).not.toHaveBeenCalled();
   });
@@ -240,7 +240,7 @@ describe("label chunk flow: planes of a deeper chunk", () => {
 
   it("cuts the plane drawn out of a delivery of some planes, at its offset among them", () => {
     const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
-    expect(dispatchLabelChunkDelivery(client, band(), meta, 4, EPOCHS)).toEqual({
+    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", index: 4 }, EPOCHS)).toEqual({
       memberId: "img-0:label:deep",
       bytes: 16,
     });
@@ -253,8 +253,8 @@ describe("label chunk flow: planes of a deeper chunk", () => {
       labelSliceChunkData: vi.fn(),
       labelVolumeChunkData: vi.fn(),
     } as unknown as UploadClient;
-    expect(dispatchLabelChunkDelivery(client, band(), meta, 6, EPOCHS)).toBe("other-plane");
-    expect(dispatchLabelChunkDelivery(client, band(), meta, 2, EPOCHS)).toBe("other-plane");
+    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", index: 6 }, EPOCHS)).toBe("other-plane");
+    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", index: 2 }, EPOCHS)).toBe("other-plane");
     expect(dispatchLabelVolumeChunkDelivery(client, band(), meta, EPOCHS)).toBe("other-plane");
     expect(client.labelSliceChunkData).not.toHaveBeenCalled();
     expect(client.labelVolumeChunkData).not.toHaveBeenCalled();

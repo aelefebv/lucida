@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use lucida_content::{DatasetId, ImageId};
+use lucida_content::{DatasetId, ImageId, SpatialAxis};
 use lucida_protocol::codec::{ChunkCodec, ChunkRelayReport};
 use lucida_protocol::{
     ChunkFailureKind, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
@@ -822,6 +822,11 @@ pub enum ChunkMessage {
         /// every plane. A client that never sends it gets whole chunks.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         planes: Option<[u32; 2]>,
+        /// The axis `planes` lie along, when it is not Z: a slice view of XZ
+        /// cuts rows along Y, and one of YZ columns along X. The reply's
+        /// plane frame names it too.
+        #[serde(default, skip_serializing_if = "SpatialAxis::is_z")]
+        plane_axis: SpatialAxis,
     },
     /// Server -> Data source: fetch this chunk and send it to `client_id`.
     ChunkFetch {
@@ -917,6 +922,7 @@ mod tests {
             image_id: ImageId("img1".into()),
             key: "0/0/0/0/0/0".into(),
             planes: None,
+            plane_axis: SpatialAxis::Z,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"chunk_request\""));
@@ -932,7 +938,9 @@ mod tests {
                 image_id,
                 key,
                 planes,
+                plane_axis,
             } => {
+                assert_eq!(plane_axis, SpatialAxis::Z);
                 assert_eq!(rid, 7);
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(image_id, ImageId("img1".into()));
@@ -947,7 +955,14 @@ mod tests {
     fn a_chunk_request_names_the_planes_it_wants() {
         let json = r#"{"type":"chunk_request","rid":1,"dataset_id":"ds1","image_id":"img1","key":"0/0/0/2/0/0","planes":[3,5]}"#;
         match serde_json::from_str::<ChunkMessage>(json).unwrap() {
-            ChunkMessage::ChunkRequest { planes, .. } => assert_eq!(planes, Some([3, 5])),
+            ChunkMessage::ChunkRequest {
+                planes, plane_axis, ..
+            } => assert_eq!((planes, plane_axis), (Some([3, 5]), SpatialAxis::Z)),
+            other => panic!("expected ChunkRequest, got {other:?}"),
+        }
+        let rows = r#"{"type":"chunk_request","rid":1,"dataset_id":"ds1","image_id":"img1","key":"0/0/0/2/0/0","planes":[3,5],"plane_axis":"y"}"#;
+        match serde_json::from_str::<ChunkMessage>(rows).unwrap() {
+            ChunkMessage::ChunkRequest { plane_axis, .. } => assert_eq!(plane_axis, SpatialAxis::Y),
             other => panic!("expected ChunkRequest, got {other:?}"),
         }
     }

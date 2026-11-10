@@ -129,9 +129,10 @@ pub fn capture(scene: &Scene) -> SavedView {
 pub fn restore(view: &SavedView, f: &Fixture, vp: Viewport, dpr: u32) -> Shown {
     let mut shown = join(f, vp, dpr);
     let camera = view.camera_in(&shown.scene);
+    let selectors = view.view_in(&shown.scene);
     shown
         .scene
-        .import_presence(camera, view.view.clone(), view.display.clone());
+        .import_presence(camera, selectors, view.display.clone());
     shown
 }
 

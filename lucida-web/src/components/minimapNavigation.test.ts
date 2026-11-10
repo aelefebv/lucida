@@ -120,6 +120,20 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       }
     });
 
+    it("leaves a side view alone, whose plane the minimap neither outlines nor maps", () => {
+      const f = fixture("volume");
+      const scene = openedScene(f, { name: "landscape", css: CANVAS_CSS }, ratio, "slice");
+      scene.apply_command(JSON.stringify({ type: "set_slice_plane", plane: "xz" }));
+      const frame = frameOf(scene, f, "slice", 40);
+      expect(frame.sliceViewports).toEqual([]);
+      const { navigator, loop } = navigatorFor(scene, frame);
+      const center = scene.center();
+      expect(navigator.pressAt(MINIMAP_SIZE / 2, MINIMAP_SIZE / 2, "mouse")).toBe(false);
+      expect(navigator.cursorAt(MINIMAP_SIZE / 2, MINIMAP_SIZE / 2)).toBe("default");
+      expect(Array.from(scene.center())).toEqual(Array.from(center));
+      expect(loop.markInput).not.toHaveBeenCalled();
+    });
+
     it("picks the collection member under the pointer", () => {
       const f = fixture("collection");
       const scene = openedScene(f, { name: "landscape", css: CANVAS_CSS }, ratio, "slice");

@@ -52,7 +52,7 @@ export function groupEntriesByPool(
         const poolKey =
           mode === "volume"
             ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ])
-            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY]);
+            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY], cold.sliceAxis);
         const dims: [number, number, number] =
           mode === "volume" ? [chunkZ, chunkY, chunkX] : [1, chunkY, chunkX];
 

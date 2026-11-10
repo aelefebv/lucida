@@ -1,3 +1,5 @@
+import { fromPlaneFrame, toPlaneFrame, type SpatialAxis } from "./slicePlane.ts";
+
 /**
  * The `"level/t/c/z/y/x"` chunk key and the `"memberId|chunkKey"` composite
  * slot key the shared atlas pools use. Every site that builds or parses a
@@ -21,6 +23,37 @@ export function parseChunkKey(
     y: parseInt(parts[4], 10),
     x: parseInt(parts[5], 10),
   };
+}
+
+/**
+ * A chunk key's coordinates in the slice worker's frame for a view cutting
+ * `axis`: `x` across the screen, `y` down it, `z` along the cut. An XY cut's
+ * frame is the image's own.
+ */
+export function parsePlaneChunkKey(
+  key: string,
+  axis: SpatialAxis = "z",
+): ReturnType<typeof parseChunkKey> {
+  const chunk = parseChunkKey(key);
+  if (chunk === null || axis === "z") return chunk;
+  const [x, y, z] = toPlaneFrame([chunk.x, chunk.y, chunk.z], axis);
+  return { ...chunk, x, y, z };
+}
+
+/**
+ * The chunk key of the chunk at `[x, y, z]` in the slice worker's frame for
+ * a view cutting `axis`, as the image names it: {@link parsePlaneChunkKey}
+ * undone.
+ */
+export function planeChunkKey(
+  level: number,
+  t: number,
+  c: number,
+  at: readonly [number, number, number],
+  axis: SpatialAxis = "z",
+): string {
+  const [x, y, z] = axis === "z" ? at : fromPlaneFrame(at, axis);
+  return `${level}/${t}/${c}/${z}/${y}/${x}`;
 }
 
 /**

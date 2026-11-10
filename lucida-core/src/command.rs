@@ -9,6 +9,7 @@ use lucida_protocol::DatasetOpened;
 
 use crate::camera::{Camera, Framing};
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
+use crate::slice_plane::SlicePlane;
 
 /// Commands that mutate shared document state (datasets).
 /// These are sequenced, persisted, and broadcast to all clients.
@@ -184,6 +185,11 @@ pub enum ViewportCommand {
     SetZoom {
         value: f64,
     },
+    /// Cut `plane` with the slice camera. Its center and zoom belong to the
+    /// plane it cut, so it fits the data again. No-op in 3D.
+    SetSlicePlane {
+        plane: SlicePlane,
+    },
     // 3D camera
     #[serde(rename = "arcball_rotate")]
     Rotate3D {
@@ -254,6 +260,14 @@ pub enum ViewportCommand {
     },
     SetT {
         t: u32,
+    },
+    /// The plane an XZ view cuts along Y.
+    SetY {
+        y: u32,
+    },
+    /// The plane a YZ view cuts along X.
+    SetX {
+        x: u32,
     },
     // Display
     SetContrast {
@@ -412,6 +426,7 @@ impl ViewportCommand {
             | ViewportCommand::ZoomBy { .. }
             | ViewportCommand::SetCenter { .. }
             | ViewportCommand::SetZoom { .. }
+            | ViewportCommand::SetSlicePlane { .. }
             | ViewportCommand::Rotate3D { .. }
             | ViewportCommand::Zoom3D { .. }
             | ViewportCommand::Pan3D { .. }
@@ -422,7 +437,9 @@ impl ViewportCommand {
             | ViewportCommand::AdjustClipDistance { .. } => ViewportScope::Camera,
             ViewportCommand::SetZ { .. }
             | ViewportCommand::SetZRange { .. }
-            | ViewportCommand::SetT { .. } => ViewportScope::ViewSelectors,
+            | ViewportCommand::SetT { .. }
+            | ViewportCommand::SetY { .. }
+            | ViewportCommand::SetX { .. } => ViewportScope::ViewSelectors,
             ViewportCommand::SetContrast { .. } | ViewportCommand::SetGamma { .. } => {
                 ViewportScope::Display
             }
@@ -483,6 +500,9 @@ impl ViewportCommand {
             | ViewportCommand::SetZ { .. }
             | ViewportCommand::SetZRange { .. }
             | ViewportCommand::SetT { .. }
+            | ViewportCommand::SetY { .. }
+            | ViewportCommand::SetX { .. }
+            | ViewportCommand::SetSlicePlane { .. }
             | ViewportCommand::SetChannelSolo { .. }
             | ViewportCommand::SetDatasetOrder { .. }
             | ViewportCommand::SetDatasetVisible { .. }
@@ -739,7 +759,12 @@ impl Scene {
             ViewportScope::Camera => {
                 let steers = cmd.steers();
                 let before = self.camera.clone();
+                // A plane switch also places the axis position it cuts at.
+                let view_before = self.view.clone();
                 self.mutate_viewport(cmd);
+                if self.view != view_before {
+                    self.epochs.selection += 1;
+                }
                 if self.camera != before {
                     // Steering a fit makes it a choice, which a new canvas
                     // keeps. A stand-in stays one: moving an empty canvas
@@ -914,6 +939,15 @@ impl Scene {
             }
             ViewportCommand::SetT { t } => {
                 self.view.t = t;
+            }
+            ViewportCommand::SetY { y } => {
+                self.view.y = Some(y);
+            }
+            ViewportCommand::SetX { x } => {
+                self.view.x = Some(x);
+            }
+            ViewportCommand::SetSlicePlane { plane } => {
+                self.set_slice_plane(plane);
             }
             ViewportCommand::SetContrast { min, max } => {
                 self.display.contrast_min = min;

@@ -9,8 +9,11 @@ use lucida_content::{DatasetId, DatasetManifest};
 use serde::{Deserialize, Serialize};
 
 use super::{BlendMode, Colormap, DatasetDisplaySettings, RenderMode, Scene};
+use crate::placement::Affine;
 use crate::saved_view::SavedView;
+use crate::slice_plane::SlicePlane;
 use crate::view::{LegacyChannels, ViewState};
+use lucida_content::SpatialAxis;
 
 /// One channel a layer shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +45,11 @@ pub struct ResolvedLayer {
     pub z_range: Range<u32>,
     /// The scene's timepoint, clamped into this layer's timepoints.
     pub t: u32,
+    /// The plane of this layer an XZ view cuts along Y, and the one a YZ
+    /// view cuts along X: the scene's axis position, a place in the scene
+    /// frame, in the layer's own samples.
+    pub y: u32,
+    pub x: u32,
     /// Whether the scene's z slab reaches past this layer, so it shows its
     /// nearest plane instead.
     pub z_clamped: bool,
@@ -54,6 +62,15 @@ impl ResolvedLayer {
     pub fn channel_indices(&self) -> Vec<u32> {
         self.channels.iter().map(|c| c.channel).collect()
     }
+
+    /// The planes a slice view of `plane` cuts in this layer.
+    pub fn cut(&self, plane: SlicePlane) -> Range<u32> {
+        match plane.cut() {
+            SpatialAxis::Z => self.z_range.clone(),
+            SpatialAxis::Y => self.y..self.y + 1,
+            SpatialAxis::X => self.x..self.x + 1,
+        }
+    }
 }
 
 /// Whether a pin placed while `placement` showed belongs to a view showing
@@ -63,12 +80,14 @@ pub fn in_channel_context(placement: &[u32], shown: &[u32]) -> bool {
     shown.iter().any(|c| placement.contains(c))
 }
 
-/// A layer's timepoint, channel and z counts, from its first image.
+/// A layer's timepoint, channel and spatial counts, from its first image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LayerExtent {
     pub t: u32,
     pub c: u32,
     pub z: u32,
+    pub y: u32,
+    pub x: u32,
 }
 
 impl LayerExtent {
@@ -83,6 +102,17 @@ impl LayerExtent {
             t: axis(0),
             c: axis(1),
             z: axis(2),
+            y: axis(3),
+            x: axis(4),
+        }
+    }
+
+    /// The count along a spatial axis.
+    pub(crate) fn along(&self, axis: SpatialAxis) -> u32 {
+        match axis {
+            SpatialAxis::X => self.x,
+            SpatialAxis::Y => self.y,
+            SpatialAxis::Z => self.z,
         }
     }
 
@@ -94,6 +124,29 @@ impl LayerExtent {
     fn clamp_t(&self, t: u32) -> u32 {
         t.min(self.t - 1)
     }
+
+    /// The plane of this layer an X or Y axis position cuts. The position is
+    /// a place in the scene frame, absent its plane 0, read back through the
+    /// layer's placement `to_scene`, so layers over one region cut the same
+    /// plane. Past the layer it takes the nearest plane, as a shallow layer's
+    /// Z does.
+    fn cut_plane(&self, position: Option<u32>, axis: SpatialAxis, to_scene: &Affine) -> u32 {
+        let a = axis.xyz();
+        let mut at = [0.0; 3];
+        at[a] = position.unwrap_or(0) as f64 + 0.5;
+        let plane = to_scene.inverse().apply(at)[a].floor();
+        plane.clamp(0.0, (self.along(axis) - 1) as f64) as u32
+    }
+
+    /// The planes a slice view of `plane` cuts here under `view`.
+    fn clamp_cut(&self, view: &ViewState, plane: SlicePlane, to_scene: &Affine) -> Range<u32> {
+        let single = |index: u32| index..index + 1;
+        match plane.cut() {
+            SpatialAxis::Z => self.clamp_z(&view.z_range),
+            SpatialAxis::Y => single(self.cut_plane(view.y, SpatialAxis::Y, to_scene)),
+            SpatialAxis::X => single(self.cut_plane(view.x, SpatialAxis::X, to_scene)),
+        }
+    }
 }
 
 /// What one layer shows with `settings` at the selectors in `view`.
@@ -102,6 +155,7 @@ fn resolve(
     manifest: &DatasetManifest,
     settings: &DatasetDisplaySettings,
     view: &ViewState,
+    to_scene: &Affine,
 ) -> ResolvedLayer {
     let extent = LayerExtent::of(manifest);
     let shown = settings.shown_channels(extent.c);
@@ -140,6 +194,8 @@ fn resolve(
         z_range,
         t_clamped: t != view.t,
         t,
+        y: extent.cut_plane(view.y, SpatialAxis::Y, to_scene),
+        x: extent.cut_plane(view.x, SpatialAxis::X, to_scene),
     }
 }
 
@@ -162,7 +218,10 @@ impl Scene {
                 &seeded
             }
         };
-        Some(resolve(dataset_id, manifest, settings, &self.view))
+        let to_scene = self.placement(dataset_id).unwrap_or(Affine::IDENTITY);
+        Some(resolve(
+            dataset_id, manifest, settings, &self.view, &to_scene,
+        ))
     }
 
     /// What this scene's layers would show under `view`, as restoring it here
@@ -190,7 +249,8 @@ impl Scene {
                         ..styled.clone()
                     };
                 }
-                Some(resolve(id, manifest, &settings, &view.view))
+                let to_scene = self.placement(id).unwrap_or(Affine::IDENTITY);
+                Some(resolve(id, manifest, &settings, &view.view, &to_scene))
             })
             .collect()
     }
@@ -210,6 +270,20 @@ impl Scene {
         match self.document.manifests.get(dataset_id) {
             Some(manifest) => LayerExtent::of(manifest).clamp_z(&self.view.z_range),
             None => self.view.z_range.clone(),
+        }
+    }
+
+    /// The planes a slice view of `plane` cuts in `dataset_id`, clamped into
+    /// it, or the scene's own for a dataset the document lacks.
+    pub fn layer_cut(&self, dataset_id: &DatasetId, plane: SlicePlane) -> Range<u32> {
+        match (
+            self.document.manifests.get(dataset_id),
+            self.placement(dataset_id),
+        ) {
+            (Some(manifest), Some(to_scene)) => {
+                LayerExtent::of(manifest).clamp_cut(&self.view, plane, &to_scene)
+            }
+            _ => self.view.cut(plane),
         }
     }
 

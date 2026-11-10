@@ -25,15 +25,18 @@ import {
   type SelectorState,
 } from "../trace/steps.ts";
 import type { DatasetState } from "../types.ts";
+import type { SlicePlane } from "../renderer/slicePlane.ts";
 
 export interface ScriptControlInputs {
   /** The selectors as the dimension controls see them. */
   selectors: SelectorState;
   /** What each layer shows, for a `c` scrub's starting solo. */
   resolvedLayers: ResolvedLayers;
-  /** The handlers the Z and T controls call. */
-  setZ(index: number): void;
+  /** The handlers the cut (Z, or Y or X in a side view) and T controls call. */
+  setCut(index: number): void;
   setT(index: number): void;
+  /** The handler the slice plane toggle calls. */
+  setSlicePlane(plane: SlicePlane): void;
   /** The handler the layer panel's solo calls. */
   setSolo(datasetId: string, channel: number | null): void;
   /** The handlers the layer panel's channel and layer checkboxes call. */
@@ -58,11 +61,12 @@ export interface ScriptControlInputs {
 }
 
 export function useScriptControls(inputs: ScriptControlInputs): void {
-  const { z, t, dimZ, dimT, viewMode } = inputs.selectors;
+  const { z, t, dimZ, dimT, viewMode, slicePlane, cutIndex, dimCut } = inputs.selectors;
   const {
     resolvedLayers,
-    setZ,
+    setCut,
     setT,
+    setSlicePlane,
     setSolo,
     setChannelVisible,
     setLayerVisible,
@@ -76,7 +80,7 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     datasetsRef,
   } = inputs;
   useEffect(() => {
-    const selectors: SelectorState = { z, t, dimZ, dimT, viewMode };
+    const selectors: SelectorState = { z, t, dimZ, dimT, viewMode, slicePlane, cutIndex, dimCut };
     const channelCountOf = (datasetId: string): number =>
       datasetsRef.current?.get(datasetId)?.manifest?.images[0]?.multiscale.levels[0]?.shape[Axis.C] ?? 1;
     setScriptControls({
@@ -96,7 +100,16 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         }
         const landing = scrubIndex(selectors, axis, count);
         if ("refused" in landing) return { applied: false, reason: landing.refused };
-        ({ z: setZ, t: setT })[axis](landing.index);
+        (axis === "t" ? setT : setCut)(landing.index);
+        return { applied: true, reason: null };
+      },
+      plane: (plane) => {
+        if (viewMode === "3d") return { applied: false, reason: "a slice plane is cut in 2D, not in volume mode" };
+        if (plane === slicePlane) return { applied: false, reason: `the slice view already cuts ${plane.toUpperCase()}` };
+        if (plane !== "xy" && dimZ <= 1) {
+          return { applied: false, reason: "the data has one Z plane, so there is no side to cut" };
+        }
+        setSlicePlane(plane);
         return { applied: true, reason: null };
       },
       select: (target, visible) => {
@@ -182,8 +195,8 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     });
     return () => setScriptControls(null);
   }, [
-    z, t, dimZ, dimT, viewMode, resolvedLayers,
-    setZ, setT, setSolo, setChannelVisible, setLayerVisible, setLabelVisible,
+    z, t, dimZ, dimT, viewMode, slicePlane, cutIndex, dimCut, resolvedLayers,
+    setCut, setT, setSlicePlane, setSolo, setChannelVisible, setLayerVisible, setLabelVisible,
     setChannelContrast, openDataset, removeDataset, datasetHealth,
     captureView, selectedDatasetId, datasetsRef,
   ]);

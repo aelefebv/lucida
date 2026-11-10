@@ -116,5 +116,6 @@ function regionJson(region: VisibleRegion): string {
     radius_basis_vox: region.radiusBasisVox ?? null,
     sort_center: region.sortCenterVox,
     frustum_planes: region.frustumPlanes,
+    ...(region.cutAxis && region.cutAxis !== "z" ? { cut_axis: region.cutAxis } : {}),
   });
 }

@@ -1130,8 +1130,8 @@ export class SessionController {
       },
       onAck: () => {},
       onCommandRejected: (reason) => this.deps.events.onCommandRejected(reason),
-      onBinary: (key, data, codecs, planes) => {
-        this.contentSource.handleBinary(key, data, codecs, planes);
+      onBinary: (key, data, codecs, planes, planeAxis) => {
+        this.contentSource.handleBinary(key, data, codecs, planes, planeAxis);
       },
       onPeerJoined: (clientId, presence) => {
         const next = new Map(this.peers);

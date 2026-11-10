@@ -13,6 +13,8 @@ import type { DatasetManifest } from "../../manifestTypes.ts";
 import { decodedBytesPerSample } from "../../renderer/dataTypeUtil.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { ChunkRequest } from "./types.ts";
+import { planesKeySuffix } from "../fetch/contentSource.ts";
+import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 
 /** Bytes, or chunk counts, per residency tier. */
 export type PerTier = Record<ResidencyTier, number>;
@@ -89,8 +91,7 @@ export function admitPlans(
     for (const req of plan.requests) {
       if (req.tier !== tier || !take(req)) continue;
       // The tiers hold their own copies, so one key is charged once per tier.
-      const planes = req.planes ? `#${req.planes[0]}:${req.planes[1]}` : "";
-      const key = `${tier}/${req.entityId}/${req.chunkKey}${planes}`;
+      const key = `${tier}/${req.entityId}/${req.chunkKey}${planesKeySuffix(req.planes, req.planeAxis)}`;
       if (noRoom.has(key)) continue;
       // A full slot pool refuses this lane's upload, not the chunk: a lane
       // that never uploads, such as the minimap, can still hold it.
@@ -156,15 +157,15 @@ export interface GpuSlot {
  * are charged at this price.
  */
 export function chunkBytesFor(manifest: DatasetManifest): (req: ChunkRequest) => number {
-  const byImage = new Map<string, { levels: number[]; depths: number[]; fallback: number }>();
+  const byImage = new Map<string, { levels: number[]; depths: Record<SpatialAxis, number>[]; fallback: number }>();
   for (const image of [...manifest.images, ...(manifest.labels ?? []).map((label) => label.image)]) {
     const sample = decodedBytesPerSample(image.multiscale.data_type);
     const levels: number[] = [];
-    const depths: number[] = [];
+    const depths: Record<SpatialAxis, number>[] = [];
     for (const level of image.multiscale.levels) {
       const [, , z, y, x] = level.chunk_shape;
       levels[level.level_index] = z * y * x * sample;
-      depths[level.level_index] = Math.max(z, 1);
+      depths[level.level_index] = { x: Math.max(x, 1), y: Math.max(y, 1), z: Math.max(z, 1) };
     }
     byImage.set(image.image_id, { levels, depths, fallback: Math.max(0, ...levels.filter(Number.isFinite)) });
   }
@@ -172,7 +173,7 @@ export function chunkBytesFor(manifest: DatasetManifest): (req: ChunkRequest) =>
     const image = byImage.get(req.imageId);
     if (!image) return 0;
     const whole = image.levels[req.level] ?? image.fallback;
-    const depth = image.depths[req.level];
+    const depth = image.depths[req.level]?.[req.planeAxis ?? "z"];
     if (!req.planes || depth === undefined) return whole;
     return (whole / depth) * (req.planes[1] - req.planes[0]);
   };

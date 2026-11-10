@@ -451,8 +451,8 @@ describe("ProxiedContentSource plane requests", () => {
   beforeEach(() => {
     // Two levels of 4-plane chunks, 4 KiB each decoded.
     source.registerImage("image-1", { Raw: { data_type: "uint16" } }, [
-      { bytes: 4096, planes: 4 },
-      { bytes: 4096, planes: 4 },
+      { bytes: 4096, planes: { x: 16, y: 32, z: 4 } },
+      { bytes: 4096, planes: { x: 16, y: 32, z: 4 } },
     ]);
   });
 
@@ -500,6 +500,26 @@ describe("ProxiedContentSource plane requests", () => {
     expect(settled).toBe(false);
     source.handleBinary(key, new ArrayBuffer(2048), null, [2, 4]);
     expect((await planes).planes).toEqual([2, 4]);
+  });
+
+  it("answers rows along Y only with a frame of rows, which hold their own share of the chunk", async () => {
+    const rows = source.fetch({ ...chunk, planes: [1, 3], planeAxis: "y" }, new AbortController().signal);
+    const zPlanes = source.fetch({ ...chunk, planes: [1, 3] }, new AbortController().signal);
+    expect(sentMessages).toHaveLength(2);
+    expect(JSON.parse(sentMessages[0])).toMatchObject({ planes: [1, 3], plane_axis: "y" });
+    expect(JSON.parse(sentMessages[1]).plane_axis).toBeUndefined();
+
+    let settled = false;
+    void rows.then(() => { settled = true; }, () => { settled = true; });
+    // Z planes do not answer the request for rows with the same range.
+    source.handleBinary(key, new ArrayBuffer(2048), null, [1, 3]);
+    expect((await zPlanes).planeAxis).toBeUndefined();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    source.handleBinary(key, new ArrayBuffer(256), null, [1, 3], "y");
+    const result = await rows;
+    expect([result.planes, result.planeAxis, result.decodedBytes]).toEqual([[1, 3], "y", 256]);
   });
 
   it("fails every request for the chunk when its read fails", async () => {

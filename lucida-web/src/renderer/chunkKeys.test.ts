@@ -1,9 +1,23 @@
 import { describe, it, expect } from "vitest";
 import {
   parseChunkKey,
+  parsePlaneChunkKey,
+  planeChunkKey,
   makeCompositeKey,
   parseCompositeKey,
 } from "./chunkKeys.ts";
+
+describe("a chunk key in a slice plane's frame", () => {
+  it("reads a key across, down and along the cut, and writes it back as the image names it", () => {
+    // Key z 3, y 4, x 5.
+    expect(parsePlaneChunkKey("0/1/2/3/4/5", "y")).toMatchObject({ x: 5, y: 3, z: 4 });
+    expect(parsePlaneChunkKey("0/1/2/3/4/5", "x")).toMatchObject({ x: 4, y: 3, z: 5 });
+    expect(parsePlaneChunkKey("0/1/2/3/4/5")).toEqual(parseChunkKey("0/1/2/3/4/5"));
+    expect(planeChunkKey(0, 1, 2, [5, 3, 4], "y")).toBe("0/1/2/3/4/5");
+    expect(planeChunkKey(0, 1, 2, [4, 3, 5], "x")).toBe("0/1/2/3/4/5");
+    expect(planeChunkKey(0, 1, 2, [5, 4, 3])).toBe("0/1/2/3/4/5");
+  });
+});
 
 describe("parseChunkKey", () => {
   it("parses a valid 6-component chunk key", () => {

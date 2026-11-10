@@ -6,7 +6,8 @@
  */
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
-import { parseChunkKey, parseCompositeKey } from "./chunkKeys.ts";
+import { parseCompositeKey, parsePlaneChunkKey } from "./chunkKeys.ts";
+import type { SpatialAxis } from "./slicePlane.ts";
 
 /**
  * Squared distance from a chunk grid coordinate to a reference point in
@@ -66,6 +67,11 @@ export interface FindEvictionParams {
    * residency to a single Z plane.
    */
   is3D: boolean;
+  /**
+   * The axis a slice pool's slots are cut along; slot keys then read in that
+   * plane's frame (`parsePlaneChunkKey`). Absent: Z.
+   */
+  sliceAxis?: SpatialAxis;
 }
 
 /**
@@ -159,7 +165,7 @@ function classifySlot(
 ): EvictionCandidate | null {
   const parsed = parseCompositeKey(compositeKey);
   if (!parsed) return null;
-  const chunk = parseChunkKey(parsed.chunkKey);
+  const chunk = parsePlaneChunkKey(parsed.chunkKey, params.sliceAxis);
   if (!chunk) return null;
 
   const target = params.targetLevelFor(parsed.memberId);

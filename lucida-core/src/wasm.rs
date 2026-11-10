@@ -174,11 +174,12 @@ impl WasmScene {
             camera_space: Option<CameraSpace>,
         }
         let p: Presence = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        let mut camera = p.camera;
+        let (mut camera, mut view) = (p.camera, p.view);
         if let Some(from) = &p.camera_space {
             self.inner.carry_camera(&mut camera, from);
+            self.inner.carry_view(&mut view, from);
         }
-        self.inner.import_presence(camera, p.view, p.display);
+        self.inner.import_presence(camera, view, p.display);
         Ok(())
     }
 
@@ -377,6 +378,24 @@ impl WasmScene {
 
     pub fn t(&self) -> u32 {
         self.inner.view.t
+    }
+
+    /// The plane the slice camera cuts: `xy`, `xz` or `yz`.
+    pub fn slice_plane(&self) -> String {
+        self.inner.slice_plane().to_string()
+    }
+
+    /// The scene's axis position along the slice plane's cut axis, before
+    /// any layer clamps it.
+    pub fn cut_index(&self) -> u32 {
+        self.inner.view.cut(self.inner.slice_plane()).start
+    }
+
+    /// How many positions the slice view's cut axis steps through: Z's
+    /// planes for an XY view, scene-frame units across what is visible for a
+    /// side view.
+    pub fn cut_extent(&self) -> u32 {
+        self.inner.cut_extent(self.inner.slice_plane().cut())
     }
 
     pub fn zoom(&self) -> f64 {

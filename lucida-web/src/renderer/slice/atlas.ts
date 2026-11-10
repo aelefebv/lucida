@@ -25,6 +25,7 @@ import { LABEL_TIER, postChunkResidency, postSlotsLost } from "../chunkUploadFee
 import { chunkPoolTier } from "../poolKeys.ts";
 import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
 import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
+import type { SpatialAxis } from "../slicePlane.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding the current
@@ -315,6 +316,12 @@ export interface SliceAtlasState {
   /** Current T, C, full-res Z — pool-wide. */
   z: number; t: number; c: number;
   /**
+   * The axis this pool's slots are cut along, which its pool key names, so
+   * it never changes. Its "Z" (`z`, `entityZInfo`, `slotLevelZ`) is that
+   * axis, and slot keys read in its frame (`parsePlaneChunkKey`).
+   */
+  axis: SpatialAxis;
+  /**
    * slotIndex → the level plane its 2D data was cut from, -1 when empty. A
    * slot whose plane is not the one the current Z maps to is stale: the remap
    * leaves it unmapped and the wanted set reports it missing.
@@ -387,6 +394,7 @@ function createSliceAtlas(
     entityMetas: new Map(),
     entityZInfo: new Map(),
     z, t, c,
+    axis: "z",
     slotLevelZ: new Int32Array(totalSlots).fill(-1),
     indirectionDirty: true,
   };
@@ -594,6 +602,7 @@ export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: Sli
     );
     atlas.entityMetas = lost.entityMetas;
     atlas.entityZInfo = lost.entityZInfo;
+    atlas.axis = lost.axis;
     resizeSliceIndirection(ctx, atlas, lost.indirectionData.length);
     atlas.indirectionData.fill(0xFFFFFFFF);
     atlas.indirectionDirty = true;

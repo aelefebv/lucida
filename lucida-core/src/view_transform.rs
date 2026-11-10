@@ -166,6 +166,7 @@ pub fn explore(
         Some(view) => match &view.camera_space {
             Some(_) => SavedView {
                 camera: view.camera_in(scene),
+                view: view.view_in(scene),
                 camera_space: scene.camera_space(),
                 ..view.clone()
             },

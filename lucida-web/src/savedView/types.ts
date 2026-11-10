@@ -1,5 +1,6 @@
 // TypeScript mirror of `lucida_core::saved_view::SavedView`. The wire format
 // is the contract, so keep this in step with `lucida-core/src/saved_view.rs`.
+import type { SlicePlane } from "../renderer/slicePlane.ts";
 
 /** Version 2 moved solo onto each layer; see `SAVED_VIEW_VERSION` in Rust. */
 export const SAVED_VIEW_VERSION = 2;
@@ -17,6 +18,8 @@ export interface SliceCamera {
   /** Absent when someone placed the view. See `Framing` in
    *  `lucida-core/src/camera.rs`. */
   framing?: CameraFraming;
+  /** The plane the view cuts. Absent for XY, which every older view was. */
+  plane?: SlicePlane;
 }
 
 export interface ArcballCamera {
@@ -83,6 +86,10 @@ export interface ZRange {
 export interface ViewState {
   z_range: ZRange;
   t: number;
+  /** The plane an XZ view cuts along Y, absent until one first opened. */
+  y?: number;
+  /** The plane a YZ view cuts along X, absent until one first opened. */
+  x?: number;
   /** The scene-wide channel of a view recorded before solo was per layer.
    *  Present only on such a view; the scene decodes it into each layer's
    *  `solo` when the view is imported. */

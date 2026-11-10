@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis, resolveIndex, type IndexChange } from "../axes.ts";
+import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { requestRender } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -31,11 +32,12 @@ export function useDimensions({
   bridgeCallbacksRef,
   loopRef,
 }: Params) {
-  const { z, t, viewMode, cameraMode, layers } = useSceneView(sceneStore);
+  const { z, t, viewMode, cameraMode, layers, slicePlane, cutIndex } = useSceneView(sceneStore);
 
   // Slider ranges are the union across all datasets, and the scene clamps
   // them into each smaller layer. `datasetsVersion` re-renders on every Map
   // mutation, so reading the ref here is current.
+  const cut = cutAxis(slicePlane);
   let dimZ = 1, dimT = 1;
   void datasetsVersion;
   // eslint-disable-next-line react-hooks/refs
@@ -44,6 +46,10 @@ export function useDimensions({
     dimZ = Math.max(dimZ, shape[Axis.Z]);
     dimT = Math.max(dimT, shape[Axis.T]);
   }
+  // A side view's position is a place in the scene frame, which the scene
+  // measures across what is visible.
+  // eslint-disable-next-line react-hooks/refs
+  const dimCut = cut === "z" ? dimZ : (wasmSceneRef.current?.cut_extent() ?? 1);
 
   // Saved-view clamping needs T/C counts, which the scene can't supply. An
   // unloaded dataset returns `{}`, leaving every axis unclamped.
@@ -85,12 +91,17 @@ export function useDimensions({
       applyViewportCommand(scene, { type: "set_t", t: dimT - 1 });
       clamped = true;
     }
+    if (cut !== "z" && scene.cut_index() >= dimCut) {
+      const last = dimCut - 1;
+      applyViewportCommand(scene, cut === "y" ? { type: "set_y", y: last } : { type: "set_x", x: last });
+      clamped = true;
+    }
     if (clamped) {
       requestRender(loopRef.current, "selector_clamp");
       bridgeCallbacksRef.current.emitPresence();
     }
     // A one-shot reaction to the union shrinking, not a continuous sync.
-  }, [dimZ, dimT]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dimZ, dimT, dimCut]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleViewModeToggle = useCallback(() => {
     const scene = wasmSceneRef.current;
@@ -111,17 +122,33 @@ export function useDimensions({
   // The recorder hears the scrub here, at the control, not where the value
   // reaches the render loop. A saved-view apply and a followed peer move the
   // same selectors, and neither is an input. A step reads the scene at the
-  // press, not the last render, so presses before a render each move.
-  const handleZChange = useCallback((v: IndexChange) => {
+  // press, not the last render, so presses before a render each move. The
+  // slider moves along the slice plane's cut: Z for an XY view, Y or X for a
+  // side view.
+  const handleCutChange = useCallback((v: IndexChange) => {
     bridgeCallbacksRef.current.breakFollow();
     loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
-      applyViewportCommand(scene, { type: "set_z", z: resolveIndex(v, scene.z()) });
+      const axis = cutAxis(scene.slice_plane() as SlicePlane);
+      const index = resolveIndex(v, scene.cut_index());
+      applyViewportCommand(scene, axis === "z"
+        ? { type: "set_z", z: index }
+        : axis === "y" ? { type: "set_y", y: index } : { type: "set_x", x: index });
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
+  // A plane is another camera, as a mode is, so it fits the data again.
+  const handleSlicePlaneChange = useCallback((plane: SlicePlane) => {
+    const scene = wasmSceneRef.current;
+    if (!scene || scene.slice_plane() === plane) return;
+    bridgeCallbacksRef.current.breakFollow();
+    loopRef.current?.markInput("plane");
+    applyViewportCommand(scene, { type: "set_slice_plane", plane });
+    requestRender(loopRef.current, "view_mode");
+    bridgeCallbacksRef.current.emitPresence();
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
   const handleTChange = useCallback((v: IndexChange) => {
     bridgeCallbacksRef.current.breakFollow();
@@ -138,13 +165,16 @@ export function useDimensions({
     viewMode, cameraMode,
     layers,
     dimZ, dimT,
+    slicePlane, cutIndex, dimCut,
     dimensionExtentsFor,
     labelNamesFor,
     handleViewModeToggle,
-    handleZChange, handleTChange,
+    handleTChange,
+    handleCutChange, handleSlicePlaneChange,
   }), [
     z, t, viewMode, cameraMode, layers, dimZ, dimT,
+    slicePlane, cutIndex, dimCut,
     dimensionExtentsFor, labelNamesFor, handleViewModeToggle,
-    handleZChange, handleTChange,
+    handleTChange, handleCutChange, handleSlicePlaneChange,
   ]);
 }
