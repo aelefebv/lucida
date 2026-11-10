@@ -13,6 +13,7 @@ import {
   PencilSimpleIcon,
   PlusIcon,
   TrashIcon,
+  WarningIcon,
 } from "@phosphor-icons/react";
 import type { PressEvent } from "react-aria-components";
 import {
@@ -27,6 +28,7 @@ import {
   Slider,
   Switch,
   TextField,
+  Tooltip,
   useCommands,
   type CommandOptions,
   type KeyCombo,
@@ -128,7 +130,8 @@ interface Props {
    *  z or t reaches past it. */
   resolvedLayers: ResolvedLayers;
   /** Each dataset's import warnings, by layer id. Those that say the data is
-   *  shown wrong mark the layer degraded and are spelled out under it. */
+   *  shown wrong count toward the layer's problem button, which spells them
+   *  out under the row. */
   importWarnings?: ReadonlyMap<string, readonly DatasetImportWarning[]>;
   /** Editor-only affordances (rename) are shown only when true. */
   canEdit: boolean;
@@ -290,6 +293,10 @@ function LayerRow(props: LayerRowProps) {
     .map(importWarningText);
   if (failedChunks) problems.push(failedChunksNotice(failedChunks));
   const problemsId = useId();
+  // Closed by default: a collection's warnings can name many tiles, and open
+  // they would push the other layers out of the panel.
+  const [problemsOpen, setProblemsOpen] = useState(false);
+  const problemCount = `${problems.length} data problem${problems.length === 1 ? "" : "s"}`;
 
   return (
     <section
@@ -339,9 +346,20 @@ function LayerRow(props: LayerRowProps) {
           </span>
         )}
         {problems.length > 0 && (
-          <span data-testid={`layer-degraded-${layer.id}`} aria-describedby={problemsId}>
-            <Badge tone="warning">Degraded</Badge>
-          </span>
+          <Tooltip content={problemCount}>
+            <Button
+              variant="warning"
+              size="sm"
+              icon={WarningIcon}
+              aria-label={problemCount}
+              aria-expanded={problemsOpen}
+              aria-controls={problemsId}
+              data-testid={`layer-degraded-${layer.id}`}
+              onPress={() => setProblemsOpen(!problemsOpen)}
+            >
+              {problems.length}
+            </Button>
+          </Tooltip>
         )}
         <Menu
           label={`Layer ${layer.name} actions`}
@@ -381,7 +399,12 @@ function LayerRow(props: LayerRowProps) {
         />
       </div>
       {problems.length > 0 && (
-        <ul className="lc-layer-problems" id={problemsId} aria-label={`${layer.name} data problems`}>
+        <ul
+          className="lc-layer-problems"
+          id={problemsId}
+          aria-label={`${layer.name} data problems`}
+          hidden={!problemsOpen}
+        >
           {problems.map((message) => (
             <li key={message}>{message}</li>
           ))}

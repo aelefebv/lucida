@@ -21,6 +21,7 @@ import {
   SidebarSimpleIcon,
   SquareIcon,
   TrashIcon,
+  WarningIcon,
   CaretDownIcon,
   FolderOpenIcon,
 } from "@phosphor-icons/react";
@@ -304,6 +305,9 @@ function ButtonSection() {
         <Button>Secondary</Button>
         <Button variant="ghost">Ghost</Button>
         <Button variant="danger">Delete</Button>
+        <Button variant="warning" icon={WarningIcon} aria-label="2 problems">
+          2
+        </Button>
       </Row>
       <Row label="Small">
         <Button variant="primary" size="sm">
