@@ -39,6 +39,11 @@ export default defineConfig({
           name: 'unit',
           include: ['src/**/*.test.{ts,tsx}'],
           exclude: ['src/**/*.perf.test.ts'],
+          // The Windows runner takes several seconds to render and click
+          // through one component test, so vitest's 5 s default fails tests
+          // that are only slow. A hung test still fails, just later.
+          testTimeout: 20_000,
+          hookTimeout: 20_000,
         },
       },
       {
