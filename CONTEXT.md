@@ -271,6 +271,17 @@ A scene holds a list of views, one by default, and they share its datasets,
 display settings and memory budgets. Commands steer the active view.
 _Avoid_: viewport (the canvas size a camera is fitted to)
 
+**View layout**:
+How the canvas divides among the views: one view across it, two side by side,
+or two stacked.
+_Avoid_: layout (unqualified; a collection's arrangement of entities)
+
+**Holder**:
+The view whose form a dataset's GPU pools hold: one slice cut or the whole
+volume, at one timepoint. The first view to show a dataset holds it until it
+stops showing it. Another view draws the dataset only while it wants the same
+form, and otherwise leaves it out and says why.
+
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on
 another canvas it keeps the region it showed. A *framed* camera is the fit of

@@ -11,7 +11,7 @@ use crate::scene::{
     CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene,
     member_transform,
 };
-use crate::view::{AxisPositions, View, ViewId};
+use crate::view::{AxisPositions, View, ViewId, ViewLayout};
 
 const IDENTITY_4X4: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -516,6 +516,44 @@ impl WasmScene {
             let r = view.rect;
             vec![r.x, r.y, r.width, r.height]
         })
+    }
+
+    /// Whether `view` draws slices or a volume: `"slice"` or `"volume"`, or
+    /// empty for an unknown view.
+    pub fn view_mode(&self, view: u32) -> String {
+        self.camera_in(view).map_or_else(String::new, |camera| {
+            if camera.is_volume() {
+                "volume"
+            } else {
+                "slice"
+            }
+            .to_string()
+        })
+    }
+
+    /// How the canvas divides among the views: `"single"`, `"columns"` or
+    /// `"rows"`.
+    pub fn view_layout(&self) -> String {
+        match self.inner.view_layout() {
+            ViewLayout::Single => "single",
+            ViewLayout::Columns => "columns",
+            ViewLayout::Rows => "rows",
+        }
+        .to_string()
+    }
+
+    /// The view whose form `dataset_id`'s GPU pools hold, or none when no
+    /// view shows the dataset.
+    pub fn dataset_holder(&self, dataset_id: &str) -> Option<u32> {
+        self.inner
+            .dataset_holder(&DatasetId(dataset_id.into()))
+            .map(|view| view.0)
+    }
+
+    /// The datasets `view` shows but leaves out, since another view holds
+    /// their pools in another form, as a JSON array of `Withheld`.
+    pub fn withheld(&self, view: u32) -> String {
+        serde_json::to_string(&self.inner.withheld(ViewId(view))).unwrap_or_default()
     }
 
     /// Query the scene for geometric information about all entities in a

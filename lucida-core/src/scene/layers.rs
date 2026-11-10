@@ -282,10 +282,11 @@ fn resolve(
 }
 
 impl Scene {
-    /// Every layer as `view` shows it, in panel order, then any dataset the
-    /// order does not list. Empty for an unknown view.
+    /// Every layer `view` draws, as it shows it, in panel order, then any
+    /// dataset the order does not list. Empty for an unknown view.
     pub fn resolved_layers(&self, view: ViewId) -> Vec<ResolvedLayer> {
         self.layer_ids()
+            .filter(|id| self.draws(view, id))
             .filter_map(|id| self.resolved_layer(view, id))
             .collect()
     }

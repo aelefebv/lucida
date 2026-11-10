@@ -2,6 +2,7 @@ mod comparison;
 mod layers;
 mod placement;
 mod types;
+mod views;
 
 pub use comparison::{CompareMode, Comparison, Side};
 pub(crate) use layers::LayerExtent;
@@ -11,6 +12,7 @@ pub use types::{
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
     RenderMode, declared_channels,
 };
+pub use views::{PoolForm, Withheld};
 
 use std::collections::HashMap;
 
@@ -27,7 +29,7 @@ use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::slice_plane::SlicePlane;
 use crate::target_level::{self, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios};
 use crate::transform::VolumeTransform;
-use crate::view::{AxisPositions, View, ViewDatasets, ViewId};
+use crate::view::{AxisPositions, View, ViewDatasets, ViewId, ViewLayout};
 use lucida_content::SpatialAxis;
 pub use placement::member_transform;
 use placement::{Placed, slice_box};
@@ -93,6 +95,23 @@ pub enum FrameTarget {
 pub struct Scene {
     /// Never empty. Client-local, like the cameras they hold.
     views: Vec<View>,
+    /// The view commands steer. Client-local.
+    #[serde(skip)]
+    active: ViewId,
+    /// How the canvas divides among the views. Client-local.
+    #[serde(skip)]
+    layout: ViewLayout,
+    /// The id the next view a layout adds takes, so no view's id is reused.
+    #[serde(skip, default = "first_added_view_id")]
+    next_view_id: u32,
+    /// The canvas size in device pixels, which each view takes its rectangle
+    /// of. Client-local.
+    #[serde(skip)]
+    canvas: [u32; 2],
+    /// Per dataset, the view whose form its pools hold. See
+    /// [`Scene::dataset_holder`]. Client-local.
+    #[serde(skip)]
+    holders: HashMap<DatasetId, ViewId>,
     /// Shared document state (dataset manifests).
     #[serde(flatten)]
     pub document: DocumentState,
@@ -188,10 +207,20 @@ impl ViewQueryCursor {
     }
 }
 
+/// The first view a layout adds follows the scene's own first view.
+fn first_added_view_id() -> u32 {
+    1
+}
+
 impl Scene {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
             views: vec![View::new(ViewId(0), viewport)],
+            active: ViewId(0),
+            layout: ViewLayout::Single,
+            next_view_id: first_added_view_id(),
+            canvas: viewport,
+            holders: HashMap::new(),
             document: DocumentState::default(),
             display: DisplayState::default(),
             dataset_order: Vec::new(),
@@ -217,16 +246,20 @@ impl Scene {
         self.views.iter_mut().find(|view| view.id() == id)
     }
 
-    /// The view commands steer, presence reports and a saved view records:
-    /// the first.
+    /// The view commands steer, presence reports and a saved view records.
     pub fn active_view(&self) -> &View {
-        &self.views[0]
+        self.view(self.active).unwrap_or(&self.views[0])
     }
 
     /// [`Self::active_view`], to change directly. Leaves the epochs to the
     /// caller.
     pub fn active_view_mut(&mut self) -> &mut View {
-        &mut self.views[0]
+        let at = self
+            .views
+            .iter()
+            .position(|view| view.id() == self.active)
+            .unwrap_or(0);
+        &mut self.views[at]
     }
 
     /// World-space bounding-box diagonal of everything `view` shows, in the
@@ -309,6 +342,7 @@ impl Scene {
     /// depend on the ratio.
     pub(crate) fn inner_set_viewport(&mut self, width: u32, height: u32, pixel_ratio: Option<f64>) {
         let ratio = self.ratio_change(pixel_ratio);
+        self.canvas = [width, height];
         let mut resized = Vec::new();
         for view in &mut self.views {
             let before = view.camera.clone();
@@ -604,7 +638,9 @@ impl Scene {
     }
 
     /// The datasets a fit of everything `view` shows covers: the visible ones
-    /// the view shows. None for an unknown view.
+    /// the view shows, a dataset it leaves out for now among them, so its
+    /// framing and axis extents hold while another view keeps the dataset's
+    /// pools. None for an unknown view.
     pub fn shown_dataset_ids(&self, view: ViewId) -> impl Iterator<Item = &DatasetId> {
         let view = self.view(view);
         self.visible_dataset_ids()
@@ -1470,7 +1506,9 @@ impl Scene {
     /// delta a caller is folding. A caller that only ever asks for full
     /// queries has no history and gets the rule without hysteresis.
     pub fn view_query(&self, view: ViewId, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
-        let view = self.view(view).filter(|view| view.shows(dataset_id))?;
+        let view = self
+            .view(view)
+            .filter(|view| self.draws(view.id(), dataset_id))?;
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
         let placed = self.placed(dataset_id)?;
