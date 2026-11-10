@@ -714,6 +714,8 @@ mod tests {
         assert_eq!(read, ChunkRead::Present(vec![1, 2, 3, 4]));
     }
 
+    /// An absent chunk is valid data, so the source's health counts it as
+    /// absent and never as a failed read.
     #[tokio::test]
     async fn absent_chunk_reads_as_one_wire_chunk_of_fill() {
         let resolver = resolver_with(vec![four_byte_level()]);
@@ -729,6 +731,8 @@ mod tests {
             }
         );
         assert_eq!(read.into_bytes(), vec![0; 4]);
+        assert_eq!(store.stats().backend_errors, 0);
+        assert_eq!(store.stats().absent_reads, 1);
     }
 
     #[tokio::test]
@@ -775,11 +779,15 @@ mod tests {
     #[tokio::test]
     async fn object_store_fault_is_an_error_and_not_an_absence() {
         let resolver = resolver_with(vec![four_byte_level()]);
-        let store = cached(FailingStore(StoreFailure::Backend));
+        for failure in [StoreFailure::Backend, StoreFailure::PermissionDenied] {
+            let store = cached(FailingStore(failure));
 
-        let error = read(&resolver, &store, "0/0/0/0/0/0").await.unwrap_err();
+            let error = read(&resolver, &store, "0/0/0/0/0/0").await.unwrap_err();
 
-        assert!(matches!(error, ChunkReadError::ObjectStore(_)));
+            assert!(matches!(error, ChunkReadError::ObjectStore(_)));
+            assert_eq!(store.stats().backend_errors, 1, "{error}");
+            assert_eq!(store.stats().absent_reads, 0, "{error}");
+        }
     }
 
     #[tokio::test]
@@ -854,6 +862,31 @@ mod tests {
             );
         }
         assert_eq!(store.stats().backend_errors, 0);
+        assert_eq!(store.stats().absent_reads, 0, "the index answered both");
+    }
+
+    /// A shard that was never written, as in an unwritten sharded level, reads
+    /// as fill for every inner chunk in it, after one absent read and no
+    /// failed one.
+    #[tokio::test]
+    async fn every_inner_chunk_of_a_missing_shard_reads_as_fill_after_one_absent_read() {
+        let resolver = resolver_with(vec![sharded(channel_bundled_level())]);
+        let store = cached(object_store::memory::InMemory::new());
+
+        for key in ["0/0/0/0/0/0", "0/0/0/0/0/1"] {
+            let read = read(&resolver, &store, key).await.unwrap();
+            assert_eq!(
+                read,
+                ChunkRead::Absent {
+                    len: 4,
+                    fill: FillValue::default()
+                },
+                "{key}"
+            );
+        }
+        let stats = store.stats();
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.absent_reads, 1);
     }
 
     /// A level the binding does not describe has no chunk size to check
@@ -1121,12 +1154,13 @@ mod tests {
         let resolver = resolver_with(vec![regridded_level()]);
         let store = object_store::memory::InMemory::new();
         seed_stored_chunks(&store, &resolver, Some((1, 1))).await;
+        let store = cached(store);
 
-        let read = read(&resolver, &cached(store), "0/0/0/0/0/0")
-            .await
-            .unwrap();
+        let read = read(&resolver, &store, "0/0/0/0/0/0").await.unwrap();
 
         assert_eq!(read, ChunkRead::Present(declared_picture(0, Some((1, 1)))));
+        assert_eq!(store.stats().backend_errors, 0);
+        assert_eq!(store.stats().absent_reads, 1);
     }
 
     #[tokio::test]

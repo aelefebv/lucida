@@ -63,6 +63,7 @@ export function fixtureHealth(id = "ds"): DatasetSourceHealth {
       misses: 12,
       evictions: 0,
       backend_errors: 0,
+      absent_reads: 0,
       source_reads: 12,
       source_read_millis: 380,
     },
