@@ -101,6 +101,7 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
     getVolumeRenderer: () => ({}) as never,
     getCompositor: () => ({ setBackground: vi.fn() }) as never,
     getCursorRenderer: () => ({ updateCursors: vi.fn() }) as never,
+    getViewLander: () => ({}) as never,
     ensureOffscreenPool: () => [],
     getOrCreateLUT: () => ({}) as GPUTexture,
     post,

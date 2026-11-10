@@ -11,8 +11,6 @@ export {
   destroyAllLabelVolumePools,
   destroyAllVolumeAtlasResources,
   destroyAtlas,
-  ensureDepthTexture,
-  getDepthTexture,
   getOrCreateLabelVolumePool,
   getOrCreateVolumePool,
   growVolumeAtlas,

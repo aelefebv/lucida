@@ -17,7 +17,13 @@ import { handleLabelVolumeChunkData } from "../volume/upload.ts";
 import { handleMinimapUploadOverviewChunks, MINIMAP_OVERVIEW_SHARE, removeMinimapResources } from "../minimapHandlers.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
 import { createInitialState } from "./state.ts";
-import { ensureOffscreenPool, trimOffscreenPool } from "./resources.ts";
+import {
+  releaseAllViewResources,
+  releaseViewsBut,
+  trimViewLayerTargets,
+  viewFrameTarget,
+  viewLayerTargets,
+} from "./viewResources.ts";
 import { grantGrowth, handleGpuOutOfMemory, measureGpuMemory } from "./gpuBudget.ts";
 
 const MIB = 1024 * 1024;
@@ -27,8 +33,12 @@ function makeCtx(gpuTotalBytes = 1536 * MIB) {
   const posts: WorkerToMainMessage[] = [];
   const copies: Array<{ from?: GPUOrigin3D; to?: GPUOrigin3D; size: number[] }> = [];
   const resource = () => ({ createView: () => ({}), destroy: vi.fn() });
+  const texture = (desc: GPUTextureDescriptor) => {
+    const [width, height] = desc.size as number[];
+    return { ...resource(), width, height, format: desc.format };
+  };
   const device = {
-    createTexture: vi.fn(resource),
+    createTexture: vi.fn(texture),
     createBuffer: (desc: GPUBufferDescriptor) => ({ size: desc.size, destroy: vi.fn() }),
     createCommandEncoder: () => ({
       copyTextureToTexture: (src: GPUTexelCopyTextureInfo, dst: GPUTexelCopyTextureInfo, size: number[]) =>
@@ -41,6 +51,7 @@ function makeCtx(gpuTotalBytes = 1536 * MIB) {
   } as unknown as GPUDevice;
   const ctx = {
     device,
+    format: "bgra8unorm",
     state: createInitialState(gpuTotalBytes),
     post: (msg: WorkerToMainMessage) => posts.push(msg),
     postWantedSet: vi.fn(),
@@ -204,13 +215,21 @@ describe("running out of memory", () => {
 });
 
 describe("holders outside the pools", () => {
-  it("count the viewport's render targets, and stop counting the ones a frame frees", () => {
+  it("count each view's render targets and kept frame, and stop counting what a view frees", () => {
     const { ctx } = makeCtx();
-    ensureOffscreenPool(ctx, 2, 100, 50);
-    expect(measureGpuMemory(ctx.state).targetBytes).toBe(2 * 100 * 50 * 8);
-    trimOffscreenPool(1);
-    expect(measureGpuMemory(ctx.state).targetBytes).toBe(100 * 50 * 8);
-    trimOffscreenPool(0);
+    const targetBytes = () => measureGpuMemory(ctx.state).targetBytes;
+    viewLayerTargets(ctx, 0, 2, 100, 50);
+    expect(targetBytes()).toBe(2 * 100 * 50 * 8);
+    trimViewLayerTargets(ctx, 0, 1);
+    expect(targetBytes()).toBe(100 * 50 * 8);
+    // A view that covers part of the canvas keeps its frame, four bytes a texel.
+    viewLayerTargets(ctx, 1, 1, 40, 50);
+    viewFrameTarget(ctx, 1, 40, 50);
+    expect(targetBytes()).toBe(100 * 50 * 8 + 40 * 50 * 8 + 40 * 50 * 4);
+    releaseViewsBut(ctx, new Set([0]));
+    expect(targetBytes()).toBe(100 * 50 * 8);
+    releaseAllViewResources(ctx);
+    expect(targetBytes()).toBe(0);
   });
 
   it("leave a minimap overview out once the overviews' share is spent, until its selection changes", () => {

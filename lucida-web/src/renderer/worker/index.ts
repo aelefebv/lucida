@@ -4,6 +4,5 @@ export { dispatchMessage } from "./dispatch.ts";
 export { handleDestroy } from "./lifecycle.ts";
 export {
   destroyAllResources,
-  ensureOffscreenPool,
   getOrCreateLUT,
 } from "./resources.ts";

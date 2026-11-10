@@ -15,7 +15,6 @@ import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
 import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
-import { setGpuLedgerLine } from "../worker/gpuLedger.ts";
 import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { applyFailedMarks, failedCellsAt, failedKeysForImage } from "../failedCells.ts";
@@ -594,33 +593,6 @@ export function destroyAllLabelVolumePools(ctx: WorkerCtx): void {
   ctx.state.labelVolumePools.clear();
 }
 
-// Shared depth texture for volume rendering (used by cursor renderer for occlusion).
-// Stays at module scope: it's a per-canvas resource (not per-session) that
-// `ensureDepthTexture` resizes when canvas dims change.
-let depthTexture: GPUTexture | null = null;
-let depthW = 0;
-let depthH = 0;
-
-export function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture {
-  if (depthTexture && depthW === w && depthH === h) return depthTexture;
-  depthTexture?.destroy();
-  depthTexture = device.createTexture({
-    size: [w, h],
-    format: "depth24plus",
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-  });
-  depthW = w;
-  depthH = h;
-  // `depth24plus` is stored in four bytes a texel on every backend.
-  setGpuLedgerLine("depth", w * h * 4);
-  return depthTexture;
-}
-
-/** Current depth texture handle, used by the cursor renderer for occlusion. */
-export function getDepthTexture(): GPUTexture | null {
-  return depthTexture;
-}
-
 function createAtlasTexture(
   device: GPUDevice,
   chunkX: number, chunkY: number, chunkZ: number,
@@ -943,9 +915,4 @@ export function destroyAllVolumeAtlasResources(ctx: WorkerCtx): void {
   const atlases = ctx.state.volumeAtlases;
   for (const atlas of atlases.values()) destroyAtlas(atlas);
   atlases.clear();
-  depthTexture?.destroy();
-  depthTexture = null;
-  depthW = 0;
-  depthH = 0;
-  setGpuLedgerLine("depth", 0);
 }

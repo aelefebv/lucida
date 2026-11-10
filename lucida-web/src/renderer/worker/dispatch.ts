@@ -37,6 +37,7 @@ import { removeDatasetResources } from "./lifecycle.ts";
 import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
 import { handleProbe } from "./probe.ts";
+import { handlePresentViews } from "./viewFrame.ts";
 import { postChunkResidency } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
 
@@ -56,6 +57,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       canvas.height = msg.height;
       return;
     }
+
+    case "presentViews":
+      await handlePresentViews(ctx, msg);
+      return;
 
     case "canvasColors":
       ctx.state.canvasColors = msg.colors;

@@ -24,6 +24,7 @@ import type { PendingFrameCapture } from "./captureFrame.ts";
 import type { WantedChunkIndex } from "../wantedChunks.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import { createMinimapRendererState, type MinimapRendererState } from "../minimapHandlers.ts";
+import type { ViewResources } from "./viewResources.ts";
 
 /** GPU errors of one kind folded into the next report while the last one's spacing runs. */
 export interface GpuErrorReport {
@@ -92,11 +93,8 @@ export interface RendererState {
    * a point from.
    */
   lastFrames: Map<number, SliceRenderMultiPassMessage | VolumeRenderMultiPassMessage>;
-  /**
-   * Per view that covers part of the canvas, the target its frames draw into
-   * before they land on the canvas (`worker/viewFrame.ts`).
-   */
-  viewTargets: Map<number, GPUTexture>;
+  /** Per view, what it draws with, sized to its own pixels (`worker/viewResources.ts`). */
+  viewResources: Map<number, ViewResources>;
   /** The newest viewport frame the page gave up on; a banded frame up to it stops at its next band. */
   abandonedFrameSeq: number;
   /**
@@ -181,7 +179,7 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     currentEpochs: null,
     currentColdState: null,
     lastFrames: new Map(),
-    viewTargets: new Map(),
+    viewResources: new Map(),
     abandonedFrameSeq: 0,
     coldStateByDataset: new Map(),
     wantedByDataset: new Map(),

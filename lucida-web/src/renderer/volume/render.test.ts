@@ -423,7 +423,7 @@ describe("handleVolumeRenderMultiPass", () => {
       });
       const ctx = makeCtx({ device, state, renderer, composite, descIndex });
       const targets = members.map((id) => ({ id }));
-      ctx.ensureOffscreenPool = ((count: number) =>
+      ctx.ensureOffscreenPool = ((_view: number, count: number) =>
         Array.from({ length: Math.max(count, 2) }, (_, i) => ({ createView: () => targets[i] }))) as unknown as WorkerCtx["ensureOffscreenPool"];
       const getCurrentTexture = vi.fn(() => ({ createView: () => ({}) }));
       ctx.context.getCurrentTexture = getCurrentTexture as unknown as () => GPUTexture;

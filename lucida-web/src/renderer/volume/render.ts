@@ -15,15 +15,13 @@ import { resolveMemberPools } from "../descriptorBuffer.ts";
 import {
   type AtlasState,
   type LabelVolumePool,
-  ensureDepthTexture,
-  getDepthTexture,
   markLabelVolumeFailed,
 } from "./atlas.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
-import { trimOffscreenPool } from "../worker/resources.ts";
+import { heldViewDepth, trimViewLayerTargets, viewDepth } from "../worker/viewResources.ts";
 import { beginViewFrame } from "../worker/viewFrame.ts";
 
 /** Defensive fallback model transform. A real label layer always carries its source member's matrices. */
@@ -148,7 +146,7 @@ function renderLabelVolumeLayer(
   renderer.setLabelColorBuffer(palette.buffer);
   renderer.setDescriptorBinding(descBuffer, 0, palette.count);
 
-  const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
+  const depth = viewDepth(ctx, msg.view, msg.canvasW, msg.canvasH);
   const depthView = depth.createView();
   const timing = ctx.passTimer;
   const encoder = ctx.device.createCommandEncoder();
@@ -190,7 +188,7 @@ async function marchInBands(
   bandsWanted: number,
 ): Promise<GPUTextureView[] | null> {
   const renderer = ctx.getVolumeRenderer();
-  const targets = ctx.ensureOffscreenPool(batches.length, msg.canvasW, msg.canvasH)
+  const targets = ctx.ensureOffscreenPool(msg.view, batches.length, msg.canvasW, msg.canvasH)
     .slice(0, batches.length)
     .map((texture) => texture.createView());
   let top = msg.canvasH;
@@ -234,9 +232,9 @@ export async function handleVolumeRenderMultiPass(
   await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
 
   // One offscreen texture: each batch of layers is rendered and composited in turn.
-  const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
+  const pool = ctx.ensureOffscreenPool(msg.view, 1, msg.canvasW, msg.canvasH);
   // A slice frame or a banded frame before this one may have left more.
-  trimOffscreenPool(1);
+  trimViewLayerTargets(ctx, msg.view, 1);
 
   const atlasMap = ctx.state.volumeAtlases;
 
@@ -303,7 +301,7 @@ export async function handleVolumeRenderMultiPass(
   }
 
   renderer.prepareMembers(VIEW_DRAWS, draws);
-  const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
+  const depth = viewDepth(ctx, msg.view, msg.canvasW, msg.canvasH);
   const depthView = depth.createView();
   const batches = batchLayers(batchInput, msg.canvasW, msg.canvasH);
   const memberBatches = batches.map((batch) => batch.layers.map((at) => drawn[at]));
@@ -358,18 +356,18 @@ export async function handleVolumeRenderMultiPass(
   comp.underlayBackground(canvasView, encoder, timing);
   ctx.device.queue.submit([encoder.finish()]);
 
-  const depthTex = getDepthTexture();
+  const depthTex = heldViewDepth(ctx, msg.view);
   if (cr.hasData() && msg.viewProj && depthTex) {
     const cursorEncoder = ctx.device.createCommandEncoder();
     cr.renderVolume(canvasView, depthTex.createView(), cursorEncoder, msg.viewProj, msg.fullW, msg.fullH, timing);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
 
-  target.land();
   // The minimap and thumbnails draw with this renderer too, at full quality.
   renderer.setMarchStepScale(1);
   timing.endFrame();
   // The frame can be read only here, after its last pass and before the
-  // texture expires with this handler.
-  captureRenderedFrame(ctx, target.canvasTexture);
+  // texture expires with this handler. A view that covers part of the canvas
+  // reaches it, and is read, when the views are presented.
+  if (target.canvasTexture) captureRenderedFrame(ctx, target.canvasTexture);
 }

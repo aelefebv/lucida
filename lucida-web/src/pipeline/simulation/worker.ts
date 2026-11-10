@@ -150,6 +150,7 @@ export class SimulatedWorker {
       getVolumeRenderer: () => { throw new Error("the simulated worker does not draw"); },
       getCompositor: () => { throw new Error("the simulated worker does not draw"); },
       getCursorRenderer: () => { throw new Error("the simulated worker does not draw"); },
+      getViewLander: () => { throw new Error("the simulated worker does not draw"); },
       ensureOffscreenPool: () => [],
       getOrCreateLUT: () => { throw new Error("the simulated worker does not draw"); },
       post,
