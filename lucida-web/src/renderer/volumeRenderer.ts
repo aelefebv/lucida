@@ -46,6 +46,23 @@ export interface VolumePoolBinding {
   slotsZ: number;
 }
 
+/** The rows of the target one band of a frame drawn in bands covers. */
+export interface RowBand {
+  y: number;
+  height: number;
+  /** The frame's first band, which clears the target. */
+  first: boolean;
+}
+
+/** `rect`, an `[x, y, w, h]` scissor, cut to `band`'s rows, or null when they miss. */
+export function clipToBand(rect: PixelRect, band: RowBand | undefined): PixelRect | null {
+  if (!band) return rect;
+  const [x, y, w, h] = rect;
+  const top = Math.max(y, band.y);
+  const bottom = Math.min(y + h, band.y + band.height);
+  return bottom > top ? [x, top, w, bottom - top] : null;
+}
+
 /** What one draw of {@link VolumeRenderer.renderMembers} binds. */
 export interface VolumeMemberDraw {
   levels: ReadonlyArray<VolumePoolBinding | null>;
@@ -614,7 +631,8 @@ export class VolumeRenderer {
   /**
    * Draw the prepared draws at `indices` into `target` in one pass, each
    * clipped to its scissor. The target is cleared first, and the depth is
-   * cleared or kept.
+   * cleared or kept. With `band`, only its rows are drawn, and a band after
+   * the first keeps what the bands before it drew.
    */
   renderMembers(
     setName: string,
@@ -626,11 +644,13 @@ export class VolumeRenderer {
     clearDepth: boolean,
     encoder: GPUCommandEncoder,
     timing?: PassTiming,
+    band?: RowBand,
   ): void {
     const set = this.memberDrawSet(setName);
     const pipeline = requireCompiled(this.pipeline, "volume renderer");
+    const keep = band !== undefined && !band.first;
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: target, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+      colorAttachments: [{ view: target, loadOp: keep ? "load" : "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
       depthStencilAttachment: {
         view: depthView,
         depthLoadOp: clearDepth ? "clear" : "load",
@@ -642,7 +662,9 @@ export class VolumeRenderer {
     pass.setPipeline(pipeline);
     for (const index of indices) {
       const draw = set.draws[index];
-      const [x, y, w, h] = draw.scissor ?? [0, 0, targetWidth, targetHeight];
+      const rect = clipToBand(draw.scissor ?? [0, 0, targetWidth, targetHeight], band);
+      if (!rect) continue;
+      const [x, y, w, h] = rect;
       pass.setScissorRect(x, y, w, h);
       pass.setBindGroup(0, draw.pools, [draw.uniformOffset]);
       pass.setBindGroup(1, draw.entity, [draw.refOffset]);

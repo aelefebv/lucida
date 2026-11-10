@@ -400,6 +400,99 @@ describe("handleVolumeRenderMultiPass", () => {
     expect(coarsePool.indirectionDirty).toBe(false);
   });
 
+  describe("a frame drawn in bands", () => {
+    /** Two channels of one member, which overlap and so draw as two batches. */
+    function bandedFrame(onBandDone: (state: RendererState) => void = () => {}) {
+      const device = makeDevice();
+      const renderer = makeRenderer();
+      const composite = vi.fn();
+      const state = createInitialState();
+      const stub = { device, state } as unknown as WorkerCtx;
+      const pool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, 0, "u16");
+      pool.indirectionDirty = false;
+      const members = ["c0", "c1"];
+      for (const id of members) {
+        pool.entityMetas.set(id, [{ level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0 }]);
+      }
+      const descIndex = makeDescIndex(members, {
+        sourceBindingByMember: bindings(Object.fromEntries(
+          members.map((id) => [id, { levelPoolKeys: [], coarsePoolKey: "ds-0:16x16x16:coarse" }]),
+        )),
+      });
+      const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+      const targets = members.map((id) => ({ id }));
+      ctx.ensureOffscreenPool = ((count: number) =>
+        Array.from({ length: Math.max(count, 2) }, (_, i) => ({ createView: () => targets[i] }))) as unknown as WorkerCtx["ensureOffscreenPool"];
+      const getCurrentTexture = vi.fn(() => ({ createView: () => ({}) }));
+      ctx.context.getCurrentTexture = getCurrentTexture as unknown as () => GPUTexture;
+      (device.queue as { onSubmittedWorkDone?: () => Promise<void> }).onSubmittedWorkDone = vi.fn(() => {
+        onBandDone(state);
+        return Promise.resolve();
+      });
+      // The volume covers rows 8 to 56 of the 64.
+      const msg: VolumeRenderMultiPassMessage = {
+        ...msgFor(members.map((memberId, i) => ({ memberId, entityIndex: i, blendMode: "additive" as const, scissorRect: [0, 8, 64, 48] as [number, number, number, number] }))),
+        bands: 4,
+        frameSeq: 7,
+      };
+      return { device, renderer, composite, ctx, msg, targets, getCurrentTexture };
+    }
+
+    it("marches each band of the rows it covers as a submission of its own, and presents only after the last", async () => {
+      const { device, renderer, composite, ctx, msg, targets, getCurrentTexture } = bandedFrame();
+      const capture = vi.mocked(captureRenderedFrame);
+      capture.mockClear();
+
+      await handleVolumeRenderMultiPass(ctx, msg);
+
+      // Every batch per band, into a target of its own; only the first draw clears the depth.
+      expect(renderer.renderMembers.mock.calls.map((call) => [call[1], call[2], call[6], call[9]])).toEqual([
+        [[0], targets[0], true, { y: 8, height: 12, first: true }],
+        [[1], targets[1], false, { y: 8, height: 12, first: true }],
+        [[0], targets[0], false, { y: 20, height: 12, first: false }],
+        [[1], targets[1], false, { y: 20, height: 12, first: false }],
+        [[0], targets[0], false, { y: 32, height: 12, first: false }],
+        [[1], targets[1], false, { y: 32, height: 12, first: false }],
+        [[0], targets[0], false, { y: 44, height: 12, first: false }],
+        [[1], targets[1], false, { y: 44, height: 12, first: false }],
+      ]);
+      const submits = vi.mocked(device.queue.submit).mock.invocationCallOrder;
+      expect(submits).toHaveLength(5);
+      // The canvas is taken after the bands' last submit, then each batch is composited from its target.
+      expect(getCurrentTexture.mock.invocationCallOrder[0]).toBeGreaterThan(submits[3]);
+      expect(composite.mock.calls.map((call) => [call[1][0].view, call[3]])).toEqual([[targets[0], true], [targets[1], false]]);
+      expect(capture).toHaveBeenCalledOnce();
+    });
+
+    it("stops between bands once the page gives the frame up, and presents nothing", async () => {
+      const { renderer, composite, ctx, msg, getCurrentTexture } = bandedFrame((state) => {
+        state.abandonedFrameSeq = 7;
+      });
+      const capture = vi.mocked(captureRenderedFrame);
+      capture.mockClear();
+
+      await handleVolumeRenderMultiPass(ctx, msg);
+
+      expect(renderer.renderMembers).toHaveBeenCalledTimes(2);
+      expect(getCurrentTexture).not.toHaveBeenCalled();
+      expect(composite).not.toHaveBeenCalled();
+      expect(capture).not.toHaveBeenCalled();
+      // The minimap and thumbnails draw with this renderer, at full quality.
+      expect(renderer.setMarchStepScale.mock.calls.at(-1)).toEqual([1]);
+    });
+
+    it("draws a frame with a label layer whole", async () => {
+      const { renderer, ctx, msg } = bandedFrame();
+      ctx.state.labelVolumePools.set("labels", {} as never);
+      // The stand-in label pool cannot draw; the batches before it already have.
+      await handleVolumeRenderMultiPass(ctx, {
+        ...msg,
+        layers: [...msg.layers, { ...msg.layers[0], datasetId: "labels", isLabel: true }],
+      }).catch(() => {});
+      expect(renderer.renderMembers.mock.calls.map((call) => call[9])).toEqual([undefined, undefined]);
+    });
+  });
+
   it("draws side-by-side members a channel to a pass and a composite, all in one submit", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();

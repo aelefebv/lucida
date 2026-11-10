@@ -21,6 +21,26 @@ import { LONG_FRAME_MS } from "./renderResolution.ts";
  */
 export const MAX_INTERACTIVE_FRAMES_IN_FLIGHT = 2;
 
+/**
+ * A full-quality volume frame is drawn in bands once the last one took
+ * longer than this, dispatch to done. A frame on the GPU cannot be taken
+ * back, so input that arrives while one draws waits for all of it, and on
+ * a slow enough GPU the browser stops delivering input until it lands.
+ */
+export const BANDED_FRAME_MS = 150;
+
+/** What each band of a banded frame aims to take. */
+export const BAND_TARGET_MS = 50;
+
+/** The most bands a frame is drawn in: each costs a submission and a trip back from the GPU. */
+export const MAX_BANDS = 32;
+
+/** Bands for a full-quality volume frame, from what the last one took; 1 draws it whole. */
+export function bandsFor(fullQualityMs: number | null): number {
+  if (fullQualityMs === null || fullQualityMs <= BANDED_FRAME_MS) return 1;
+  return Math.min(MAX_BANDS, Math.ceil(fullQualityMs / BAND_TARGET_MS));
+}
+
 export class FramePacer {
   /** When the newest finished frame was heard of, and how long it took. */
   private lastDoneAt = Number.NEGATIVE_INFINITY;

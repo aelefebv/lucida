@@ -208,7 +208,17 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // The entry point handles `destroy` so it can null the ctx before
       // `self.close()`. Reaching here means a duplicate.
       return;
+
+    case "abandonFrame":
+      // The entry point notes it as it arrives, ahead of the frame it stops.
+      noteAbandonedFrame(ctx, msg.frameSeq);
+      return;
   }
+}
+
+/** Note that the page gave up viewport frames up to `frameSeq`. */
+export function noteAbandonedFrame(ctx: WorkerCtx, frameSeq: number): void {
+  ctx.state.abandonedFrameSeq = Math.max(ctx.state.abandonedFrameSeq, frameSeq);
 }
 
 /**
