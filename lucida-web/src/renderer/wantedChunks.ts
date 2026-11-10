@@ -5,7 +5,8 @@
  */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import type { WantedMemberChunks } from "./workerProtocol.ts";
+import type { PoolMode, WantedMemberChunks } from "./workerProtocol.ts";
+import { datasetModeKey } from "./poolKeys.ts";
 import type { RendererState } from "./worker/state.ts";
 
 /** `${tier}|${memberId}` → the chunk keys the planner wants for that member in that tier. */
@@ -51,13 +52,17 @@ export function patchWantedIndex(index: WantedChunkIndex, replacements: readonly
   }
 }
 
-/** The chunks the planner wants for one member in one tier, under its dataset's latest cold state. */
+/**
+ * The chunks the planner wants for one member in one tier of the pools of
+ * `mode`, under that mode's latest cold state for the member's dataset.
+ */
 export function wantedChunksFor(
   state: RendererState,
+  mode: PoolMode,
   memberId: string,
   tier: ResidencyTier,
 ): ReadonlySet<string> | undefined {
   const datasetId = state.memberToDataset.get(memberId);
   if (datasetId === undefined) return undefined;
-  return state.wantedByDataset.get(datasetId)?.get(wantedEntryKey(tier, memberId));
+  return state.wantedByDatasetMode.get(datasetModeKey(datasetId, mode))?.get(wantedEntryKey(tier, memberId));
 }

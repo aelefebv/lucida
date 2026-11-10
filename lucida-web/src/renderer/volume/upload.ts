@@ -38,7 +38,7 @@ export function handleLabelVolumeChunkData(
 ): void {
   const { memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
   const refuseAll = (reason: ChunkFeedbackReason): void =>
-    postChunkResidency(ctx, memberId, LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason);
+    postChunkResidency(ctx, memberId, "volume", LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason);
 
   // A previous timepoint's chunk racing in must not overwrite the atlas.
   if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) {
@@ -115,9 +115,9 @@ export function handleLabelVolumeChunkData(
   if (wrote) {
     ctx.device.queue.writeBuffer(pool.indirectionBuf, 0, pool.indirectionData);
   }
-  batch.post(ctx, memberId, LABEL_TIER);
+  batch.post(ctx, memberId, "volume", LABEL_TIER);
   // After held, so a chunk this batch wrote and then overwrote ends lost.
-  postChunkResidency(ctx, memberId, LABEL_TIER, "lost", replaced, "replaced");
+  postChunkResidency(ctx, memberId, "volume", LABEL_TIER, "lost", replaced, "replaced");
 }
 
 export function handleVolumeChunkData(
@@ -129,7 +129,7 @@ export function handleVolumeChunkData(
 ): void {
   const { tier, level, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
   const refuseAll = (reason: ChunkFeedbackReason): void =>
-    postChunkResidency(ctx, memberId, tier, "refused", msg.chunks.map(c => c.key), reason);
+    postChunkResidency(ctx, memberId, "volume", tier, "refused", msg.chunks.map(c => c.key), reason);
 
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     refuseAll("stale");
@@ -158,7 +158,7 @@ export function handleVolumeChunkData(
     return;
   }
 
-  const wanted = wantedChunksFor(ctx.state, memberId, tier);
+  const wanted = wantedChunksFor(ctx.state, "volume", memberId, tier);
   const batch = new ResidencyBatch();
   let failure: unknown = null;
 
@@ -246,8 +246,8 @@ export function handleVolumeChunkData(
     }
   }
 
-  batch.post(ctx, memberId, tier);
-  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
+  batch.post(ctx, memberId, "volume", tier);
+  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId), "volume");
 
   if (failure !== null) throw failure;
 }

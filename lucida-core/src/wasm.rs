@@ -8,7 +8,7 @@ use crate::framing::PlaneBox;
 use crate::placement::CameraSpace;
 use crate::saved_view::SavedView;
 use crate::scene::{
-    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene,
+    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, PoolKind, Scene,
     member_transform,
 };
 use crate::view::{AxisPositions, View, ViewId, ViewLayout};
@@ -542,11 +542,17 @@ impl WasmScene {
         .to_string()
     }
 
-    /// The view whose form `dataset_id`'s GPU pools hold, or none when no
-    /// view shows the dataset.
-    pub fn dataset_holder(&self, dataset_id: &str) -> Option<u32> {
+    /// The view whose form `dataset_id`'s GPU pools of one kind hold: its
+    /// slice pools for `mode` `"slice"`, its volume pools for `"volume"`. None
+    /// when no view draws the dataset from them.
+    pub fn dataset_holder(&self, dataset_id: &str, mode: &str) -> Option<u32> {
+        let kind = if mode == "volume" {
+            PoolKind::Volume
+        } else {
+            PoolKind::Slice
+        };
         self.inner
-            .dataset_holder(&DatasetId(dataset_id.into()))
+            .dataset_holder(&DatasetId(dataset_id.into()), kind)
             .map(|view| view.0)
     }
 

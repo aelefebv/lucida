@@ -13,12 +13,13 @@
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateSelectionMessage } from "../workerProtocol.ts";
 import { applyColdState } from "./apply.ts";
+import { datasetModeKey } from "../poolKeys.ts";
 
 export function applyColdStateSelection(
   ctx: WorkerCtx,
   msg: ColdStateSelectionMessage,
 ): void {
-  const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
+  const cold = ctx.state.coldStateByDatasetMode.get(datasetModeKey(msg.datasetId, msg.viewMode));
   if (!cold) return;
 
   cold.currentT = msg.currentT;

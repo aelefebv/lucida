@@ -19,6 +19,7 @@ import type {
 import { applyColdState } from "./apply.ts";
 import { indexWantedChunks, patchWantedChunks, patchWantedIndex } from "../wantedChunks.ts";
 import { renderRadiusEnabled } from "../../pipeline/renderRadius.ts";
+import { datasetModeKey } from "../poolKeys.ts";
 
 /** Whether either tier draws only the chunks inside a render radius, which moves with the view. */
 function radiusInPlay(radius: ColdStateDeltaMessage["renderRadiusView"]): boolean {
@@ -29,7 +30,8 @@ export function applyColdStateDelta(
   ctx: WorkerCtx,
   msg: ColdStateDeltaMessage,
 ): void {
-  const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
+  const key = datasetModeKey(msg.datasetId, msg.viewMode);
+  const cold = ctx.state.coldStateByDatasetMode.get(key);
   if (!cold) return;
 
   const laidOutAsBefore =
@@ -78,9 +80,9 @@ export function applyColdStateDelta(
   ctx.state.currentColdState = cold;
   ctx.state.currentEpochs = msg.epochs;
   if (laidOutAsBefore) {
-    const index = ctx.state.wantedByDataset.get(msg.datasetId);
+    const index = ctx.state.wantedByDatasetMode.get(key);
     if (index) patchWantedIndex(index, msg.wantedChunks);
-    else ctx.state.wantedByDataset.set(msg.datasetId, indexWantedChunks(cold.wantedChunks));
+    else ctx.state.wantedByDatasetMode.set(key, indexWantedChunks(cold.wantedChunks));
     return;
   }
   applyColdState(ctx, cold);

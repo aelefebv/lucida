@@ -9,7 +9,7 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { WorkerToMainMessage } from "../workerProtocol.ts";
+import type { ColdStateMessage, PoolMode, WorkerToMainMessage } from "../workerProtocol.ts";
 import { initGPU, requestGpuDevice } from "../gpuContext.ts";
 import { fitBudgets } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
@@ -23,7 +23,7 @@ import { viewLayerTargets } from "./viewResources.ts";
 import { ViewLander } from "../viewLander.ts";
 import { createFrameTiming, type FrameTiming } from "../passTiming.ts";
 import { watchDevice } from "./deviceLoss.ts";
-import { sourceKey } from "../poolKeys.ts";
+import { datasetModeKey, sourceKey } from "../poolKeys.ts";
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 
 /** What is built on one device and rebuilt on its replacement. */
@@ -106,8 +106,8 @@ export async function bootstrapWorker(
     getOrCreateLUT: (name) => getOrCreateLUT(ctx.device, name),
     post,
     postWantedSet,
-    lookupEntityDescriptor(datasetId: string) {
-      return state.descriptorBuffersByDataset.get(datasetId) ?? null;
+    lookupEntityDescriptor(datasetId: string, mode: PoolMode) {
+      return state.descriptorBuffersByDatasetMode.get(datasetModeKey(datasetId, mode)) ?? null;
     },
   };
 
@@ -130,20 +130,28 @@ export async function bootstrapWorker(
 export function createWantedSetPoster(
   state: RendererState,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
-): (datasetId?: string) => void {
-  return function postWantedSet(datasetId?: string): void {
-    const cold = datasetId === undefined
-      ? state.currentColdState
-      : state.coldStateByDataset.get(datasetId) ?? null;
-    if (!cold) return;
+): (datasetId?: string, mode?: PoolMode) => void {
+  return function postWantedSet(datasetId?: string, mode?: PoolMode): void {
+    if (datasetId === undefined) {
+      if (state.currentColdState) postFor(state.currentColdState);
+      return;
+    }
+    for (const each of mode === undefined ? (["slice", "volume"] as const) : [mode]) {
+      const cold = state.coldStateByDatasetMode.get(datasetModeKey(datasetId, each));
+      if (cold) postFor(cold);
+    }
+  };
+
+  function postFor(cold: ColdStateMessage): void {
+    const mode = cold.viewMode;
+    const routes = state.memberSourcePools[mode];
     const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
     const result = computeWantedSet(
       cold,
-      state.wantedByDataset.get(cold.datasetId) ?? new Map(),
+      state.wantedByDatasetMode.get(datasetModeKey(cold.datasetId, mode)) ?? new Map(),
       state.volumeAtlases,
       state.sliceAtlases,
-      (memberId, tier, level) =>
-        state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
+      (memberId, tier, level) => routes.get(memberId)?.get(sourceKey(tier, level)),
     );
     // Ahead of the missing list, which names these too: the page was told
     // they were held, and a missing chunk it holds is a disagreement.
@@ -155,18 +163,20 @@ export function createWantedSetPoster(
       else stale.set(id, { memberId, tier, keys: [chunkKey] });
     }
     for (const { memberId, tier, keys } of stale.values()) {
-      post({ type: "chunkResidency", memberId, tier, change: "lost", keys, reason: "wrong-slice" });
+      post({ type: "chunkResidency", memberId, viewMode: mode, tier, change: "lost", keys, reason: "wrong-slice" });
     }
     post({
       type: "wantedSetDelta",
       datasetId: cold.datasetId,
+      viewMode: mode,
       epochs,
       missing: result.missing,
     });
     post({
       type: "entityLevels",
       datasetId: cold.datasetId,
+      viewMode: mode,
       entities: result.levels,
     });
-  };
+  }
 }

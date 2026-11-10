@@ -27,6 +27,7 @@ function req(overrides: Partial<ChunkRequest>): ChunkRequest {
     x: 0,
     lane: "detail",
     tier: "detail",
+    mode: "slice",
     priority: 0,
     chunkKey: "0/0/0/0/0/0",
     ...overrides,
@@ -62,8 +63,8 @@ describe("DebugOverlays tier coverage helpers", () => {
 
   it("aggregates current detail and coarse available coverage per group", () => {
     const deliveryState = new DeliveryState();
-    deliveryState.markChunkSent("img-a", 0, "0/0/0/0/0/0", "detail");
-    deliveryState.markChunkSent("img-a", 0, "2/0/0/0/0/0", "coarse");
+    deliveryState.markChunkSent("img-a", 0, "0/0/0/0/0/0", "detail", "slice");
+    deliveryState.markChunkSent("img-a", 0, "2/0/0/0/0/0", "coarse", "slice");
 
     const cacheSnap: CacheStateSnapshot = {
       cached: new Map([

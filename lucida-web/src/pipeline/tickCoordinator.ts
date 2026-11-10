@@ -17,7 +17,8 @@ import {
   type ResolvedLayers,
 } from "../resolvedLayers.ts";
 import { buildDisplayStateByChannel } from "./upload/coldState/displayState.ts";
-import type { ColdStateDisplayState, GpuCapacityReport } from "../renderer/workerProtocol.ts";
+import type { ColdStateDisplayState, GpuCapacityReport, PoolMode } from "../renderer/workerProtocol.ts";
+import { datasetModeKey } from "../renderer/poolKeys.ts";
 import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
 import {
   plan,
@@ -25,6 +26,7 @@ import {
   isCutStep,
   emptyPlanStats,
   initialPlanningState,
+  mergeActiveSets,
   scrubbedPlanningState,
   type PlanningConfig,
 } from "./planning/index.ts";
@@ -82,20 +84,32 @@ export interface MemberRosterEntry {
 }
 
 export interface TickCoordinatorResult {
-  /** Per-dataset roster of members that need render layers, keyed by dsId. */
-  memberRoster: Map<string, MemberRosterEntry[]>;
+  /**
+   * Per dataset and mode, keyed by `datasetModeKey`, the roster of members
+   * that need render layers in the views of that mode.
+   */
+  memberRosterByDatasetMode: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
-  /** What each layer shows, as the scene resolved it for this plan. */
+  /**
+   * What each layer shows, as the scene resolved it for this plan in the
+   * first view that draws it, the drawn view whenever that one does.
+   */
   layers: ReadonlyMap<string, ResolvedLayer>;
+  /**
+   * Each layer a slice view draws, as its slice holder resolved it for this
+   * plan: what fixes the cut its slice pools hold.
+   */
+  sliceLayers: ReadonlyMap<string, ResolvedLayer>;
   epochs: SceneEpochs;
   /**
-   * Per-dataset memberId → entity index map. Both the worker (when
-   * building the descriptor buffer) and the render paths (when
-   * assembling layers) read from this map. Computed deterministically
-   * from the same `cold.activeSet × cold.visibleChannels` iteration the
-   * worker uses, so indices agree by construction.
+   * Per dataset and mode, keyed by `datasetModeKey`, the memberId → entity
+   * index map of that mode's pools. Both the worker (when building the
+   * descriptor buffer) and the render paths (when assembling layers) read
+   * from this map. Computed deterministically from the same
+   * `cold.activeSet × cold.visibleChannels` iteration the worker uses, so
+   * indices agree by construction.
    */
-  entityIndexByDataset: Map<string, Map<string, number>>;
+  entityIndexByDatasetMode: Map<string, Map<string, number>>;
 }
 
 /** The views a tick plans for: each view the loop draws, the drawn one first. */
@@ -103,11 +117,27 @@ function plannedViews(ctx: TickContext): readonly TickView[] {
   return ctx.views;
 }
 
-/** Each dataset's layer as the view holding its pools resolves it. */
-function heldLayers(ctx: TickContext, layersByView: ReadonlyMap<number, ResolvedLayers>): ResolvedLayers {
+/** Each dataset's layer as the first view that draws it resolves it, the drawn view first. */
+function leadLayers(ctx: TickContext, layersByView: ReadonlyMap<number, ResolvedLayers>): ResolvedLayers {
+  const lead = new Map<string, ResolvedLayer>();
+  for (const dsId of ctx.datasets.keys()) {
+    for (const view of ctx.views) {
+      const layer = layersByView.get(view.id)?.get(dsId);
+      if (layer) {
+        lead.set(dsId, layer);
+        break;
+      }
+    }
+  }
+  return lead;
+}
+
+/** Each dataset's layer as its slice holder resolves it, for each dataset a slice view draws. */
+function sliceHolderLayers(ctx: TickContext, layersByView: ReadonlyMap<number, ResolvedLayers>): ResolvedLayers {
   const held = new Map<string, ResolvedLayer>();
   for (const dsId of ctx.datasets.keys()) {
-    const layer = layersByView.get(holderView(ctx, dsId).id)?.get(dsId);
+    const holder = holderView(ctx, dsId, "slice");
+    const layer = holder && layersByView.get(holder.id)?.get(dsId);
     if (layer) held.set(dsId, layer);
   }
   return held;
@@ -123,22 +153,46 @@ interface PlannedView {
   cutStep: boolean;
 }
 
+/**
+ * A dataset's planned views of one mode, which draw from its pools of that
+ * mode. The worker keeps one cold state for them.
+ */
+interface PlannedForm {
+  mode: PoolMode;
+  /** The views, the mode's holder first, whose frame of the dataset the worker holds. */
+  views: PlannedView[];
+  /** What the pools hold: the views' active sets merged. */
+  activeSet: ActiveSetEntry[];
+}
+
 interface PlannedDataset {
   dsId: string;
   dsSettings: SceneSettings["allSettings"][string] | undefined;
   views: PlannedView[];
-  /**
-   * The view whose frame of the dataset the worker holds: the first planned
-   * view that shows it, which is the drawn view whenever that one does.
-   */
-  drawn: PlannedView;
+  /** One per mode the planned views draw in, in the order of each mode's first view. */
+  forms: PlannedForm[];
   result: RequestPlan;
-  /**
-   * The active set the worker holds for this dataset, captured from
-   * `PlanningState.previousActiveSet` before `plan()`'s `nextState` overwrote
-   * it. The view-move delta diffs `result.activeSet` against this.
-   */
-  previousActiveSet: ActiveSetEntry[];
+}
+
+/**
+ * The planned views of a dataset grouped by mode, in order, each with its
+ * share of the plan's active set. One mode's pools hold the plan's whole
+ * active set.
+ */
+function plannedForms(views: readonly PlannedView[], result: RequestPlan): PlannedForm[] {
+  const byMode = new Map<PoolMode, PlannedView[]>();
+  for (const planned of views) {
+    const list = byMode.get(planned.view.mode);
+    if (list) list.push(planned);
+    else byMode.set(planned.view.mode, [planned]);
+  }
+  return [...byMode].map(([mode, formViews]) => ({
+    mode,
+    views: formViews,
+    activeSet: byMode.size === 1
+      ? result.activeSet
+      : mergeActiveSets(formViews.map((planned) => result.nextState.views.get(planned.view.id)?.activeSet ?? [])),
+  }));
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -373,8 +427,9 @@ interface DatasetRequests {
 
 /**
  * Admit each dataset's requests against what the CPU budgets and the GPU
- * pools hold between them, as `report` gives the pools, in either view mode,
- * so the wanted set the cache drives toward fits both.
+ * pools hold between them, as `report` gives the pools, each request in the
+ * pools of the mode of the view that asked, so the wanted set the cache
+ * drives toward fits the one page-wide budget.
  */
 function admitDatasetPlans(
   ctx: TickContext,
@@ -385,13 +440,13 @@ function admitDatasetPlans(
   return admitPlans(
     plans.map(({ dsId, requests }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
-      // A dataset's pools hold what its holder samples.
-      const holder = holderView(ctx, dsId);
-      const sliceAxis = cutAxis(ctx.scene.slice_plane(holder.id) as SlicePlane);
+      // A dataset's slice pools hold the plane its slice holder cuts.
+      const holder = holderView(ctx, dsId, "slice");
+      const sliceAxis = holder ? cutAxis(ctx.scene.slice_plane(holder.id) as SlicePlane) : "z";
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
-        slotOf: gpuSlotsFor(manifest, holder.mode, report, gpuTotalBytes, sliceAxis),
+        slotOf: gpuSlotsFor(manifest, report, gpuTotalBytes, sliceAxis),
       };
     }),
     ctx.cpuCache.tierCapacity(),
@@ -587,13 +642,14 @@ export class TickCoordinator {
   private viewDeltaScene: WasmScene | null = null;
 
   /**
-   * Datasets whose worker cold state holds exactly this coordinator's
-   * `previousActiveSet`, the precondition for a view-move delta. Set after a
-   * full cold state or a delta lands. The scrub and display fast paths never
-   * change the active set, so they leave it set. Cleared on dataset removal
-   * so a re-added dataset re-syncs with a full send.
+   * Per dataset and mode, the active set the worker's cold state for those
+   * pools holds, the base a view-move delta diffs against. Set when a full
+   * cold state or a delta goes out. The scrub and display fast paths never
+   * change the active set, so they leave it. A mode the dataset's views no
+   * longer draw in is released and dropped, and a removed dataset drops
+   * both, so pools drawn from again re-sync with a full send.
    */
-  private readonly coldStateSyncedDatasets = new Set<string>();
+  private readonly heldActiveSets = new Map<string, Map<PoolMode, ActiveSetEntry[]>>();
   private requestEpoch = 0;
   /** Per-dataset snapshot of the most recent visible region. Consumed by `orchDebug`. */
   private _lastVisibleRegion = new Map<string, VisibleRegion>();
@@ -752,9 +808,11 @@ export class TickCoordinator {
     const views = plannedViews(ctx);
     const drawn = views[0];
     const layersByView = new Map(views.map((view) => [view.id, readResolvedLayers(ctx.scene, view.id)]));
-    // The fast paths and the result describe what the worker holds: each
-    // dataset as its holder draws it, which with one view is that view.
-    const layers = views.length === 1 ? layersByView.get(drawn.id)! : heldLayers(ctx, layersByView);
+    // With one view, the fast paths and the result describe what it draws.
+    const layers = views.length === 1 ? layersByView.get(drawn.id)! : leadLayers(ctx, layersByView);
+    const sliceLayers = views.length === 1
+      ? (drawn.mode === "slice" ? layers : new Map<string, ResolvedLayer>())
+      : sliceHolderLayers(ctx, layersByView);
     const planningConfig = configStore.get();
 
     const structural = isStructural(causes);
@@ -827,21 +885,22 @@ export class TickCoordinator {
     // loop.
     ctx.cpuCache.onPlanRebuildStart();
 
-    const memberRoster = new Map<string, MemberRosterEntry[]>();
-    const entityIndexByDataset = new Map<string, Map<string, number>>();
+    const memberRosterByDatasetMode = new Map<string, MemberRosterEntry[]>();
+    const entityIndexByDatasetMode = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
 
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
-      // Each view that draws the dataset plans it, its holder first, whose
-      // plan is what the worker holds; a view that leaves it out gets no
-      // view query for it. A layer a view's cut misses draws nothing there,
-      // so nothing of it is planned for that view.
-      const holder = holderView(ctx, dsId);
+      // Each view that draws the dataset plans it, the holder of each mode's
+      // pools ahead of the other views of that mode, since the cold state of
+      // those pools is built from its plan. A view that leaves the dataset
+      // out gets no view query for it. A layer a view's cut misses draws
+      // nothing there, so nothing of it is planned for that view.
+      const holds = (view: TickView): number => Number(holderView(ctx, dsId, view.mode)?.id === view.id);
       const viewsOfDataset = views
         .filter((view) => !outsideCut(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)))
-        .sort((a, b) => Number(b.id === holder.id) - Number(a.id === holder.id));
+        .sort((a, b) => holds(b) - holds(a));
       if (viewsOfDataset.length === 0) continue;
 
       // See `snapshotInputCacheByDataset` for why both keys are checked.
@@ -925,9 +984,6 @@ export class TickCoordinator {
         views: plannedViewsOfDataset.map((planned) => planned.snapshot),
         minimapPending: minimapPendingFetch,
       };
-      // Capture what the worker holds before `nextState` overwrites it. The
-      // view-move delta diffs the fresh active set against this.
-      const previousActiveSet = planningStateForDataset.previousActiveSet;
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
@@ -942,16 +998,15 @@ export class TickCoordinator {
         result,
         ctx.cpuCache.levelResidency(),
         entities,
-        ctx.client.datasetLevels(dsId)?.displayed ?? null,
+        ctx.client.datasetLevels(dsId, drawnOfDataset.view.mode)?.displayed ?? null,
       );
 
       plannedDatasets.push({
         dsId,
         dsSettings,
         views: plannedViewsOfDataset,
-        drawn: drawnOfDataset,
+        forms: plannedForms(plannedViewsOfDataset, result),
         result,
-        previousActiveSet,
       });
     }
 
@@ -964,8 +1019,8 @@ export class TickCoordinator {
       plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
     );
     for (const [index, planned] of plannedDatasets.entries()) {
-      const { dsId, dsSettings } = planned;
-      const { layer, snapshot: { entities, visibleRegion, selection } } = planned.drawn;
+      const { dsId, dsSettings, forms } = planned;
+      const { layer, snapshot: { visibleRegion, selection } } = forms[0].views[0];
       const admission = admissions[index];
       const result: RequestPlan = {
         ...planned.result,
@@ -975,94 +1030,104 @@ export class TickCoordinator {
       };
       this._lastPlanByDataset.set(dsId, result);
 
-      // Build the member roster and per-entity matrix map in one walk.
       const matrixEpochKey = `${currentEpochs.content}|${currentEpochs.layout}`;
       let matrixCacheEntry = this.matrixCacheByDataset.get(dsId);
       if (!matrixCacheEntry || matrixCacheEntry.epochKey !== matrixEpochKey) {
         matrixCacheEntry = { epochKey: matrixEpochKey, matrices: new Map() };
         this.matrixCacheByDataset.set(dsId, matrixCacheEntry);
       }
-      const { entries: rosterEntries, matricesByEntity } = buildRoster({
-        activeSet: result.activeSet,
-        entities,
-        ctx,
-        datasetId: dsId,
-        tileMatrixCache: matrixCacheEntry.matrices,
-      });
-      memberRoster.set(dsId, rosterEntries);
+      // Each cold state names the modes that draw the dataset, and the worker
+      // frees its pools of any other mode.
+      const drawnModes = forms.map((form) => form.mode);
+      let held = this.heldActiveSets.get(dsId);
+      if (!held) {
+        held = new Map();
+        this.heldActiveSets.set(dsId, held);
+      }
+      for (const mode of [...held.keys()]) {
+        if (!drawnModes.includes(mode)) held.delete(mode);
+      }
+      // The ray picks that order volume eviction come from the view holding
+      // the volume pools, else from the lead view.
+      const hotForm = forms.find((form) => form.mode === "volume") ?? forms[0];
 
-      // View-move fast path: only the camera moved and the worker holds
-      // exactly this coordinator's `previousActiveSet`, so ship only the
-      // active-set delta instead of the whole descriptor array.
-      const canDelta =
-        viewOnly &&
-        this.coldStateSyncedDatasets.has(dsId) &&
-        planned.previousActiveSet.length > 0;
+      // Each mode's pools get the cold state of their own views: their active
+      // set, the requests they asked for, and their holder's view.
+      for (const form of forms) {
+        const lead = form.views[0];
+        const { entities } = lead.snapshot;
+        const key = datasetModeKey(dsId, form.mode);
+        const requests = forms.length === 1 ? result.requests : result.requests.filter((req) => req.mode === form.mode);
 
-      if (canDelta) {
-        this.uploader.sendColdStateDelta({
+        // Build the member roster and per-entity matrix map in one walk.
+        const { entries: rosterEntries, matricesByEntity } = buildRoster({
+          activeSet: form.activeSet,
+          entities,
           ctx,
           datasetId: dsId,
-          activeSet: result.activeSet,
-          previousActiveSet: planned.previousActiveSet,
-          requests: result.requests,
+          tileMatrixCache: matrixCacheEntry.matrices,
+        });
+        memberRosterByDatasetMode.set(key, rosterEntries);
+        const coldArgs = {
+          ctx,
+          datasetId: dsId,
+          activeSet: form.activeSet,
+          requests,
           entities,
-          selection,
-          visibleRegion,
+          selection: lead.snapshot.selection,
+          visibleRegion: lead.snapshot.visibleRegion,
           renderRadiusView: {
             detail: planningConfig.detailRenderRadiusView,
             coarse: planningConfig.coarseRenderRadiusView,
           },
           epochs: result.epochs,
           matricesByEntity,
-          layer,
-        });
-        // The worker rebuilds its descriptor buffer from the reordered active
-        // set in the same canonical order this walks, so the indices agree.
-        entityIndexByDataset.set(
-          dsId,
-          computeActiveSetIndexMap(result.activeSet, selection.visibleChannels),
-        );
-        this.uploader.sendViewHotStateFromMembersIfAdvanced({
-          ctx,
-          datasetId: dsId,
-          memberIds: iterateActiveSetMembers(result.activeSet, selection.visibleChannels),
-          epochs: result.epochs,
-        });
-      } else {
-        // Full send. Drives atlas creation/remap + wanted-set + descriptor
-        // buffer build; the resolved layer bakes per-channel display state
-        // into descriptors. Marks the dataset synced so a later pure view move
-        // can take the delta path against this active set.
-        const coldMsg = this.uploader.sendColdState({
-          ctx,
-          datasetId: dsId,
-          activeSet: result.activeSet,
-          requests: result.requests,
-          entities,
-          selection,
-          visibleRegion,
-          renderRadiusView: {
-            detail: planningConfig.detailRenderRadiusView,
-            coarse: planningConfig.coarseRenderRadiusView,
-          },
-          epochs: result.epochs,
-          matricesByEntity,
-          layer,
-        });
-        // Same memberId → entityIndex map the worker builds from cold
-        // state — both sides converge because they walk the same iteration order.
-        entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
+          layer: lead.layer,
+          drawnModes,
+        };
 
-        // Emit before render messages so `rayHitPerEntity` is current
-        // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
-        this.uploader.sendViewHotStateIfAdvanced({
-          ctx,
-          datasetId: dsId,
-          coldMsg,
-          epochs: result.epochs,
-        });
-        this.coldStateSyncedDatasets.add(dsId);
+        // View-move fast path: only the camera moved and the worker holds
+        // exactly the active set last sent to these pools, so ship only the
+        // active-set delta instead of the whole descriptor array.
+        const previousActiveSet = held.get(form.mode);
+        if (viewOnly && previousActiveSet !== undefined && previousActiveSet.length > 0) {
+          this.uploader.sendColdStateDelta({ ...coldArgs, previousActiveSet });
+          // The worker rebuilds its descriptor buffer from the reordered active
+          // set in the same canonical order this walks, so the indices agree.
+          const visibleChannels = lead.snapshot.selection.visibleChannels;
+          entityIndexByDatasetMode.set(key, computeActiveSetIndexMap(form.activeSet, visibleChannels));
+          if (form === hotForm) {
+            this.uploader.sendViewHotStateFromMembersIfAdvanced({
+              ctx,
+              datasetId: dsId,
+              view: lead.view.id,
+              memberIds: iterateActiveSetMembers(form.activeSet, visibleChannels),
+              epochs: result.epochs,
+            });
+          }
+        } else {
+          // Full send. Drives atlas creation/remap + wanted-set + descriptor
+          // buffer build; the resolved layer bakes per-channel display state
+          // into descriptors.
+          const coldMsg = this.uploader.sendColdState(coldArgs);
+          // Same memberId → entityIndex map the worker builds from cold
+          // state — both sides converge because they walk the same iteration order.
+          entityIndexByDatasetMode.set(key, computeMemberIndexMap(coldMsg));
+
+          // Emit before render messages so `rayHitPerEntity` is current
+          // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
+          if (form === hotForm) {
+            this.uploader.sendViewHotStateIfAdvanced({
+              ctx,
+              datasetId: dsId,
+              view: lead.view.id,
+              coldMsg,
+              epochs: result.epochs,
+            });
+          }
+        }
+        // A later pure view move can take the delta path against this.
+        held.set(form.mode, form.activeSet);
       }
 
       // Categorical label overlays are invisible to the WASM planner
@@ -1120,7 +1185,9 @@ export class TickCoordinator {
 
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
-    this.cachedResult = { memberRoster, settings, layers, epochs: outputEpochs, entityIndexByDataset };
+    this.cachedResult = {
+      memberRosterByDatasetMode, settings, layers, sliceLayers, epochs: outputEpochs, entityIndexByDatasetMode,
+    };
     this.lastRebuildManifests = new Map(
       [...ctx.datasets].map(([dsId, ds]) => [dsId, ds.manifest]),
     );
@@ -1300,6 +1367,7 @@ export class TickCoordinator {
       this.uploader.sendColdStateDisplay({
         ctx,
         datasetId: u.dsId,
+        viewMode: scalars.mode,
         displayStateByChannel: u.displayState,
       });
       const sig = this.lastRebuildByDataset.get(u.dsId);
@@ -1510,6 +1578,7 @@ export class TickCoordinator {
       this.uploader.sendColdStateSelection({
         ctx,
         datasetId: p.dsId,
+        viewMode: mode,
         currentT: p.selection.t,
         currentZ: workerCutIndex(p.selection),
         requests: p.requests,
@@ -1529,7 +1598,8 @@ export class TickCoordinator {
     // state.
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
-    this.cachedResult = { ...this.cachedResult, settings, layers, epochs: outputEpochs };
+    // The fast path runs in a lone slice view, whose layers fix the cut.
+    this.cachedResult = { ...this.cachedResult, settings, layers, sliceLayers: layers, epochs: outputEpochs };
     this.plannedMinimap = new Map(minimapPendingFetch);
     this.lastRebuildScalars = { ...scalars, t: newT };
     this.lastRebuildAt = performance.now();
@@ -1658,11 +1728,12 @@ export class TickCoordinator {
     this.lastRebuildByDataset.delete(workerMemberId);
     this.lastDrawnDatasetIds.delete(workerMemberId);
     // Drop the cached tile matrices, the cached snapshot inputs, and the
-    // delta-sync flag so a re-added dataset re-derives placement and re-syncs
-    // with a full cold state before any view-move delta can reference it.
+    // active sets the worker held so a re-added dataset re-derives placement
+    // and re-syncs with a full cold state before any view-move delta can
+    // reference it.
     this.matrixCacheByDataset.delete(workerMemberId);
     this.snapshotInputCacheByDataset.delete(workerMemberId);
-    this.coldStateSyncedDatasets.delete(workerMemberId);
+    this.heldActiveSets.delete(workerMemberId);
     // Drop the view-query fold cursor so a re-added dataset reseeds from a
     // full query rather than folding a delta onto a removed dataset's records.
     this.viewDeltaCursor.delete(workerMemberId);

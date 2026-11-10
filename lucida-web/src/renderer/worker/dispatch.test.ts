@@ -156,6 +156,7 @@ describe("worker dispatch upload feedback", () => {
       {
         type: "chunkResidency",
         memberId: "img-0:ch1",
+        viewMode: "slice",
         tier: "detail",
         change: "refused",
         keys: ["0/0/1/0/0/0"],
@@ -188,6 +189,7 @@ describe("worker dispatch upload feedback", () => {
       {
         type: "chunkResidency",
         memberId: "img-0",
+        viewMode: "volume",
         tier: "detail",
         change: "refused",
         keys: ["0/0/0/0/0/0"],
@@ -198,7 +200,7 @@ describe("worker dispatch upload feedback", () => {
 
   it("does not route coarse chunk uploads through the detail pool fallback", async () => {
     const { ctx, posts } = makeCtx();
-    ctx.state.memberSourcePools.set("img-0", new Map([["detail:2", "detail-pool"]]));
+    ctx.state.memberSourcePools.volume.set("img-0", new Map([["detail:2", "detail-pool"]]));
     ctx.state.volumeAtlases.set("detail-pool", {
       chunkX: 1,
       chunkY: 1,
@@ -227,6 +229,7 @@ describe("worker dispatch upload feedback", () => {
       {
         type: "chunkResidency",
         memberId: "img-0",
+        viewMode: "volume",
         tier: "coarse",
         change: "refused",
         keys: ["2/0/0/0/0/0"],
@@ -240,7 +243,7 @@ describe("worker dispatch upload feedback", () => {
     // (their chunk shapes differ). A level-2 upload must reach level 2's
     // pool, and a level with no section is requeued as missing-pool.
     const { ctx, posts } = makeCtx();
-    ctx.state.memberSourcePools.set("img-0", new Map([
+    ctx.state.memberSourcePools.volume.set("img-0", new Map([
       ["detail:0", "fine-pool"],
       ["detail:2", "small-chunk-pool"],
     ]));
@@ -264,7 +267,7 @@ describe("worker dispatch upload feedback", () => {
     };
     ctx.state.volumeAtlases.set("small-chunk-pool", smallChunkPool as never);
     ctx.state.memberToDataset.set("img-0", "ds");
-    ctx.state.wantedByDataset.set("ds", indexWantedChunks([
+    ctx.state.wantedByDatasetMode.set("ds|volume", indexWantedChunks([
       { memberId: "img-0", tier: "detail", chunkKeys: ["1/0/0/0/0/0", "2/0/0/0/0/0"] },
     ]));
     (ctx as unknown as { device: unknown }).device = { queue: { writeTexture() {}, writeBuffer() {} } };
@@ -309,6 +312,7 @@ describe("worker dispatch upload feedback", () => {
     await dispatchMessage(ctx, {
       type: "coldStateSelection",
       datasetId: "ds-not-yet-ingested",
+      viewMode: "slice",
       currentT: 7,
       currentZ: 2,
       visibleRegion: {
@@ -323,7 +327,7 @@ describe("worker dispatch upload feedback", () => {
     });
 
     expect(posts).toEqual([]);
-    expect(ctx.state.coldStateByDataset.size).toBe(0);
+    expect(ctx.state.coldStateByDatasetMode.size).toBe(0);
     expect(ctx.state.currentColdState).toBeNull();
     expect(harness.wantedSetPosts).toBe(1);
   });
@@ -338,6 +342,8 @@ describe("worker dispatch upload feedback", () => {
     await dispatchMessage(ctx, {
       type: "coldStateDelta",
       datasetId: "ds-not-yet-ingested",
+      viewMode: "volume",
+      drawnModes: ["volume"],
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
@@ -355,7 +361,7 @@ describe("worker dispatch upload feedback", () => {
     });
 
     expect(posts).toEqual([]);
-    expect(ctx.state.coldStateByDataset.size).toBe(0);
+    expect(ctx.state.coldStateByDatasetMode.size).toBe(0);
     expect(ctx.state.currentColdState).toBeNull();
     expect(harness.wantedSetPosts).toBe(1);
   });

@@ -28,6 +28,7 @@ function sliceColdState(z: number): ColdStateMessage {
       displayStateByChannel: {},
     }],
     viewMode: "slice",
+    drawnModes: ["slice"],
     sampleFormat: "u16",
   };
 }
@@ -36,10 +37,10 @@ describe("the wanted-set report", () => {
   it("reports a wanted slot cut from a plane the current Z no longer maps to lost, ahead of the missing list", () => {
     const state = createInitialState();
     const cold = sliceColdState(11);
-    state.coldStateByDataset.set("ds-0", cold);
-    state.wantedByDataset.set("ds-0", indexWantedChunks(cold.wantedChunks));
+    state.coldStateByDatasetMode.set("ds-0|slice", cold);
+    state.wantedByDatasetMode.set("ds-0|slice", indexWantedChunks(cold.wantedChunks));
     state.memberToDataset.set("img:ch0", "ds-0");
-    state.memberSourcePools.set("img:ch0", new Map([["detail:0", "pool"]]));
+    state.memberSourcePools.slice.set("img:ch0", new Map([["detail:0", "pool"]]));
     state.sliceAtlases.set("pool", {
       z: 11,
       // Cut at plane 10, in the same chunk as plane 11.
@@ -53,7 +54,7 @@ describe("the wanted-set report", () => {
 
     expect(posts.map((m) => m.type)).toEqual(["chunkResidency", "wantedSetDelta", "entityLevels"]);
     expect(posts[0]).toEqual({
-      type: "chunkResidency", memberId: "img:ch0", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "wrong-slice",
+      type: "chunkResidency", memberId: "img:ch0", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "wrong-slice",
     });
     const missing = posts[1].type === "wantedSetDelta" ? posts[1].missing : [];
     expect(missing.map((m) => m.chunkKey)).toEqual(["0/0/0/0/0/0", "0/0/0/0/0/1"]);

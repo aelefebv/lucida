@@ -568,6 +568,7 @@ function appendLabelChunkRequests(
       x,
       lane,
       tier: "detail",
+      mode: volume ? "volume" : "slice",
       priority,
       chunkKey: `${levelIdx}/${targetChunkT}/${c}/${z}/${y}/${x}`,
     };

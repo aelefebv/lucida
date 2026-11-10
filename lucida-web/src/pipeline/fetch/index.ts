@@ -20,6 +20,7 @@ export type {
   CpuCacheConfig,
   EvictionTier,
   ReadyChunkDelivery,
+  CachedChunk,
   CacheTelemetry,
   TierResidencyEntry,
   TierCounters,

@@ -181,7 +181,7 @@ export function buildGroupTierCoverage(
     if (cacheSnap?.inFlight.get(req.entityId)?.has(req.chunkKey)) {
       counts.inFlight++;
     }
-    if (ready || cpuCache?.deliveryState.isChunkHeld(req.imageId, req.c, req.chunkKey, tier)) {
+    if (ready || cpuCache?.deliveryState.isChunkHeld(req.imageId, req.c, req.chunkKey, tier, req.mode)) {
       counts.shown++;
     }
   }
@@ -910,7 +910,7 @@ export function DebugOverlays({
               })) {
                 return false;
               }
-              return cpuCache.deliveryState.isChunkHeld(entry.imageId, c, key, tier);
+              return cpuCache.deliveryState.isChunkHeld(entry.imageId, c, key, tier, is3D ? "volume" : "slice");
             };
 
             const statusFor = (key: string): Pick<ChunkCell, "status" | "priorityRank" | "tier"> => {

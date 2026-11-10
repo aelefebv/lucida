@@ -8,6 +8,7 @@ import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type { SliceCut, SpatialAxis } from "../../renderer/slicePlane.ts";
+import type { PoolMode } from "../../renderer/workerProtocol.ts";
 
 /**
  * Fields shared by every {@link EntitySnapshot} variant. `levels` stays
@@ -285,6 +286,12 @@ export interface ChunkRequest {
   lane: "minimap" | "detail" | "coarse" | "prefetch" | "overview";
   /** Residency tier this request fills. */
   tier: ResidencyTier;
+  /**
+   * The mode of the view that asked, whose pools of the dataset a detail or
+   * coarse chunk goes to. Two views of one dataset in different modes each
+   * ask for their own.
+   */
+  mode: PoolMode;
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;

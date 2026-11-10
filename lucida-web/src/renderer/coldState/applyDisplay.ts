@@ -11,13 +11,15 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateDisplayMessage } from "../workerProtocol.ts";
 import { rebuildDescriptorBuffer } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
+import { datasetModeKey } from "../poolKeys.ts";
 
 export function applyColdStateDisplay(
   ctx: WorkerCtx,
   msg: ColdStateDisplayMessage,
 ): void {
   const state = ctx.state;
-  const cold = state.coldStateByDataset.get(msg.datasetId);
+  const key = datasetModeKey(msg.datasetId, msg.viewMode);
+  const cold = state.coldStateByDatasetMode.get(key);
   if (!cold) return;
 
   // The display map is dataset-level, shared by every entry, so swapping the
@@ -27,9 +29,9 @@ export function applyColdStateDisplay(
   }
 
   const sources: Map<string, EntitySource[]> =
-    state.currentSourcesByDataset.get(msg.datasetId) ?? new Map();
-  state.descriptorBuffersByDataset.set(
-    msg.datasetId,
-    rebuildDescriptorBuffer(ctx.device, state.descriptorBuffersByDataset.get(msg.datasetId), cold, sources),
+    state.currentSourcesByDatasetMode.get(key) ?? new Map();
+  state.descriptorBuffersByDatasetMode.set(
+    key,
+    rebuildDescriptorBuffer(ctx.device, state.descriptorBuffersByDatasetMode.get(key), cold, sources),
   );
 }

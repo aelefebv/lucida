@@ -20,6 +20,7 @@ import type {
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
+  PoolMode,
   FailedChunksMessage,
   ViewHotStateMessage,
   RgbaColor,
@@ -319,11 +320,12 @@ export class RenderClient implements UploadClient {
     if (msg.type === "chunkResidency" && this.onChunkResidency) {
       this.onChunkResidency(msg);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
-      this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
+      this.onWantedSetDelta(msg.datasetId, msg.viewMode, msg.epochs, msg.missing);
     } else if (msg.type === "entityLevels") {
       const levels = summarizeDatasetLevels(msg.entities);
-      if (levels === null) this.levelsByDataset.delete(msg.datasetId);
-      else this.levelsByDataset.set(msg.datasetId, levels);
+      const key = `${msg.datasetId}|${msg.viewMode}`;
+      if (levels === null) this.levelsByDataset.delete(key);
+      else this.levelsByDataset.set(key, levels);
       this.onEntityLevels?.(msg.datasetId, levels);
     } else if (msg.type === "gpuPassTime") {
       // Latest wins: when two frames land between ticks, the newer one is
@@ -819,18 +821,19 @@ export class RenderClient implements UploadClient {
   }
 
   removeLayerResources(datasetId: string) {
-    this.levelsByDataset.delete(datasetId);
+    this.levelsByDataset.delete(`${datasetId}|slice`);
+    this.levelsByDataset.delete(`${datasetId}|volume`);
     this.worker.postMessage({ type: "removeLayerResources", datasetId });
   }
 
   /**
-   * The worker's latest level readout for a dataset, or null before its first
-   * report. What the planning tick records as the displayed level, since the
-   * worker is the only side that knows which resident level each visible
-   * position samples from.
+   * The worker's latest level readout for a dataset's pools of `mode`, or
+   * null before their first report. What the planning tick records as the
+   * displayed level, since the worker is the only side that knows which
+   * resident level each visible position samples from.
    */
-  datasetLevels(datasetId: string): DatasetLevels | null {
-    return this.levelsByDataset.get(datasetId) ?? null;
+  datasetLevels(datasetId: string, mode: PoolMode): DatasetLevels | null {
+    return this.levelsByDataset.get(`${datasetId}|${mode}`) ?? null;
   }
 
   /** Idempotent. */

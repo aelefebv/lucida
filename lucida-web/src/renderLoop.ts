@@ -224,7 +224,7 @@ export class RenderLoop implements TraceEnvironment {
     // A tick runs only when one makes a chunk sendable again.
     this.client.onChunkResidency = (msg) => {
       const resend = this.uploader.handleChunkResidency(
-        msg.memberId, msg.tier, msg.change, msg.keys, this.session.cpuCache, msg.reason,
+        msg.memberId, msg.viewMode, msg.tier, msg.change, msg.keys, this.session.cpuCache, msg.reason,
       );
       if (resend) {
         this.setDirty("residency", "chunk_residency");
@@ -240,8 +240,8 @@ export class RenderLoop implements TraceEnvironment {
       this.republishSettle();
     };
 
-    this.client.onWantedSetDelta = (datasetId, _epochs, missing) => {
-      if (this.uploader.handleWantedSetDelta(datasetId, missing, this.session.cpuCache)) {
+    this.client.onWantedSetDelta = (datasetId, mode, _epochs, missing) => {
+      if (this.uploader.handleWantedSetDelta(datasetId, mode, missing, this.session.cpuCache)) {
         this.setDirty("residency", "wanted_set_delta");
       }
     };

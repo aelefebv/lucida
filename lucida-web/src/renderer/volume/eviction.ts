@@ -80,8 +80,8 @@ export function volumeEvictionParams(
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
     cameraFor: (memberId) => state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
-    targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
-    isWanted: (memberId, chunkKey) => wantedChunksFor(state, memberId, tier)?.has(chunkKey) ?? false,
+    targetLevelFor: (memberId) => state.targetLevelByMember.volume.get(memberId),
+    isWanted: (memberId, chunkKey) => wantedChunksFor(state, "volume", memberId, tier)?.has(chunkKey) ?? false,
     is3D: true,
   };
 }

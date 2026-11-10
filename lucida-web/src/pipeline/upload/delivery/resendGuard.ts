@@ -13,6 +13,7 @@
 
 import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { HeldReason } from "../../../trace/types.ts";
+import type { PoolMode } from "../../../renderer/workerProtocol.ts";
 
 /**
  * Consecutive no-progress ticks before the guard holds. About half a second
@@ -28,11 +29,11 @@ export interface HeldChunk {
 }
 
 function deliveryKey(d: ReadyChunkDelivery): string {
-  return `${d.residencyTier}|${d.imageId}|${d.c}|${d.chunkKey}`;
+  return `${d.mode}|${d.residencyTier}|${d.imageId}|${d.c}|${d.chunkKey}`;
 }
 
-function reasonKey(imageId: string, c: number, chunkKey: string): string {
-  return `${imageId}|${c}|${chunkKey}`;
+function reasonKey(imageId: string, c: number, mode: PoolMode, chunkKey: string): string {
+  return `${mode}|${imageId}|${c}|${chunkKey}`;
 }
 
 export class ResendGuard {
@@ -70,8 +71,8 @@ export class ResendGuard {
   }
 
   /** The worker handed a chunk back, evicted or refused, and said why. */
-  noteReturned(imageId: string, c: number, chunkKey: string, reason: HeldReason): void {
-    this.lastReason.set(reasonKey(imageId, c, chunkKey), reason);
+  noteReturned(imageId: string, c: number, mode: PoolMode, chunkKey: string, reason: HeldReason): void {
+    this.lastReason.set(reasonKey(imageId, c, mode, chunkKey), reason);
   }
 
   /**
@@ -79,8 +80,8 @@ export class ResendGuard {
    * follow a refusal or loss of the same chunk, so it must not overwrite the
    * reason that gave.
    */
-  noteMissing(imageId: string, c: number, chunkKey: string): void {
-    const key = reasonKey(imageId, c, chunkKey);
+  noteMissing(imageId: string, c: number, mode: PoolMode, chunkKey: string): void {
+    const key = reasonKey(imageId, c, mode, chunkKey);
     if (!this.lastReason.has(key)) this.lastReason.set(key, "not-resident");
   }
 
@@ -108,7 +109,7 @@ export class ResendGuard {
       this.held.add(key);
       held.push({
         delivery,
-        reason: this.lastReason.get(reasonKey(delivery.imageId, delivery.c, delivery.chunkKey)) ?? "not-resident",
+        reason: this.lastReason.get(reasonKey(delivery.imageId, delivery.c, delivery.mode, delivery.chunkKey)) ?? "not-resident",
       });
     }
     this.repeated.clear();

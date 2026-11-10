@@ -384,7 +384,7 @@ function makeSeamHarness(opts: {
 }): SeamHarness {
   const members = rosterGrid(opts.memberCount, 100, 1024);
   const orchResult: TickCoordinatorResult = {
-    memberRoster: new Map([["ds1", members]]),
+    memberRosterByDatasetMode: new Map([["ds1|slice", members]]),
     settings: {
       layerOrder: ["ds1"],
       allSettings: {
@@ -401,8 +401,9 @@ function makeSeamHarness(opts: {
       },
     },
     layers: resolvedLayers(resolvedLayer("ds1", [shownChannel(0, { blend_mode: "alpha" })], opts.layer)),
+    sliceLayers: new Map(),
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
-    entityIndexByDataset: new Map([["ds1", indexFor(members, 0)]]),
+    entityIndexByDatasetMode: new Map([["ds1|slice", indexFor(members, 0)]]),
   };
   const tickCoordinator = {
     planAndFetch: vi.fn(() => orchResult),

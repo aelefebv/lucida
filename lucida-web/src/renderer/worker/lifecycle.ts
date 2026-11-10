@@ -16,6 +16,7 @@ import {
 import { destroyAllResources } from "./resources.ts";
 import { clearFrameCaptures } from "./captureFrame.ts";
 import { clearGpuErrorReports } from "./gpuErrors.ts";
+import { datasetModeKey } from "../poolKeys.ts";
 
 /**
  * Free everything the worker holds for a removed dataset, or for one member
@@ -28,22 +29,27 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   removeVolumeResources(ctx, id);
   removeMinimapResources(ctx, id);
 
-  const desc = state.descriptorBuffersByDataset.get(id);
-  if (desc) {
-    destroyDescriptorBuffer(desc);
-    state.descriptorBuffersByDataset.delete(id);
+  for (const mode of ["slice", "volume"] as const) {
+    const key = datasetModeKey(id, mode);
+    const desc = state.descriptorBuffersByDatasetMode.get(key);
+    if (desc) {
+      destroyDescriptorBuffer(desc);
+      state.descriptorBuffersByDatasetMode.delete(key);
+    }
+    state.currentSourcesByDatasetMode.delete(key);
+    state.coldStateByDatasetMode.delete(key);
+    state.wantedByDatasetMode.delete(key);
   }
-  state.currentSourcesByDataset.delete(id);
-  state.coldStateByDataset.delete(id);
-  state.wantedByDataset.delete(id);
   state.failedByDataset.delete(id);
 
   // These maps would otherwise grow for the worker's whole lifetime.
   for (const [memberId, dsId] of state.memberToDataset) {
     if (dsId === id) {
       state.memberToDataset.delete(memberId);
-      state.memberSourcePools.delete(memberId);
-      state.targetLevelByMember.delete(memberId);
+      for (const mode of ["slice", "volume"] as const) {
+        state.memberSourcePools[mode].delete(memberId);
+        state.targetLevelByMember[mode].delete(memberId);
+      }
       state.cameraUVPerEntity.delete(memberId);
       state.rayHitPerEntity.delete(memberId);
     }
@@ -69,10 +75,12 @@ export function handleDestroy(ctx: WorkerCtx): void {
   clearFrameCaptures(state);
   clearGpuErrorReports(ctx);
   state.memberToDataset.clear();
-  state.memberSourcePools.clear();
-  state.targetLevelByMember.clear();
-  state.currentSourcesByDataset.clear();
-  state.wantedByDataset.clear();
+  for (const mode of ["slice", "volume"] as const) {
+    state.memberSourcePools[mode].clear();
+    state.targetLevelByMember[mode].clear();
+  }
+  state.currentSourcesByDatasetMode.clear();
+  state.wantedByDatasetMode.clear();
   state.failedByDataset.clear();
   releaseDeviceResources(ctx);
   destroyAllMinimapResources(state.minimap);
@@ -86,10 +94,10 @@ export function handleDestroy(ctx: WorkerCtx): void {
  */
 export function releaseDeviceResources(ctx: WorkerCtx): void {
   const state = ctx.state;
-  for (const desc of state.descriptorBuffersByDataset.values()) {
+  for (const desc of state.descriptorBuffersByDatasetMode.values()) {
     destroyDescriptorBuffer(desc);
   }
-  state.descriptorBuffersByDataset.clear();
+  state.descriptorBuffersByDatasetMode.clear();
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
   releaseAllViewResources(ctx);

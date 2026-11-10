@@ -18,6 +18,7 @@ function request(x: number, overrides: Partial<ChunkRequest> = {}): ChunkRequest
     x,
     lane,
     tier: lane === "coarse" || lane === "minimap" || lane === "overview" ? "coarse" : "detail",
+    mode: "slice",
     priority: x,
     chunkKey: `0/0/0/0/0/${x}`,
     ...overrides,
