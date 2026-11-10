@@ -75,8 +75,8 @@ describe("workspaceNameFromDatasets", () => {
     expect(
       workspaceNameFromDatasets([
         "/data/sample.ome.zarr",
-        "gs://bucket/brain.zarr",
-        "/data/heart.zarr",
+        "gs://bucket/volume.zarr",
+        "/data/plane.zarr",
       ]),
     ).toBe("sample.ome.zarr (+2)");
   });

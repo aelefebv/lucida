@@ -2021,7 +2021,7 @@ mod reconcile_label_settings_tests {
 
     #[test]
     fn repeated_names_are_matched_by_occurrence() {
-        // A plate that repeats a label name: each current occurrence claims the
+        // A collection that repeats a label name: each current occurrence claims the
         // matching author occurrence, in order.
         let author = names(&["region-a", "region-a", "region-a"]);
         let saved = vec![marked(0.11), marked(0.22), marked(0.33)];

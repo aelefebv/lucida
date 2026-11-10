@@ -128,7 +128,7 @@ def test_3d_cameras_rotate_and_a_2d_pan_is_refused_on_them(tmp_path):
 def test_layer_changes_persist_with_the_core_defaults(tmp_path):
     ws, server = workspace(tmp_path)
 
-    ws.layer.opacity("kidney-multiplex.zarr", 0.25)
+    ws.layer.opacity("multichannel-volume.zarr", 0.25)
     ws.layer.visible(DATASET, False)
 
     settings = stored_view(server)["dataset_settings"][DATASET]
