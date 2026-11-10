@@ -1,7 +1,7 @@
 {
   "type": "dataset_open_progress",
   "request_id": "web-7d2f45aa",
-  "url": "gs://lucida-fixtures/kidney-multiplex.zarr",
+  "url": "gs://lucida-fixtures/multichannel-volume.zarr",
   "diagnostic": {
     "stage": "generated_coarse_planning",
     "message": "planning generated coarse levels",

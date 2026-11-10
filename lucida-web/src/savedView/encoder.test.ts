@@ -257,7 +257,7 @@ describe("SavedView encoder", () => {
      */
     it("384-group collection share link fits under 1 KB", () => {
       const v = emptySliceView([1280, 720]);
-      v.datasets = ["gs://bucket/big-collection-screen-2024.zarr"];
+      v.datasets = ["gs://bucket/big-collection-series-2024.zarr"];
       v.dataset_order = ["ds-7777aaaabbbbcccc"];
       v.active_layouts = { "ds-7777aaaabbbbcccc": "collection-24x16-grid" };
       v.dataset_settings = {

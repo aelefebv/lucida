@@ -44,6 +44,7 @@ describe("healthReasons", () => {
           misses: 0,
           evictions: 0,
           backend_errors: 1,
+          absent_reads: 0,
           source_reads: 1,
           source_read_millis: 1,
         },
@@ -67,6 +68,27 @@ describe("healthReasons", () => {
         degrades: true,
       },
     ]);
+  });
+
+  it("gives no reason for chunks that were never written, which draw their fill as stored", () => {
+    const reasons = healthReasons(
+      health({
+        source_cache: {
+          max_bytes: 1,
+          current_bytes: 0,
+          used_percent: 0,
+          entry_count: 0,
+          hits: 0,
+          misses: 1352,
+          evictions: 0,
+          backend_errors: 0,
+          absent_reads: 1352,
+          source_reads: 1352,
+          source_read_millis: 1,
+        },
+      }),
+    );
+    expect(reasons).toEqual([]);
   });
 });
 

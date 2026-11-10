@@ -40,3 +40,39 @@ export function transformPoint(m: Float32Array, ux: number, uy: number, uz: numb
   const [x, y, z, w] = mulMat4Vec4(m, ux, uy, uz, 1);
   return [x / w, y / w, z / w];
 }
+
+/**
+ * The world ray through a canvas pixel, the inverse of {@link projectToCanvas}:
+ * the points at the near and far clip depths. Null when either lies at
+ * infinity, which a degenerate camera would give.
+ */
+export function canvasRay(
+  invViewProj: Float32Array, px: number, py: number,
+  canvasW: number, canvasH: number,
+): { near: Vec3; far: Vec3 } | null {
+  const ndcX = (px / canvasW) * 2 - 1;
+  const ndcY = (1 - py / canvasH) * 2 - 1;
+  const [nx, ny, nz, nw] = mulMat4Vec4(invViewProj, ndcX, ndcY, 0, 1);
+  const [fx, fy, fz, fw] = mulMat4Vec4(invViewProj, ndcX, ndcY, 1, 1);
+  if (Math.abs(nw) < 1e-12 || Math.abs(fw) < 1e-12) return null;
+  return { near: [nx / nw, ny / nw, nz / nw], far: [fx / fw, fy / fw, fz / fw] };
+}
+
+/** The unit depth the minimap draws slice `z` at, in a member `depth` planes deep. */
+export function sliceUnitDepth(z: number, depth: number): number {
+  return z / Math.max(depth - 1, 1);
+}
+
+/**
+ * A member-local voxel point in the member's unit space, at unit depth `nz`.
+ * Y flips: voxel Y=0 is the image's top, unit Y=0 the 3D bottom (Y up).
+ * Unbounded, so a point off the member maps past its edges.
+ */
+export function sliceLocalToUnit(x: number, y: number, width: number, height: number, nz: number): Vec3 {
+  return [x / width, 1 - y / height, nz];
+}
+
+/** The inverse of {@link sliceLocalToUnit} in X and Y. */
+export function unitToSliceLocal(ux: number, uy: number, width: number, height: number): [number, number] {
+  return [ux * width, (1 - uy) * height];
+}

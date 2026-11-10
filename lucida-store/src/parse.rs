@@ -591,12 +591,13 @@ fn declared_translation(node: &serde_json::Value, axes_names: &[String]) -> [f64
 /// wrong, so this never panics, errors, or mislabels.
 ///
 /// - A missing or non-array `channels` → empty `Vec` (caller falls back to `Channel n`).
-/// - A usable label is a non-blank string.
-/// - Results stay aligned to channel index: a label-less channel in the
-///   middle gets the `Channel n` fallback, counted from 1 like every other
-///   channel name, so later labels still line up, and a label-less trailing
-///   run is dropped. No usable label at all → empty.
-/// - A non-string `color` becomes `None`; the raw hex is carried verbatim.
+/// - A usable label is a non-blank string, and a usable color a non-blank
+///   string, carried verbatim.
+/// - Results stay aligned to channel index: a channel with a color but no
+///   label, or with neither in the middle, gets the `Channel n` fallback
+///   label, counted from 1 like every other channel name, so later entries
+///   still line up. A trailing run with neither is dropped, and no usable
+///   label or color at all → empty.
 ///
 /// Not reconciled against the C-axis size: parse stays a pure function of
 /// the metadata, and the web falls back per index beyond the list.
@@ -608,46 +609,35 @@ pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<Channel
         return Vec::new();
     };
 
-    // First pass: best-effort label per position (None == no usable label).
-    let parsed: Vec<Option<ChannelInfo>> = channels
+    let usable = |entry: &serde_json::Value, key: &str| {
+        entry
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let parsed: Vec<(Option<String>, Option<String>)> = channels
         .iter()
-        .map(|entry| {
-            let label = entry
-                .get("label")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())?;
-            let color = entry
-                .get("color")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-            Some(ChannelInfo {
-                label: label.to_string(),
-                color,
-            })
-        })
+        .map(|entry| (usable(entry, "label"), usable(entry, "color")))
         .collect();
 
-    // Truncate a trailing run of label-less channels: the web falls back
-    // per-index, so there's nothing to preserve past the last real label.
-    let last_labeled = parsed.iter().rposition(Option::is_some);
-    let Some(last) = last_labeled else {
-        return Vec::new(); // no usable labels anywhere
+    // The web falls back per index, so there's nothing to keep past the last
+    // channel that declares something.
+    let Some(last) = parsed
+        .iter()
+        .rposition(|(label, color)| label.is_some() || color.is_some())
+    else {
+        return Vec::new();
     };
 
-    // Fill interior gaps with the positional fallback so index i always maps
-    // to channel i; keep real labels as-is.
     parsed
         .into_iter()
         .take(last + 1)
         .enumerate()
-        .map(|(i, slot)| {
-            slot.unwrap_or(ChannelInfo {
-                label: format!("Channel {}", i + 1),
-                color: None,
-            })
+        .map(|(i, (label, color))| ChannelInfo {
+            label: label.unwrap_or_else(|| format!("Channel {}", i + 1)),
+            color,
         })
         .collect()
 }
@@ -1523,7 +1513,7 @@ mod tests {
             "channels": [
                 {"label": "   "},
                 {"label": ""},
-                {"color": "FF0000"},
+                {"color": "  "},
                 {"label": 42},
                 "not-an-object",
                 42
@@ -1531,8 +1521,45 @@ mod tests {
         }));
         assert!(
             parse_omero_channels(&root).is_empty(),
-            "no usable label anywhere must fully fall back to Channel n (empty list)",
+            "no usable label or color anywhere must fully fall back to Channel n (empty list)",
         );
+    }
+
+    #[test]
+    fn omero_channels_keep_a_color_without_a_label() {
+        // A color alone is worth keeping, in the middle and at the end, and
+        // its channel takes the positional label.
+        let root = root_with_omero(serde_json::json!({
+            "channels": [
+                {"label": "First"},
+                {"color": "00FF00"},
+                {},
+                {"color": "FF00FF"}
+            ]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 4);
+        assert_eq!(infos[0].label, "First");
+        assert_eq!(infos[0].color, None);
+        assert_eq!(infos[1].label, "Channel 2");
+        assert_eq!(infos[1].color.as_deref(), Some("00FF00"));
+        assert_eq!(infos[2].label, "Channel 3");
+        assert_eq!(infos[2].color, None);
+        assert_eq!(infos[3].label, "Channel 4");
+        assert_eq!(infos[3].color.as_deref(), Some("FF00FF"));
+    }
+
+    #[test]
+    fn omero_channels_with_only_colors_are_kept() {
+        let root = root_with_omero(serde_json::json!({
+            "channels": [{"color": "00FFFF"}, {"color": "FFFFFF"}]
+        }));
+        let infos = parse_omero_channels(&root);
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].label, "Channel 1");
+        assert_eq!(infos[0].color.as_deref(), Some("00FFFF"));
+        assert_eq!(infos[1].label, "Channel 2");
+        assert_eq!(infos[1].color.as_deref(), Some("FFFFFF"));
     }
 
     #[test]

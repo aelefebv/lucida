@@ -427,11 +427,13 @@ impl SharedError {
 
 /// What a caller is reading, which decides two things a read cannot decide
 /// for itself: which concurrency cap bounds it, and whether a not-found
-/// answer is a fault or an answer.
+/// answer is a fault, an answer, or an absent chunk.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ReadClass {
-    /// A chunk of the data itself. Bounded by the chunk cap; a not-found is
-    /// counted as a backend error, as it has always been.
+    /// A chunk of the data itself, or the shard holding it. Bounded by the
+    /// chunk cap. A not-found is a chunk that was never written, which reads
+    /// as fill, so it is counted as absent and never as a backend error: a
+    /// sparse dataset or an unwritten level is not a failing source.
     Chunk,
     /// A metadata object the dataset is expected to have.
     Metadata,
@@ -448,6 +450,29 @@ impl ReadClass {
     fn is_metadata(self) -> bool {
         matches!(self, ReadClass::Metadata | ReadClass::OptionalMetadata)
     }
+
+    /// How a round trip of this class that came back as `result` is counted.
+    fn answer<T>(self, result: &Result<T, object_store::Error>) -> Answer {
+        match (self, result) {
+            (_, Ok(_)) => Answer::Read,
+            (ReadClass::Chunk, Err(object_store::Error::NotFound { .. })) => Answer::Absent,
+            (ReadClass::OptionalMetadata, Err(object_store::Error::NotFound { .. })) => {
+                Answer::Read
+            }
+            (_, Err(_)) => Answer::Failed,
+        }
+    }
+}
+
+/// What one backend round trip answered, as the cache's counters tally it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Answer {
+    /// The bytes, or an optional object's absence, which is also an answer.
+    Read,
+    /// Nothing was written at a chunk's location.
+    Absent,
+    /// Anything else: I/O, timeout, permission, a backend fault.
+    Failed,
 }
 
 /// A read's claim on whichever cap bounds its [`ReadClass`], held for the
@@ -638,6 +663,12 @@ pub struct CacheStats {
     pub misses: u64,
     pub evictions: u64,
     pub backend_errors: u64,
+    /// Chunk round trips that found nothing written, so the chunk reads as
+    /// fill. Kept apart from `backend_errors` because absence is valid data,
+    /// and counted at all because a source that answers every read this way
+    /// draws nothing but fill. Round trips, not chunks: one read of a missing
+    /// shard answers for every inner chunk in it.
+    pub absent_reads: u64,
     /// Reads served without a backend read of their own: single-flight
     /// followers handed a leader's result, and range reads carried in a
     /// neighbour's merged request.
@@ -699,6 +730,7 @@ struct ReadCounters {
     hits: u64,
     misses: u64,
     backend_errors: u64,
+    absent_reads: u64,
     coalesced: u64,
     source_reads: u64,
     source_read_nanos: u128,
@@ -1121,6 +1153,7 @@ impl CachedStore {
             misses: counters.misses,
             evictions: usage.evictions,
             backend_errors: counters.backend_errors,
+            absent_reads: counters.absent_reads,
             coalesced: counters.coalesced,
             source_reads: counters.source_reads,
             source_read_millis: (counters.source_read_nanos / 1_000_000) as u64,
@@ -1323,25 +1356,22 @@ impl CachedStore {
                 .expect("source-read semaphore is never closed");
             self.inner.head(path).await
         };
-        let elapsed_nanos = read_started.elapsed().as_nanos();
+        let elapsed = read_started.elapsed();
+        let answer = ReadClass::OptionalMetadata.answer(&head);
         // A presence probe is a round trip like any other and queues behind
         // the same cap, so it files the same phase.
         metadata_reads::record(
             MetadataReadPhase::BackendRead,
             started,
-            !matches!(head, Ok(_) | Err(object_store::Error::NotFound { .. })),
+            answer == Answer::Failed,
         );
 
         // The round trip happened whatever it answered, so it is counted once
         // here rather than in each arm below.
-        {
-            let mut counters = self.counters.lock().unwrap();
-            counters.source_reads += 1;
-            counters.source_read_nanos += elapsed_nanos;
-            if !matches!(head, Ok(_) | Err(object_store::Error::NotFound { .. })) {
-                counters.backend_errors += 1;
-            }
-        }
+        self.counters
+            .lock()
+            .unwrap()
+            .count_round_trip(elapsed, answer);
 
         match head {
             Ok(_) => Ok(true),
@@ -1558,12 +1588,12 @@ impl CachedStore {
                 .map_or(0, |slices| slices.iter().map(Bytes::len).sum()),
         );
 
+        self.counters
+            .lock()
+            .unwrap()
+            .count_round_trip(elapsed, ReadClass::Chunk.answer(&fetch));
         let result = match fetch {
             Ok(slices) => {
-                self.counters
-                    .lock()
-                    .unwrap()
-                    .count_round_trip(elapsed, false);
                 let mut own = None;
                 let mut outcomes = Vec::with_capacity(keys.len());
                 let mut budget = self.budget.state.lock().unwrap();
@@ -1579,10 +1609,6 @@ impl CachedStore {
                 Ok(own.expect("the leader's own range is in its group"))
             }
             Err(error) => {
-                self.counters
-                    .lock()
-                    .unwrap()
-                    .count_round_trip(elapsed, true);
                 let shared = SharedError::capture(&error);
                 guard.complete(
                     keys.iter()
@@ -1742,23 +1768,22 @@ impl CachedStore {
         let elapsed = started.elapsed();
         let timing = permit_and_read(permit_wait, elapsed, fetch.as_ref().map_or(0, Bytes::len));
 
-        // An optional object that is not there answered the question it was
-        // asked, so it is not a failed read, for the open's row and the
-        // backend-error counter alike.
-        let absent_as_expected = class == ReadClass::OptionalMetadata
-            && matches!(fetch, Err(object_store::Error::NotFound { .. }));
+        // A not-found that answers what was asked, an optional object or a
+        // chunk never written, is not a failed read, for the open's row and
+        // the backend-error counter alike.
+        let answer = class.answer(&fetch);
         if let Some(called_at) = called_at {
             metadata_reads::record(
                 MetadataReadPhase::BackendRead,
                 called_at,
-                fetch.is_err() && !absent_as_expected,
+                answer == Answer::Failed,
             );
         }
 
         self.counters
             .lock()
             .unwrap()
-            .count_round_trip(elapsed, fetch.is_err() && !absent_as_expected);
+            .count_round_trip(elapsed, answer);
         let result = fetch.map(|bytes| {
             self.budget
                 .state
@@ -1834,11 +1859,13 @@ fn share(result: &Result<Bytes, object_store::Error>) -> ShareResult {
 
 impl ReadCounters {
     /// Count one backend round trip, however it answered.
-    fn count_round_trip(&mut self, elapsed: std::time::Duration, failed: bool) {
+    fn count_round_trip(&mut self, elapsed: std::time::Duration, answer: Answer) {
         self.source_reads += 1;
         self.source_read_nanos += elapsed.as_nanos();
-        if failed {
-            self.backend_errors += 1;
+        match answer {
+            Answer::Read => {}
+            Answer::Absent => self.absent_reads += 1,
+            Answer::Failed => self.backend_errors += 1,
         }
     }
 }
@@ -2078,8 +2105,10 @@ mod tests {
         assert_eq!(budget.current_bytes(), 0);
     }
 
+    /// A chunk that was never written answers not-found, which the caller
+    /// serves as fill. That is an absent read, not a failing source.
     #[tokio::test]
-    async fn missing_file_returns_error() {
+    async fn a_missing_chunk_is_an_absent_read_and_not_a_backend_error() {
         let dir = temp_dir("missing");
 
         let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
@@ -2089,11 +2118,80 @@ mod tests {
             .get_bytes(&Path::from("nonexistent"), READER, LABEL)
             .await
             .result;
-        assert!(result.is_err());
+        assert!(matches!(result, Err(object_store::Error::NotFound { .. })));
         let stats = cached.stats();
-        assert_eq!(stats.backend_errors, 1);
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.absent_reads, 1);
+        assert_eq!(stats.source_reads, 1, "the round trip is still counted");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A metadata object the dataset must have is a different question: not
+    /// finding it is a fault, and it is still counted as one.
+    #[tokio::test]
+    async fn a_missing_required_metadata_object_is_still_a_backend_error() {
+        let cached = CachedStore::new(Arc::new(CountingStore::new(0)), 1024);
+
+        assert!(
+            cached
+                .get_metadata_bytes(&Path::from("zarr.json"))
+                .await
+                .is_err()
+        );
+        let stats = cached.stats();
+        assert_eq!(stats.backend_errors, 1);
+        assert_eq!(stats.absent_reads, 0);
+    }
+
+    /// A suffix read, the shape a shard index at the end of its object is
+    /// read in, of a shard that was never written is absent as well.
+    #[tokio::test]
+    async fn a_suffix_read_of_a_missing_object_is_an_absent_read() {
+        let cached = CachedStore::new(Arc::new(CountingStore::new(0)), 1024);
+
+        let read = cached
+            .get_suffix(&Path::from("0/c/0/0"), 36, READER, LABEL)
+            .await;
+        assert!(matches!(
+            read.result,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        let stats = cached.stats();
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.absent_reads, 1);
+    }
+
+    /// Readers coalesced onto one read of a missing chunk all see not-found,
+    /// and the one round trip is one absent read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn coalesced_readers_of_a_missing_chunk_count_one_absent_read() {
+        let store = Arc::new(CountingStore::new(50));
+        let get_count = store.get_count.clone();
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            SourceReadLimiter::new(64),
+        ));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let cached = cached.clone();
+                tokio::spawn(
+                    async move { cached.get_bytes(&Path::from("chunk"), READER, LABEL).await },
+                )
+            })
+            .collect();
+        for handle in handles {
+            assert!(matches!(
+                handle.await.unwrap().result,
+                Err(object_store::Error::NotFound { .. })
+            ));
+        }
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        let stats = cached.stats();
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.absent_reads, 1);
     }
 
     // --- Single-flight, cap, and failure-sharing tests ---
@@ -2281,6 +2379,7 @@ mod tests {
             // Only the leader records a backend error; followers are spared
             // the GET but still surface the shared failure.
             assert_eq!(stats.backend_errors, 1);
+            assert_eq!(stats.absent_reads, 0, "a fault is not an absence");
             assert_eq!(stats.coalesced, waiters - 1);
             // The failure was not cached.
             assert_eq!(stats.entry_count, 0);
@@ -3797,6 +3896,7 @@ mod tests {
         assert_eq!(get_count.load(Ordering::SeqCst), 1);
         let stats = cached.stats();
         assert_eq!(stats.backend_errors, 1, "one failed round trip");
+        assert_eq!(stats.absent_reads, 0, "a fault is not an absence");
         assert_eq!(stats.entry_count, 0);
         no_flight_is_left_behind(&cached);
 
@@ -3808,5 +3908,56 @@ mod tests {
             .unwrap();
         assert_eq!(&bytes[..], &SHARD_BYTES[4..8]);
         assert_eq!(get_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// A merged request for ranges of an object that was never written
+    /// answers not-found for every read it carried. That is one round trip
+    /// that found nothing, so one absent read and no backend error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_merged_read_of_a_missing_object_is_one_absent_read_and_no_backend_error() {
+        let store = Arc::new(CountingStore::new(20));
+        let get_count = store.get_count.clone();
+        let limiter = SourceReadLimiter::new(1);
+        let cached = Arc::new(CachedStore::with_source_limiter(
+            store,
+            1024,
+            limiter.clone(),
+        ));
+
+        let held = limiter.acquire(OUTSIDER, 0).await;
+        let handles: Vec<_> = (0..3u64)
+            .map(|i| spawn_range_read(&cached, "shard", i * 4..i * 4 + 4, RequestLabel(i as u32)))
+            .collect();
+        wait_for_queued(&limiter, 3).await;
+        drop(held);
+        for handle in handles {
+            assert!(matches!(
+                handle.await.unwrap().result,
+                Err(object_store::Error::NotFound { .. })
+            ));
+        }
+        assert_eq!(get_count.load(Ordering::SeqCst), 1);
+        let stats = cached.stats();
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.absent_reads, 1);
+        no_flight_is_left_behind(&cached);
+    }
+
+    /// A lone range read, which the merge path sends as a plain range
+    /// request, counts a missing object the same way.
+    #[tokio::test]
+    async fn a_lone_range_read_of_a_missing_object_is_an_absent_read() {
+        let cached = CachedStore::new(Arc::new(CountingStore::new(0)), 1024);
+
+        let read = cached
+            .get_range(&Path::from("shard"), 0..4, READER, LABEL)
+            .await;
+        assert!(matches!(
+            read.result,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        let stats = cached.stats();
+        assert_eq!(stats.backend_errors, 0);
+        assert_eq!(stats.absent_reads, 1);
     }
 }

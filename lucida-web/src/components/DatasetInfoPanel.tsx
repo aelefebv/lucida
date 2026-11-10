@@ -109,8 +109,13 @@ function DatasetFacts({ dataset, health }: { dataset: InfoDataset; health: Healt
   const collection = typeof manifest.kind === "object" ? manifest.kind.Collection : null;
   const generated = new Set((multiscale?.generated_levels ?? []).map((g) => g.level_index));
   const channelCount = shape?.[1] ?? 0;
-  const channelNames = Array.from({ length: channelCount }, (_, i) => {
-    return channelDisplayName(i, null, multiscale?.channel_infos?.[i]?.label);
+  const channels = Array.from({ length: channelCount }, (_, i) => {
+    const info = multiscale?.channel_infos?.[i];
+    return {
+      name: channelDisplayName(i, null, info?.label),
+      color: info?.color ?? null,
+      swatch: swatchColor(info?.color),
+    };
   });
   const labels = manifest.labels ?? [];
 
@@ -186,7 +191,23 @@ function DatasetFacts({ dataset, health }: { dataset: InfoDataset; health: Healt
         )}
         {channelCount > 0 && (
           <Fact label={channelCount === 1 ? "1 channel" : `${channelCount} channels`}>
-            {channelNames.join(", ")}
+            <ol className="lc-info-channels">
+              {channels.map((channel, i) => (
+                <li key={i}>
+                  {channel.name}
+                  {channel.swatch && (
+                    <span className="lc-info-declared-color">
+                      <span
+                        className="lc-info-swatch"
+                        style={{ backgroundColor: channel.swatch }}
+                        aria-hidden="true"
+                      />
+                      {channel.color}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ol>
           </Fact>
         )}
         {labels.length > 0 && (
@@ -228,6 +249,16 @@ function HealthFacts({ health }: { health: HealthState | null }) {
       )}
     </section>
   );
+}
+
+/**
+ * The CSS color for a channel's declared color, or null when it is not the
+ * `rrggbb` hex, with or without `#`, that seeds its colormap. A malformed one
+ * seeds nothing, so it shows nothing either.
+ */
+function swatchColor(color: string | null | undefined): string | null {
+  const hex = color?.replace(/^#/, "");
+  return hex && /^[0-9a-f]{6}$/i.test(hex) ? `#${hex}` : null;
 }
 
 /** A level's spatial extent, Z × Y × X, dropping a single plane. */

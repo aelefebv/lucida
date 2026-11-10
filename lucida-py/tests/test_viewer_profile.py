@@ -128,17 +128,18 @@ def test_3d_cameras_rotate_and_a_2d_pan_is_refused_on_them(tmp_path):
 def test_layer_changes_persist_with_the_core_defaults(tmp_path):
     ws, server = workspace(tmp_path)
 
-    ws.layer.opacity("kidney-multiplex.zarr", 0.25)
+    ws.layer.opacity("multichannel-volume.zarr", 0.25)
     ws.layer.visible(DATASET, False)
 
     settings = stored_view(server)["dataset_settings"][DATASET]
     assert settings["opacity"] == 0.25
     assert settings["visible"] is False
-    # Seeded by the core: one entry per channel with the default colormaps,
-    # and the label list with its names.
+    # Seeded by the core: one entry per channel, in the colormap nearest the
+    # color it declares or else the first one free, and the label list with
+    # its names.
     assert [channel["colormap"] for channel in settings["channel_settings"]] == [
+        "blue",
         "magenta",
-        "green",
     ]
     assert settings["label_names"] == ["region-a"]
     assert settings["label_settings"] == [{"visible": False, "opacity": 0.5}]

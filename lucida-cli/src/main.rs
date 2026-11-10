@@ -2430,16 +2430,23 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let wait = Duration::from_secs(*timeout_seconds);
                 let dataset_client =
                     DatasetWorkspaceClient::new(target.ws_url.clone(), token.clone());
-                let (_seq, info) = dataset_client.info(dataset, wait).await?;
+                let viewport = [*cell_px, *cell_px];
+                let (info, scene) = dataset_client
+                    .info_and_scene(dataset, viewport, wait)
+                    .await?;
                 let dims = info.summary.dimensions.ok_or_else(|| {
                     CliError::new(ErrorKind::Protocol, "dataset has no dimensions to montage")
                 })?;
                 let ds_id = info.summary.workspace_dataset_id.clone();
+                let declared = scene
+                    .document
+                    .manifests
+                    .get(&lucida_core::DatasetId(ds_id.clone()))
+                    .map_or(&[][..], lucida_core::scene::declared_channels);
                 // Samples the Z / T / single axis, each cell fitting the whole
                 // dataset. A per-tile collection montage is not built yet, so
                 // plan as a single image here.
                 let plan = montage::plan_montage(dims, 1, *cells, *cols);
-                let viewport = [*cell_px, *cell_px];
 
                 // Pre-pass: read the dataset's auto-contrast window from a
                 // representative (middle) cell, then pin ONE shared,
@@ -2451,8 +2458,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // and through-stack variation show. Best-effort: if the probe can't
                 // read a window, fall back to per-cell auto.
                 let mid = plan.cells.len() / 2;
-                let probe_saved =
-                    montage::build_cell_view(&ds_id, &plan.cells[mid], viewport, None, dims[1]);
+                let probe_saved = montage::build_cell_view(
+                    &ds_id,
+                    &plan.cells[mid],
+                    viewport,
+                    None,
+                    dims[1],
+                    declared,
+                );
                 let probe_url =
                     montage::with_render_param(&viewer_inline_view_web_url(&target, &probe_saved)?);
                 const BG_CLIP: f64 = 0.3;
@@ -2474,8 +2487,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 for (index, cell) in plan.cells.iter().enumerate() {
                     // Same shared window for the sidecar drill-in URL and the
                     // captured thumbnail, so drilling in matches the montage.
-                    let saved =
-                        montage::build_cell_view(&ds_id, cell, viewport, shared_contrast, dims[1]);
+                    let saved = montage::build_cell_view(
+                        &ds_id,
+                        cell,
+                        viewport,
+                        shared_contrast,
+                        dims[1],
+                        declared,
+                    );
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
                         "index": index,
@@ -4250,7 +4269,11 @@ async fn run_trace(
             composed_camera = Some(framing.record);
         }
         let channels = trace::channel_count(&document, &dataset_id);
-        trace::pin_display(&mut view, &dataset_id, channels, pins);
+        let declared = document
+            .manifests
+            .get(&dataset_id)
+            .map_or(&[][..], lucida_core::scene::declared_channels);
+        trace::pin_display(&mut view, &dataset_id, channels, declared, pins);
     }
     let url = trace::driven_page_url(&viewer_inline_view_web_url(target, &view)?, args.full_ui);
     let composed = trace::ComposedView {
@@ -6570,6 +6593,7 @@ mod tests {
             "set_contrast",
             "add",
             "remove",
+            "minimap",
         ];
 
         let command = Cli::command();

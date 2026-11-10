@@ -1149,7 +1149,13 @@ function Viewer({
               // first frame (see Minimap.tsx).
               "bottom-right": render.clientReady && render.clientRef.current && (
                 <div hidden={!hasData}>
-                  <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
+                  <Minimap
+                    client={render.clientRef.current}
+                    activeLoop={render.activeLoop}
+                    engine={engine}
+                    emitPresence={emitPresenceWithUrl}
+                    breakFollow={breakFollow}
+                  />
                 </div>
               ),
             }}

@@ -642,7 +642,7 @@ fn format_one_dataset_health(dataset: &DatasetSourceHealth) -> String {
     ];
     if let Some(cache) = &dataset.source_cache {
         lines.push(format!(
-            "Source cache: {} / {} bytes ({}%), {} entries, hits {}, misses {}, evictions {}, backend errors {}",
+            "Source cache: {} / {} bytes ({}%), {} entries, hits {}, misses {}, evictions {}, backend errors {}, absent reads {}",
             cache.current_bytes,
             cache.max_bytes,
             cache.used_percent,
@@ -650,7 +650,8 @@ fn format_one_dataset_health(dataset: &DatasetSourceHealth) -> String {
             cache.hits,
             cache.misses,
             cache.evictions,
-            cache.backend_errors
+            cache.backend_errors,
+            cache.absent_reads
         ));
     }
     if let Some(cache) = &dataset.generated_coarse.cache {
@@ -1787,6 +1788,7 @@ mod tests {
                     misses: 4,
                     evictions: 1,
                     backend_errors: 0,
+                    absent_reads: 0,
                     source_reads: 4,
                     source_read_millis: 120,
                 }),
