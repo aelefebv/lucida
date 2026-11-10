@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.29.0](https://github.com/aelefebv/lucida/compare/v0.28.0...v0.29.0) (2026-11-10)
+
+
+### Features
+
+* open each channel in the colormap nearest the color the dataset declares ([#1467](https://github.com/aelefebv/lucida/issues/1467)) ([5e6a31b](https://github.com/aelefebv/lucida/commit/5e6a31ba05ebc8daa7897abadfea265601b0c407))
+* **web:** collapse a layer's data problems behind a warning button ([#1463](https://github.com/aelefebv/lucida/issues/1463)) ([23d1a1f](https://github.com/aelefebv/lucida/commit/23d1a1fcbffbe54ffa219d58d92e5aa8774f4f0d))
+* **web:** navigate from the minimap ([#1480](https://github.com/aelefebv/lucida/issues/1480)) ([099cff6](https://github.com/aelefebv/lucida/commit/099cff6080af39697aa72f674040c8f466540c46))
+
+
+### Bug Fixes
+
+* **store:** count absent chunks apart from failed source reads ([#1468](https://github.com/aelefebv/lucida/issues/1468)) ([17965c8](https://github.com/aelefebv/lucida/commit/17965c8f575500d969c3af77540faec78348663f))
+
+
+### Performance
+
+* **web:** start a gesture cheap on a slow GPU, and let input give up a full-quality frame ([#1481](https://github.com/aelefebv/lucida/issues/1481)) ([4cfbbe6](https://github.com/aelefebv/lucida/commit/4cfbbe6b328a255af5f50e49efce7b20c919ac84))
+
 ## [0.28.0](https://github.com/aelefebv/lucida/compare/v0.27.1...v0.28.0) (2026-11-09)
 
 
