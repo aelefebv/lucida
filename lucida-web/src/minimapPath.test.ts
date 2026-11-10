@@ -337,7 +337,7 @@ describe("tickMinimap overview/overlay split", () => {
       datasets: makeDatasets(),
       client,
       canvas,
-      views: [{ id: 0, mode, rect: [0, 0, 800, 600] }],
+      views: [{ id: 0, mode, rect: [0, 0, 800 * devicePixelRatio, 600 * devicePixelRatio] }],
     } as unknown as TickContext;
   }
 

@@ -722,14 +722,14 @@ export function tickMinimap(
 ): number | null {
   if (!state.enabled) return null;
 
-  const { scene, canvas } = ctx;
+  const { scene } = ctx;
   // The minimap frames the view whose frame the worker holds.
-  const { mode } = drawnView(ctx);
+  const { id: view, mode, rect } = drawnView(ctx);
 
   const theta = scene.camera_theta();
   const phi = scene.camera_phi();
 
-  const resolved = readResolvedLayers(scene, scene.active_view());
+  const resolved = readResolvedLayers(scene, view);
   // What the overview draws and how, less the z slab: the overview takes no
   // Z, so a Z-scrub refreshes only the overlay.
   const settingsSnap = JSON.stringify(
@@ -760,8 +760,8 @@ export function tickMinimap(
   // rotates with the eye fixed and the frustum would freeze.
   const overlayCamSnap =
     mode === "volume"
-      ? `${scene.eye_position(scene.active_view())}|${scene.inv_view_proj(scene.active_view())}`
-      : `${scene.zoom(scene.active_view())}|${scene.center(scene.active_view())}`;
+      ? `${scene.eye_position(view)}|${scene.inv_view_proj(view)}`
+      : `${scene.zoom(view)}|${scene.center(view)}`;
   const overlayCamKey = `${mode}|${overlayCamSnap}`;
   const zForOverlay = mode === "slice" ? sliceZ : 0;
   const overlayKey = `${overlayCamKey}|${zForOverlay}`;
@@ -825,16 +825,14 @@ export function tickMinimap(
     // Slice view bounds in scene XY.
     let sliceViewports: MinimapOverlayData["sliceViewports"] = [];
     // The overlay outlines an XY cut at its Z; a side view's cut is not drawn.
-    if (mode === "slice" && scene.slice_plane(scene.active_view()) === "xy") {
-      const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
-      const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
-      const sceneBounds = sliceViewSceneBounds(scene.center(scene.active_view()), scene.zoom(scene.active_view()), mainW, mainH);
+    if (mode === "slice" && scene.slice_plane(view) === "xy") {
+      const sceneBounds = sliceViewSceneBounds(scene.center(view), scene.zoom(view), rect[2], rect[3]);
       sliceViewports = cache.sliceViewportMembers
         .map((member) => intersectSliceViewWithMember(sceneBounds, member))
         .filter((viewport): viewport is MinimapOverlayData["sliceViewports"][number] => viewport !== null);
     }
 
-    const mainInvViewProj = mode === "volume" ? new Float32Array(scene.inv_view_proj(scene.active_view())) : null;
+    const mainInvViewProj = mode === "volume" ? new Float32Array(scene.inv_view_proj(view)) : null;
     const currentZ = mode === "slice" ? sliceZ : scene.z();
 
     state.overlayCallback({
