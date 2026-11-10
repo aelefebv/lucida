@@ -18,8 +18,8 @@ export interface ClipDepth {
 function depthSpan(scene: WasmScene, datasetId: string): [number, number] | null {
   const b = scene.dataset_fit_bounds(datasetId);
   if (b.length < 6) return null;
-  const eye = scene.eye_position();
-  const forward = scene.camera_forward();
+  const eye = scene.eye_position(scene.active_view());
+  const forward = scene.camera_forward(scene.active_view());
   let near = Infinity;
   let far = -Infinity;
   for (const x of [b[0], b[3]]) {
@@ -41,7 +41,7 @@ export function sceneClipDepth(scene: WasmScene, datasetId: string, onChange: ()
   return {
     read: () => {
       const span = depthSpan(scene, datasetId);
-      const distance = scene.clip_distance();
+      const distance = scene.clip_distance(scene.active_view());
       if (!span || distance <= 0) return 0;
       return Math.min(1, Math.max(0, (distance - span[0]) / (span[1] - span[0])));
     },
@@ -49,7 +49,7 @@ export function sceneClipDepth(scene: WasmScene, datasetId: string, onChange: ()
       const span = depthSpan(scene, datasetId);
       if (!span) return;
       const target = fraction <= 0 ? 0 : span[0] + fraction * (span[1] - span[0]);
-      scene.adjust_clip_distance(target - scene.clip_distance());
+      scene.adjust_clip_distance(target - scene.clip_distance(scene.active_view()));
       onChange();
     },
   };

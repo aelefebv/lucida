@@ -13,6 +13,10 @@ use crate::scene::{
 };
 use crate::view::{AxisPositions, View, ViewId};
 
+const IDENTITY_4X4: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
 #[wasm_bindgen]
 pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     crate::chunk::chunk_key(level, t, c, z, y, x)
@@ -284,14 +288,15 @@ impl WasmScene {
         self.inner.flip_comparison();
     }
 
-    /// What of the view's width `dataset_id` shows under the comparison, as
+    /// What of `view`'s width `dataset_id` shows under its comparison, as
     /// `[from, to]` fractions from its left edge ([`Comparison::span`]).
     /// Empty for a dataset it leaves alone, which shows everywhere.
     ///
     /// [`Comparison::span`]: crate::scene::Comparison::span
-    pub fn comparison_span(&self, dataset_id: &str) -> Vec<f64> {
+    pub fn comparison_span(&self, view: u32, dataset_id: &str) -> Vec<f64> {
         self.inner
-            .comparison()
+            .view(ViewId(view))
+            .and_then(|view| view.comparison.as_ref())
             .and_then(|c| c.span(&DatasetId(dataset_id.to_string())))
             .map_or_else(Vec::new, Vec::from)
     }
@@ -390,8 +395,9 @@ impl WasmScene {
         );
     }
 
-    pub fn center(&self) -> Vec<f64> {
-        if let Camera::Slice(ref v) = self.active().camera {
+    /// `view`'s slice camera center, or the origin for any other camera.
+    pub fn center(&self, view: u32) -> Vec<f64> {
+        if let Some(Camera::Slice(v)) = self.camera_in(view) {
             vec![v.center[0], v.center[1]]
         } else {
             vec![0.0, 0.0]
@@ -472,8 +478,8 @@ impl WasmScene {
         self.inner.cut_extent(view.id(), view.slice_plane().cut())
     }
 
-    pub fn zoom(&self) -> f64 {
-        self.active().camera.effective_zoom()
+    pub fn zoom(&self, view: u32) -> f64 {
+        self.camera_in(view).map_or(1.0, Camera::effective_zoom)
     }
 
     /// Project a world-space point to screen-space pixel coordinates,
@@ -496,6 +502,22 @@ impl WasmScene {
     /// describe.
     pub fn active_view(&self) -> u32 {
         self.active().id().0
+    }
+
+    /// Every view of the scene, by id.
+    pub fn view_ids(&self) -> Vec<u32> {
+        self.inner.views().iter().map(|view| view.id().0).collect()
+    }
+
+    /// Where `view` draws, as `[x, y, width, height]` fractions of the
+    /// canvas from its top-left corner; empty for an unknown view.
+    pub fn view_rect(&self, view: u32) -> Vec<f64> {
+        self.inner
+            .view(ViewId(view))
+            .map_or_else(Vec::new, |view| {
+                let r = view.rect;
+                vec![r.x, r.y, r.width, r.height]
+            })
     }
 
     /// Query the scene for geometric information about all entities in a
@@ -700,25 +722,23 @@ impl WasmScene {
         self.inner.volume_diagonal(self.active().id())
     }
 
-    pub fn clip_distance(&self) -> f64 {
-        match &self.active().camera {
-            Camera::Arcball(v) => v.clip_distance,
-            Camera::Fly(v) => v.clip_distance,
-            Camera::Slice(_) => 0.0,
+    pub fn clip_distance(&self, view: u32) -> f64 {
+        match self.camera_in(view) {
+            Some(Camera::Arcball(v)) => v.clip_distance,
+            Some(Camera::Fly(v)) => v.clip_distance,
+            _ => 0.0,
         }
     }
 
-    pub fn clip_mode(&self) -> String {
-        match &self.active().camera {
-            Camera::Arcball(v) => match v.clip_mode {
-                ClipMode::Plane => "plane".to_string(),
-                ClipMode::Sphere => "sphere".to_string(),
-            },
-            Camera::Fly(v) => match v.clip_mode {
-                ClipMode::Plane => "plane".to_string(),
-                ClipMode::Sphere => "sphere".to_string(),
-            },
-            Camera::Slice(_) => "plane".to_string(),
+    pub fn clip_mode(&self, view: u32) -> String {
+        let mode = match self.camera_in(view) {
+            Some(Camera::Arcball(v)) => v.clip_mode,
+            Some(Camera::Fly(v)) => v.clip_mode,
+            _ => ClipMode::Plane,
+        };
+        match mode {
+            ClipMode::Plane => "plane".to_string(),
+            ClipMode::Sphere => "sphere".to_string(),
         }
     }
 
@@ -727,79 +747,62 @@ impl WasmScene {
             .apply(ViewportCommand::AdjustClipDistance { delta }.into());
     }
 
-    /// Camera forward direction in world space (normalized). Returns [fx, fy, fz].
-    pub fn camera_forward(&self) -> Vec<f32> {
-        match &self.active().camera {
-            Camera::Arcball(v) => {
-                let fwd = v.forward_direction();
-                vec![fwd[0] as f32, fwd[1] as f32, fwd[2] as f32]
-            }
-            Camera::Fly(v) => {
-                let fwd = v.forward_direction();
-                vec![fwd[0] as f32, fwd[1] as f32, fwd[2] as f32]
-            }
-            Camera::Slice(_) => vec![0.0, 0.0, -1.0],
+    /// `view`'s forward direction in world space (normalized), as
+    /// `[fx, fy, fz]`.
+    pub fn camera_forward(&self, view: u32) -> Vec<f32> {
+        let fwd = match self.camera_in(view) {
+            Some(Camera::Arcball(v)) => v.forward_direction(),
+            Some(Camera::Fly(v)) => v.forward_direction(),
+            _ => return vec![0.0, 0.0, -1.0],
+        };
+        vec![fwd[0] as f32, fwd[1] as f32, fwd[2] as f32]
+    }
+
+    pub fn view_proj(&self, view: u32) -> Vec<f32> {
+        match self.camera_in(view) {
+            Some(Camera::Arcball(v)) => v.view_proj().to_vec(),
+            Some(Camera::Fly(v)) => v.view_proj().to_vec(),
+            _ => IDENTITY_4X4.to_vec(),
         }
     }
 
-    pub fn view_proj(&self) -> Vec<f32> {
-        match &self.active().camera {
-            Camera::Arcball(v) => v.view_proj().to_vec(),
-            Camera::Fly(v) => v.view_proj().to_vec(),
-            _ => vec![
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
+    pub fn inv_view_proj(&self, view: u32) -> Vec<f32> {
+        match self.camera_in(view) {
+            Some(Camera::Arcball(v)) => v.inv_view_proj().to_vec(),
+            Some(Camera::Fly(v)) => v.inv_view_proj().to_vec(),
+            _ => IDENTITY_4X4.to_vec(),
         }
     }
 
-    pub fn inv_view_proj(&self) -> Vec<f32> {
-        match &self.active().camera {
-            Camera::Arcball(v) => v.inv_view_proj().to_vec(),
-            Camera::Fly(v) => v.inv_view_proj().to_vec(),
-            _ => vec![
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-            ],
-        }
+    pub fn eye_position(&self, view: u32) -> Vec<f32> {
+        let eye = match self.camera_in(view) {
+            Some(Camera::Arcball(v)) => v.eye_position(),
+            Some(Camera::Fly(v)) => v.eye_position(),
+            _ => return vec![0.0, 0.0, 1.0],
+        };
+        vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
     }
 
-    pub fn eye_position(&self) -> Vec<f32> {
-        match &self.active().camera {
-            Camera::Arcball(v) => {
-                let eye = v.eye_position();
-                vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
-            }
-            Camera::Fly(v) => {
-                let eye = v.eye_position();
-                vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
-            }
-            _ => vec![0.0, 0.0, 1.0],
-        }
-    }
-
-    /// Returns the ray-volume intersection point in [0,1]^3 local space for a dataset.
-    pub fn ray_hit_local(&self, dataset_id: &str) -> Vec<f32> {
+    /// Where `view`'s center ray meets a dataset, in its `[0,1]^3` local
+    /// space.
+    pub fn ray_hit_local(&self, view: u32, dataset_id: &str) -> Vec<f32> {
         let inv_model_vec = self.inv_scene_model_matrix_for(dataset_id);
         let mut im = [0.0f64; 16];
         for (i, val) in inv_model_vec.iter().enumerate() {
             im[i] = *val as f64;
         }
-        match &self.active().camera {
-            Camera::Arcball(v) => {
-                let hit = v.ray_hit_local(&im);
-                vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
-            }
-            Camera::Fly(v) => {
-                let hit = v.ray_hit_local(&im);
-                vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
-            }
-            _ => vec![0.5, 0.5, 0.5],
-        }
+        let hit = match self.camera_in(view) {
+            Some(Camera::Arcball(v)) => v.ray_hit_local(&im),
+            Some(Camera::Fly(v)) => v.ray_hit_local(&im),
+            _ => return vec![0.5, 0.5, 0.5],
+        };
+        vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
     }
 
     /// Like `ray_hit_local`, but flips Y from unit space (Y-up: 0=bottom)
     /// to image space (Y-down: 0=top).
-    pub fn ray_hit_local_image(&self, dataset_id: &str) -> Vec<f32> {
-        let hit = self.ray_hit_local(dataset_id);
+    pub fn ray_hit_local_image(&self, view: u32, dataset_id: &str) -> Vec<f32> {
+        let hit = self.ray_hit_local(view, dataset_id);
         vec![hit[0], 1.0 - hit[1], hit[2]]
     }
 
@@ -1085,9 +1088,16 @@ impl WasmScene {
         out
     }
 
-    /// The view the camera readers describe: the active one.
+    /// The view the readers without a view argument describe: the active one.
     fn active(&self) -> &View {
         self.inner.active_view()
+    }
+
+    /// `view`'s camera, or `None` for a view the scene doesn't hold, which
+    /// the readers answer as they answer a camera that has none of what they
+    /// read.
+    fn camera_in(&self, view: u32) -> Option<&Camera> {
+        self.inner.view(ViewId(view)).map(|view| &view.camera)
     }
 
     /// Every member's world box, visibility, and plane count, for

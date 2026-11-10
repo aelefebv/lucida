@@ -14,7 +14,6 @@ import type { VolumeMemberDraw } from "./volumeRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import type { MinimapRenderMessage, ThumbnailRenderMessage, WorkerToMainMessage } from "./workerProtocol.ts";
 import {
-  destroyAllMinimapResources,
   handleMinimapDestroy,
   handleMinimapInit,
   handleMinimapRender,
@@ -138,7 +137,6 @@ async function flush(): Promise<void> {
 }
 
 afterEach(() => {
-  destroyAllMinimapResources();
   vi.unstubAllGlobals();
 });
 
@@ -188,7 +186,7 @@ describe("the minimap's overview render", () => {
     uploadOverview(ctx);
 
     handleMinimapRender(ctx, renderMsg(100));
-    handleMinimapDestroy();
+    handleMinimapDestroy(ctx.state.minimap);
     compile();
     await flush();
 

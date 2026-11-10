@@ -81,7 +81,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "sliceRenderMultiPass":
       try {
         await handleSliceRenderMultiPass(ctx, msg);
-        ctx.state.lastFrame = msg;
+        ctx.state.lastFrames.set(msg.view, msg);
       } finally {
         postFrameDone(ctx, msg.frameSeq);
       }
@@ -108,7 +108,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "volumeRenderMultiPass":
       try {
         await handleVolumeRenderMultiPass(ctx, msg);
-        ctx.state.lastFrame = msg;
+        ctx.state.lastFrames.set(msg.view, msg);
       } finally {
         postFrameDone(ctx, msg.frameSeq);
       }
@@ -135,7 +135,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleProbe(ctx, msg);
       return;
     case "minimapDestroy":
-      handleMinimapDestroy();
+      handleMinimapDestroy(ctx.state.minimap);
       return;
 
     case "updateCursorData": {

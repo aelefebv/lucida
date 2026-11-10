@@ -41,7 +41,7 @@ function frameOf(scene: WasmScene, f: ViewFixture, mode: "slice" | "volume", z =
     datasets: new Map([[datasetId(f), { manifest: manifest(f) }]]),
     client: { minimapRender: () => {} } as unknown as RenderClient,
     canvas: mainCanvas(),
-    mode,
+    views: [{ id: scene.active_view(), mode, rect: [0, 0, 0, 0] }],
   } as unknown as TickContext;
   tickMinimap(ctx, state, z);
   if (!frame) throw new Error("the minimap drew no overlay");
@@ -127,10 +127,10 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       const frame = frameOf(scene, f, "slice", 40);
       expect(frame.sliceViewports).toEqual([]);
       const { navigator, loop } = navigatorFor(scene, frame);
-      const center = scene.center();
+      const center = scene.center(scene.active_view());
       expect(navigator.pressAt(MINIMAP_SIZE / 2, MINIMAP_SIZE / 2, "mouse")).toBe(false);
       expect(navigator.cursorAt(MINIMAP_SIZE / 2, MINIMAP_SIZE / 2)).toBe("default");
-      expect(Array.from(scene.center())).toEqual(Array.from(center));
+      expect(Array.from(scene.center(scene.active_view()))).toEqual(Array.from(center));
       expect(loop.markInput).not.toHaveBeenCalled();
     });
 
@@ -158,14 +158,14 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
 
     it("centres the view on a clicked spot at the current zoom", () => {
       const { scene, frame, navigator, loop, deps } = setup();
-      const zoom = scene.zoom();
+      const zoom = scene.zoom(scene.active_view());
       const target = memberCenter(frame, frame.members.length - 1);
       const at = css(frame, sceneToMinimap(frame, frame.members[0], ...target)!);
       expect(navigator.cursorAt(...at)).toBe("crosshair");
       expect(navigator.pressAt(...at, "mouse", 10)).toBe(true);
       navigator.releaseAt(...at, 20);
-      expectNear(scene.center(), target, 1);
-      expect(scene.zoom()).toBe(zoom);
+      expectNear(scene.center(scene.active_view()), target, 1);
+      expect(scene.zoom(scene.active_view())).toBe(zoom);
       expect(loop.markInput).toHaveBeenCalledWith("pan", 10);
       expect(deps.breakFollow).toHaveBeenCalled();
       expect(deps.emitPresence).toHaveBeenCalled();
@@ -173,24 +173,24 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
 
     it("drags the view rectangle, and the view pans with it", () => {
       const { scene, frame, navigator, loop } = setup();
-      const start = [...scene.center()] as [number, number];
+      const start = [...scene.center(scene.active_view())] as [number, number];
       const member = pickSceneAt(frame, ...sceneToMinimap(frame, frame.members[0], ...start)!)!.member;
       // Grab the rectangle off its center, so the grab offset is under test.
       const grab = css(frame, sceneToMinimap(frame, member, start[0] + 2, start[1] + 1)!);
       expect(navigator.cursorAt(...grab)).toBe("move");
       navigator.pressAt(...grab, "mouse");
-      expectNear(scene.center(), start, 1e-9);
+      expectNear(scene.center(scene.active_view()), start, 1e-9);
       const path: [number, number][] = [[5, 2], [12, 6], [30, 18]];
       for (const [dx, dy] of path) {
         navigator.moveTo(grab[0] + dx, grab[1] + dy, 100 + dx);
         // The point grabbed stays under the pointer, so the center keeps its offset from it.
         const under = minimapToScene(frame, member, ...backingOf(frame, grab[0] + dx, grab[1] + dy))!;
-        expectNear(scene.center(), [under[0] - 2, under[1] - 1], 1e-3);
+        expectNear(scene.center(scene.active_view()), [under[0] - 2, under[1] - 1], 1e-3);
       }
       navigator.releaseAt(grab[0] + 30, grab[1] + 18);
       expect(loop.markInput).toHaveBeenCalledTimes(path.length);
-      expect(scene.center()[0]).toBeGreaterThan(start[0]);
-      expect(scene.center()[1]).toBeGreaterThan(start[1]);
+      expect(scene.center(scene.active_view())[0]).toBeGreaterThan(start[0]);
+      expect(scene.center(scene.active_view())[1]).toBeGreaterThan(start[1]);
     });
 
     it("jumps to a press outside the view rectangle, then drags from there", () => {
@@ -198,13 +198,13 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       const target = memberCenter(frame, 0);
       const at = css(frame, sceneToMinimap(frame, frame.members[0], ...target)!);
       navigator.pressAt(...at, "touch");
-      expectNear(scene.center(), target, 1);
+      expectNear(scene.center(scene.active_view()), target, 1);
       // A finger's wobble inside the touch slop moves nothing.
       navigator.moveTo(at[0] + 3, at[1], 5);
-      expectNear(scene.center(), target, 1);
+      expectNear(scene.center(scene.active_view()), target, 1);
       navigator.moveTo(at[0] + 20, at[1], 6);
       const under = minimapToScene(frame, frame.members[0], ...backingOf(frame, at[0] + 20, at[1]))!;
-      expectNear(scene.center(), under, 1e-3);
+      expectNear(scene.center(scene.active_view()), under, 1e-3);
     });
 
     it("zooms about the spot under the wheel", () => {
@@ -212,14 +212,14 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       const spot = memberCenter(frame, 0);
       spot[0] += frame.members[0].width / 4;
       const onScreen = () => {
-        const c = scene.center();
-        return [(spot[0] - c[0]) * scene.zoom(), (spot[1] - c[1]) * scene.zoom()];
+        const c = scene.center(scene.active_view());
+        return [(spot[0] - c[0]) * scene.zoom(scene.active_view()), (spot[1] - c[1]) * scene.zoom(scene.active_view())];
       };
       const before = onScreen();
-      const zoom = scene.zoom();
+      const zoom = scene.zoom(scene.active_view());
       expect(navigator.wheelAt(...css(frame, sceneToMinimap(frame, frame.members[0], ...spot)!), -100, 7)).toBe(true);
-      expect(scene.zoom()).toBeGreaterThan(zoom);
-      expectNear(onScreen(), before, 0.05 * scene.zoom());
+      expect(scene.zoom(scene.active_view())).toBeGreaterThan(zoom);
+      expectNear(onScreen(), before, 0.05 * scene.zoom(scene.active_view()));
       expect(loop.markInput).toHaveBeenCalledWith("zoom", 7);
     });
 
@@ -227,7 +227,7 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       const { scene, frame, navigator } = setup("image");
       const member = frame.members[0];
       const centerOnMinimap = () => {
-        const [x, y] = scene.center();
+        const [x, y] = scene.center(scene.active_view());
         return sceneToMinimap(frame, member, x, y)!;
       };
       const before = centerOnMinimap();
@@ -271,10 +271,10 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       const at: [number, number] = [MINIMAP_SIZE * 0.42, MINIMAP_SIZE * 0.55];
       const picked = pickVolumeAt(frame, (at[0] * frame.canvasW) / MINIMAP_SIZE, (at[1] * frame.canvasH) / MINIMAP_SIZE);
       expect(picked).not.toBeNull();
-      const eye = [...scene.eye_position()];
+      const eye = [...scene.eye_position(scene.active_view())];
       navigator.pressAt(...at, "mouse");
       navigator.releaseAt(...at, 3);
-      expect([...scene.eye_position()]).not.toEqual(eye);
+      expect([...scene.eye_position(scene.active_view())]).not.toEqual(eye);
       const [w, h] = [CANVAS_CSS[0] * ratio, CANVAS_CSS[1] * ratio];
       expectNear(scene.project_to_screen(...picked!.world), [w / 2, h / 2], 1);
       expect(loop.markInput).toHaveBeenCalledWith("pan", 3);
@@ -282,10 +282,10 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
 
     it("leaves the target alone on a click off the data", () => {
       const { scene, navigator, loop } = setup();
-      const eye = [...scene.eye_position()];
+      const eye = [...scene.eye_position(scene.active_view())];
       navigator.pressAt(2, 2, "mouse");
       navigator.releaseAt(2, 2);
-      expect([...scene.eye_position()]).toEqual(eye);
+      expect([...scene.eye_position(scene.active_view())]).toEqual(eye);
       expect(loop.markInput).not.toHaveBeenCalled();
     });
   });

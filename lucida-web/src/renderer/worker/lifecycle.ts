@@ -74,7 +74,7 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.wantedByDataset.clear();
   state.failedByDataset.clear();
   releaseDeviceResources(ctx);
-  destroyAllMinimapResources();
+  destroyAllMinimapResources(state.minimap);
   self.close();
 }
 
@@ -91,7 +91,9 @@ export function releaseDeviceResources(ctx: WorkerCtx): void {
   state.descriptorBuffersByDataset.clear();
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
-  releaseMinimapDeviceResources();
+  for (const target of state.viewTargets.values()) target.destroy();
+  state.viewTargets.clear();
+  releaseMinimapDeviceResources(state.minimap);
   // The page uploads every overview again to a replacement device.
   state.overviewsRefused.clear();
   ctx.passTimer.destroy();

@@ -146,10 +146,12 @@ function drewImage(levels: Level[], fullDims: [number, number], chunk: number) {
     zoom: 1,
     cx: width / 2,
     cy: height / 2,
+    view: 0,
     canvasW: width,
     canvasH: height,
+    rect: [0, 0, width, height],
   };
-  state.lastFrame = frame;
+  state.lastFrames.set(frame.view, frame);
   const descriptor = {
     memberByIndex: [memberId],
     sourceBindingByMember: new Map([[memberId, { levelPoolKeys: levels.map((_, i) => `pool${i}`), coarsePoolKey: null }]]),
@@ -308,7 +310,7 @@ describe("the worker's pixel probe", () => {
     label.planes.set(labelCellKey(0, 0), 0);
     label.indirection[4] = INDIRECTION_FAILED;
     state.labelSlicePools.set("img:label:regions", label);
-    const frame = state.lastFrame as SliceRenderMultiPassMessage;
+    const frame = [...state.lastFrames.values()][0] as SliceRenderMultiPassMessage;
     frame.layers.push({
       datasetId: "img:label:regions",
       dataW: 40,
@@ -388,18 +390,20 @@ function drewVolume(renderMode: "translucent" | "max_intensity", window: { contr
     activeSet: [entry],
     sampleFormat: "u16",
   } as unknown as ColdStateMessage);
-  state.lastFrame = {
+  state.lastFrames.set(0, {
     type: "volumeRenderMultiPass",
     epochs: EPOCHS,
     layers: [{ datasetId: memberId, blendMode: "alpha", renderMode, entityIndex: 0 }],
     invViewProj: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
     eye: new Float32Array([0, 0, -1]),
     camForward: new Float32Array([0, 0, 1]),
+    view: 0,
     canvasW: 100,
     canvasH: 100,
+    rect: [0, 0, 100, 100],
     fullW: 100,
     fullH: 100,
-  };
+  });
   const descriptor = {
     memberByIndex: [memberId],
     sourceBindingByMember: new Map([[memberId, { levelPoolKeys: ["pool"], coarsePoolKey: null }]]),
@@ -452,7 +456,7 @@ describe("the worker's pixel probe of a 3D label overlay", () => {
       width: side, height: side, depth: side,
     } as unknown as LabelVolumePool;
     ctx.state.labelVolumePools.set("vol:label:regions", label);
-    const frame = ctx.state.lastFrame as VolumeRenderMultiPassMessage;
+    const frame = [...ctx.state.lastFrames.values()][0] as VolumeRenderMultiPassMessage;
     const entry = ctx.state.coldStateByDataset.get("ds")!.activeSet[0];
     frame.layers.push({
       datasetId: "vol:label:regions",

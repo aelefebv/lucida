@@ -85,9 +85,9 @@ describe("RenderClient destroy", () => {
   it("times each viewport frame from dispatch to the worker's frameDone", () => {
     const { client, worker } = makeReadyClient();
     const epochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
-    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs, 0, [0, 0, 10, 10]);
     vi.advanceTimersByTime(5);
-    client.volumeRenderMultiPass(noLayers, invViewProj, eye, 10, 10, 10, 10, epochs);
+    client.volumeRenderMultiPass(noLayers, invViewProj, eye, 10, 10, 10, 10, epochs, 0, [0, 0, 10, 10]);
     const sent = worker.posted.filter((m) => m.type.endsWith("RenderMultiPass")).map((m) => m.frameSeq);
     expect(sent).toEqual([1, 2]);
     expect(client.lastFrameSeq()).toBe(2);
@@ -109,16 +109,16 @@ describe("RenderClient destroy", () => {
     client.onFrameDone = (frameSeq, doneAtMs) => done.push([frameSeq, doneAtMs]);
     const origin = performance.timeOrigin;
 
-    const first = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    const first = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs, 0, [0, 0, 10, 10]);
     const dispatchedAt = performance.now();
     vi.advanceTimersByTime(50);
     // Finished 20 ms after dispatch, heard 30 ms later on a busy thread.
     worker.emit({ type: "frameDone", frameSeq: first, doneAtMs: origin + dispatchedAt + 20 });
     // A skewed stamp from before the dispatch, and one with no stamp at all.
-    const second = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    const second = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs, 0, [0, 0, 10, 10]);
     const secondAt = performance.now();
     worker.emit({ type: "frameDone", frameSeq: second, doneAtMs: origin + secondAt - 500 });
-    const third = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    const third = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs, 0, [0, 0, 10, 10]);
     vi.advanceTimersByTime(7);
     worker.emit({ type: "frameDone", frameSeq: third });
 
@@ -131,8 +131,8 @@ describe("RenderClient destroy", () => {
   it("stops waiting on frames sent before the device was replaced", () => {
     const { client, worker } = makeReadyClient();
     const epochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
-    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
-    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs, 0, [0, 0, 10, 10]);
+    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs, 0, [0, 0, 10, 10]);
     expect(client.framesAwaitingDone()).toBe(2);
     worker.emit({ type: "gpuDeviceRestored" });
     expect(client.framesAwaitingDone()).toBe(0);

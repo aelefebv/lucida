@@ -1,7 +1,7 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
 import { assertCanvasSize } from "./applyAndSend.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
-import type { TickContext } from "./renderLoopTypes.ts";
+import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { computeScissorRect } from "./pipeline/upload/scissor.ts";
@@ -9,13 +9,14 @@ import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type Resolve
 import { labelModelMatrices } from "./renderer/labelLayout.ts";
 import { compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
-import type { ResolvedLayers } from "./resolvedLayers.ts";
+import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { comparisonClip, intersectRects } from "./comparison.ts";
 import type { PixelRect } from "./renderer/layerBatches.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
+import { scaleRect } from "./slicePath.ts";
 
 /**
  * Ray-march steps a gesture's frame takes per step of its sampled level.
@@ -129,11 +130,11 @@ interface PlanResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: { layerOrder: string[]; allSettings: Record<string, DatasetSettings> };
   layers: ResolvedLayers;
-  eye: Float32Array;
+  /** The canvas's backing store, at the frame's render scale. */
   canvasW: number;
   canvasH: number;
-  fullW: number;
-  fullH: number;
+  /** Backing-store pixels per device pixel of the canvas. */
+  scale: number;
   epochs: SceneEpochs;
   /** Per-dataset memberId → entity index map. */
   entityIndexByDataset: Map<string, Map<string, number>>;
@@ -152,9 +153,7 @@ function uploadAndRenderVolume(
   shouldRender: boolean,
   holdUploads: boolean,
 ): boolean {
-  const { scene, client, datasets } = ctx;
-  const { memberRoster, settings, layers: resolvedLayers, eye, canvasW, canvasH, fullW, fullH, entityIndexByDataset } = plan;
-  const { layerOrder, allSettings } = settings;
+  const { scene } = ctx;
 
   let budgetExhausted = false;
   if (holdUploads) uploader.holdDelivery();
@@ -162,11 +161,40 @@ function uploadAndRenderVolume(
 
   if (!shouldRender) return budgetExhausted;
 
-  const invVP = new Float32Array(scene.inv_view_proj());
-  const viewProj = new Float32Array(scene.view_proj());
-  const camForward = new Float32Array(scene.camera_forward());
-  const clipDistance = scene.clip_distance();
-  const clipModeStr = scene.clip_mode();
+  const drawn = drawnView(ctx);
+  for (const view of ctx.views) {
+    if (view.mode !== "volume") continue;
+    // The drawn view draws the layers its plan resolved, which a coalesced
+    // tick keeps from the plan before.
+    const layers = view.id === drawn.id ? plan.layers : readResolvedLayers(scene, view.id);
+    renderVolumeView(ctx, plan, layers, view);
+  }
+  return budgetExhausted;
+}
+
+/** Build `view`'s layer params and render it in its rectangle of the canvas. */
+function renderVolumeView(
+  ctx: TickContext,
+  plan: PlanResult,
+  resolvedLayers: ResolvedLayers,
+  view: TickView,
+): void {
+  const { scene, client, datasets } = ctx;
+  const { memberRoster, settings, canvasW: fullCanvasW, canvasH: fullCanvasH, entityIndexByDataset } = plan;
+  const { layerOrder, allSettings } = settings;
+  // Cursors keep their size whatever the render scale, so they read the
+  // view in device pixels.
+  const [, , fullW, fullH] = view.rect;
+  const rect = scaleRect(view.rect, plan.scale);
+  const [, , canvasW, canvasH] = rect;
+
+  // The eye drives the shader's ray-march; `rayHitLocal` is residency-only.
+  const eye = new Float32Array(scene.eye_position(view.id));
+  const invVP = new Float32Array(scene.inv_view_proj(view.id));
+  const viewProj = new Float32Array(scene.view_proj(view.id));
+  const camForward = new Float32Array(scene.camera_forward(view.id));
+  const clipDistance = scene.clip_distance(view.id);
+  const clipModeStr = scene.clip_mode(view.id);
   const clipMode = clipModeStr === "sphere" ? 1 : 0;
 
   const layers: VolumeLayerParams[] = [];
@@ -178,7 +206,7 @@ function uploadAndRenderVolume(
     if (!dsSettings || !resolved || !resolved.visible) continue;
     // A comparison draws a dataset on its side of the divider, or not at all
     // while a blink shows the other. Either way it stays planned and resident.
-    const clip = comparisonClip(scene, dsId, canvasW, canvasH);
+    const clip = comparisonClip(scene, view.id, dsId, canvasW, canvasH);
     if (clip === "hidden") continue;
     const firstLayer = layers.length;
 
@@ -228,13 +256,14 @@ function uploadAndRenderVolume(
   }
 
   const pixelRatio = devicePixelRatio * ctx.renderScale * ctx.resolutionScale;
-  const frameSeq = client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode, pixelRatio, ctx.marchStepScale, ctx.bands);
+  const frameSeq = client.volumeRenderMultiPass(
+    layers, invVP, eye, fullCanvasW, fullCanvasH, fullW, fullH, plan.epochs, view.id, rect, viewProj, camForward,
+    clipDistance, clipMode, pixelRatio, ctx.marchStepScale, ctx.bands,
+  );
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
   traceRecorder.noteFrameDispatched(frameSeq);
-
-  return budgetExhausted;
 }
 
 /**
@@ -263,14 +292,11 @@ export function tickVolume(
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;
 
-  // The eye drives the shader's ray-march; `rayHitLocal` is residency-only.
-  const eye = new Float32Array(scene.eye_position());
-
   const planResult: PlanResult = {
     memberRoster: orchResult.memberRoster,
     settings: orchResult.settings,
     layers: orchResult.layers,
-    eye, canvasW, canvasH, fullW, fullH,
+    canvasW, canvasH, scale,
     epochs: orchResult.epochs,
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };

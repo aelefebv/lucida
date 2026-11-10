@@ -4,7 +4,7 @@ import { Axis } from "./axes.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { MINIMAP_DISPLAY_HOLD_MS, MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS } from "./renderLoopTypes.ts";
+import { MINIMAP_DISPLAY_HOLD_MS, MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS, drawnView } from "./renderLoopTypes.ts";
 import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import { datasetSampleFormat } from "./renderer/dataTypeUtil.ts";
 import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
@@ -722,7 +722,9 @@ export function tickMinimap(
 ): number | null {
   if (!state.enabled) return null;
 
-  const { scene, canvas, mode } = ctx;
+  const { scene, canvas } = ctx;
+  // The minimap frames the view whose frame the worker holds.
+  const { mode } = drawnView(ctx);
 
   const theta = scene.camera_theta();
   const phi = scene.camera_phi();
@@ -758,8 +760,8 @@ export function tickMinimap(
   // rotates with the eye fixed and the frustum would freeze.
   const overlayCamSnap =
     mode === "volume"
-      ? `${scene.eye_position()}|${scene.inv_view_proj()}`
-      : `${scene.zoom()}|${scene.center()}`;
+      ? `${scene.eye_position(scene.active_view())}|${scene.inv_view_proj(scene.active_view())}`
+      : `${scene.zoom(scene.active_view())}|${scene.center(scene.active_view())}`;
   const overlayCamKey = `${mode}|${overlayCamSnap}`;
   const zForOverlay = mode === "slice" ? sliceZ : 0;
   const overlayKey = `${overlayCamKey}|${zForOverlay}`;
@@ -826,13 +828,13 @@ export function tickMinimap(
     if (mode === "slice" && scene.slice_plane(scene.active_view()) === "xy") {
       const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
       const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
-      const sceneBounds = sliceViewSceneBounds(scene.center(), scene.zoom(), mainW, mainH);
+      const sceneBounds = sliceViewSceneBounds(scene.center(scene.active_view()), scene.zoom(scene.active_view()), mainW, mainH);
       sliceViewports = cache.sliceViewportMembers
         .map((member) => intersectSliceViewWithMember(sceneBounds, member))
         .filter((viewport): viewport is MinimapOverlayData["sliceViewports"][number] => viewport !== null);
     }
 
-    const mainInvViewProj = mode === "volume" ? new Float32Array(scene.inv_view_proj()) : null;
+    const mainInvViewProj = mode === "volume" ? new Float32Array(scene.inv_view_proj(scene.active_view())) : null;
     const currentZ = mode === "slice" ? sliceZ : scene.z();
 
     state.overlayCallback({

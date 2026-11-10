@@ -457,7 +457,7 @@ function makeSeamHarness(opts: {
       clientWidth: opts.clientWidth ?? 800,
       clientHeight: opts.clientHeight ?? 600,
     },
-    mode: "slice",
+    views: [{ id: 0, mode: "slice", rect: [0, 0, 800, 600] }],
     renderScale: 1,
     resolutionScale: 1,
   } as unknown as TickContext;

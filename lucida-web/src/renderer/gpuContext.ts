@@ -80,11 +80,13 @@ export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Prom
 export function configureCanvas(context: GPUCanvasContext, device: GPUDevice, format: GPUTextureFormat): void {
   // `COPY_SRC` lets the frame capture copy the canvas texture out from
   // inside a frame, for the trace bundle. See `worker/captureFrame.ts`.
+  // `COPY_DST` lets a view that covers part of the canvas land its frame
+  // there. See `worker/viewFrame.ts`.
   context.configure({
     device,
     format,
     alphaMode: "opaque",
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
   });
 }
 

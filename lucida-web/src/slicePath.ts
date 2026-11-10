@@ -6,11 +6,11 @@ import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type Resolve
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { placementInPlane, readPlacement, rectToScene, type Placement } from "./placement.ts";
-import type { TickContext } from "./renderLoopTypes.ts";
+import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
-import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
+import { outsideCut, readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import { sliceCut } from "./pipeline/planning/snapshot.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
@@ -304,8 +304,24 @@ interface SlicePlanResult {
 }
 
 /**
- * Upload+render phase: deliver decoded chunks via Uploader, build layer
- * params, and render.
+ * `rect`, device pixels of the canvas, in pixels of a backing store
+ * `scale` times the canvas. Each edge rounds on its own, as the canvas's
+ * size does, so the whole canvas scales to the whole backing store.
+ */
+export function scaleRect(rect: PixelRect, scale: number): PixelRect {
+  const left = Math.round(rect[0] * scale);
+  const top = Math.round(rect[1] * scale);
+  return [
+    left,
+    top,
+    Math.max(1, Math.round((rect[0] + rect[2]) * scale) - left),
+    Math.max(1, Math.round((rect[1] + rect[3]) * scale) - top),
+  ];
+}
+
+/**
+ * Upload+render phase: deliver decoded chunks via Uploader, then build each
+ * slice view's layer params and render it in its rectangle.
  */
 function uploadAndRenderSlice(
   ctx: TickContext,
@@ -313,8 +329,7 @@ function uploadAndRenderSlice(
   planResult: SlicePlanResult,
   shouldRender: boolean = true,
 ): boolean {
-  const { scene, client, canvas, datasets } = ctx;
-  const { memberRoster, settings, layers: resolvedLayers, entityIndexByDataset } = planResult;
+  const { scene, client, canvas } = ctx;
 
   const dpr = devicePixelRatio;
   const fullW = Math.round(canvas.clientWidth * dpr);
@@ -325,18 +340,45 @@ function uploadAndRenderSlice(
   const canvasW = Math.max(1, Math.round(fullW * backingScale));
   const canvasH = Math.max(1, Math.round(fullH * backingScale));
 
-  const plane = scene.slice_plane(scene.active_view()) as SlicePlane;
+  const drawn = drawnView(ctx);
   const budgetExhausted = uploader.deliverToWorker(
     ctx,
     MAIN_VIEW_UPLOAD_BUDGET_BYTES,
-    (datasetId) => sliceCut(scene, scene.active_view(), resolvedLayers.get(datasetId)),
+    (datasetId) => sliceCut(scene, drawn.id, planResult.layers.get(datasetId)),
   );
 
   if (!shouldRender) return budgetExhausted;
 
+  client.resize(canvasW, canvasH);
+  for (const view of ctx.views) {
+    if (view.mode !== "slice") continue;
+    // The drawn view draws the layers its plan resolved, which a coalesced
+    // tick keeps from the plan before.
+    const layers = view.id === drawn.id ? planResult.layers : readResolvedLayers(scene, view.id);
+    renderSliceView(ctx, planResult, layers, view, canvasW, canvasH, backingScale);
+  }
+  return budgetExhausted;
+}
+
+/** Build `view`'s layer params and render it in its rectangle of the canvas. */
+function renderSliceView(
+  ctx: TickContext,
+  planResult: SlicePlanResult,
+  resolvedLayers: ResolvedLayers,
+  view: TickView,
+  canvasW: number,
+  canvasH: number,
+  backingScale: number,
+): void {
+  const { scene, client, datasets } = ctx;
+  const { memberRoster, settings, entityIndexByDataset } = planResult;
+  const rect = scaleRect(view.rect, backingScale);
+  const [, , viewW, viewH] = rect;
+
+  const plane = scene.slice_plane(view.id) as SlicePlane;
   const { layerOrder, allSettings } = settings;
-  const currentZoom = scene.zoom() * backingScale;
-  const centerArr = scene.center();
+  const currentZoom = scene.zoom(view.id) * backingScale;
+  const centerArr = scene.center(view.id);
   const cx = centerArr[0];
   const cy = centerArr[1];
 
@@ -352,7 +394,7 @@ function uploadAndRenderSlice(
     if (outsideCut(resolved, plane)) continue;
     // A comparison shows a dataset on its side of the divider, or not at all
     // while a blink shows the other. Either way it stays planned and resident.
-    const clip = comparisonClip(scene, dsId, canvasW, canvasH);
+    const clip = comparisonClip(scene, view.id, dsId, viewW, viewH);
     if (clip === "hidden") continue;
     const firstLayer = layers.length;
 
@@ -409,14 +451,13 @@ function uploadAndRenderSlice(
     clipSliceLayers(layers, firstLabel, clip);
   }
 
-  client.resize(canvasW, canvasH);
-  const frameSeq = client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs, dpr * backingScale);
+  const frameSeq = client.sliceRenderMultiPass(
+    layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs, view.id, rect, devicePixelRatio * backingScale,
+  );
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
   traceRecorder.noteFrameDispatched(frameSeq);
-
-  return budgetExhausted;
 }
 
 /**
@@ -440,7 +481,7 @@ export function tickSlice(
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;
 
-  const vpCenter = scene.center();
+  const vpCenter = scene.center(drawnView(ctx).id);
   const planResult: SlicePlanResult = {
     memberRoster: orchResult.memberRoster,
     settings: orchResult.settings,

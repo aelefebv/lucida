@@ -219,15 +219,26 @@ export interface VolumeLayerParams {
  * next view epoch sends one anyway, while a stale chunk would write
  * wrong-epoch voxels into the atlas for good.
  */
+/** `[x, y, width, height]` in pixels from the canvas's top-left corner. */
+export type ViewRect = readonly [number, number, number, number];
+
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
   epochs: SceneEpochs;
+  /** The scene's id for the view this frame draws. */
+  view: number;
   layers: VolumeLayerParams[];
   invViewProj: Float32Array;
   eye: Float32Array;
+  /** The canvas's backing store. */
   canvasW: number;
   canvasH: number;
-  /** Unscaled device-pixel dimensions for cursor sizing (immune to renderScale). */
+  /**
+   * The view's rectangle of the canvas, in backing-store pixels. It draws
+   * only there, and its layers' scissor rects are its own pixels.
+   */
+  rect: ViewRect;
+  /** The view's unscaled device-pixel dimensions, for cursor sizing (immune to renderScale). */
   fullW: number;
   fullH: number;
   viewProj?: Float32Array;
@@ -354,12 +365,21 @@ export interface SliceLayerParams {
 export interface SliceRenderMultiPassMessage {
   type: "sliceRenderMultiPass";
   epochs: SceneEpochs;
+  /** The scene's id for the view this frame draws. */
+  view: number;
   layers: SliceLayerParams[];
   zoom: number;
   cx: number;
   cy: number;
+  /** The canvas's backing store. */
   canvasW: number;
   canvasH: number;
+  /**
+   * The view's rectangle of the canvas, in backing-store pixels. It draws
+   * only there; `cx`, `cy` sit at its center, and its layers' clips are its
+   * own pixels.
+   */
+  rect: ViewRect;
   /**
    * Render-target pixels per CSS pixel. Screen-space patterns use it to keep
    * one size on screen at any device pixel ratio or render scale. Defaults to 1.

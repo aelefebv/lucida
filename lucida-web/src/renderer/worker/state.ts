@@ -23,6 +23,7 @@ import type { EntitySource } from "../entitySources.ts";
 import type { PendingFrameCapture } from "./captureFrame.ts";
 import type { WantedChunkIndex } from "../wantedChunks.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { createMinimapRendererState, type MinimapRendererState } from "../minimapHandlers.ts";
 
 /** GPU errors of one kind folded into the next report while the last one's spacing runs. */
 export interface GpuErrorReport {
@@ -86,8 +87,16 @@ export interface RendererState {
   currentEpochs: SceneEpochs | null;
   /** Last cold-state message (replaced on every cold state). */
   currentColdState: ColdStateMessage | null;
-  /** The last viewport frame drawn, which a probe reads what is under a point from. */
-  lastFrame: SliceRenderMultiPassMessage | VolumeRenderMultiPassMessage | null;
+  /**
+   * Per view, the last frame drawn of it, which a probe reads what is under
+   * a point from.
+   */
+  lastFrames: Map<number, SliceRenderMultiPassMessage | VolumeRenderMultiPassMessage>;
+  /**
+   * Per view that covers part of the canvas, the target its frames draw into
+   * before they land on the canvas (`worker/viewFrame.ts`).
+   */
+  viewTargets: Map<number, GPUTexture>;
   /** The newest viewport frame the page gave up on; a banded frame up to it stops at its next band. */
   abandonedFrameSeq: number;
   /**
@@ -138,6 +147,8 @@ export interface RendererState {
   closing: boolean;
   /** Label texture sizes, `${memberId}|${w}x${h}x${d}`, that ran out of memory and are not tried again. */
   labelSizesOutOfMemory: Set<string>;
+  /** The minimap's and the explore thumbnails' textures, canvases and targets. */
+  minimap: MinimapRendererState;
 }
 
 /** What a pool's indirection remap reads besides its slots and sections. */
@@ -169,7 +180,8 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     targetLevelByMember: new Map(),
     currentEpochs: null,
     currentColdState: null,
-    lastFrame: null,
+    lastFrames: new Map(),
+    viewTargets: new Map(),
     abandonedFrameSeq: 0,
     coldStateByDataset: new Map(),
     wantedByDataset: new Map(),
@@ -186,5 +198,6 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     gpuFailed: false,
     closing: false,
     labelSizesOutOfMemory: new Set(),
+    minimap: createMinimapRendererState(),
   };
 }

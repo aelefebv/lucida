@@ -8,6 +8,7 @@ function makeScene(initialDistance = 0) {
   let distance = initialDistance;
   const scene = {
     dataset_fit_bounds: () => new Float64Array([0, 0, 0, 1, 1, 2]),
+    active_view: () => 0,
     eye_position: () => new Float32Array([0.5, 0.5, -5]),
     camera_forward: () => new Float32Array([0, 0, 1]),
     clip_distance: () => distance,

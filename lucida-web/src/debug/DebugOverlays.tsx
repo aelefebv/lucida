@@ -392,7 +392,7 @@ function voxelProjector(ws: WasmScene, frame: TileFrame, dpr: number): Projector
 /** The camera's world position, for ordering boxes front to back in the hit test. */
 function eyeOf(ws: WasmScene): [number, number, number] | null {
   try {
-    const eye = ws.eye_position();
+    const eye = ws.eye_position(ws.active_view());
     return eye.length >= 3 ? [eye[0], eye[1], eye[2]] : null;
   } catch {
     return null;

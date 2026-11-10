@@ -5,7 +5,7 @@
  * emission and chunk delivery.
  */
 
-import type { TickContext } from "../renderLoopTypes.ts";
+import { drawnView, type TickContext, type TickView } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { getSceneSettings } from "../tickCommon.ts";
@@ -98,23 +98,9 @@ export interface TickCoordinatorResult {
   entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
-/** A view a tick plans for: its id in the scene, and the mode the loop draws it in. */
-interface TickView {
-  id: number;
-  mode: "slice" | "volume";
-}
-
-/**
- * The view the loop draws: the scene's active one, in the mode its viewer
- * runs. The worker holds one frame of each dataset, this view's.
- */
-function drawnView(ctx: TickContext): TickView {
-  return { id: ctx.scene.active_view(), mode: ctx.mode };
-}
-
 /** The views a tick plans for: each view the loop draws, the drawn one first. */
-function plannedViews(ctx: TickContext): TickView[] {
-  return [drawnView(ctx)];
+function plannedViews(ctx: TickContext): readonly TickView[] {
+  return ctx.views;
 }
 
 /** One view of a planned dataset. */
@@ -394,7 +380,7 @@ function admitDatasetPlans(
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
-        slotOf: gpuSlotsFor(manifest, ctx.mode, report, gpuTotalBytes, sliceAxis),
+        slotOf: gpuSlotsFor(manifest, drawnView(ctx).mode, report, gpuTotalBytes, sliceAxis),
       };
     }),
     ctx.cpuCache.tierCapacity(),
@@ -1131,7 +1117,7 @@ export class TickCoordinator {
     // above (each carries its own z-range).
     this.lastRebuildScalars = {
       t: ctx.scene.t(),
-      mode: ctx.mode as "slice" | "volume",
+      mode: drawn.mode,
     };
     this.lastLayerOrderKey = JSON.stringify(settings.layerOrder);
     this.lastDrawnDatasetIds = drawnDatasetIds(settings, layers, viewCutPlane(ctx, drawn));
@@ -1252,7 +1238,7 @@ export class TickCoordinator {
     const scalars = this.lastRebuildScalars;
     if (
       ctx.scene.t() !== scalars.t ||
-      (ctx.mode as "slice" | "volume") !== scalars.mode
+      drawnView(ctx).mode !== scalars.mode
     ) {
       return false;
     }

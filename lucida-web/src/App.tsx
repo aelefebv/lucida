@@ -855,7 +855,7 @@ function Viewer({
       },
       getViewCenter: () => {
         const ws = scene.wasmSceneRef.current;
-        return ws ? sceneToFrame(readPlacement(ws, ds.id), [ws.center()[0], ws.center()[1]]) : null;
+        return ws ? sceneToFrame(readPlacement(ws, ds.id), [ws.center(ws.active_view())[0], ws.center(ws.active_view())[1]]) : null;
       },
     };
   })();

@@ -41,8 +41,10 @@ describe("worker dispatch and the pipeline compile", () => {
       zoom: 1,
       cx: 0,
       cy: 0,
+      view: 0,
       canvasW: 8,
       canvasH: 8,
+      rect: [0, 0, 8, 8],
     }).then(() => {
       settled = true;
     });
@@ -65,8 +67,10 @@ describe("worker dispatch frame done", () => {
     zoom: 1,
     cx: 0,
     cy: 0,
+    view: 0,
     canvasW: 8,
     canvasH: 8,
+    rect: [0, 0, 8, 8] as const,
     frameSeq: 7,
   };
 

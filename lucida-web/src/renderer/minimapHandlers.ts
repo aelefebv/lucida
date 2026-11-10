@@ -57,28 +57,66 @@ interface MinimapOverviewEntry {
  */
 export const MINIMAP_OVERVIEW_SHARE = 1 / 16;
 
-const minimapOverviewPerDataset = new Map<string, MinimapOverviewEntry>();
-let overviewBytes = 0;
-
-let minimapContext: GPUCanvasContext | null = null;
-let minimapOffscreenPool: GPUTexture[] = [];
-let minimapPoolWidth = 0;
-let minimapPoolHeight = 0;
-
-function noteOverviewBytes(): void {
-  setGpuLedgerLine("minimapTextures", overviewBytes);
+/**
+ * What the minimap and the explore thumbnails hold on the worker: the
+ * overview textures both sample, and each one's canvas and targets. The
+ * worker's renderer state holds one, as it holds each view's frames.
+ */
+export interface MinimapRendererState {
+  overviews: Map<string, MinimapOverviewEntry>;
+  overviewBytes: number;
+  context: GPUCanvasContext | null;
+  targets: GPUTexture[];
+  targetW: number;
+  targetH: number;
+  /**
+   * Thumbnails reuse the overview textures and renderers but draw to their
+   * own square targets and `OffscreenCanvas`, then `transferToImageBitmap()`
+   * back to the main thread. One render finishes before the next starts, so
+   * one target and one canvas are enough.
+   */
+  thumbnailCanvas: OffscreenCanvas | null;
+  thumbnailContext: GPUCanvasContext | null;
+  thumbnailTargets: GPUTexture[];
+  thumbnailSize: number;
+  /**
+   * The latest overview render to arrive before the volume renderer
+   * compiled. Earlier ones would only be painted over.
+   */
+  deferredRender: MinimapRenderMessage | null;
 }
 
-function noteMinimapTargetBytes(): void {
+export function createMinimapRendererState(): MinimapRendererState {
+  return {
+    overviews: new Map(),
+    overviewBytes: 0,
+    context: null,
+    targets: [],
+    targetW: 0,
+    targetH: 0,
+    thumbnailCanvas: null,
+    thumbnailContext: null,
+    thumbnailTargets: [],
+    thumbnailSize: 0,
+    deferredRender: null,
+  };
+}
+
+function noteOverviewBytes(m: MinimapRendererState): void {
+  setGpuLedgerLine("minimapTextures", m.overviewBytes);
+}
+
+function noteMinimapTargetBytes(m: MinimapRendererState): void {
   setGpuLedgerLine(
     "minimapTargets",
-    (minimapOffscreenPool.length * minimapPoolWidth * minimapPoolHeight +
-      thumbnailOffscreenPool.length * thumbnailPoolSize * thumbnailPoolSize) * OFFSCREEN_BYTES_PER_TEXEL,
+    (m.targets.length * m.targetW * m.targetH +
+      m.thumbnailTargets.length * m.thumbnailSize * m.thumbnailSize) * OFFSCREEN_BYTES_PER_TEXEL,
   );
 }
 
 /** Make an offscreen target that leaves `pool` when the device can't allocate it. */
 function watchedTarget(ctx: WorkerCtx, w: number, h: number, pool: () => GPUTexture[]): GPUTexture {
+  const m = ctx.state.minimap;
   return allocateWatched(
     ctx,
     () => createOffscreenTarget(ctx.device, w, h),
@@ -88,80 +126,71 @@ function watchedTarget(ctx: WorkerCtx, w: number, h: number, pool: () => GPUText
       if (at >= 0) {
         targets.splice(at, 1);
         lost.destroy();
-        noteMinimapTargetBytes();
+        noteMinimapTargetBytes(m);
       }
       handleGpuOutOfMemory(ctx);
     },
   );
 }
 
-function dropOverview(datasetId: string): void {
-  const entry = minimapOverviewPerDataset.get(datasetId);
+function dropOverview(m: MinimapRendererState, datasetId: string): void {
+  const entry = m.overviews.get(datasetId);
   if (!entry) return;
   entry.texture.destroy();
   entry.indirectionBuf.destroy();
-  overviewBytes -= entry.bytes;
-  minimapOverviewPerDataset.delete(datasetId);
-  noteOverviewBytes();
+  m.overviewBytes -= entry.bytes;
+  m.overviews.delete(datasetId);
+  noteOverviewBytes(m);
 }
 
-// Thumbnail render state. Thumbnails reuse the minimap's overview textures and
-// renderers but draw to their own square pool and `OffscreenCanvas`, then
-// `transferToImageBitmap()` back to the main thread. One render finishes before
-// the next starts, so one pool entry and one canvas are enough.
-let thumbnailCanvas: OffscreenCanvas | null = null;
-let thumbnailContext: GPUCanvasContext | null = null;
-let thumbnailOffscreenPool: GPUTexture[] = [];
-let thumbnailPoolSize = 0;
 
 function ensureThumbnailTargets(ctx: WorkerCtx, size: number, count: number) {
-  if (size !== thumbnailPoolSize) {
-    for (const tex of thumbnailOffscreenPool) tex.destroy();
-    thumbnailOffscreenPool = [];
-    thumbnailPoolSize = size;
+  const m = ctx.state.minimap;
+  if (size !== m.thumbnailSize) {
+    for (const tex of m.thumbnailTargets) tex.destroy();
+    m.thumbnailTargets = [];
+    m.thumbnailSize = size;
     // The canvas is reconfigured (not just resized) so its backing store matches
     // the new size; a fresh context keeps the configure() simple.
-    thumbnailCanvas = new OffscreenCanvas(size, size);
-    thumbnailContext = thumbnailCanvas.getContext("webgpu") as GPUCanvasContext;
-    thumbnailContext.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
+    m.thumbnailCanvas = new OffscreenCanvas(size, size);
+    m.thumbnailContext = m.thumbnailCanvas.getContext("webgpu") as GPUCanvasContext;
+    m.thumbnailContext.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
   }
-  if (thumbnailCanvas && (thumbnailCanvas.width !== size || thumbnailCanvas.height !== size)) {
-    thumbnailCanvas.width = size;
-    thumbnailCanvas.height = size;
+  if (m.thumbnailCanvas && (m.thumbnailCanvas.width !== size || m.thumbnailCanvas.height !== size)) {
+    m.thumbnailCanvas.width = size;
+    m.thumbnailCanvas.height = size;
   }
-  while (thumbnailOffscreenPool.length < count) {
-    thumbnailOffscreenPool.push(watchedTarget(ctx, size, size, () => thumbnailOffscreenPool));
+  while (m.thumbnailTargets.length < count) {
+    m.thumbnailTargets.push(watchedTarget(ctx, size, size, () => m.thumbnailTargets));
   }
-  noteMinimapTargetBytes();
+  noteMinimapTargetBytes(m);
 }
 
 function ensureMinimapOffscreenPool(ctx: WorkerCtx, count: number, w: number, h: number) {
-  if (w !== minimapPoolWidth || h !== minimapPoolHeight) {
-    for (const tex of minimapOffscreenPool) tex.destroy();
-    minimapOffscreenPool = [];
-    minimapPoolWidth = w;
-    minimapPoolHeight = h;
+  const m = ctx.state.minimap;
+  if (w !== m.targetW || h !== m.targetH) {
+    for (const tex of m.targets) tex.destroy();
+    m.targets = [];
+    m.targetW = w;
+    m.targetH = h;
   }
-  while (minimapOffscreenPool.length < count) {
-    minimapOffscreenPool.push(watchedTarget(ctx, w, h, () => minimapOffscreenPool));
+  while (m.targets.length < count) {
+    m.targets.push(watchedTarget(ctx, w, h, () => m.targets));
   }
-  noteMinimapTargetBytes();
+  noteMinimapTargetBytes(m);
 }
 
 export function handleMinimapInit(ctx: WorkerCtx, msg: MinimapInitMessage): void {
+  const m = ctx.state.minimap;
   const canvas = msg.canvas;
-  minimapContext = canvas.getContext("webgpu") as GPUCanvasContext;
-  minimapContext.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
+  m.context = canvas.getContext("webgpu") as GPUCanvasContext;
+  m.context.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
 }
 
-/**
- * The latest overview render to arrive before the volume renderer compiled.
- * Earlier ones would only be painted over.
- */
-let deferredMinimapRender: MinimapRenderMessage | null = null;
 
 export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
-  if (!minimapContext) return;
+  const m = ctx.state.minimap;
+  if (!m.context) return;
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
   if (renderer.isCompiled && comp.isCompiled) {
@@ -173,17 +202,17 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
   // its compile is the longest of the four. An await here would hold every
   // viewport frame and upload behind it in the message order, so the draw
   // waits outside that order instead (`pipelineCompile.ts`).
-  const first = deferredMinimapRender === null;
-  deferredMinimapRender = msg;
+  const first = m.deferredRender === null;
+  m.deferredRender = msg;
   if (!first) return;
   Promise.all([renderer.compiled, comp.compiled]).then(
     () => {
-      const pending = deferredMinimapRender;
-      deferredMinimapRender = null;
-      if (pending && minimapContext) drawMinimap(ctx, pending);
+      const pending = m.deferredRender;
+      m.deferredRender = null;
+      if (pending && m.context) drawMinimap(ctx, pending);
     },
     (err: unknown) => {
-      deferredMinimapRender = null;
+      m.deferredRender = null;
       postCompileFailure(ctx, err);
     },
   );
@@ -195,17 +224,18 @@ function postCompileFailure(ctx: WorkerCtx, err: unknown): void {
 }
 
 function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
-  if (!minimapContext) return;
-  const mmCanvas = minimapContext.canvas as OffscreenCanvas;
+  const m = ctx.state.minimap;
+  if (!m.context) return;
+  const mmCanvas = m.context.canvas as OffscreenCanvas;
   mmCanvas.width = msg.canvasW;
   mmCanvas.height = msg.canvasH;
 
   const comp = ctx.getCompositor();
   ensureMinimapOffscreenPool(ctx, 1, msg.canvasW, msg.canvasH);
-  const minimapView = minimapContext.getCurrentTexture().createView();
+  const minimapView = m.context.getCurrentTexture().createView();
   const encoder = ctx.device.createCommandEncoder();
   const drawn = drawOverviewLayers(
-    ctx, MINIMAP_DRAWS, msg, minimapView, minimapOffscreenPool[0], msg.canvasW, msg.canvasH, encoder,
+    ctx, MINIMAP_DRAWS, msg, minimapView, m.targets[0], msg.canvasW, msg.canvasH, encoder,
   );
 
   // Drawn even with no overview resident, so the minimap shows the canvas
@@ -238,11 +268,12 @@ function drawOverviewLayers(
   height: number,
   encoder: GPUCommandEncoder,
 ): number {
+  const m = ctx.state.minimap;
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
   const shown: Array<{ layer: MinimapLayerParams; overview: MinimapOverviewEntry }> = [];
   for (const layer of msg.layers) {
-    const overview = minimapOverviewPerDataset.get(layer.datasetId);
+    const overview = m.overviews.get(layer.datasetId);
     if (!overview) continue;
     markOverviewFailed(ctx, overview);
     shown.push({ layer, overview });
@@ -323,35 +354,37 @@ export function handleThumbnailRender(ctx: WorkerCtx, msg: ThumbnailRenderMessag
 }
 
 function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
+  const m = ctx.state.minimap;
   const size = Math.max(1, Math.round(msg.size));
   const comp = ctx.getCompositor();
   ensureThumbnailTargets(ctx, size, 1);
 
-  if (!msg.layers.some((layer) => minimapOverviewPerDataset.has(layer.datasetId)) || !thumbnailContext || !thumbnailCanvas) {
+  if (!msg.layers.some((layer) => m.overviews.has(layer.datasetId)) || !m.thumbnailContext || !m.thumbnailCanvas) {
     // Nothing to draw. Reply anyway so the pending promise resolves and the
     // panel keeps its label-only row.
     ctx.post({ type: "thumbnailResult", id: msg.id, bitmap: null });
     return;
   }
 
-  const thumbnailView = thumbnailContext.getCurrentTexture().createView();
+  const thumbnailView = m.thumbnailContext.getCurrentTexture().createView();
   const encoder = ctx.device.createCommandEncoder();
-  drawOverviewLayers(ctx, THUMBNAIL_DRAWS, msg, thumbnailView, thumbnailOffscreenPool[0], size, size, encoder);
+  drawOverviewLayers(ctx, THUMBNAIL_DRAWS, msg, thumbnailView, m.thumbnailTargets[0], size, size, encoder);
   comp.underlayBackground(thumbnailView, encoder);
   ctx.device.queue.submit([encoder.finish()]);
 
   // The canvas is reused for the next thumbnail, so snapshot it rather than
   // transfer the canvas itself. The next render clears what this empties.
-  const bitmap = thumbnailCanvas.transferToImageBitmap();
+  const bitmap = m.thumbnailCanvas.transferToImageBitmap();
   ctx.post({ type: "thumbnailResult", id: msg.id, bitmap }, [bitmap]);
 }
 
 export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUploadOverviewChunksForLayerMessage): void {
+  const m = ctx.state.minimap;
   const { datasetId, imageId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, sampleFormat } = msg;
-  let entry = minimapOverviewPerDataset.get(datasetId);
+  let entry = m.overviews.get(datasetId);
 
   if (entry && (entry.level !== level || entry.t !== t || entry.c !== c || entry.format !== sampleFormat)) {
-    dropOverview(datasetId);
+    dropOverview(m, datasetId);
     entry = undefined;
   }
 
@@ -371,7 +404,7 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
     const indirection = emptyIndirection(grid.x * grid.y * grid.z);
     const bytes = levelWidth * levelHeight * levelDepth * bytesPerTexel(sampleFormat) + indirection.byteLength;
     if (
-      overviewBytes + bytes > ctx.state.gpuTotalBytes * MINIMAP_OVERVIEW_SHARE ||
+      m.overviewBytes + bytes > ctx.state.gpuTotalBytes * MINIMAP_OVERVIEW_SHARE ||
       !reserveGpuBytes(ctx, bytes)
     ) {
       refused.set(datasetId, selection);
@@ -381,8 +414,8 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
       ctx,
       () => createEmptyVolumeTexture(ctx.device, levelWidth, levelHeight, levelDepth, atlasTextureFormat(sampleFormat)),
       (lost) => {
-        if (minimapOverviewPerDataset.get(datasetId)?.texture !== lost) return;
-        dropOverview(datasetId);
+        if (m.overviews.get(datasetId)?.texture !== lost) return;
+        dropOverview(m, datasetId);
         // Under a halved total the page sends it again; at the floor it
         // would only fail again, so it is refused.
         if (handleGpuOutOfMemory(ctx)) ctx.post({ type: "minimapOverviewsLost", memberIds: [datasetId] });
@@ -401,9 +434,9 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
       grid, indirection, indirectionBuf, markedFailed: new Set(),
       bytes,
     };
-    minimapOverviewPerDataset.set(datasetId, entry);
-    overviewBytes += bytes;
-    noteOverviewBytes();
+    m.overviews.set(datasetId, entry);
+    m.overviewBytes += bytes;
+    noteOverviewBytes(m);
   }
 
   for (const chunk of msg.chunks) {
@@ -444,71 +477,73 @@ function markOverviewFailed(ctx: WorkerCtx, overview: MinimapOverviewEntry): voi
   if (changed) ctx.device.queue.writeBuffer(overview.indirectionBuf, 0, overview.indirection);
 }
 
-export function handleMinimapDestroy(): void {
-  deferredMinimapRender = null;
-  for (const tex of minimapOffscreenPool) tex.destroy();
-  minimapOffscreenPool = [];
-  minimapPoolWidth = 0;
-  minimapPoolHeight = 0;
-  if (minimapContext) {
-    minimapContext.unconfigure();
-    minimapContext = null;
+export function handleMinimapDestroy(m: MinimapRendererState): void {
+  m.deferredRender = null;
+  for (const tex of m.targets) tex.destroy();
+  m.targets = [];
+  m.targetW = 0;
+  m.targetH = 0;
+  if (m.context) {
+    m.context.unconfigure();
+    m.context = null;
   }
   // Thumbnail off-screen render state shares the overview textures + renderer
   // with the minimap, so it's torn down here too.
-  for (const tex of thumbnailOffscreenPool) tex.destroy();
-  thumbnailOffscreenPool = [];
-  thumbnailPoolSize = 0;
-  if (thumbnailContext) {
-    thumbnailContext.unconfigure();
-    thumbnailContext = null;
+  for (const tex of m.thumbnailTargets) tex.destroy();
+  m.thumbnailTargets = [];
+  m.thumbnailSize = 0;
+  if (m.thumbnailContext) {
+    m.thumbnailContext.unconfigure();
+    m.thumbnailContext = null;
   }
-  thumbnailCanvas = null;
-  noteMinimapTargetBytes();
+  m.thumbnailCanvas = null;
+  noteMinimapTargetBytes(m);
 }
 
 /**
  * Forget every texture the minimap and thumbnails built on a lost device. The
  * minimap canvas stays, for {@link rebindMinimapCanvas} to point at the next one.
  */
-export function releaseMinimapDeviceResources(): void {
-  deferredMinimapRender = null;
-  for (const entry of minimapOverviewPerDataset.values()) {
+export function releaseMinimapDeviceResources(m: MinimapRendererState): void {
+  m.deferredRender = null;
+  for (const entry of m.overviews.values()) {
     entry.texture.destroy();
     entry.indirectionBuf.destroy();
   }
-  minimapOverviewPerDataset.clear();
-  overviewBytes = 0;
-  noteOverviewBytes();
-  for (const tex of minimapOffscreenPool) tex.destroy();
-  minimapOffscreenPool = [];
-  minimapPoolWidth = 0;
-  minimapPoolHeight = 0;
-  for (const tex of thumbnailOffscreenPool) tex.destroy();
-  thumbnailOffscreenPool = [];
-  thumbnailPoolSize = 0;
-  thumbnailContext = null;
-  thumbnailCanvas = null;
-  noteMinimapTargetBytes();
+  m.overviews.clear();
+  m.overviewBytes = 0;
+  noteOverviewBytes(m);
+  for (const tex of m.targets) tex.destroy();
+  m.targets = [];
+  m.targetW = 0;
+  m.targetH = 0;
+  for (const tex of m.thumbnailTargets) tex.destroy();
+  m.thumbnailTargets = [];
+  m.thumbnailSize = 0;
+  m.thumbnailContext = null;
+  m.thumbnailCanvas = null;
+  noteMinimapTargetBytes(m);
 }
 
 /** Point the minimap canvas, if there is one, at the worker's current device. */
 export function rebindMinimapCanvas(ctx: WorkerCtx): void {
-  minimapContext?.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
+  const m = ctx.state.minimap;
+  m.context?.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
 }
 
 export function removeMinimapResources(ctx: WorkerCtx, datasetId: string): void {
-  dropOverview(datasetId);
+  const m = ctx.state.minimap;
+  dropOverview(m, datasetId);
   ctx.state.overviewsRefused.delete(datasetId);
 }
 
-export function destroyAllMinimapResources(): void {
-  for (const mmE of minimapOverviewPerDataset.values()) {
+export function destroyAllMinimapResources(m: MinimapRendererState): void {
+  for (const mmE of m.overviews.values()) {
     mmE.texture.destroy();
     mmE.indirectionBuf.destroy();
   }
-  minimapOverviewPerDataset.clear();
-  overviewBytes = 0;
-  noteOverviewBytes();
-  handleMinimapDestroy();
+  m.overviews.clear();
+  m.overviewBytes = 0;
+  noteOverviewBytes(m);
+  handleMinimapDestroy(m);
 }

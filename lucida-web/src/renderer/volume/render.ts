@@ -24,6 +24,7 @@ import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { trimOffscreenPool } from "../worker/resources.ts";
+import { beginViewFrame } from "../worker/viewFrame.ts";
 
 /** Defensive fallback model transform. A real label layer always carries its source member's matrices. */
 const IDENTITY_4X4 = new Float32Array([
@@ -220,8 +221,10 @@ async function marchInBands(
 
 export async function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
-  msg: VolumeRenderMultiPassMessage,
+  frame: VolumeRenderMultiPassMessage,
 ): Promise<void> {
+  // The view draws in its own pixels, as if its rectangle were the canvas.
+  const msg = { ...frame, canvasW: frame.rect[2], canvasH: frame.rect[3] };
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
   const cr = ctx.getCursorRenderer();
@@ -320,11 +323,8 @@ export async function handleVolumeRenderMultiPass(
 
   // Only after the bands: the canvas presents the texture it hands out once
   // this handler yields, so a band's wait would present a blank frame.
-  const canvas = ctx.context.canvas as OffscreenCanvas;
-  canvas.width = msg.canvasW;
-  canvas.height = msg.canvasH;
-  const canvasTexture = ctx.context.getCurrentTexture();
-  const canvasView = canvasTexture.createView();
+  const target = beginViewFrame(ctx, frame.view, frame.canvasW, frame.canvasH, frame.rect);
+  const canvasView = target.texture.createView();
   const scratchView = pool[0].createView();
 
   // One submit for every batch between label layers, which draw through the
@@ -365,10 +365,11 @@ export async function handleVolumeRenderMultiPass(
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
 
+  target.land();
   // The minimap and thumbnails draw with this renderer too, at full quality.
   renderer.setMarchStepScale(1);
   timing.endFrame();
   // The frame can be read only here, after its last pass and before the
   // texture expires with this handler.
-  captureRenderedFrame(ctx, canvasTexture);
+  captureRenderedFrame(ctx, target.canvasTexture);
 }

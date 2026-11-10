@@ -289,7 +289,7 @@ describe("epoch caching", () => {
         datasetLevels: vi.fn(() => null),
       } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
-      mode: "slice",
+      views: [{ id: 0, mode: "slice", rect: [0, 0, 800, 600] }],
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
@@ -851,7 +851,7 @@ describe("epoch caching", () => {
     const cpuCache = createMockCpuCache();
     const ctx = makeCtx(scene, datasets);
     ctx.cpuCache = cpuCache;
-    ctx.mode = "volume";
+    ctx.views = [{ id: 0, mode: "volume", rect: [0, 0, 800, 600] }];
 
     // Force a fresh read of this scene's settings (the module cache persists
     // across tests); in the app a settings change bumps this generation.
@@ -873,7 +873,7 @@ describe("epoch caching", () => {
     const cpuCache = createMockCpuCache();
     const ctx = makeCtx(scene, datasets);
     ctx.cpuCache = cpuCache;
-    ctx.mode = "slice";
+    ctx.views = [{ id: 0, mode: "slice", rect: [0, 0, 800, 600] }];
 
     // Force a fresh read of this scene's settings (the module cache persists
     // across tests); in the app a settings change bumps this generation.
@@ -934,7 +934,7 @@ describe("display-only fast path", () => {
         datasetLevels: vi.fn(() => null),
       } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
-      mode: "slice",
+      views: [{ id: 0, mode: "slice", rect: [0, 0, 800, 600] }],
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: over?.cpuCache ?? createMockCpuCache(),
@@ -1360,7 +1360,7 @@ describe("display-only fast path", () => {
 
       const volumeCtx = (scene: unknown) => {
         const c = makeCtx(scene, datasets, { coldState, coldStateSelection });
-        return { ...c, mode: "volume" } as TickContext;
+        return { ...c, views: [{ ...c.views[0], mode: "volume" }] } as TickContext;
       };
 
       bumpSettingsGeneration();
@@ -1779,7 +1779,7 @@ describe("multi-dataset planning", () => {
         datasetLevels: vi.fn(() => null),
       } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
-      mode: "slice",
+      views: [{ id: 0, mode: "slice", rect: [0, 0, 800, 600] }],
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
@@ -1932,7 +1932,7 @@ describe("incremental delta fold", () => {
         datasetLevels: vi.fn(() => null),
       } as unknown as TickContext["client"],
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
-      mode: "slice",
+      views: [{ id: 0, mode: "slice", rect: [0, 0, 800, 600] }],
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
