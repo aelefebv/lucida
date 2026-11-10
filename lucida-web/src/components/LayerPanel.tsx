@@ -120,6 +120,11 @@ export interface LayerInfo {
   displayedCoarserThanTarget: boolean;
   /** The multiscale metadata's downsampling method, or `null` when it declares none. */
   downsamplingMethod: string | null;
+  /**
+   * Whether the data declares length units, so it lines up with other data
+   * that does. Without, it is placed by its declared numbers alone.
+   */
+  physicalScale: boolean;
 }
 
 interface Props {
@@ -768,6 +773,15 @@ function Advanced(props: LayerRowProps) {
           {layer.downsamplingMethod && (
             <p className="lc-level-meta" aria-label={`${layer.name} downsampling method`}>
               {`Downsampled by ${layer.downsamplingMethod}`}
+            </p>
+          )}
+          {!layer.physicalScale && (
+            <p
+              className="lc-level-meta"
+              aria-label={`${layer.name} physical scale`}
+              title="The data names no length units, so it is placed by its declared scale alone and may not line up with data that does."
+            >
+              No physical scale
             </p>
           )}
         </div>

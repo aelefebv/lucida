@@ -4,9 +4,12 @@ use lucida_content::DatasetId;
 
 use crate::camera::{Arcball, Camera, ClipMode, Framing};
 use crate::command::{Command, ViewportCommand};
-use crate::framing::VoxBox;
+use crate::framing::PlaneBox;
+use crate::placement::CameraSpace;
 use crate::saved_view::SavedView;
-use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene};
+use crate::scene::{
+    DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene, member_transform,
+};
 use crate::view::ViewState;
 
 #[wasm_bindgen]
@@ -149,17 +152,33 @@ impl WasmScene {
         serde_json::to_string(&p).unwrap()
     }
 
+    /// The spaces the camera's numbers are in, as JSON, for a saved view to
+    /// record ([`SavedView::camera_space`]). `null` until a dataset with an
+    /// image fixes them.
+    pub fn camera_space(&self) -> String {
+        serde_json::to_string(&self.inner.camera_space()).unwrap()
+    }
+
     /// Import another client's camera + view + display (for follow mode).
     /// The local viewport size is preserved; see [`Scene::import_presence`].
+    /// A stored view's camera comes with the `camera_space` it was saved in,
+    /// and is carried from it into this scene's spaces first. A follow
+    /// target's camera needs none: the two scenes share one document.
     pub fn import_presence(&mut self, json: &str) -> Result<(), JsError> {
         #[derive(serde::Deserialize)]
         struct Presence {
             camera: Camera,
             view: ViewState,
             display: DisplayState,
+            #[serde(default)]
+            camera_space: Option<CameraSpace>,
         }
         let p: Presence = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        self.inner.import_presence(p.camera, p.view, p.display);
+        let mut camera = p.camera;
+        if let Some(from) = &p.camera_space {
+            self.inner.carry_camera(&mut camera, from);
+        }
+        self.inner.import_presence(camera, p.view, p.display);
         Ok(())
     }
 
@@ -177,12 +196,39 @@ impl WasmScene {
         self.inner.frame(&FrameTarget::Visible, [width, height])
     }
 
-    /// Fit the slice camera to the voxel rect `[min_x, min_y]..[max_x,
-    /// max_y]` on its canvas, as a collection's group navigator does. Returns
-    /// whether it moved the camera; a volume camera ignores it.
-    pub fn frame_region(&mut self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> bool {
+    /// Fit the slice camera to the rect `[min_x, min_y]..[max_x, max_y]` in
+    /// `dataset_id`'s frame on its canvas, as a collection's group navigator
+    /// does. Returns whether it moved the camera; a volume camera ignores it.
+    pub fn frame_region(
+        &mut self,
+        dataset_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+    ) -> bool {
+        self.inner.frame_region(
+            &DatasetId(dataset_id.to_string()),
+            PlaneBox::new([min_x, min_y, 0.0], [max_x, max_y, 0.0]),
+        )
+    }
+
+    /// Where `dataset_id`'s frame sits in the scene frame the slice camera
+    /// views, as `[offset_x, offset_y, offset_z, scale_x, scale_y, scale_z]`:
+    /// a frame point `p` lands at `offset + p * scale`. Empty for a dataset
+    /// the scene doesn't hold.
+    pub fn dataset_placement(&self, dataset_id: &str) -> Vec<f64> {
+        match self.inner.placement(&DatasetId(dataset_id.to_string())) {
+            Some(placed) => placed.offset.into_iter().chain(placed.scale).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether `dataset_id` declares physical lengths
+    /// ([`Scene::has_physical_scale`]).
+    pub fn dataset_has_physical_scale(&self, dataset_id: &str) -> bool {
         self.inner
-            .frame_voxel_region(VoxBox::new([min_x, min_y, 0.0], [max_x, max_y, 0.0]))
+            .has_physical_scale(&DatasetId(dataset_id.to_string()))
     }
 
     /// The camera's framing: `"placed"`, `"framed"`, or `"unframed"`. An
@@ -353,25 +399,6 @@ impl WasmScene {
         }
     }
 
-    pub fn world_bounds(&self) -> String {
-        match &self.inner.camera {
-            Camera::Slice(v) => {
-                let bounds = v.world_bounds();
-                serde_json::to_string(&bounds).unwrap()
-            }
-            Camera::Arcball(_) | Camera::Fly(_) => {
-                let vol_shape = self.inner.volume_shape();
-                let vol_transform = self.inner.volume_transform();
-                let region = self.inner.camera.visible_region(
-                    &self.inner.view.z_range,
-                    vol_transform,
-                    vol_shape.as_ref(),
-                );
-                serde_json::to_string(&region.xy_bounds).unwrap()
-            }
-        }
-    }
-
     /// Query the scene for geometric information about all entities in a dataset.
     pub fn view_query(&self, dataset_id: &str) -> String {
         let id = DatasetId(dataset_id.into());
@@ -403,39 +430,22 @@ impl WasmScene {
         self.inner.camera.effective_zoom()
     }
 
-    /// Returns the visible region for a dataset as JSON.
-    /// The region is computed using the first member's volume transform and shape,
-    /// giving the global viewport bounds before per-member position offsets.
+    /// The visible region of a dataset as JSON, in the dataset's own frame,
+    /// where member positions are ([`Scene::visible_region`]). `"null"` for a
+    /// dataset with no image.
     pub fn visible_region(&self, dataset_id: &str) -> String {
-        let ds_id = DatasetId(dataset_id.to_string());
-        let derived = match self.inner.derived.get(&ds_id) {
-            Some(d) => d,
-            None => return "null".to_string(),
-        };
-        let member = match derived.members.first() {
-            Some(m) => m,
-            None => return "null".to_string(),
-        };
-        let level0 = match member.levels.first() {
-            Some(l) => l,
-            None => return "null".to_string(),
-        };
-        let vol_shape = [
-            level0.shape[2] as u32,
-            level0.shape[3] as u32,
-            level0.shape[4] as u32,
-        ];
-        // A layer shallower than the scene's slab plans its nearest plane.
-        let region = self.inner.camera.visible_region(
-            &self.inner.layer_z_range(&ds_id),
-            Some(&member.volume_transform),
-            Some(&vol_shape),
-        );
-        serde_json::to_string(&region).unwrap()
+        match self
+            .inner
+            .visible_region(&DatasetId(dataset_id.to_string()))
+        {
+            Some(region) => serde_json::to_string(&region).unwrap(),
+            None => "null".to_string(),
+        }
     }
 
     /// Returns member positions as JSON: `{"entity_id": [x, y], ...}`.
-    /// These are the composed layout+transform positions used by chunk planning.
+    /// These are the composed layout+transform positions used by chunk
+    /// planning, in the dataset's own frame.
     pub fn member_positions(&self, dataset_id: &str) -> String {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = match self.inner.derived.get(&ds_id) {
@@ -489,7 +499,7 @@ impl WasmScene {
             Some(m) => m,
             None => return identity,
         };
-        self.inner.member_world_matrix(member).to_vec()
+        self.inner.member_world_matrix(&ds_id, member).to_vec()
     }
 
     /// Returns the inverse model matrix for a specific member of a dataset.
@@ -511,7 +521,10 @@ impl WasmScene {
             Some(m) => m,
             None => return identity,
         };
-        self.inner.rendering_transform(member).1.inv_model.to_vec()
+        self.inner
+            .rendering_transform(&ds_id, member)
+            .inv_model
+            .to_vec()
     }
 
     /// All member matrices for a dataset in one call: 32 floats per member —
@@ -973,11 +986,14 @@ impl WasmScene {
                 .get(ds_id)
                 .map(|s| s.visible)
                 .unwrap_or(true);
+            let Some(to_world) = self.inner.frame_to_world(ds_id) else {
+                continue;
+            };
             for member in &derived.members {
                 members.push(crate::minimap::MinimapMember {
                     // Shared with the renderer and the camera's fit, so the minimap
                     // frames the boxes that are drawn.
-                    model: self.inner.member_world_matrix(member),
+                    model: member_transform(&to_world, member).model,
                     visible,
                     z_planes: member.levels.first().map_or(0, |l| l.shape[2]),
                 });

@@ -1,4 +1,5 @@
 mod layers;
+mod placement;
 mod types;
 
 pub(crate) use layers::LayerExtent;
@@ -18,19 +19,21 @@ use lucida_content::*;
 use crate::camera::{Camera, Framing};
 use crate::chunk::{self, ChunkCoord, ChunkQuery, ChunkView, CullCounts};
 use crate::epoch::SceneEpochs;
-use crate::framing::{FitBounds, VoxBox, WorldBox};
+use crate::framing::{FitBounds, PlaneBox, WorldBox};
+use crate::placement::{Affine, CameraSpace, DeclaredFrame};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::target_level::{
     self, IN_PLANE_AXES, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios,
 };
-use crate::transform::{self, VolumeTransform};
+use crate::transform::VolumeTransform;
 use crate::view::ViewState;
+use placement::Placed;
+pub use placement::member_transform;
 
 /// Per-dataset derived state for fast hot-path lookups.
 /// Rebuilt on register/remove. Not serialized.
 #[derive(Debug, Clone)]
 pub struct DatasetDerivedState {
-    pub volume_transforms: HashMap<ImageId, VolumeTransform>,
     pub active_layout: LayoutSpec,
     pub members: Vec<MemberState>,
     /// Member id (image id **or** entity id) → index into `members`. First
@@ -39,16 +42,12 @@ pub struct DatasetDerivedState {
     /// matrices, picking) stay O(1) instead of scanning tens of thousands of
     /// members per call in wide collections.
     pub member_index: HashMap<String, usize>,
-    /// Max of every member's (positive-clamped) `max_physical_extent`; `0.0`
-    /// for a dataset with no members so it is neutral in a cross-dataset
-    /// `max` fold. Precomputed here so [`Scene::global_max_physical_extent`]
-    /// folds over datasets, not over every member of every dataset.
-    pub max_physical_extent: f64,
-    /// Max of every member's physical Y extent (`model[5] * clamped extent`);
-    /// `0.0` with no members. The per-dataset input to
-    /// [`Scene::global_max_physical_y`], precomputed for the same reason as
-    /// `max_physical_extent`.
-    pub max_physical_y: f64,
+    /// What the dataset's source declares about its frame, which places it.
+    pub frame: DeclaredFrame,
+    /// The largest level-0 member extent along each of `[x, y, z]`, in
+    /// samples; zero with no members. Precomputed so
+    /// [`Scene::world_space`] folds over datasets, not over every member.
+    pub max_member_shape: [f64; 3],
 }
 
 impl DatasetDerivedState {
@@ -72,76 +71,10 @@ impl DatasetDerivedState {
 pub struct MemberState {
     pub entity_id: EntityId,
     pub image_id: ImageId,
+    /// Where the member's box starts in its dataset's frame.
     pub position: [f64; 2],
-    pub volume_transform: VolumeTransform,
     pub levels: Vec<LevelGeometry>,
     pub data_type: DataType,
-}
-
-/// Aggregate XY extent for visible image content in scene coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct VisibleContentBounds2D {
-    pub min_x: f64,
-    pub min_y: f64,
-    pub max_x: f64,
-    pub max_y: f64,
-    pub max_depth: u32,
-}
-
-impl VisibleContentBounds2D {
-    pub fn width(&self) -> f64 {
-        self.max_x - self.min_x
-    }
-
-    pub fn height(&self) -> f64 {
-        self.max_y - self.min_y
-    }
-
-    pub fn center_x(&self) -> f64 {
-        (self.min_x + self.max_x) / 2.0
-    }
-
-    pub fn center_y(&self) -> f64 {
-        (self.min_y + self.max_y) / 2.0
-    }
-}
-
-/// The multi-dataset placement correction for one volume, produced by
-/// [`Scene::placement_correction`]: a uniform scale (`correction`, with its
-/// exact reciprocal ratio `inv_correction`) that preserves relative physical
-/// sizes across datasets, plus a Y translation (`top_align`) that top-aligns
-/// volumes of different heights in 3D. Kept in `f64`; consumers that build
-/// `f32` matrices cast at application time ([`Self::apply`]), consumers that
-/// stay in `f64` (e.g. [`Scene::volume_diagonal`]) use the tiles directly.
-#[derive(Debug, Clone, Copy)]
-struct PlacementCorrection {
-    correction: f64,
-    inv_correction: f64,
-    top_align: f64,
-}
-
-impl PlacementCorrection {
-    /// Fold this correction into a forward/inverse matrix pair (column-major
-    /// `[f32; 16]`): scale the diagonal and XY translation of `model` and add
-    /// the top-align term to its Y translation; apply the reciprocal to
-    /// `inv_model` so the pair keeps composing to the identity.
-    fn apply(&self, model: &mut [f32; 16], inv_model: &mut [f32; 16]) {
-        let correction = self.correction as f32;
-        let inv_correction = self.inv_correction as f32;
-        let top_align = self.top_align as f32;
-
-        model[0] *= correction;
-        model[5] *= correction;
-        model[10] *= correction;
-        model[12] *= correction;
-        model[13] *= correction;
-        model[13] += top_align;
-
-        inv_model[0] *= inv_correction;
-        inv_model[5] *= inv_correction;
-        inv_model[10] *= inv_correction;
-        inv_model[13] -= top_align * inv_model[5];
-    }
 }
 
 /// What [`Scene::frame`] fits.
@@ -275,42 +208,18 @@ impl Scene {
         }
     }
 
-    /// Get the volume transform for the first dataset's first image.
-    pub fn volume_transform(&self) -> Option<&VolumeTransform> {
-        self.derived
-            .values()
-            .next()
-            .and_then(|d| d.members.first())
-            .map(|m| &m.volume_transform)
-    }
-
-    /// Get the volume shape [Z, Y, X] for the first dataset's first image.
-    pub fn volume_shape(&self) -> Option<[u32; 3]> {
-        self.derived
-            .values()
-            .next()
-            .and_then(|d| d.members.first())
-            .and_then(|m| m.levels.first())
-            .map(|l| [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
-    }
-
-    /// World-space bounding-box diagonal of the first dataset's first volume,
-    /// **after** the multi-dataset global correction
-    /// ([`Self::placement_correction`]) — the same scale the renderer draws it
-    /// at. Consumers size world-space motion from it (fly-camera base speed,
-    /// initial 3D framing). Returns `1.0` when no volume is loaded so speed
-    /// seeding always has a sane basis.
+    /// World-space bounding-box diagonal of everything visible, in the
+    /// volume cameras' space. Consumers size world-space motion from it
+    /// (fly-camera base speed). It reads the same union a framed camera
+    /// fits, so it doesn't depend on which dataset a map yields first.
+    /// Returns `1.0` with nothing visible, so speed seeding always has a sane
+    /// basis.
     pub fn volume_diagonal(&self) -> f64 {
-        let member = self.derived.values().next().and_then(|d| d.members.first());
-        let Some(m) = member else {
+        let Some(bounds) = self.visible_bounds() else {
             return 1.0;
         };
-        let t = &m.volume_transform;
-        let correction = self.placement_correction(t).correction;
-        let sx = t.model[0] as f64 * correction;
-        let sy = t.model[5] as f64 * correction;
-        let sz = t.model[10] as f64 * correction;
-        (sx * sx + sy * sy + sz * sz).sqrt()
+        let d: [f64; 3] = std::array::from_fn(|i| bounds.world.max[i] - bounds.world.min[i]);
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
     }
 
     /// Switch to the slice camera: the one this scene last had, or a new one
@@ -444,15 +353,20 @@ impl Scene {
         true
     }
 
-    /// Fit the slice camera to `region`, a voxel box, on its canvas: a part of
-    /// the data, so the camera is left placed. A volume camera ignores it.
-    /// Bumps `epochs.view` and returns `true` when the camera changed.
-    pub fn frame_voxel_region(&mut self, region: VoxBox) -> bool {
+    /// Fit the slice camera to `region`, a box in `dataset_id`'s frame, on
+    /// its canvas: a part of the data, so the camera is left placed. A volume
+    /// camera ignores it, as does a dataset the scene doesn't hold. Bumps
+    /// `epochs.view` and returns `true` when the camera changed.
+    pub fn frame_region(&mut self, dataset_id: &DatasetId, region: PlaneBox) -> bool {
+        let Some(to_scene) = self.placement(dataset_id) else {
+            return false;
+        };
+        let (min, max) = to_scene.apply_box(region.min, region.max);
         let Camera::Slice(slice) = &mut self.camera else {
             return false;
         };
         let before = slice.clone();
-        slice.fit_to_bounds(region, crate::framing::FIT_MARGIN_2D);
+        slice.fit_to_bounds(PlaneBox::new(min, max), crate::framing::FIT_MARGIN_2D);
         slice.framing = Framing::Placed;
         let changed = *slice != before;
         if changed {
@@ -483,11 +397,14 @@ impl Scene {
         self.camera != before
     }
 
-    /// Follow a change to the document's datasets. A scene with none left has
-    /// nothing its cameras frame, so the active one becomes a stand-in and
-    /// the parked one is dropped; otherwise the camera reframes. Bumps
-    /// `epochs.view` when the camera changed.
-    pub(crate) fn content_changed(&mut self) {
+    /// Follow a change to the document's datasets, from `before`, the
+    /// scene's camera spaces ahead of it. The datasets fix those spaces, so a
+    /// placed camera is carried into the new ones and keeps its region. A
+    /// scene with no datasets left has nothing its cameras frame, so the
+    /// active one becomes a stand-in and the parked one is dropped; otherwise
+    /// the camera reframes. Bumps `epochs.view` when the camera changed.
+    pub(crate) fn content_changed(&mut self, before: Option<CameraSpace>) {
+        let carried = before.is_some_and(|from| self.carry_placed_cameras(&from));
         let changed = if self.document.manifests.is_empty() {
             self.parked_camera = None;
             let stand_in = self.camera.framing() != Framing::Unframed;
@@ -496,63 +413,27 @@ impl Scene {
         } else {
             self.reframe()
         };
-        if changed {
+        if carried || changed {
             self.epochs.view += 1;
         }
     }
 
     pub fn remove_dataset(&mut self, id: &DatasetId) {
+        let before = self.camera_space();
         self.document.remove_dataset(id);
         self.dataset_order.retain(|s| s != id);
         self.dataset_settings.remove(id);
         self.derived.remove(id);
         self.view_query_cursors.remove(id);
-        self.content_changed();
-    }
-
-    /// Returns the maximum `max_physical_extent` across all datasets.
-    /// Used to apply a global normalization correction so multi-dataset
-    /// scenes preserve relative physical sizes in 3D.
-    ///
-    /// Folds over the per-dataset maxima precomputed by
-    /// [`build_derived_state`], so this is O(datasets) — cheap enough to sit
-    /// inside [`Self::placement_correction`], which runs once per member on
-    /// render-path passes. The maxima can only change when `derived` is
-    /// rebuilt, so they are never stale mid-frame.
-    pub fn global_max_physical_extent(&self) -> f64 {
-        let max = self
-            .derived
-            .values()
-            .map(|d| d.max_physical_extent)
-            .fold(0.0_f64, f64::max);
-        if max > 0.0 { max } else { 1.0 }
-    }
-
-    /// Returns the maximum physical Y extent across all datasets.
-    /// Used to top-align datasets in 3D mode.
-    ///
-    /// O(datasets) via the precomputed per-dataset `max_physical_y`, same
-    /// rationale as [`Self::global_max_physical_extent`].
-    pub fn global_max_physical_y(&self) -> f64 {
-        let max = self
-            .derived
-            .values()
-            .map(|d| d.max_physical_y)
-            .fold(0.0_f64, f64::max);
-        if max > 0.0 { max } else { 1.0 }
+        self.content_changed(before);
     }
 
     /// The per-member **world placement matrix** (`[f32; 16]`, column-major):
-    /// the scale-and-translate that maps the member's unit cube `[0,1]³` into the
-    /// scene's normalized world space, including the member position, the 3D Y-flip,
-    /// the multi-dataset global normalization (`global_max_physical_extent`), and
-    /// the 3D top-alignment (`global_max_physical_y`).
-    ///
-    /// Returns the forward `model` of [`Self::rendering_transform`], so the
-    /// renderer, minimap framing, and [`Self::dataset_world_bounds`] cannot
-    /// drift from what is drawn. A member with no levels yields the identity.
-    pub fn member_world_matrix(&self, member: &MemberState) -> [f32; 16] {
-        self.rendering_transform(member).0.model
+    /// the forward `model` of [`Self::rendering_transform`], so the renderer,
+    /// minimap framing, and [`Self::dataset_world_bounds`] cannot drift from
+    /// what is drawn. A member with no levels yields the identity.
+    pub fn member_world_matrix(&self, dataset_id: &DatasetId, member: &MemberState) -> [f32; 16] {
+        self.rendering_transform(dataset_id, member).model
     }
 
     /// Every member's forward and inverse world matrix for one dataset: for
@@ -565,14 +446,16 @@ impl Scene {
     /// [`Self::member_render_ids`]. Empty for an unknown dataset.
     pub fn member_render_matrices(&self, dataset_id: &str) -> Vec<f32> {
         let ds_id = DatasetId(dataset_id.to_string());
-        let Some(derived) = self.derived.get(&ds_id) else {
+        let (Some(derived), Some(to_world)) =
+            (self.derived.get(&ds_id), self.frame_to_world(&ds_id))
+        else {
             return Vec::new();
         };
         let mut out = Vec::with_capacity(derived.members.len() * 32);
         for member in &derived.members {
-            let (fwd, inv) = self.rendering_transform(member);
-            out.extend_from_slice(&fwd.model);
-            out.extend_from_slice(&inv.inv_model);
+            let transform = member_transform(&to_world, member);
+            out.extend_from_slice(&transform.model);
+            out.extend_from_slice(&transform.inv_model);
         }
         out
     }
@@ -601,13 +484,14 @@ impl Scene {
     pub fn dataset_world_bounds(&self, dataset_id: &str) -> Option<WorldBox> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
+        let to_world = self.frame_to_world(&ds_id)?;
 
         let mut aabb = crate::framing::Aabb::empty();
         for member in &derived.members {
             if member.levels.is_empty() {
                 continue;
             }
-            for corner in self.rendering_transform(member).0.world_corners() {
+            for corner in member_transform(&to_world, member).world_corners() {
                 aabb.add_point(corner);
             }
         }
@@ -619,39 +503,44 @@ impl Scene {
         }
     }
 
-    /// Bounds of a single dataset's members in voxel space, the space the
-    /// [`Camera::Slice`] camera works in: the voxel twin of
+    /// Bounds of a single dataset's members in the plane the
+    /// [`Camera::Slice`] camera works in: the plane twin of
     /// [`Self::dataset_world_bounds`].
     ///
-    /// Each member with a level 0 contributes
-    /// `[position[0], position[1], 0] .. [position[0] + X, position[1] + Y, Z]`
-    /// from its level-0 shape, the voxel convention the slice-mode ray pick
-    /// and chunk culling use. Returns `None` when no member has levels.
-    pub fn dataset_voxel_bounds(&self, dataset_id: &str) -> Option<VoxBox> {
+    /// Each member with a level 0 contributes its layout box, its level-0
+    /// shape from its position, placed in the world in X and Y. Z counts the
+    /// member's planes, since the axis position steps through planes.
+    /// Returns `None` when no member has levels.
+    pub fn dataset_plane_bounds(&self, dataset_id: &str) -> Option<PlaneBox> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
+        let to_scene = self.placement(&ds_id)?;
         derived
             .members
             .iter()
             .filter_map(|member| {
                 let level0 = member.levels.first()?;
                 let [x0, y0] = member.position;
-                Some(VoxBox::new(
+                let (min, max) = to_scene.apply_box(
                     [x0, y0, 0.0],
                     [
                         x0 + level0.shape[4] as f64,
                         y0 + level0.shape[3] as f64,
-                        level0.shape[2] as f64,
+                        0.0,
                     ],
+                );
+                Some(PlaneBox::new(
+                    [min[0], min[1], 0.0],
+                    [max[0], max[1], level0.shape[2] as f64],
                 ))
             })
-            .reduce(VoxBox::union)
+            .reduce(PlaneBox::union)
     }
 
     /// A dataset's bounds in both spaces, or `None` when it has none.
     pub fn dataset_bounds(&self, dataset_id: &str) -> Option<FitBounds> {
         Some(FitBounds {
-            vox: self.dataset_voxel_bounds(dataset_id)?,
+            plane: self.dataset_plane_bounds(dataset_id)?,
             world: self.dataset_world_bounds(dataset_id)?,
         })
     }
@@ -675,11 +564,11 @@ impl Scene {
     }
 
     /// The named dataset's box in the space the current camera works in, as
-    /// `(min, max)`: voxel space with a zero Z extent for the slice camera,
+    /// `(min, max)`: the plane with a zero Z extent for the slice camera,
     /// world space for a volume camera. `None` when it has no bounds.
     pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
         if let Camera::Slice(_) = self.camera {
-            let b = self.dataset_voxel_bounds(dataset_id)?;
+            let b = self.dataset_plane_bounds(dataset_id)?;
             Some(([b.min[0], b.min[1], 0.0], [b.max[0], b.max[1], 0.0]))
         } else {
             let b = self.dataset_world_bounds(dataset_id)?;
@@ -702,7 +591,8 @@ impl Scene {
     /// one [`Self::zoom_to_pixels_per_sample`] sets. `None` when the dataset
     /// has no image with a level 0.
     pub fn pixels_per_sample(&self, dataset_id: &DatasetId) -> Option<f64> {
-        Some(self.member_pixels_per_sample(self.first_image(dataset_id)?))
+        let member = self.first_image(dataset_id)?;
+        Some(self.member_pixels_per_sample(&self.placed(dataset_id)?, member))
     }
 
     /// Move the camera until `dataset_id`'s first image measures
@@ -726,16 +616,20 @@ impl Scene {
         let Some(member) = self.first_image(dataset_id) else {
             return false;
         };
-        let transform = self.placed_transform(member);
+        let transform = self.rendering_transform(dataset_id, member);
         let shape = level0_shape(member);
-        let Some(bounds) = self.dataset_world_bounds(&dataset_id.0) else {
+        let (Some(bounds), Some(to_scene)) = (
+            self.dataset_world_bounds(&dataset_id.0),
+            self.placement(dataset_id),
+        ) else {
             return false;
         };
         let before = self.camera.clone();
         let reached = match &mut self.camera {
             Camera::Slice(slice) => {
-                slice.set_zoom(pixels_per_sample);
-                slice.zoom == pixels_per_sample
+                let zoom = pixels_per_sample / to_scene.plane_sample();
+                slice.set_zoom(zoom);
+                slice.zoom == zoom
             }
             Camera::Arcball(arcball) => {
                 arcball.set_pixels_per_sample(&transform, shape, pixels_per_sample, bounds)
@@ -760,67 +654,6 @@ impl Scene {
             .members
             .iter()
             .find(|member| !member.levels.is_empty())
-    }
-
-    /// Return aggregate bounds for all visible image members in scene XY space.
-    pub fn visible_content_bounds_2d(&self) -> Option<VisibleContentBounds2D> {
-        let mut bounds: Option<VisibleContentBounds2D> = None;
-
-        for id in &self.dataset_order {
-            self.accumulate_visible_dataset_bounds_2d(id, &mut bounds);
-        }
-
-        // Be tolerant of partially hydrated scenes where derived state exists
-        // before dataset_order is fully populated.
-        for id in self.derived.keys() {
-            if !self.dataset_order.contains(id) {
-                self.accumulate_visible_dataset_bounds_2d(id, &mut bounds);
-            }
-        }
-
-        bounds
-    }
-
-    fn accumulate_visible_dataset_bounds_2d(
-        &self,
-        id: &DatasetId,
-        bounds: &mut Option<VisibleContentBounds2D>,
-    ) {
-        let settings = self.dataset_settings.get(id).cloned().unwrap_or_default();
-        if !settings.visible {
-            return;
-        }
-        let Some(derived) = self.derived.get(id) else {
-            return;
-        };
-
-        for member in &derived.members {
-            let Some(level) = member.levels.first() else {
-                continue;
-            };
-            let width = level.shape[4] as f64;
-            let height = level.shape[3] as f64;
-            if width <= 0.0 || height <= 0.0 {
-                continue;
-            }
-            let candidate = VisibleContentBounds2D {
-                min_x: member.position[0],
-                min_y: member.position[1],
-                max_x: member.position[0] + width,
-                max_y: member.position[1] + height,
-                max_depth: level.shape[2].min(u32::MAX as u64) as u32,
-            };
-            *bounds = Some(match *bounds {
-                Some(existing) => VisibleContentBounds2D {
-                    min_x: existing.min_x.min(candidate.min_x),
-                    min_y: existing.min_y.min(candidate.min_y),
-                    max_x: existing.max_x.max(candidate.max_x),
-                    max_y: existing.max_y.max(candidate.max_y),
-                    max_depth: existing.max_depth.max(candidate.max_depth),
-                },
-                None => candidate,
-            });
-        }
     }
 
     /// The chunks the first dataset's view needs, every member's in turn.
@@ -860,6 +693,9 @@ impl Scene {
         let layer = self.resolved_layer(dataset_id)?;
         let channels = layer.channel_indices();
 
+        // The region is in the dataset's frame, where member positions are.
+        let region = self.visible_region(dataset_id)?;
+        let placed = self.placed(dataset_id)?;
         let mut plans = Vec::new();
         for member in &derived.members {
             if member.levels.is_empty() {
@@ -869,18 +705,6 @@ impl Scene {
             let level0 = &member.levels[0];
             let tile_w = level0.shape[4] as f64; // X
             let tile_h = level0.shape[3] as f64; // Y
-
-            // Compute visible region using the member's volume transform.
-            let vol_shape = [
-                level0.shape[2] as u32,
-                level0.shape[3] as u32,
-                level0.shape[4] as u32,
-            ];
-            let region = self.camera.visible_region(
-                &layer.z_range,
-                Some(&member.volume_transform),
-                Some(&vol_shape),
-            );
 
             // AABB culling (same logic as current but using member.position)
             let pos_x = member.position[0];
@@ -922,7 +746,7 @@ impl Scene {
                 member,
                 multiscale_by_image[&member.image_id],
                 pin,
-                self.member_pixels_per_sample(member),
+                self.member_pixels_per_sample(&placed, member),
                 last_query,
             );
             let level_geo = &member.levels[level as usize];
@@ -962,160 +786,49 @@ impl Scene {
         Some(plans)
     }
 
-    /// The scene-global placement correction for one volume: the multi-dataset
-    /// scale normalization (`max_physical_extent / global_max_physical_extent`)
-    /// and the 3D top-alignment translation
-    /// (`(global_max_physical_y - phys_y) / global_max`).
-    ///
-    /// The only owner of that arithmetic, so a policy change reaches the
-    /// renderer, minimap, picking, and framing together.
-    fn placement_correction(&self, t: &VolumeTransform) -> PlacementCorrection {
-        let max_phys = if t.max_physical_extent > 0.0 {
-            t.max_physical_extent
-        } else {
-            1.0
-        };
-        let global_max = self.global_max_physical_extent();
-        let phys_y = t.model[5] as f64 * max_phys;
-        let global_max_y = self.global_max_physical_y();
-        PlacementCorrection {
-            correction: max_phys / global_max,
-            inv_correction: global_max / max_phys,
-            top_align: (global_max_y - phys_y) / global_max,
-        }
-    }
-
-    /// Build the rendering model matrix for a member — the same transform
-    /// the GPU uses, including Y-flip, global normalization, and top-alignment.
-    ///
-    /// Returns (model, inv_model) in the camera's coordinate space.
-    pub fn rendering_transform(&self, member: &MemberState) -> (VolumeTransform, VolumeTransform) {
-        let level0 = match member.levels.first() {
-            Some(l) => l,
-            None => {
-                let id = VolumeTransform {
-                    model: [
-                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                        1.0,
-                    ],
-                    inv_model: [
-                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                        1.0,
-                    ],
-                    max_physical_extent: 1.0,
-                };
-                return (id.clone(), id);
-            }
-        };
-
-        let t = &member.volume_transform;
-        let max_phys = if t.max_physical_extent > 0.0 {
-            t.max_physical_extent
-        } else {
-            1.0
-        };
-        let vol_shape = [
-            level0.shape[2] as u32,
-            level0.shape[3] as u32,
-            level0.shape[4] as u32,
-        ];
-
-        // Recover voxel scale from volume transform
-        let scale_x = if vol_shape[2] > 0 {
-            t.model[0] as f64 * max_phys / vol_shape[2] as f64
-        } else {
-            1.0
-        };
-        let scale_y = if vol_shape[1] > 0 {
-            t.model[5] as f64 * max_phys / vol_shape[1] as f64
-        } else {
-            1.0
-        };
-        let scale_z = if vol_shape[0] > 0 {
-            t.model[10] as f64 * max_phys / vol_shape[0] as f64
-        } else {
-            1.0
-        };
-
-        // Y-flip for 3D (Y-up convention)
-        let flipped_offset = [
-            member.position[0],
-            vol_shape[1] as f64 - member.position[1] - vol_shape[1] as f64,
-        ];
-        let mt = transform::compute_member_transform(
-            vol_shape,
-            [scale_z, scale_y, scale_x],
-            flipped_offset,
-            max_phys,
-        );
-
-        // Global correction for multi-dataset scenes
-        let mut model = mt.model;
-        let mut inv_model = mt.inv_model;
-        self.placement_correction(t)
-            .apply(&mut model, &mut inv_model);
-
-        let fwd = VolumeTransform {
-            model,
-            inv_model: [0.0; 16],
-            max_physical_extent: max_phys,
-        };
-        let inv = VolumeTransform {
-            model: [0.0; 16],
-            inv_model,
-            max_physical_extent: max_phys,
-        };
-        (fwd, inv)
-    }
-
-    /// The dataset-level model matrix (column-major `[f32; 16]`): the first
-    /// member's volume transform with the same correction and top-alignment as
-    /// [`Self::rendering_transform`], but without the member's layout offset.
-    /// The minimap projects orbit rays through it, and `ray_hit_local` uses the
-    /// inverse to express hits in `[0,1]³`.
+    /// The dataset-level model matrix (column-major `[f32; 16]`): the unit
+    /// cube of the dataset's first member, set at the frame's origin and
+    /// placed in world space as [`Self::rendering_transform`] places every
+    /// member. The minimap projects orbit rays through it, and
+    /// `ray_hit_local` uses the inverse to express hits in `[0,1]³`.
     ///
     /// Returns the identity for an unknown dataset or one with no members.
     pub fn dataset_model_matrix(&self, dataset_id: &str) -> [f32; 16] {
-        self.dataset_placement_matrices(dataset_id).0
+        self.dataset_placement_matrices(dataset_id).model
     }
 
     /// Inverse of [`Self::dataset_model_matrix`] (world space → the first
-    /// member's `[0,1]³` unit space), built from the same
-    /// [`Self::placement_correction`] so the pair composes to the identity.
-    /// Returns the identity for an unknown dataset or one with no members.
+    /// member's `[0,1]³` unit space), built from the same placement so the
+    /// pair composes to the identity. Returns the identity for an unknown
+    /// dataset or one with no members.
     pub fn dataset_inv_model_matrix(&self, dataset_id: &str) -> [f32; 16] {
-        self.dataset_placement_matrices(dataset_id).1
+        self.dataset_placement_matrices(dataset_id).inv_model
     }
 
     /// Shared body of [`Self::dataset_model_matrix`] /
-    /// [`Self::dataset_inv_model_matrix`]: resolve the first member and fold
-    /// the placement correction into its volume transform pair.
-    fn dataset_placement_matrices(&self, dataset_id: &str) -> ([f32; 16], [f32; 16]) {
-        let identity = [
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-        ];
+    /// [`Self::dataset_inv_model_matrix`].
+    fn dataset_placement_matrices(&self, dataset_id: &str) -> VolumeTransform {
         let ds_id = DatasetId(dataset_id.to_string());
-        let member = self.derived.get(&ds_id).and_then(|d| d.members.first());
-        let Some(m) = member else {
-            return (identity, identity);
-        };
-        let t = &m.volume_transform;
-        let mut model = t.model;
-        let mut inv_model = t.inv_model;
-        self.placement_correction(t)
-            .apply(&mut model, &mut inv_model);
-        (model, inv_model)
+        let first = self.derived.get(&ds_id).and_then(|d| d.members.first());
+        match (first, self.frame_to_world(&ds_id)) {
+            (Some(member), Some(to_world)) => {
+                let at_origin = MemberState {
+                    position: [0.0, 0.0],
+                    ..member.clone()
+                };
+                member_transform(&to_world, &at_origin)
+            }
+            _ => Affine::IDENTITY.volume_transform(),
+        }
     }
 
     /// Pick the closest entity hit by a ray cast from screen coordinates.
     ///
-    /// For Slice (2D) mode: tests the voxel-space ray against each member's
-    /// voxel-space AABB (position + shape). The Slice camera operates in
-    /// voxel coordinates, so the ray and member bounds are in the same space.
+    /// For Slice (2D) mode: tests the ray's scene-frame point against each
+    /// member's layout box, placed in the scene frame as its dataset is.
     ///
-    /// For 3D modes (Arcball/Fly): uses the rendering transform (which
-    /// includes Y-flip, global correction, and top-alignment) so the ray
-    /// test matches what the camera actually sees.
+    /// For 3D modes (Arcball/Fly): uses the rendering transform, placed in
+    /// world space, so the ray test matches what the camera actually sees.
     pub fn ray_pick(
         &self,
         dataset_id: &DatasetId,
@@ -1123,6 +836,7 @@ impl Scene {
         screen_y: f64,
     ) -> Option<crate::ray::RayHit> {
         let derived = self.derived.get(dataset_id)?;
+        let placed = self.placed(dataset_id)?;
         let world_ray = self.camera.unproject_ray(screen_x, screen_y);
         let is_2d = matches!(self.camera, Camera::Slice(_));
         let mut closest: Option<crate::ray::RayHit> = None;
@@ -1134,25 +848,31 @@ impl Scene {
             };
 
             let hit_result = if is_2d {
-                // Slice mode: ray and member positions are both in voxel space.
-                let pos_x = member.position[0];
-                let pos_y = member.position[1];
-                let tile_w = level0.shape[4] as f64;
-                let tile_h = level0.shape[3] as f64;
+                // Slice mode: the ray stands at a world point, which the
+                // member's placed box holds or doesn't.
+                let [x0, y0] = member.position;
+                let (min, max) = placed.to_scene.apply_box(
+                    [x0, y0, 0.0],
+                    [
+                        x0 + level0.shape[4] as f64,
+                        y0 + level0.shape[3] as f64,
+                        0.0,
+                    ],
+                );
 
                 let rx = world_ray.origin[0];
                 let ry = world_ray.origin[1];
 
-                if rx >= pos_x && rx <= pos_x + tile_w && ry >= pos_y && ry <= pos_y + tile_h {
+                if rx >= min[0] && rx <= max[0] && ry >= min[1] && ry <= max[1] {
                     Some(([rx, ry, 0.0], 0.0))
                 } else {
                     None
                 }
             } else {
                 // 3D mode: use rendering transform to match camera space.
-                let (fwd, inv) = self.rendering_transform(member);
+                let transform = member_transform(&placed.to_world, member);
 
-                let local_ray = crate::ray::transform_ray(&world_ray, &inv.inv_model);
+                let local_ray = crate::ray::transform_ray(&world_ray, &transform.inv_model);
 
                 local_ray.intersect_unit_cube().map(|t| {
                     let hit_local = [
@@ -1160,7 +880,7 @@ impl Scene {
                         local_ray.origin[1] + t * local_ray.direction[1],
                         local_ray.origin[2] + t * local_ray.direction[2],
                     ];
-                    let hit_world = crate::ray::transform_point(&hit_local, &fwd.model);
+                    let hit_world = crate::ray::transform_point(&hit_local, &transform.model);
                     let dx = hit_world[0] - world_ray.origin[0];
                     let dy = hit_world[1] - world_ray.origin[1];
                     let dz = hit_world[2] - world_ray.origin[2];
@@ -1183,68 +903,35 @@ impl Scene {
         closest
     }
 
-    // A pin's stored world point `(position[0], position[1], z)` is in the 2D
-    // pin frame: in-plane voxels plus voxel depth (x right, y down, z = slice
-    // index). The helpers below convert it to and from arcball world space by
-    // reusing `rendering_transform` and the camera's own `project_to_screen` /
-    // `ray_pick`, so a marker tracks the volume exactly and a depth pick is the
-    // exact inverse of the projection that draws it.
+    // A pin's stored point `(position[0], position[1], z)` is in its
+    // dataset's frame: in-plane samples plus a plane index (x right, y down).
+    // The helpers below place it with the dataset's own placement and reuse
+    // the camera's `project_to_screen` / `ray_pick`, so a marker tracks the
+    // data exactly and a depth pick is the exact inverse of the projection
+    // that draws it.
 
-    /// Resolve the first member of `dataset_id`, with its level-0 voxel shape
-    /// `[X, Y, Z]`. Pins are dataset-scoped and anchored against the dataset's
-    /// primary member (the same member `ray_pick`/`view_query` treat as the
-    /// volume), so depth is consistent between drop and render.
-    fn annotation_member(&self, dataset_id: &DatasetId) -> Option<(&MemberState, [f64; 3])> {
-        let derived = self.derived.get(dataset_id)?;
-        let member = derived.members.first()?;
-        let level0 = member.levels.first()?;
-        let shape = [
-            level0.shape[4] as f64, // X
-            level0.shape[3] as f64, // Y
-            level0.shape[2] as f64, // Z
-        ];
-        Some((member, shape))
-    }
-
-    /// Map an in-plane-voxel + voxel-depth pin point to arcball-world space
-    /// using the dataset's rendering transform. Image-convention Y (0 = top) is
-    /// flipped to the renderer's Y-up unit cube exactly like
-    /// `ray_hit_local_image` does in reverse, so a pin drawn here lands where
-    /// the matching voxel is drawn in the volume.
-    fn annotation_world_point(
+    /// Place a pin's frame point where the active camera looks: the scene
+    /// frame for the slice camera, world space for a volume camera. `None`
+    /// for a dataset the scene doesn't hold.
+    fn annotation_point_in_view(
         &self,
-        member: &MemberState,
-        shape: [f64; 3],
+        dataset_id: &DatasetId,
         point: [f64; 3],
-    ) -> [f64; 3] {
-        let (fwd, _) = self.rendering_transform(member);
-        let ux = if shape[0] > 0.0 {
-            point[0] / shape[0]
-        } else {
-            0.0
-        };
-        // Image y-down -> unit y-up.
-        let uy = if shape[1] > 0.0 {
-            1.0 - point[1] / shape[1]
-        } else {
-            0.0
-        };
-        let uz = if shape[2] > 0.0 {
-            point[2] / shape[2]
-        } else {
-            0.0
-        };
-        crate::ray::transform_point(&[ux, uy, uz], &fwd.model)
+    ) -> Option<[f64; 3]> {
+        let placed = self.placed(dataset_id)?;
+        Some(match self.camera {
+            Camera::Slice(_) => placed.to_scene.apply(point),
+            Camera::Arcball(_) | Camera::Fly(_) => placed.to_world.apply(point),
+        })
     }
 
-    /// Project a pin's stored world point `(x, y, z)` (in-plane voxel + voxel
-    /// depth) to screen-space pixels through the active camera.
+    /// Project a pin's stored frame point `(x, y, z)` to screen-space pixels
+    /// through the active camera, placed as its dataset is.
     ///
     /// In 2D slice mode this is the in-plane projection, depth ignored. In a 3D
-    /// mode the point is first lifted to arcball world via the rendering
-    /// transform, so the marker tracks the volume as the camera orbits.
-    /// Returns `None` when the point is behind the camera or the dataset has no
-    /// anchorable member; the caller then hides the marker.
+    /// mode the marker tracks the volume as the camera orbits.
+    /// Returns `None` when the point is behind the camera or the scene doesn't
+    /// hold the dataset; the caller then hides the marker.
     pub fn project_annotation(
         &self,
         dataset_id: &DatasetId,
@@ -1252,18 +939,13 @@ impl Scene {
         y: f64,
         z: f64,
     ) -> Option<[f64; 2]> {
-        if matches!(self.camera, Camera::Slice(_)) {
-            // 2D: keep the long-standing in-plane behavior verbatim.
-            return self.camera.project_to_screen([x, y, z]);
-        }
-        let (member, shape) = self.annotation_member(dataset_id)?;
-        let world = self.annotation_world_point(member, shape, [x, y, z]);
-        self.camera.project_to_screen(world)
+        let point = self.annotation_point_in_view(dataset_id, [x, y, z])?;
+        self.camera.project_to_screen(point)
     }
 
-    /// Lift a pin's stored voxel point `(x, y, z)` to arcball world space, the
-    /// same lift [`Self::project_annotation`] does before projecting. Returns
-    /// `None` for an unknown or unanchorable dataset.
+    /// Lift a pin's stored frame point `(x, y, z)` to world space, the same
+    /// lift [`Self::project_annotation`] does before projecting in 3D.
+    /// Returns `None` for a dataset the scene doesn't hold.
     ///
     /// `CenterOnVoxel3D` targets this point, so the recenter and the marker
     /// projection share one definition of the pin's world position.
@@ -1272,16 +954,16 @@ impl Scene {
         dataset_id: &DatasetId,
         point: [f64; 3],
     ) -> Option<[f64; 3]> {
-        let (member, shape) = self.annotation_member(dataset_id)?;
-        Some(self.annotation_world_point(member, shape, point))
+        Some(self.frame_to_world(dataset_id)?.apply(point))
     }
 
-    /// Depth pick for a pin dropped in a 3D view: ray-cast from screen into the
-    /// volume and return the hit as an in-plane-voxel + voxel-depth point
-    /// `[x, y, z]`, ready to store as `(position, z)`. This is the exact inverse
-    /// of [`Self::annotation_world_point`] (so the new marker re-projects to the
-    /// cursor), built on the shared `ray_pick`. Returns `None` if the ray misses
-    /// the volume; the caller then declines to drop a pin into empty space.
+    /// Depth pick for a pin dropped in a view: ray-cast from screen into the
+    /// dataset and return the hit as a frame point `[x, y, z]`, ready to store
+    /// as `(position, z)`. This is the exact inverse of the placement
+    /// [`Self::project_annotation`] draws with, so the new marker re-projects
+    /// to the cursor. A slice pick has no depth and returns `z` 0. Returns
+    /// `None` if the ray misses the dataset; the caller then declines to drop
+    /// a pin into empty space.
     pub fn pick_annotation_voxel(
         &self,
         dataset_id: &DatasetId,
@@ -1289,14 +971,16 @@ impl Scene {
         screen_y: f64,
     ) -> Option<[f64; 3]> {
         let hit = self.ray_pick(dataset_id, screen_x, screen_y)?;
-        let (member, shape) = self.annotation_member(dataset_id)?;
-        let (_, inv) = self.rendering_transform(member);
-        // World -> unit cube, then unit -> image-convention voxel (un-flip Y).
-        let unit = crate::ray::transform_point(&hit.world_position, &inv.inv_model);
-        let vx = unit[0] * shape[0];
-        let vy = (1.0 - unit[1]) * shape[1];
-        let vz = unit[2] * shape[2];
-        Some([vx, vy, vz])
+        let placed = self.placed(dataset_id)?;
+        Some(match self.camera {
+            Camera::Slice(_) => {
+                let [x, y, _] = placed.to_scene.inverse().apply(hit.world_position);
+                [x, y, 0.0]
+            }
+            Camera::Arcball(_) | Camera::Fly(_) => {
+                placed.to_world.inverse().apply(hit.world_position)
+            }
+        })
     }
 
     /// Replace the document portion (content graphs) wholesale, preserving the
@@ -1313,10 +997,12 @@ impl Scene {
     ///
     /// It bumps every document-scoped epoch (`content`, `layout`,
     /// `annotation`) plus `selection`. `view` bumps only when the camera
-    /// reframed: a placed camera is untouched, and a framed or unframed one
-    /// fits the loaded content, so a page that joins an open dataset shows it
-    /// fitted.
+    /// moved: a placed camera keeps its region, carried into the new
+    /// document's spaces should its first dataset differ, and a framed or
+    /// unframed one fits the loaded content, so a page that joins an open
+    /// dataset shows it fitted.
     pub fn load_document(&mut self, doc: DocumentState) {
+        let before = self.camera_space();
         self.document = doc;
         self.rebuild_derived();
 
@@ -1370,7 +1056,7 @@ impl Scene {
         self.epochs.layout += 1;
         self.epochs.annotation += 1;
         self.epochs.selection += 1;
-        self.content_changed();
+        self.content_changed(before);
     }
 
     /// Adopt another client's camera + view + display: follow, and every
@@ -1549,29 +1235,18 @@ impl Scene {
             .collect()
     }
 
-    /// The box the renderer draws for `member`, as one transform with both
-    /// directions filled in. [`Scene::rendering_transform`] returns the two
-    /// halves. The camera projects and measures against this.
-    fn placed_transform(&self, member: &MemberState) -> VolumeTransform {
-        let (forward, inverse) = self.rendering_transform(member);
-        VolumeTransform {
-            model: forward.model,
-            inv_model: inverse.inv_model,
-            max_physical_extent: forward.max_physical_extent,
-        }
-    }
-
     /// Device pixels per level-0 sample of `member`, the measure its target
-    /// level is chosen from. A slice view spaces every sample `zoom` device
-    /// pixels apart. A volume view measures where the center-screen ray meets
-    /// the box the renderer draws for the member, so a scene-global placement
-    /// correction counts.
-    fn member_pixels_per_sample(&self, member: &MemberState) -> f64 {
+    /// level is chosen from. A slice view spaces world units `zoom` device
+    /// pixels apart, and a sample spans its dataset's placement. A volume
+    /// view measures where the center-screen ray meets the box the renderer
+    /// draws for the member, so placement counts there too.
+    fn member_pixels_per_sample(&self, placed: &Placed, member: &MemberState) -> f64 {
         match self.camera {
-            Camera::Slice(_) => self.camera.effective_zoom(),
-            _ => self
-                .camera
-                .pixels_per_sample(&self.placed_transform(member), level0_shape(member)),
+            Camera::Slice(_) => self.camera.effective_zoom() * placed.to_scene.plane_sample(),
+            _ => self.camera.pixels_per_sample(
+                &member_transform(&placed.to_world, member),
+                level0_shape(member),
+            ),
         }
     }
 
@@ -1703,6 +1378,7 @@ impl Scene {
     pub fn view_query(&self, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
+        let placed = self.placed(dataset_id)?;
         let vp = self.camera.viewport();
         let eye = self.camera.eye_position();
         let pin = self.level_pin(dataset_id);
@@ -1726,8 +1402,8 @@ impl Scene {
             let pos = member.position;
 
             // Compute screen-space bounding box.
-            // 2D: corners in voxel space (pos to pos+tile_size).
-            // 3D: corners from rendering_transform (includes position, Y-flip, global correction).
+            // 2D: corners of the member's layout box, placed in the world.
+            // 3D: corners from rendering_transform, placed in world space.
             let mut screen_min = [f64::MAX, f64::MAX];
             let mut screen_max = [f64::MIN, f64::MIN];
             let mut any_visible = false;
@@ -1739,7 +1415,11 @@ impl Scene {
                 let (fw, fh, fd) = level0
                     .map(|l| (l.shape[4] as f64, l.shape[3] as f64, l.shape[2] as f64))
                     .unwrap_or((1.0, 1.0, 1.0));
-                centroid = [pos[0] + fw / 2.0, pos[1] + fh / 2.0, fd / 2.0];
+                let [cx, cy, _] =
+                    placed
+                        .to_scene
+                        .apply([pos[0] + fw / 2.0, pos[1] + fh / 2.0, 0.0]);
+                centroid = [cx, cy, fd / 2.0];
                 let corners = [
                     [pos[0], pos[1], 0.0],
                     [pos[0] + fw, pos[1], 0.0],
@@ -1747,7 +1427,8 @@ impl Scene {
                     [pos[0] + fw, pos[1] + fh, 0.0],
                 ];
                 for corner in &corners {
-                    if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
+                    let corner = placed.to_scene.apply(*corner);
+                    if let Some([sx, sy]) = self.camera.project_to_screen(corner) {
                         screen_min[0] = screen_min[0].min(sx);
                         screen_min[1] = screen_min[1].min(sy);
                         screen_max[0] = screen_max[0].max(sx);
@@ -1755,9 +1436,9 @@ impl Scene {
                         any_visible = true;
                     }
                 }
-                self.camera.effective_zoom()
+                self.member_pixels_per_sample(&placed, member)
             } else {
-                let placed = self.placed_transform(member);
+                let placed = member_transform(&placed.to_world, member);
                 let corners = placed.world_corners();
                 centroid = placed.world_centroid();
                 for corner in &corners {
@@ -2058,70 +1739,41 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
     let position_index =
         LayoutPositionIndex::new(&active_layout, manifest.entities(), manifest.transforms());
 
-    // Build per-image member state
     let mut members = Vec::new();
-    let mut volume_transforms = HashMap::new();
-
     for image in manifest.images() {
         // Find position from layout placements
         let position = position_index.resolve(&image.owner).unwrap_or([0.0, 0.0]);
-
-        // Compute volume transform from level 0 geometry
-        let vt = if let Some(level0) = image.multiscale.levels.first() {
-            let shape_3d = [
-                level0.shape[2] as u32,
-                level0.shape[3] as u32,
-                level0.shape[4] as u32,
-            ];
-            let scale_3d = [level0.scale[2], level0.scale[3], level0.scale[4]];
-            transform::compute_volume_transform(shape_3d, scale_3d)
-        } else {
-            VolumeTransform {
-                model: [
-                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-                ],
-                inv_model: [
-                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-                ],
-                max_physical_extent: 1.0,
-            }
-        };
-
-        volume_transforms.insert(image.image_id.clone(), vt.clone());
-
         members.push(MemberState {
             entity_id: image.owner.clone(),
             image_id: image.image_id.clone(),
             position,
-            volume_transform: vt,
             levels: image.multiscale.levels.clone(),
             data_type: image.multiscale.data_type,
         });
     }
 
     // Id → index (first occurrence wins, both id namespaces) and the
-    // per-dataset extent maxima the scene-global placement correction folds
-    // over. Derived entirely from `members`, so they can never disagree with
-    // a linear pass over it.
+    // per-axis member maxima the world space folds over. Derived entirely
+    // from `members`, so they can never disagree with a linear pass over it.
     let mut member_index = HashMap::with_capacity(members.len() * 2);
-    let mut max_physical_extent = 0.0_f64;
-    let mut max_physical_y = 0.0_f64;
+    let mut max_member_shape = [0.0_f64; 3];
     for (i, member) in members.iter().enumerate() {
         member_index.entry(member.image_id.0.clone()).or_insert(i);
         member_index.entry(member.entity_id.0.clone()).or_insert(i);
-        let extent = member.volume_transform.max_physical_extent;
-        let extent = if extent > 0.0 { extent } else { 1.0 };
-        max_physical_extent = max_physical_extent.max(extent);
-        max_physical_y = max_physical_y.max(member.volume_transform.model[5] as f64 * extent);
+        if let Some(level0) = member.levels.first() {
+            let shape = [level0.shape[4], level0.shape[3], level0.shape[2]];
+            for (max, extent) in max_member_shape.iter_mut().zip(shape) {
+                *max = max.max(extent as f64);
+            }
+        }
     }
 
     DatasetDerivedState {
-        volume_transforms,
         active_layout,
         members,
         member_index,
-        max_physical_extent,
-        max_physical_y,
+        frame: DeclaredFrame::of(manifest),
+        max_member_shape,
     }
 }
 
@@ -3694,38 +3346,6 @@ mod tests {
     }
 
     #[test]
-    fn visible_content_bounds_include_all_visible_collection_members() {
-        let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_collection_dataset_opened(
-            "collection",
-            "collection",
-            vec![("m1", [0.0, 0.0]), ("m2", [300.0, 100.0])],
-            [1, 1, 5, 64, 32],
-            [1, 1, 1, 32, 32],
-        );
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-
-        let bounds = scene.visible_content_bounds_2d().unwrap();
-        assert_eq!(
-            bounds,
-            VisibleContentBounds2D {
-                min_x: 0.0,
-                min_y: 0.0,
-                max_x: 332.0,
-                max_y: 164.0,
-                max_depth: 5,
-            },
-        );
-
-        scene
-            .dataset_settings
-            .get_mut(&DatasetId("collection".into()))
-            .unwrap()
-            .visible = false;
-        assert_eq!(scene.visible_content_bounds_2d(), None);
-    }
-
-    #[test]
     fn multi_member_aabb_culling() {
         // Two members side-by-side, each 256x256 in XY. Camera at origin
         // should see member at [0,0] but not the one at [10000, 0].
@@ -3841,11 +3461,15 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         scene.set_mode_3d();
         let id = DatasetId::from("ds1");
-        let (member, shape) = scene.annotation_member(&id).unwrap();
-        let center = [shape[0] / 2.0, shape[1] / 2.0, shape[2] / 2.0];
-        let world = scene.annotation_world_point(member, shape, center);
-        let (fwd, _) = scene.rendering_transform(member);
-        let corners = fwd.world_corners();
+        let member = &scene.derived[&id].members[0];
+        let level0 = &member.levels[0];
+        let center = [
+            level0.shape[4] as f64 / 2.0,
+            level0.shape[3] as f64 / 2.0,
+            level0.shape[2] as f64 / 2.0,
+        ];
+        let world = scene.annotation_world_point_for(&id, center).unwrap();
+        let corners = scene.rendering_transform(&id, member).world_corners();
         let mut lo = [f64::MAX; 3];
         let mut hi = [f64::MIN; 3];
         for corner in &corners {
@@ -4123,9 +3747,8 @@ mod tests {
             .expect("derived state");
         for member in &derived.members {
             let vt = VolumeTransform {
-                model: scene.member_world_matrix(member),
+                model: scene.member_world_matrix(&DatasetId("p".into()), member),
                 inv_model: [0.0; 16],
-                max_physical_extent: 1.0,
             };
             for corner in vt.world_corners() {
                 expected.add_point(corner);
@@ -4166,13 +3789,11 @@ mod tests {
 
         let mut members_seen = 0;
         for ds in ["solo", "collection"] {
-            let derived = scene
-                .derived
-                .get(&DatasetId(ds.into()))
-                .expect("derived state");
+            let id = DatasetId(ds.into());
+            let derived = scene.derived.get(&id).expect("derived state");
             for member in &derived.members {
-                let wrapper = scene.member_world_matrix(member);
-                let canonical = scene.rendering_transform(member).0.model;
+                let wrapper = scene.member_world_matrix(&id, member);
+                let canonical = scene.rendering_transform(&id, member).model;
                 for i in 0..16 {
                     assert!(
                         (wrapper[i] - canonical[i]).abs() < 1e-6,
@@ -4196,7 +3817,7 @@ mod tests {
     /// the identity (within fp epsilon) — picking/upload run the inverse, the
     /// render runs the forward, so a broken round-trip would desync them. Check
     /// it for an offset, anisotropic member inside a multi-dataset scene (the
-    /// hardest case: non-zero translation + global correction + top-align).
+    /// hardest case: a non-zero translation, scaled into a shared world space).
     #[test]
     fn rendering_transform_forward_inverse_round_trips_to_identity() {
         let mut scene = Scene::new([800, 600]);
@@ -4233,13 +3854,11 @@ mod tests {
         ];
 
         for ds in ["a", "b"] {
-            let derived = scene
-                .derived
-                .get(&DatasetId(ds.into()))
-                .expect("derived state");
+            let id = DatasetId(ds.into());
+            let derived = scene.derived.get(&id).expect("derived state");
             for member in &derived.members {
-                let (fwd, inv) = scene.rendering_transform(member);
-                let composed = mul(&fwd.model, &inv.inv_model);
+                let transform = scene.rendering_transform(&id, member);
+                let composed = mul(&transform.model, &transform.inv_model);
                 for i in 0..16 {
                     assert!(
                         (composed[i] - identity[i]).abs() < 1e-5,
@@ -4255,9 +3874,9 @@ mod tests {
 
     /// Open a 512-voxel-cube dataset ("big") next to a two-group collection whose
     /// groups are 256 voxels across ("collection", first group at the layout origin,
-    /// second offset). With isotropic unit spacing the collection's global
-    /// correction is a real 0.5 and its top-align term is (512-200)/512 —
-    /// non-trivial placement on every axis this module corrects.
+    /// second offset). With isotropic unit spacing the collection measures a
+    /// real 0.5 of world space and its top row sits (512-200)/512 above its
+    /// bottom: non-trivial placement on every axis.
     fn scene_with_big_and_collection() -> Scene {
         let mut scene = Scene::new([800, 600]);
         scene.apply(
@@ -4293,17 +3912,15 @@ mod tests {
         let scene = scene_with_big_and_collection();
 
         for ds in ["big", "collection"] {
-            let derived = scene
-                .derived
-                .get(&DatasetId(ds.into()))
-                .expect("derived state");
+            let id = DatasetId(ds.into());
+            let derived = scene.derived.get(&id).expect("derived state");
             let first = derived.members.first().expect("first member");
             assert_eq!(
                 first.position,
                 [0.0, 0.0],
                 "fixture invariant: first member sits at the layout origin"
             );
-            let canonical = scene.rendering_transform(first).0.model;
+            let canonical = scene.rendering_transform(&id, first).model;
             let dataset = scene.dataset_model_matrix(ds);
             for i in 0..16 {
                 assert!(
@@ -4316,12 +3933,12 @@ mod tests {
             }
         }
 
-        // The collection is half the physical size of "big": its correction is a
-        // real 0.5 and it is top-aligned below the taller dataset's rim.
+        // The collection is half the physical size of "big", and both start at
+        // the physical origin, so their top rows meet at the taller one's rim.
         let collection = scene.dataset_model_matrix("collection");
         assert!(
             (collection[0] - 0.5).abs() < 1e-6,
-            "global correction should halve the collection's X scale, got {}",
+            "the collection should measure half of big in X, got {}",
             collection[0]
         );
         assert!(
@@ -4331,17 +3948,13 @@ mod tests {
         );
         assert!(
             (collection[13] - (512.0 - 200.0) / 512.0).abs() < 1e-6,
-            "top-align term missing or wrong: {}",
+            "the collection's top row should sit at big's: {}",
             collection[13]
         );
-        // "big" attains the global max: correction 1, no top-align shift.
+        // "big" is the largest member, so it measures one, from the bottom.
         let big = scene.dataset_model_matrix("big");
         assert!((big[0] - 1.0).abs() < 1e-6, "big X scale: {}", big[0]);
-        assert!(
-            big[13].abs() < 1e-6,
-            "big top-align should be 0: {}",
-            big[13]
-        );
+        assert!(big[13].abs() < 1e-6, "big should start at 0: {}", big[13]);
     }
 
     /// The dataset-level inverse must be the render path's inverse (for an
@@ -4371,12 +3984,10 @@ mod tests {
         ];
 
         for ds in ["big", "collection"] {
-            let derived = scene
-                .derived
-                .get(&DatasetId(ds.into()))
-                .expect("derived state");
+            let id = DatasetId(ds.into());
+            let derived = scene.derived.get(&id).expect("derived state");
             let first = derived.members.first().expect("first member");
-            let canonical_inv = scene.rendering_transform(first).1.inv_model;
+            let canonical_inv = scene.rendering_transform(&id, first).inv_model;
             let inv = scene.dataset_inv_model_matrix(ds);
             for i in 0..16 {
                 assert!(
@@ -4401,72 +4012,29 @@ mod tests {
         }
     }
 
-    /// `volume_diagonal` must be the diagonal of the corrected render scale,
-    /// the size the volume is drawn at, not the uncorrected unit-cube size.
+    /// `volume_diagonal` is the world-space diagonal of everything visible,
+    /// the box a framed volume camera fits, so it doesn't depend on which
+    /// dataset a map yields first.
     #[test]
-    fn volume_diagonal_is_the_corrected_scale_diagonal() {
-        // Alone in the scene, the collection needs no correction: the diagonal is
-        // its anisotropic normalized-cube diagonal.
-        let mut scene = Scene::new([800, 600]);
-        scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
-                "collection",
-                "collection",
-                vec![("m1", [0.0, 0.0]), ("m2", [256.0, 128.0])],
-                [1, 1, 4, 200, 256],
-                [1, 1, 1, 128, 128],
-            ))
-            .into(),
-        );
-        let collection_alone: f64 =
-            (1.0f64 + (200.0f64 / 256.0).powi(2) + (4.0f64 / 256.0).powi(2)).sqrt();
-        assert!(
-            (scene.volume_diagonal() - collection_alone).abs() < 1e-6,
-            "uncorrected diagonal wrong: {}",
-            scene.volume_diagonal()
-        );
+    fn volume_diagonal_is_the_diagonal_of_everything_visible() {
+        let diagonal = |b: WorldBox| {
+            (0..3)
+                .map(|i| (b.max[i] - b.min[i]).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        let mut scene = scene_with_big_and_collection();
+        let expected = diagonal(scene.visible_bounds().unwrap().world);
+        assert!((scene.volume_diagonal() - expected).abs() < 1e-12);
 
-        // Opening a physically larger dataset re-normalizes the scene.
-        // Whichever dataset happens to be first, the diagonal must equal the
-        // diagonal of ITS corrected render scale (the diagonal terms of
-        // rendering_transform's forward model).
-        scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
-                "big",
-                "big",
-                1,
-                [1, 1, 10, 512, 512],
-                [1, 1, 1, 128, 128],
-                1,
-            ))
-            .into(),
-        );
-        let first = scene
-            .derived
-            .values()
-            .next()
-            .and_then(|d| d.members.first())
-            .expect("first member");
-        let rt = scene.rendering_transform(first).0.model;
-        let expected =
-            ((rt[0] as f64).powi(2) + (rt[5] as f64).powi(2) + (rt[10] as f64).powi(2)).sqrt();
-        assert!(
-            (scene.volume_diagonal() - expected).abs() < 1e-6,
-            "corrected diagonal drifted from render scale: {} vs {}",
-            scene.volume_diagonal(),
-            expected
-        );
-
-        // Deterministic correction!=1 coverage (independent of map order):
-        // through the dataset-level matrix, the collection's corrected diagonal is
-        // exactly half its standalone diagonal.
-        let m = scene.dataset_model_matrix("collection");
-        let collection_diag =
-            ((m[0] as f64).powi(2) + (m[5] as f64).powi(2) + (m[10] as f64).powi(2)).sqrt();
-        assert!(
-            (collection_diag - 0.5 * collection_alone).abs() < 1e-6,
-            "collection's corrected diagonal should be half its standalone one: {collection_diag}"
-        );
+        scene
+            .dataset_settings
+            .get_mut(&DatasetId("big".into()))
+            .unwrap()
+            .visible = false;
+        let collection = diagonal(scene.dataset_world_bounds("collection").unwrap());
+        assert!((scene.volume_diagonal() - collection).abs() < 1e-12);
+        assert!(collection < expected, "big held the collection inside it");
     }
 
     /// Absent-dataset fallbacks: identity matrices and a 1.0 diagonal, both on
@@ -4495,7 +4063,7 @@ mod tests {
     }
 
     /// `dataset_world_bounds` is folded directly from
-    /// `rendering_transform(member).0.world_corners()`. Assert it returns finite,
+    /// `rendering_transform(member).world_corners()`. Assert it returns finite,
     /// sensible bounds that match recomputing that exact fold — the same AABB the
     /// renderer's transform yields, with no second, drifting derivation.
     #[test]
@@ -4521,7 +4089,8 @@ mod tests {
             if member.levels.is_empty() {
                 continue;
             }
-            for corner in scene.rendering_transform(member).0.world_corners() {
+            let id = DatasetId("p".into());
+            for corner in scene.rendering_transform(&id, member).world_corners() {
                 expected.add_point(corner);
             }
         }
@@ -4542,18 +4111,19 @@ mod tests {
 
     #[test]
     fn fit_camera_to_dataset_centers_slice_on_voxel_xy_midpoint() {
-        // The Slice camera lives in voxel space (see ray_pick), so the 2D fit
-        // centers on the voxel midpoint [W/2, H/2]. The normalized midpoint
-        // (~0.5) would frame a sub-pixel speck at the origin.
+        // The Slice camera lives in the scene frame, which a lone dataset's
+        // samples measure, so the 2D fit centers on [W/2, H/2]. The
+        // normalized midpoint (~0.5) would frame a sub-pixel speck at the
+        // origin.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1); // 256x256 XY
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let VoxBox {
+        let PlaneBox {
             min: min2,
             max: max2,
         } = scene
-            .dataset_voxel_bounds("ds1")
+            .dataset_plane_bounds("ds1")
             .expect("known dataset has voxel bounds");
         let mid_x = (min2[0] + max2[0]) / 2.0;
         let mid_y = (min2[1] + max2[1]) / 2.0;
@@ -4743,7 +4313,7 @@ mod tests {
     }
 
     #[test]
-    fn dataset_voxel_bounds_is_origin_to_voxel_extent() {
+    fn dataset_plane_bounds_is_origin_to_voxel_extent() {
         // A single image of shape [1,1,Z,H,W] at the origin yields
         // [0,0,0]..[W,H,Z], whose XY rect is the AABB the slice-mode ray pick
         // and chunk culling test against.
@@ -4759,8 +4329,8 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let VoxBox { min, max } = scene
-            .dataset_voxel_bounds("ds1")
+        let PlaneBox { min, max } = scene
+            .dataset_plane_bounds("ds1")
             .expect("known dataset has voxel bounds");
         for v in min.iter().chain(max.iter()) {
             assert!(v.is_finite(), "non-finite voxel bound leaked: {v}");
@@ -4780,7 +4350,7 @@ mod tests {
     #[test]
     fn dataset_fit_bounds_follows_the_camera_space() {
         // The box a Home move frames must be the one the viewer's own fit
-        // uses: voxel space for the slice camera, normalized world space for 3D.
+        // uses: the scene frame for the slice camera, normalized world space for 3D.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1",
@@ -4804,11 +4374,11 @@ mod tests {
     }
 
     #[test]
-    fn dataset_voxel_bounds_none_for_unknown_id() {
+    fn dataset_plane_bounds_none_for_unknown_id() {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert!(scene.dataset_voxel_bounds("nope").is_none());
+        assert!(scene.dataset_plane_bounds("nope").is_none());
     }
 
     #[test]
@@ -5560,16 +5130,15 @@ mod tests {
     }
 
     #[test]
-    fn per_dataset_extent_maxima_match_member_folds() {
+    fn per_dataset_member_maxima_match_member_folds() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(
-            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
-                "small",
-                "small",
-                1,
-                [1, 1, 8, 128, 128],
+            DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
+                "mixed",
+                "mixed",
+                vec![("m1", [0.0, 0.0]), ("m2", [300.0, 0.0])],
+                [1, 1, 8, 128, 96],
                 [1, 1, 8, 64, 64],
-                1,
             ))
             .into(),
         );
@@ -5585,40 +5154,20 @@ mod tests {
             .into(),
         );
 
-        let fold_extent = |members: &[MemberState]| {
-            members
-                .iter()
-                .map(|m| {
-                    let e = m.volume_transform.max_physical_extent;
-                    if e > 0.0 { e } else { 1.0 }
-                })
-                .fold(0.0_f64, f64::max)
-        };
-        let fold_y = |members: &[MemberState]| {
-            members
-                .iter()
-                .map(|m| {
-                    let t = &m.volume_transform;
-                    let e = if t.max_physical_extent > 0.0 {
-                        t.max_physical_extent
-                    } else {
-                        1.0
-                    };
-                    t.model[5] as f64 * e
-                })
-                .fold(0.0_f64, f64::max)
-        };
-
-        let mut expected_extent = 0.0_f64;
-        let mut expected_y = 0.0_f64;
         for derived in scene.derived.values() {
-            assert_eq!(derived.max_physical_extent, fold_extent(&derived.members));
-            assert_eq!(derived.max_physical_y, fold_y(&derived.members));
-            expected_extent = expected_extent.max(derived.max_physical_extent);
-            expected_y = expected_y.max(derived.max_physical_y);
+            let mut expected = [0.0_f64; 3];
+            for member in &derived.members {
+                let shape = member.levels[0].shape;
+                for (max, extent) in expected.iter_mut().zip([shape[4], shape[3], shape[2]]) {
+                    *max = max.max(extent as f64);
+                }
+            }
+            assert_eq!(derived.max_member_shape, expected);
         }
-        assert_eq!(scene.global_max_physical_extent(), expected_extent);
-        assert_eq!(scene.global_max_physical_y(), expected_y);
+        // Unit spacing and no units: the largest member extent is large's
+        // 4096 rows, and world space measures it as one.
+        let large = scene.dataset_world_bounds("large").unwrap();
+        assert!((large.max[1] - large.min[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -5626,7 +5175,7 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_grouped_collection_opened("coll", 3, 5);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        // 3D mode so the global correction + top-alignment terms are exercised.
+        // 3D mode so placement into world space is exercised.
         scene.set_mode_3d();
 
         let ids = scene.member_render_ids("coll");
@@ -5636,10 +5185,11 @@ mod tests {
         assert_eq!(ids.len(), derived.members.len());
         assert_eq!(flat.len(), derived.members.len() * 32);
 
+        let id = DatasetId("coll".into());
         for (i, member) in derived.members.iter().enumerate() {
             assert_eq!(ids[i], member.image_id.0);
-            let fwd = scene.member_world_matrix(member);
-            let inv = scene.rendering_transform(member).1.inv_model;
+            let fwd = scene.member_world_matrix(&id, member);
+            let inv = scene.rendering_transform(&id, member).inv_model;
             assert_eq!(&flat[i * 32..i * 32 + 16], &fwd[..]);
             assert_eq!(&flat[i * 32 + 16..i * 32 + 32], &inv[..]);
         }
@@ -5715,11 +5265,12 @@ mod tests {
                 .iter()
                 .map(|m| m.image_id.0.clone())
                 .collect();
+            let dataset = DatasetId("coll".into());
             best_of_3(|| {
                 for id in &ids {
                     let member = derived.member_by_id(id).unwrap();
-                    let (fwd, inv) = scene.rendering_transform(member);
-                    std::hint::black_box((fwd.model[12], inv.inv_model[12]));
+                    let transform = scene.rendering_transform(&dataset, member);
+                    std::hint::black_box((transform.model[12], transform.inv_model[12]));
                 }
             })
         };

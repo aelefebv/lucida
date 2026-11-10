@@ -7,6 +7,7 @@ import {
 import {
   SAVED_VIEW_VERSION,
   type Camera,
+  type CameraSpace,
   type ChannelSettings,
   type DatasetDisplaySettings,
   type SavedView,
@@ -120,6 +121,25 @@ describe("restoreAnnotationView (light tier)", () => {
     expect(getPresenceCamera()).toMatchObject({ mode: "slice", center: [123, 456], zoom: 8 });
     expect(result.applied).toEqual({ zStart: 5, zEnd: 6, t: 2 });
     expect(result.notice).toBeNull();
+  });
+
+  it("hands the scene the spaces the camera was saved in", () => {
+    const { scene } = makeScene({ volumeShapes: { [DS]: new Uint32Array([100, 512, 512]) } });
+    const imported: string[] = [];
+    const importPresence = scene.import_presence.bind(scene);
+    scene.import_presence = (json: string) => {
+      imported.push(json);
+      importPresence(json);
+    };
+    const camera_space: CameraSpace = {
+      frame: { spacing: [1, 1, 1], origin: [0, 0, 0] },
+      world: { extent: 64, top: 64 },
+    };
+
+    restoreAnnotationView({ scene, view: viewWith({ camera_space }), datasetId: DS });
+
+    expect(imported).toHaveLength(1);
+    expect((JSON.parse(imported[0]) as { camera_space: unknown }).camera_space).toEqual(camera_space);
   });
 
   it("switches camera MODE (2D->3D) before importing the camera", () => {

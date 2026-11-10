@@ -41,6 +41,7 @@ function mockScene(presenceView: unknown) {
       }),
     dataset_ids: () => JSON.stringify(["wds-a"]),
     available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+    camera_space: () => "null",
   } as never;
 }
 

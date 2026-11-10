@@ -39,17 +39,18 @@ export function frameOnCanvas(scene: WasmScene, canvas: HTMLCanvasElement): void
   noteSceneWrite();
 }
 
-/** Fit the slice camera to the voxel rect `region` on `canvas`, as a click on
- *  a collection's group does. */
+/** Fit the slice camera to `region`, a rect in `datasetId`'s frame, on
+ *  `canvas`, as a click on a collection's group does. */
 export function frameRegionOnCanvas(
   scene: WasmScene,
   canvas: HTMLCanvasElement,
+  datasetId: string,
   region: { min: [number, number]; max: [number, number] },
 ): void {
   const dpr = window.devicePixelRatio || 1;
   assertCanvasSize(scene, Math.round(canvas.clientWidth * dpr), Math.round(canvas.clientHeight * dpr), dpr);
   guardedSceneCall("frame_region", scene, () =>
-    scene.frame_region(region.min[0], region.min[1], region.max[0], region.max[1]),
+    scene.frame_region(datasetId, region.min[0], region.min[1], region.max[0], region.max[1]),
   );
   noteSceneWrite();
 }

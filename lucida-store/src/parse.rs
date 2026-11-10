@@ -12,7 +12,7 @@ use object_store::path::Path;
 use serde::Deserialize;
 
 use lucida_content::normalize::normalize_f64_to_5d;
-use lucida_content::{ChannelInfo, LabelColor, LabelName};
+use lucida_content::{ChannelInfo, LabelColor, LabelName, PhysicalSpace};
 
 use crate::ChunkKeyEncoding;
 use crate::backend::StoreError;
@@ -425,6 +425,8 @@ pub(crate) struct ParsedMultiscales {
     /// coarser level, kept verbatim. `None` when the writer declared none or
     /// left it blank.
     pub downsampling_method: Option<String>,
+    /// The units the axes name and where level 0's origin sits.
+    pub space: PhysicalSpace,
 }
 
 /// Parse OME multiscales from a root zarr.json value.
@@ -471,8 +473,10 @@ pub(crate) fn parse_multiscales(
     // A scale on the multiscale itself applies after each level's own, so it
     // multiplies every level's.
     let shared_scale = declared_scale(ms, &axes_names);
+    let shared_translation = declared_translation(ms, &axes_names);
 
     let mut level_entries: Vec<LevelEntry> = Vec::new();
+    let mut origin = [0.0; 3];
     for ds in datasets_arr {
         let path = ds
             .get("path")
@@ -484,6 +488,15 @@ pub(crate) fn parse_multiscales(
 
         let own = declared_scale(ds, &axes_names); // [T, C, Z, Y, X]
         let scale = std::array::from_fn(|axis| own[axis] * shared_scale[axis]);
+        if level_entries.is_empty() {
+            // The multiscale's transforms apply after level 0's, so its scale
+            // stretches level 0's translation before its own is added.
+            let own = declared_translation(ds, &axes_names);
+            origin = std::array::from_fn(|i| {
+                let axis = i + 2;
+                own[axis] * shared_scale[axis] + shared_translation[axis]
+            });
+        }
         level_entries.push(LevelEntry { path, scale });
     }
 
@@ -500,11 +513,33 @@ pub(crate) fn parse_multiscales(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    let space = PhysicalSpace {
+        units: ["z", "y", "x"].map(|name| axis_unit(&axes_json, name)),
+        origin,
+    };
+
     Ok(ParsedMultiscales {
         axes_names,
         level_entries,
         downsampling_method,
+        space,
     })
+}
+
+/// The unit the axis called `name` declares, or `None` when it declares none.
+fn axis_unit(axes_json: &[serde_json::Value], name: &str) -> Option<String> {
+    axes_json
+        .iter()
+        .find(|axis| {
+            axis.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })?
+        .get("unit")?
+        .as_str()
+        .map(str::trim)
+        .filter(|unit| !unit.is_empty())
+        .map(str::to_string)
 }
 
 /// The `scale` transform among `node`'s `coordinateTransformations`, as
@@ -525,6 +560,28 @@ fn declared_scale(node: &serde_json::Value, axes_names: &[String]) -> [f64; 5] {
         }
     }
     scale
+}
+
+/// The `translation` transform among `node`'s `coordinateTransformations`, as
+/// `[T, C, Z, Y, X]`, or all zeros when it declares none.
+fn declared_translation(node: &serde_json::Value, axes_names: &[String]) -> [f64; 5] {
+    let mut translation = [0.0_f64; 5];
+    for ct in node
+        .get("coordinateTransformations")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        if ct.get("type").and_then(|v| v.as_str()) == Some("translation")
+            && let Some(t) = ct.get("translation").and_then(|v| v.as_array())
+        {
+            let raw: Vec<f64> = t.iter().filter_map(|v| v.as_f64()).collect();
+            if raw.len() == axes_names.len() && raw.iter().all(|v| v.is_finite()) {
+                translation = normalize_f64_to_5d(&raw, axes_names, 0.0);
+            }
+        }
+    }
+    translation
 }
 
 /// Parse per-channel display info from the OME `omero.channels` block of a
@@ -980,6 +1037,60 @@ mod tests {
         assert_eq!(parsed.level_entries[1].path, "1");
         assert_eq!(parsed.level_entries[1].scale, [1.0, 1.0, 4.0, 1.0, 1.0]);
         assert_eq!(parsed.downsampling_method, None);
+        assert!(parsed.space.is_unset());
+    }
+
+    #[test]
+    fn parse_multiscales_reads_units_and_the_level_zero_origin() {
+        let root_json = serde_json::json!({
+            "attributes": {
+                "ome": {
+                    "multiscales": [{
+                        "axes": [
+                            {"name": "c", "type": "channel"},
+                            {"name": "z", "type": "space", "unit": "nanometer"},
+                            {"name": "y", "type": "space", "unit": "micrometer"},
+                            {"name": "x", "type": "space", "unit": " micrometer "}
+                        ],
+                        "datasets": [
+                            {
+                                "path": "0",
+                                "coordinateTransformations": [
+                                    {"type": "scale", "scale": [1.0, 2.0, 0.5, 0.5]},
+                                    {"type": "translation", "translation": [0.0, 3.0, 10.0, 20.0]}
+                                ]
+                            },
+                            {
+                                "path": "1",
+                                "coordinateTransformations": [
+                                    {"type": "scale", "scale": [1.0, 4.0, 1.0, 1.0]},
+                                    {"type": "translation", "translation": [0.0, 99.0, 99.0, 99.0]}
+                                ]
+                            }
+                        ],
+                        "coordinateTransformations": [
+                            {"type": "scale", "scale": [1.0, 1.0, 2.0, 2.0]},
+                            {"type": "translation", "translation": [0.0, 0.0, 1.0, -1.0]}
+                        ]
+                    }]
+                }
+            }
+        });
+
+        let parsed = parse_multiscales(&root_json, "").unwrap();
+
+        assert_eq!(
+            parsed.space.units,
+            [
+                Some("nanometer".to_string()),
+                Some("micrometer".to_string()),
+                Some("micrometer".to_string()),
+            ]
+        );
+        // Level 0's translation, stretched by the multiscale's scale, plus the
+        // multiscale's own translation. Coarser levels' translations are not
+        // the image's origin.
+        assert_eq!(parsed.space.origin, [3.0, 21.0, 39.0]);
     }
 
     fn multiscales_with_type(type_value: serde_json::Value) -> serde_json::Value {

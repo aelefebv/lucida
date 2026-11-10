@@ -67,6 +67,12 @@ vi.mock("lucida-core", () => {
     pinnable_levels() {
       return Uint32Array.from([0]);
     }
+    dataset_has_physical_scale() {
+      return false;
+    }
+    dataset_placement() {
+      return new Float64Array([0, 0, 0, 1, 1, 1]);
+    }
     all_dataset_settings() {
       const out: Record<string, unknown> = {};
       for (const id of Object.keys(this.doc.manifests ?? {})) {
@@ -140,6 +146,9 @@ vi.mock("lucida-core", () => {
         dataset_order: JSON.parse(this.dataset_order()),
         dataset_settings: settings,
       });
+    }
+    camera_space() {
+      return "null";
     }
     import_presence(json: string) {
       const presence = JSON.parse(json) as {

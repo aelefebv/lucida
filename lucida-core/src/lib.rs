@@ -9,6 +9,7 @@ pub mod framing;
 pub(crate) mod gzip;
 pub(crate) mod mat4;
 pub mod minimap;
+pub mod placement;
 pub mod protocol;
 pub mod query;
 pub mod ray;

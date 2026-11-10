@@ -136,7 +136,7 @@ export function levelZeroPosition(
 /**
  * A slice layer member under the point, at its member-local UV. A label
  * overlay's hit carries the entity whose image it overlays, and that image's
- * level-0 extent its quad spans.
+ * level-0 extent in samples its quad spans.
  */
 export interface SliceHit {
   memberId: string;
@@ -169,10 +169,11 @@ export function sliceHits(
     const v = ((py - msg.canvasH / 2) / msg.zoom + msg.cy - (layer.offsetY ?? 0)) / layer.dataH;
     if (layer.isLabel) {
       if (inUnit(u) && inUnit(v)) {
+        const [dataW, dataH] = layer.labelSamples ?? [layer.dataW, layer.dataH];
         hits.push({
           memberId: layer.datasetId,
           uv: [u, v],
-          label: { entityId: layer.entityId, dataW: layer.dataW, dataH: layer.dataH },
+          label: { entityId: layer.entityId, dataW, dataH },
         });
       }
       continue;
