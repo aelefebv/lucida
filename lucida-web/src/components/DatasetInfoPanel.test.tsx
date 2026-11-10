@@ -128,6 +128,32 @@ describe("DatasetInfoPanel", () => {
     expect(getHealth).toHaveBeenCalledTimes(2);
   });
 
+  it("shows the color the dataset declares beside each channel's name, when it is one", async () => {
+    const declared = structuredClone(dataset);
+    declared.manifest.images[0].multiscale.levels[0].shape = [1, 4, 1, 64, 64];
+    declared.manifest.images[0].multiscale.channel_infos = [
+      { label: "First", color: "00FFFF" },
+      { label: "Channel 2", color: "#ff00ff" },
+      { label: "Third", color: "not-a-color" },
+    ];
+    render(<DatasetInfoPanel visible workspaceId="ws" dataset={declared} getHealth={async () => health()} />);
+
+    const fact = screen.getByText("4 channels").closest(".lc-info-fact")!;
+    const rows = within(fact as HTMLElement).getAllByRole("listitem");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "First00FFFF",
+      "Channel 2#ff00ff",
+      "Third",
+      "Channel 4",
+    ]);
+    const swatches = rows.map(
+      (row) => row.querySelector<HTMLElement>(".lc-info-swatch")?.style.backgroundColor ?? null,
+    );
+    expect(swatches[2]).toBeNull();
+    expect(swatches[3]).toBeNull();
+    expect(swatches.slice(0, 2).every((color) => color)).toBe(true);
+  });
+
   it("states the precision a type is drawn at when a float32 can't hold all of it", async () => {
     const dataType = (data_type: string) => {
       cleanup();

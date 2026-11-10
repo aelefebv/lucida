@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
+use lucida_content::ChannelInfo;
 use lucida_core::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::ViewportCommand;
@@ -9,7 +10,7 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
     BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
-    RenderMode, Scene,
+    RenderMode, Scene, declared_channels,
 };
 use lucida_core::view::ViewState;
 use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
@@ -1657,12 +1658,14 @@ fn layer_states(scene: &Scene) -> Vec<LayerState> {
                 &default_settings
             };
             let shown = layer.channel_indices();
+            let declared = declared_channels(manifest);
             let channels = (0..layer.channel_count)
                 .map(|channel| {
                     channel_state(
                         settings,
                         channel,
                         layer.channel_count,
+                        declared,
                         shown.contains(&channel),
                     )
                 })
@@ -1695,6 +1698,7 @@ fn channel_state(
     settings: &DatasetDisplaySettings,
     channel: u32,
     channel_count: u32,
+    declared: &[ChannelInfo],
     shown: bool,
 ) -> ChannelState {
     let default_settings;
@@ -1702,7 +1706,11 @@ fn channel_state(
         settings
     } else {
         default_settings = ChannelSettings {
-            colormap: Colormap::default_for_channel(channel as usize, channel_count as usize),
+            colormap: Colormap::default_for_channel(
+                channel as usize,
+                channel_count as usize,
+                declared,
+            ),
             ..Default::default()
         };
         &default_settings

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use lucida_content::ChannelInfo;
 use lucida_core::DatasetId;
 use lucida_core::camera::{Camera, Framing};
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
@@ -1614,7 +1615,7 @@ pub fn contrast_window(values: &[f64]) -> Result<(f64, f64), CliError> {
 }
 
 /// Write `pins` into the view for `dataset_id`, on the dataset and on each
-/// of its `channel_count` channels.
+/// of its `channel_count` channels, whose metadata is `declared`.
 ///
 /// A pinned window turns the page's contrast fit off for the dataset. The
 /// fit samples whatever is resident when it runs, so two runs of one dataset
@@ -1625,6 +1626,7 @@ pub fn pin_display(
     view: &mut SavedView,
     dataset_id: &DatasetId,
     channel_count: usize,
+    declared: &[ChannelInfo],
     pins: DisplayPins,
 ) {
     if pins.is_empty() {
@@ -1643,10 +1645,10 @@ pub fn pin_display(
     if pins.contrast.is_some() || pins.colormap.is_some() {
         let channel_count = channel_count.max(1);
         for index in 0..channel_count {
-            let channel = settings.ensure_channel(index, channel_count);
+            let channel = settings.ensure_channel(index, channel_count, declared);
             channel.colormap = pins
                 .colormap
-                .unwrap_or_else(|| Colormap::default_for_channel(index, channel_count));
+                .unwrap_or_else(|| Colormap::default_for_channel(index, channel_count, declared));
             if let Some((min, max)) = pins.contrast {
                 channel.contrast_min = min;
                 channel.contrast_max = max;
@@ -5211,6 +5213,7 @@ mod tests {
             &mut view,
             &id,
             2,
+            &[],
             DisplayPins {
                 contrast: Some((1.0, 3.0)),
                 ..Default::default()
@@ -5223,11 +5226,49 @@ mod tests {
         assert_eq!(settings.channel_settings.len(), 2);
         for (index, channel) in settings.channel_settings.iter().enumerate() {
             assert_eq!((channel.contrast_min, channel.contrast_max), (1.0, 3.0));
-            assert_eq!(channel.colormap, Colormap::default_for_channel(index, 2));
+            assert_eq!(
+                channel.colormap,
+                Colormap::default_for_channel(index, 2, &[])
+            );
         }
         assert!(settings.visible);
         assert_eq!(settings.render_mode, RenderMode::Translucent);
         assert_eq!(settings.detail_level_override, None);
+    }
+
+    /// A pinned window keeps each channel in the colormap the page opens it
+    /// with, which follows the color the dataset declares for it.
+    #[test]
+    fn a_pinned_window_keeps_the_colormaps_the_dataset_declares() {
+        let id = volume_id();
+        let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, None);
+        let declared = [
+            ChannelInfo {
+                label: "a".into(),
+                color: Some("00FFFF".into()),
+            },
+            ChannelInfo {
+                label: "b".into(),
+                color: None,
+            },
+        ];
+        pin_display(
+            &mut view,
+            &id,
+            2,
+            &declared,
+            DisplayPins {
+                contrast: Some((1.0, 3.0)),
+                ..Default::default()
+            },
+        );
+
+        let colormaps: Vec<Colormap> = view.dataset_settings[&id]
+            .channel_settings
+            .iter()
+            .map(|channel| channel.colormap)
+            .collect();
+        assert_eq!(colormaps, [Colormap::Cyan, Colormap::Green]);
     }
 
     #[test]
@@ -5238,6 +5279,7 @@ mod tests {
             &mut view,
             &id,
             3,
+            &[],
             DisplayPins {
                 colormap: Some(Colormap::Gray),
                 render_mode: Some(RenderMode::MaxIntensity),
@@ -5269,7 +5311,7 @@ mod tests {
     #[test]
     fn empty_pins_leave_the_view_alone() {
         let mut view = compose_dataset_view("gs://bucket/set.zarr", 1440, 900, None);
-        pin_display(&mut view, &volume_id(), 1, DisplayPins::default());
+        pin_display(&mut view, &volume_id(), 1, &[], DisplayPins::default());
         assert!(view.dataset_settings.is_empty());
         assert!(view.auto_contrast.is_empty());
     }
@@ -5285,6 +5327,7 @@ mod tests {
                 &mut view,
                 &id,
                 1,
+                &[],
                 DisplayPins {
                     level: Some(level),
                     ..Default::default()

@@ -509,7 +509,7 @@ mod tests {
                 "three",
                 layer(
                     (0..3)
-                        .map(|i| channel(Colormap::default_for_channel(i, 3)))
+                        .map(|i| channel(Colormap::default_for_channel(i, 3, &[])))
                         .collect(),
                 ),
             ),
@@ -527,6 +527,34 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// What a payload leaves out follows the frozen table, never the seed, so a
+    /// view of a dataset that declares its channel colors carries each one
+    /// the table does not already say.
+    #[test]
+    fn a_view_seeded_from_declared_colors_carries_them() {
+        let declared: Vec<lucida_content::ChannelInfo> = ["00ffff", "00ff00", "ff00ff"]
+            .iter()
+            .map(|color| lucida_content::ChannelInfo {
+                label: String::new(),
+                color: Some(color.to_string()),
+            })
+            .collect();
+        let view = view_with(&[(
+            "three",
+            layer(
+                (0..3)
+                    .map(|i| channel(Colormap::default_for_channel(i, 3, &declared)))
+                    .collect(),
+            ),
+        )]);
+        let wire = inflate(&view.to_payload());
+        assert_eq!(
+            wire["dataset_settings"]["three"]["channel_settings"],
+            json!([{"colormap": "cyan"}, {}, {"colormap": "magenta"}])
+        );
+        assert_eq!(decoded(&view.to_payload()), view);
     }
 
     #[test]

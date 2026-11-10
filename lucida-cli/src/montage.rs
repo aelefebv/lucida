@@ -11,7 +11,7 @@ use std::io::Cursor;
 
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{ImageFormat, Rgba, RgbaImage};
-use lucida_content::DatasetId;
+use lucida_content::{ChannelInfo, DatasetId};
 use lucida_core::camera::Camera;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{ChannelSettings, Colormap, DatasetDisplaySettings};
@@ -165,13 +165,15 @@ pub fn plan_montage(
 /// sheet of a densely-labelled stack). `Some([lo, hi])` pins one **shared**
 /// window across all cells (auto off) so brightness is comparable and a clipped
 /// `lo` suppresses the background — and restores each channel's natural colormap
-/// (`default_for_channel`), which an explicit window would otherwise reset to gray.
+/// (`default_for_channel`, from the `declared` channel metadata), which an
+/// explicit window would otherwise reset to gray.
 pub fn build_cell_view(
     ds_id: &str,
     cell: &MontageCell,
     viewport: [u32; 2],
     contrast: Option<[f64; 2]>,
     channel_count: u64,
+    declared: &[ChannelInfo],
 ) -> SavedView {
     let mut view = SavedView::empty(viewport);
     view.camera = Camera::new_2d(viewport);
@@ -190,7 +192,7 @@ pub fn build_cell_view(
             let channel_count = channel_count.max(1) as usize;
             let channel_settings = (0..channel_count)
                 .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i, channel_count),
+                    colormap: Colormap::default_for_channel(i, channel_count, declared),
                     contrast_min: lo,
                     contrast_max: hi,
                     ..ChannelSettings::default()
@@ -366,7 +368,7 @@ mod tests {
             tile: 0,
             label: "Z 43".into(),
         };
-        let view = build_cell_view("wds-abc", &cell, [256, 256], None, 3);
+        let view = build_cell_view("wds-abc", &cell, [256, 256], None, 3, &[]);
         // The page fits the camera, so the cell asks for a slice and no pose.
         assert!(matches!(view.camera, Camera::Slice(_)));
         assert_eq!(view.camera.framing(), Framing::Unframed);
@@ -393,7 +395,7 @@ mod tests {
             tile: 0,
             label: "Z 11".into(),
         };
-        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]), 2);
+        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]), 2, &[]);
         let id = DatasetId("wds-x".into());
         // Auto OFF so the window is shared across all cells, not per-slice.
         assert_eq!(view.auto_contrast.get(&id), Some(&false));
@@ -405,13 +407,13 @@ mod tests {
         assert_eq!(settings.channel_settings.len(), 2);
         assert_eq!(
             settings.channel_settings[1].colormap,
-            Colormap::default_for_channel(1, 2)
+            Colormap::default_for_channel(1, 2, &[])
         );
         assert_eq!(settings.channel_settings[1].contrast_min, 60.0);
         assert_eq!(settings.channel_settings[1].contrast_max, 196.0);
 
         // A one-channel image keeps the gray it opens with.
-        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]), 1);
+        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]), 1, &[]);
         let settings = view.dataset_settings.get(&id).expect("settings");
         assert_eq!(settings.channel_settings[0].colormap, Colormap::Gray);
     }

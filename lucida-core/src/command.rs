@@ -1100,15 +1100,13 @@ impl Scene {
         dataset_id: &DatasetId,
         channel: u32,
     ) -> Option<&mut crate::scene::ChannelSettings> {
-        let channel_count = self
-            .document
-            .manifests
-            .get(dataset_id)
-            .map(|m| crate::scene::LayerExtent::of(m).c as usize);
+        let manifest = self.document.manifests.get(dataset_id);
+        let channel_count = manifest.map(|m| crate::scene::LayerExtent::of(m).c as usize);
+        let declared = manifest.map_or(&[][..], crate::scene::declared_channels);
         let settings = self.dataset_settings.get_mut(dataset_id)?;
         let channel_count = channel_count
             .unwrap_or_else(|| settings.channel_settings.len().max(channel as usize + 1));
-        Some(settings.ensure_channel(channel as usize, channel_count))
+        Some(settings.ensure_channel(channel as usize, channel_count, declared))
     }
 
     fn clamp_detail_level_override(&self, dataset_id: &DatasetId, requested: u32) -> Option<u32> {
@@ -2105,6 +2103,103 @@ mod tests {
             assert_eq!(c.contrast_max, 65535.0);
             assert_eq!(c.gamma, 1.0);
         }
+    }
+
+    /// Give every image of `opened` the channel `colors`, as an import
+    /// stamps a collection's declared colors on each of its tiles.
+    fn declare_colors(opened: &mut lucida_protocol::DatasetOpened, colors: &[&str]) {
+        for image in opened.manifest.images_mut() {
+            image.multiscale.channel_infos = colors
+                .iter()
+                .enumerate()
+                .map(|(i, color)| lucida_content::ChannelInfo {
+                    label: format!("Channel {}", i + 1),
+                    color: Some(color.to_string()),
+                })
+                .collect();
+        }
+    }
+
+    fn channel_colormaps(scene: &Scene, id: &str) -> Vec<crate::scene::Colormap> {
+        scene.dataset_settings[&DatasetId(id.into())]
+            .channel_settings
+            .iter()
+            .map(|c| c.colormap)
+            .collect()
+    }
+
+    #[test]
+    fn dataset_opened_seeds_the_colormaps_the_dataset_declares() {
+        use crate::scene::Colormap;
+        let mut scene = Scene::new([800, 600]);
+        let mut reg = test_helpers::make_dataset_opened("ds1", "test", 4);
+        declare_colors(&mut reg, &["00ffff", "00ff00", "ff00ff", "ffffff"]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(
+            channel_colormaps(&scene, "ds1"),
+            [
+                Colormap::Cyan,
+                Colormap::Green,
+                Colormap::Magenta,
+                Colormap::Gray
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collection_seeds_the_colormaps_its_tiles_declare() {
+        use crate::scene::Colormap;
+        let mut reg = test_helpers::make_collection_dataset_opened(
+            "c1",
+            "collection",
+            vec![("a", [0.0, 0.0]), ("b", [1.0, 0.0])],
+            [1, 2, 1, 64, 64],
+            [1, 1, 1, 64, 64],
+        );
+        declare_colors(&mut reg, &["ff0000", "0000ff"]);
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(
+            channel_colormaps(&scene, "c1"),
+            [Colormap::Red, Colormap::Blue]
+        );
+    }
+
+    #[test]
+    fn a_restored_document_seeds_the_colormaps_its_datasets_declare() {
+        use crate::scene::Colormap;
+        let mut source = Scene::new([800, 600]);
+        let mut reg = test_helpers::make_dataset_opened("ds1", "test", 2);
+        declare_colors(&mut reg, &["ffff00", "e98d34"]);
+        source.apply(DocumentCommand::DatasetOpened(reg).into());
+        let mut scene = Scene::new([800, 600]);
+        scene.load_document(source.document.clone());
+        assert_eq!(
+            channel_colormaps(&scene, "ds1"),
+            [Colormap::Yellow, Colormap::Red]
+        );
+    }
+
+    #[test]
+    fn a_chosen_colormap_outlives_a_reopen_of_a_dataset_that_declares_another() {
+        use crate::scene::Colormap;
+        let mut scene = Scene::new([800, 600]);
+        let mut reg = test_helpers::make_dataset_opened("ds1", "test", 2);
+        declare_colors(&mut reg, &["00ffff", "00ff00"]);
+        scene.apply(DocumentCommand::DatasetOpened(reg.clone()).into());
+        scene.apply(
+            ViewportCommand::SetChannelColormap {
+                dataset_id: "ds1".into(),
+                channel: 0,
+                colormap: Colormap::Inferno,
+            }
+            .into(),
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(
+            channel_colormaps(&scene, "ds1"),
+            [Colormap::Inferno, Colormap::Green]
+        );
     }
 
     #[test]
