@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FramePacer, MAX_INTERACTIVE_FRAMES_IN_FLIGHT } from "./framePacing.ts";
+import { BAND_TARGET_MS, BANDED_FRAME_MS, FramePacer, MAX_BANDS, MAX_INTERACTIVE_FRAMES_IN_FLIGHT, bandsFor } from "./framePacing.ts";
 import { LONG_FRAME_MS } from "./renderResolution.ts";
 
 describe("FramePacer", () => {
@@ -48,5 +48,18 @@ describe("FramePacer", () => {
 
   it("draws before any frame has finished", () => {
     expect(new FramePacer().mayDrawResidency(0, 0, true)).toBe(true);
+  });
+});
+
+describe("bandsFor", () => {
+  it("draws a frame whole until a full-quality frame has been seen to run long", () => {
+    expect(bandsFor(null)).toBe(1);
+    expect(bandsFor(BANDED_FRAME_MS)).toBe(1);
+  });
+
+  it("splits a long frame into bands of about the target, up to the most", () => {
+    expect(bandsFor(BANDED_FRAME_MS + 1)).toBe(Math.ceil((BANDED_FRAME_MS + 1) / BAND_TARGET_MS));
+    expect(bandsFor(1_000)).toBe(1_000 / BAND_TARGET_MS);
+    expect(bandsFor(11_000)).toBe(MAX_BANDS);
   });
 });

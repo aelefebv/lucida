@@ -6,7 +6,7 @@ import { TickWake } from "./invalidation.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
-import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
+import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState, marchStepScaleFor } from "./volumePath.ts";
 import { TickCoordinator } from "./pipeline/tickCoordinator.ts";
 import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
@@ -22,7 +22,7 @@ import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { subscribeAppearance } from "./theme/appearance.ts";
 import { AdaptiveResolution, cappedPixelRatioScale } from "./renderResolution.ts";
-import { FramePacer } from "./framePacing.ts";
+import { FramePacer, bandsFor } from "./framePacing.ts";
 import { wakeFrames } from "./frameClock.ts";
 import { AutoContrastFitter, type AutoContrastListener } from "./pipeline/autoContrast.ts";
 
@@ -60,6 +60,19 @@ export function cacheIdsOf(manifest: DatasetManifest | undefined, memberIds: rea
   for (const entity of manifest?.entities ?? []) ids.add(entity.id);
   for (const label of manifest?.labels ?? []) ids.add(label.image.image_id);
   return [...ids];
+}
+
+/** What a tick's frame is drawn at. */
+interface FrameQuality {
+  renderScale: number;
+  /** The adaptive resolution's share. */
+  factor: number;
+  marchStepScale: number;
+  bands: number;
+  /** Full scale, full resolution and the finest march: what a settled frame is drawn at. */
+  full: boolean;
+  /** Drawn below the quality the loop is at, which a frame after it restores. */
+  held: boolean;
 }
 
 export class RenderLoop implements TraceEnvironment {
@@ -119,6 +132,21 @@ export class RenderLoop implements TraceEnvironment {
   private _renderScale = 1.0;
   /** The render scale of the last frame drawn. */
   private drawnRenderScale = 1.0;
+  /** The adaptive resolution's share in the last frame drawn. */
+  private drawnFactor = 1.0;
+  /** An input landed since the last frame was dispatched, so the next one shows it. */
+  private inputSinceFrame = false;
+  /** The last frame dispatched at full quality: what it takes is what a settled frame costs. */
+  private fullQualitySeq = 0;
+  /**
+   * A full-quality frame has finished. The first waits for the renderer's
+   * pipelines to compile, so what it takes says nothing about the next.
+   */
+  private fullQualityFrameSeen = false;
+  /** A frame drawn in bands that has not finished, which the next input gives up. */
+  private bandedSeq: number | null = null;
+  /** The last frame given up: it stopped early, so what it took says nothing. */
+  private abandonedSeq = 0;
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
@@ -202,6 +230,7 @@ export class RenderLoop implements TraceEnvironment {
       }
     };
     this.client.onFrameDone = (frameSeq, doneAtMs) => {
+      if (this.bandedSeq !== null && frameSeq >= this.bandedSeq) this.bandedSeq = null;
       traceRecorder.noteFrameDone(frameSeq, doneAtMs);
       if (this.client.framesAwaitingDone() > 0) return;
       traceRecorder.noteFramesDrawn();
@@ -549,6 +578,14 @@ export class RenderLoop implements TraceEnvironment {
     if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
     settleSignal.restart();
     this.resolution.noteInput(this.client.lastFrameSeq());
+    this.inputSinceFrame = true;
+    // The banded frame drawing is of the view before this input, and the
+    // frame that shows the input would wait for all of it.
+    if (this.bandedSeq !== null) {
+      this.client.abandonFrame(this.bandedSeq);
+      this.abandonedSeq = this.bandedSeq;
+      this.bandedSeq = null;
+    }
     this.setDirty("interactive", input);
   }
 
@@ -562,6 +599,10 @@ export class RenderLoop implements TraceEnvironment {
     if (frame) {
       this.resolution.noteFrame(frame.frameSeq, frame.ms, this.client.lastFrameSeq());
       this.framePacer.noteFrameDone(frame.ms, performance.now());
+      if (frame.frameSeq === this.fullQualitySeq && frame.frameSeq !== this.abandonedSeq) {
+        if (this.fullQualityFrameSeen) this.resolution.noteFullQualityFrame(frame.ms);
+        this.fullQualityFrameSeen = true;
+      }
     }
     const wait = this.resolution.msUntilRestore();
     if (wait === null || this.resolutionRestoreTimer !== null) return;
@@ -723,15 +764,52 @@ export class RenderLoop implements TraceEnvironment {
     }
   }
 
-  private buildContext(): TickContext {
+  /**
+   * What the tick's frame is drawn at, when it draws one.
+   *
+   * A gesture's first frame at the viewer's interaction scale starts as low
+   * as the last full-quality frame says it must
+   * ({@link AdaptiveResolution.fitGestureStart}). An input the viewer draws
+   * at full scale, such as a scrub, is left to the adaptive resolution.
+   *
+   * The quality comes back on timers once input stops, and on a slow GPU it
+   * can come back while the frame before waits to finish, with input after
+   * that frame not yet shown. The frame that shows that input keeps the last
+   * frame's quality, and the full-quality frame follows it: drawn first, the
+   * full-quality frame would show the input as late as it takes to draw.
+   */
+  private frameQuality(drawing: boolean): FrameQuality {
+    let renderScale = this._renderScale;
+    if (drawing && this.inputSinceFrame && renderScale < 1) {
+      const marchStep = this.mode === "volume" ? marchStepScaleFor(renderScale) : 1;
+      this.resolution.fitGestureStart((renderScale * renderScale) / marchStep);
+    }
+    let factor = this.resolution.scale;
+    let held = false;
+    if (drawing && this.inputSinceFrame && (renderScale > this.drawnRenderScale || factor > this.drawnFactor)) {
+      renderScale = Math.min(renderScale, this.drawnRenderScale);
+      factor = Math.min(factor, this.drawnFactor);
+      held = true;
+    }
+    const marchStepScale = renderScale < 1 ? marchStepScaleFor(renderScale) * this.resolution.marchCoarsening : 1;
+    const full = renderScale >= 1 && factor >= 1;
+    const bands = drawing && full && this.mode === "volume" ? bandsFor(this.resolution.fullQualityMs) : 1;
+    return { renderScale, factor, marchStepScale, bands, full, held };
+  }
+
+  private buildContext(quality?: FrameQuality): TickContext {
+    const factor = quality?.factor ?? this.resolution.scale;
+    const renderScale = quality?.renderScale ?? this._renderScale;
     return {
       scene: this.session.scene!,
       datasets: this.datasets,
       client: this.client,
       canvas: this.canvas,
       mode: this.mode,
-      renderScale: this._renderScale,
-      resolutionScale: cappedPixelRatioScale(devicePixelRatio) * this.resolution.scale,
+      renderScale,
+      resolutionScale: cappedPixelRatioScale(devicePixelRatio) * factor,
+      marchStepScale: quality?.marchStepScale ?? marchStepScaleFor(renderScale),
+      bands: quality?.bands ?? 1,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
     };
@@ -805,7 +883,9 @@ export class RenderLoop implements TraceEnvironment {
       }
     }
 
-    const ctx = this.buildContext();
+    const quality = this.frameQuality(shouldRender);
+    const ctx = this.buildContext(quality);
+    const seqBefore = this.client.lastFrameSeq();
 
     // Ahead of this tick's frame, so the frame draws the failures hatched.
     const failed = this.uploader.syncFailedChunks(ctx);
@@ -829,6 +909,14 @@ export class RenderLoop implements TraceEnvironment {
 
     if (shouldRender) {
       this.drawnRenderScale = ctx.renderScale;
+      this.drawnFactor = quality.factor;
+      const seq = this.client.lastFrameSeq();
+      if (seq !== seqBefore) {
+        this.inputSinceFrame = false;
+        if (quality.full) this.fullQualitySeq = seq;
+        if (quality.bands > 1) this.bandedSeq = seq;
+      }
+      if (quality.held) this.setDirty("interactive", "render_scale");
       this.publishRenderedCaptureReady();
     }
 

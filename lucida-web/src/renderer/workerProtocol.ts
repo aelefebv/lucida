@@ -238,6 +238,13 @@ export interface VolumeRenderMultiPassMessage {
    * 1 while a gesture is drawn at a reduced scale, 1 for every other frame.
    */
   marchStepScale?: number;
+  /**
+   * Row bands to march the frame in, each its own submission, so a frame
+   * too long to wait for can be given up between bands; see
+   * {@link AbandonFrameMessage}. A frame with label layers is drawn whole.
+   * 1, or absent, draws it whole.
+   */
+  bands?: number;
   /** Echoed in the frame's {@link FrameDoneMessage}. */
   frameSeq?: number;
 }
@@ -481,6 +488,17 @@ export interface CaptureFrameMessage {
 }
 
 /**
+ * Stop drawing viewport frames up to `frameSeq` that are drawn in bands, at
+ * the next band: input has made them stale. The worker reads it as it
+ * arrives rather than in turn, since the frame it stops is the message
+ * being handled. A frame given up presents nothing and still reports done.
+ */
+export interface AbandonFrameMessage {
+  type: "abandonFrame";
+  frameSeq: number;
+}
+
+/**
  * Per-entity cold-state record: an image member the worker allocates
  * sections for and draws. Invisible planner entries arrive here too, with
  * only their coarsest level, so CPU-side eviction still sees them.
@@ -718,6 +736,7 @@ export type MainToWorkerMessage =
   | FailedChunksMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
+  | AbandonFrameMessage
   | ProbeMessage
   | LoseDeviceMessage
   | RaiseValidationErrorMessage;

@@ -1,5 +1,6 @@
 /** Main-thread API wrapping the GPU render worker. */
 import type {
+  AbandonFrameMessage,
   CanvasColors,
   Chunk,
   InitMessage,
@@ -610,6 +611,7 @@ export class RenderClient implements UploadClient {
     clipMode?: number,
     pixelRatio?: number,
     marchStepScale?: number,
+    bands?: number,
   ): number {
     const frameSeq = this.nextFrameSeq();
     this.worker.postMessage({
@@ -617,10 +619,15 @@ export class RenderClient implements UploadClient {
       epochs,
       layers, invViewProj, eye,
       canvasW, canvasH, fullW, fullH, viewProj,
-      camForward, clipDistance, clipMode, pixelRatio, marchStepScale,
+      camForward, clipDistance, clipMode, pixelRatio, marchStepScale, bands,
       frameSeq,
     });
     return frameSeq;
+  }
+
+  /** Give up frames up to `frameSeq` that are drawn in bands, at their next band. */
+  abandonFrame(frameSeq: number): void {
+    this.worker.postMessage({ type: "abandonFrame", frameSeq } satisfies AbandonFrameMessage);
   }
 
   sliceRenderMultiPass(

@@ -86,6 +86,20 @@ describe("the lag reading", () => {
     expect(lag.inputToFrame).toEqual({ samples: 6, p50Ms: 20, p95Ms: 20, maxMs: 20 });
   });
 
+  it("reads the first input's wait apart, which a gesture's p95 hides", () => {
+    // The gesture's first input waits behind a long frame; the rest keep up.
+    const drag = steadyDrag(40, 12);
+    drag.inputs[0] = input(20, 920);
+    drag.framesUs[0] = 920 * MS;
+    const lag = diagnoseRun(withLag(interactionRunFor("pan"), drag)).lag!;
+    expect(lag.firstInputMs).toBe(900);
+    expect(lag.inputToFrame!.p95Ms).toBe(12);
+
+    const unanswered = steadyDrag(5, 12);
+    unanswered.inputs[0] = input(20, null);
+    expect(diagnoseRun(withLag(interactionRunFor("pan"), unanswered)).lag!.firstInputMs).toBeNull();
+  });
+
   it("reads only the inputs inside a window, and the part of each long task inside it", () => {
     const run = withLag(interactionRunFor("pan"), {
       ...steadyDrag(20, 12),
@@ -159,7 +173,7 @@ describe("the lag rule", () => {
     const doc = diagnoseRun(run);
     const summary = renderDiagnostic(doc).text;
     expect(summary).toContain(
-      "lag       input-to-frame p50 12 ms · p95 12 ms · max 12 ms (n=20) · 1 long task(s), longest 60 ms, 60 ms total · 20 frames, 0 dropped against a 16.7 ms refresh",
+      "lag       input-to-frame first 12 ms · p50 12 ms · p95 12 ms · max 12 ms (n=20) · 1 long task(s), longest 60 ms, 60 ms total · 20 frames, 0 dropped against a 16.7 ms refresh",
     );
     expect(renderDiagnostic(doc, { depth: "phases" }).text).toContain(`LAG  ${doc.lag!.statement}`);
     expect(doc.lag!.statement).toContain("reads up to one display interval low");

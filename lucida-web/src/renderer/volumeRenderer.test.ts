@@ -117,6 +117,27 @@ describe("the volume renderer's member draws", () => {
     expect(pass.draw).toHaveBeenCalledTimes(3);
   });
 
+  it("draws only a band's rows, clearing the target for the first band and keeping it for the rest", async () => {
+    const { renderer, draw } = await setup();
+    // Rows 0-9, 20-39 and 50-59.
+    renderer.prepareMembers("view", [
+      draw(0, 0, { scissor: [0, 0, 10, 10] }),
+      draw(1, 0, { scissor: [10, 20, 10, 20] }),
+      draw(2, 0, { scissor: [20, 50, 10, 10] }),
+    ]);
+
+    const first = makeEncoder();
+    renderer.renderMembers("view", [0, 1, 2], {} as GPUTextureView, 64, 64, {} as GPUTextureView, true, first.encoder, undefined, { y: 0, height: 32, first: true });
+    expect(first.pass.setScissorRect.mock.calls).toEqual([[0, 0, 10, 10], [10, 20, 10, 12]]);
+    expect(vi.mocked(first.encoder.beginRenderPass).mock.calls[0][0].colorAttachments).toMatchObject([{ loadOp: "clear" }]);
+
+    const second = makeEncoder();
+    renderer.renderMembers("view", [0, 1, 2], {} as GPUTextureView, 64, 64, {} as GPUTextureView, false, second.encoder, undefined, { y: 32, height: 32, first: false });
+    expect(second.pass.setScissorRect.mock.calls).toEqual([[10, 32, 10, 8], [20, 50, 10, 10]]);
+    expect(second.pass.draw).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(second.encoder.beginRenderPass).mock.calls[0][0].colorAttachments).toMatchObject([{ loadOp: "load" }]);
+  });
+
   it("makes a bind group again for a pool or descriptor buffer that was replaced", async () => {
     const { device, renderer, collection, draw, texture } = await setup();
     renderer.prepareMembers("view", collection(2));

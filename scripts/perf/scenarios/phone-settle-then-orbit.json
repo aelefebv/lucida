@@ -1,0 +1,14 @@
+{
+  "description": "settle-then-orbit on a phone: a 390x844 window laid out as a mobile browser lays it out; the phone suite runs it at ratio 3, and under LUCIDA_BROWSER_ARGS=--use-webgpu-adapter=swiftshader it stands in for a phone's GPU",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "width": 390,
+  "height": 844,
+  "mobile": true,
+  "steps": [
+    { "kind": "zoom", "factor": 4, "durationMs": 1000 },
+    { "kind": "orbit", "theta": 40, "phi": 10, "durationMs": 1500 },
+    { "kind": "hold", "ms": 2000 },
+    { "kind": "orbit", "theta": -40, "phi": -10, "durationMs": 1500 }
+  ]
+}

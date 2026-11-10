@@ -28,6 +28,9 @@ export const GESTURE_START_STEP_UP = 1.25;
 /** The lowest share of the capped resolution a gesture is drawn at. */
 export const MIN_ADAPTIVE_SCALE = 0.5;
 
+/** The most a gesture's ray march coarsens past its usual step once the resolution is at its floor. */
+export const MAX_MARCH_COARSENING = 2;
+
 /** Quiet after the last input before the full resolution comes back. */
 export const RESTORE_AFTER_MS = 250;
 
@@ -51,6 +54,11 @@ export class AdaptiveResolution {
    * time.
    */
   private gestureStart = 1;
+  /** What the last frame drawn at full quality took, dispatch to done. */
+  private fullQualityFrameMs: number | null = null;
+  /** The gesture under way has not drawn its first frame. */
+  private gestureUnfitted = false;
+  private coarsening = 1;
   private lastInputAt = Number.NEGATIVE_INFINITY;
   /**
    * The last frame dispatched before the latest step down or before the
@@ -71,6 +79,15 @@ export class AdaptiveResolution {
   }
 
   /**
+   * How many times its usual step a gesture's ray march takes, in
+   * `[1, MAX_MARCH_COARSENING]`: above 1 only where the resolution's floor
+   * leaves a gesture's frame long.
+   */
+  get marchCoarsening(): number {
+    return this.coarsening;
+  }
+
+  /**
    * An input landed; `lastDispatchedSeq` is the newest frame already sent.
    * A gesture's first input leaves the frames before it out: a frame's
    * latency is read at the tick after it finishes, which is often the
@@ -81,8 +98,39 @@ export class AdaptiveResolution {
     if (now - this.lastInputAt >= RESTORE_AFTER_MS) {
       this.settledAfterSeq = Math.max(this.settledAfterSeq, lastDispatchedSeq);
       this.factor = Math.min(this.factor, this.gestureStart);
+      this.gestureUnfitted = true;
     }
     this.lastInputAt = now;
+  }
+
+  /** A frame drawn at full quality took `ms`, dispatch to done. */
+  noteFullQualityFrame(ms: number): void {
+    this.fullQualityFrameMs = ms;
+  }
+
+  /** What the last frame drawn at full quality took, or null before one finished. */
+  get fullQualityMs(): number | null {
+    return this.fullQualityFrameMs;
+  }
+
+  /**
+   * Before a gesture's first frame, which costs `share` of a full-quality
+   * frame at full scale: if the last full-quality frame says that frame
+   * would be long, step down now, as a long frame would. Waiting to measure
+   * one costs a whole long frame, and on a GPU slow enough the gesture's
+   * frames outlast its input, so none is ever measured within it.
+   */
+  fitGestureStart(share: number): void {
+    if (!this.gestureUnfitted) return;
+    this.gestureUnfitted = false;
+    if (this.fullQualityFrameMs === null) return;
+    const predictedMs = this.fullQualityFrameMs * share * this.factor * this.factor;
+    if (predictedMs <= LONG_FRAME_MS) return;
+    this.factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * Math.sqrt(TARGET_FRAME_MS / predictedMs));
+    // A frame's cost goes with its samples along each ray too, so past the
+    // resolution's floor the march takes what is left, up to its own floor.
+    const atFloorMs = this.fullQualityFrameMs * share * this.factor * this.factor;
+    if (atFloorMs > LONG_FRAME_MS) this.coarsening = Math.min(MAX_MARCH_COARSENING, atFloorMs / TARGET_FRAME_MS);
   }
 
   /**
@@ -115,6 +163,7 @@ export class AdaptiveResolution {
     if (wait === null || wait > 0) return false;
     this.gestureStart = Math.min(1, this.factor * GESTURE_START_STEP_UP);
     this.factor = 1;
+    this.coarsening = 1;
     return true;
   }
 }

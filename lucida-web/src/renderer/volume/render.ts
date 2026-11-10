@@ -9,7 +9,7 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { VolumeLayerParams, VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
-import type { VolumeMemberDraw, VolumePoolBinding } from "../volumeRenderer.ts";
+import type { RowBand, VolumeMemberDraw, VolumePoolBinding } from "../volumeRenderer.ts";
 import { batchLayers, type BatchLayer } from "../layerBatches.ts";
 import { resolveMemberPools } from "../descriptorBuffer.ts";
 import {
@@ -171,6 +171,53 @@ function poolBinding(atlas: AtlasState): VolumePoolBinding {
 /** The member draw set the viewport's frames use. */
 const VIEW_DRAWS = "view";
 
+/**
+ * March each batch's member draws into an offscreen texture of its own, a
+ * row band at a time, each band its own submission. Between bands the GPU
+ * is free for the browser and the page, and the page can give the frame up
+ * for one that answers input; then this returns null. The march's pixels
+ * are the whole frame's, band by band, so the composite after it draws the
+ * frame the unbanded path would. The bands split only the rows the draws
+ * cover: a row with no draw costs nothing to march.
+ */
+async function marchInBands(
+  ctx: WorkerCtx,
+  msg: VolumeRenderMultiPassMessage,
+  draws: readonly VolumeMemberDraw[],
+  batches: readonly (readonly number[])[],
+  depthView: GPUTextureView,
+  bandsWanted: number,
+): Promise<GPUTextureView[] | null> {
+  const renderer = ctx.getVolumeRenderer();
+  const targets = ctx.ensureOffscreenPool(batches.length, msg.canvasW, msg.canvasH)
+    .slice(0, batches.length)
+    .map((texture) => texture.createView());
+  let top = msg.canvasH;
+  let bottom = 0;
+  for (const draw of draws) {
+    const [, y, , h] = draw.scissor ?? [0, 0, msg.canvasW, msg.canvasH];
+    top = Math.min(top, Math.max(0, y));
+    bottom = Math.max(bottom, Math.min(msg.canvasH, y + h));
+  }
+  const covered = Math.max(0, bottom - top);
+  const bands = Math.max(1, Math.min(bandsWanted, covered));
+  for (let band = 0; band < bands; band++) {
+    const y = top + Math.floor((band * covered) / bands);
+    const rows: RowBand = { y, height: top + Math.floor(((band + 1) * covered) / bands) - y, first: band === 0 };
+    const encoder = ctx.device.createCommandEncoder();
+    for (const [at, indices] of batches.entries()) {
+      renderer.renderMembers(
+        VIEW_DRAWS, indices, targets[at], msg.canvasW, msg.canvasH, depthView, at === 0 && band === 0, encoder, ctx.passTimer, rows,
+      );
+    }
+    ctx.device.queue.submit([encoder.finish()]);
+    if (band === bands - 1) break;
+    await ctx.device.queue.onSubmittedWorkDone();
+    if (msg.frameSeq !== undefined && msg.frameSeq <= ctx.state.abandonedFrameSeq) return null;
+  }
+  return targets;
+}
+
 export async function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
   msg: VolumeRenderMultiPassMessage,
@@ -183,17 +230,11 @@ export async function handleVolumeRenderMultiPass(
   // (`worker/inOrder.ts`).
   await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
 
-  const canvas = ctx.context.canvas as OffscreenCanvas;
-  canvas.width = msg.canvasW;
-  canvas.height = msg.canvasH;
-
   // One offscreen texture: each batch of layers is rendered and composited in turn.
   const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
-  // A slice frame before this one may have left more.
+  // A slice frame or a banded frame before this one may have left more.
   trimOffscreenPool(1);
 
-  const canvasTexture = ctx.context.getCurrentTexture();
-  const canvasView = canvasTexture.createView();
   const atlasMap = ctx.state.volumeAtlases;
 
   const timing = ctx.passTimer;
@@ -261,13 +302,36 @@ export async function handleVolumeRenderMultiPass(
   renderer.prepareMembers(VIEW_DRAWS, draws);
   const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
   const depthView = depth.createView();
+  const batches = batchLayers(batchInput, msg.canvasW, msg.canvasH);
+  const memberBatches = batches.map((batch) => batch.layers.map((at) => drawn[at]));
+  const bands = Math.floor(msg.bands ?? 1);
+  let marched: GPUTextureView[] | null = null;
+  if (bands > 1 && batches.length > 0 && memberBatches.every((batch) => batch.every((d) => "draw" in d))) {
+    const batchDraws = memberBatches.map((batch) => batch.map((d) => (d as { draw: number }).draw));
+    marched = await marchInBands(ctx, msg, draws, batchDraws, depthView, bands);
+    if (marched === null) {
+      // Given up between bands: the canvas keeps the frame it shows.
+      if (lastMode !== null) renderer.setRenderMode(lastMode);
+      renderer.setMarchStepScale(1);
+      timing.endFrame();
+      return;
+    }
+  }
+
+  // Only after the bands: the canvas presents the texture it hands out once
+  // this handler yields, so a band's wait would present a blank frame.
+  const canvas = ctx.context.canvas as OffscreenCanvas;
+  canvas.width = msg.canvasW;
+  canvas.height = msg.canvasH;
+  const canvasTexture = ctx.context.getCurrentTexture();
+  const canvasView = canvasTexture.createView();
   const scratchView = pool[0].createView();
 
   // One submit for every batch between label layers, which draw through the
   // renderer's own buffers and submit on their own.
   let encoder = ctx.device.createCommandEncoder();
   let isFirstLayer = true;
-  for (const batch of batchLayers(batchInput, msg.canvasW, msg.canvasH)) {
+  for (const [at, batch] of batches.entries()) {
     const lead = drawn[batch.layers[0]];
     if ("label" in lead) {
       ctx.device.queue.submit([encoder.finish()]);
@@ -275,11 +339,16 @@ export async function handleVolumeRenderMultiPass(
       encoder = ctx.device.createCommandEncoder();
       continue;
     }
-    const indices = batch.layers.map((at) => (drawn[at] as { draw: number }).draw);
-    renderer.renderMembers(
-      VIEW_DRAWS, indices, scratchView, msg.canvasW, msg.canvasH, depthView, isFirstLayer, encoder, timing,
-    );
-    comp.composite(canvasView, [{ view: scratchView, blendMode: batch.blendMode }], encoder, isFirstLayer, timing);
+    let source = scratchView;
+    if (marched) {
+      source = marched[at];
+    } else {
+      const indices = batch.layers.map((layer) => (drawn[layer] as { draw: number }).draw);
+      renderer.renderMembers(
+        VIEW_DRAWS, indices, scratchView, msg.canvasW, msg.canvasH, depthView, isFirstLayer, encoder, timing,
+      );
+    }
+    comp.composite(canvasView, [{ view: source, blendMode: batch.blendMode }], encoder, isFirstLayer, timing);
     isFirstLayer = false;
   }
   if (lastMode !== null) renderer.setRenderMode(lastMode);

@@ -123,7 +123,7 @@ describe("the lag tier", () => {
     expect(diagnostic.lag!.frames).toEqual({ presented: 40, dropped: 0, displayIntervalMs: 16.7 });
     expect(diagnostic.findings.some((finding) => finding.rule === RULESET.lag.id)).toBe(false);
     expect(renderDiagnostic(diagnostic).text).toMatch(
-      /^lag {7}input-to-frame p50 12 ms · p95 12 ms · max 12 ms \(n=40\) · no long task · 40 frames, 0 dropped against a 16\.7 ms refresh$/m,
+      /^lag {7}input-to-frame first 12 ms · p50 12 ms · p95 12 ms · max 12 ms \(n=40\) · no long task · 40 frames, 0 dropped against a 16\.7 ms refresh$/m,
     );
   });
 

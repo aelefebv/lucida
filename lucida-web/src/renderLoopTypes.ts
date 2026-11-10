@@ -100,6 +100,10 @@ export interface TickContext {
    * keep the full device-pixel viewport.
    */
   resolutionScale: number;
+  /** Level steps per ray-march step in the volume path's frame: 1 for full quality. */
+  marchStepScale: number;
+  /** Bands the volume path draws a frame in; 1 draws it whole. */
+  bands: number;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
 }
