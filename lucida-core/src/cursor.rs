@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::camera::Camera;
 use crate::camera::ray_aabb_hit;
 use crate::mat4::{invert4_f64, normalize3, unproject};
+use crate::placement::Affine;
 use crate::scene::Scene;
 
 /// The one peer palette, in 8-bit sRGB. The page reads it through
@@ -199,15 +200,81 @@ fn make_ray(start: [f32; 3], end: [f32; 3], marker: [f32; 3], r: f32, g: f32, b:
     ]
 }
 
-/// Convert voxel coords to world space via model matrix.
-fn voxel_to_world(x: f64, y: f64, z: f64, shape: [u32; 3], model: &[f64; 16]) -> [f32; 3] {
-    let unit = [
-        x / shape[2] as f64,
-        1.0 - y / shape[1] as f64, // flip Y
-        z / shape[0] as f64,
-    ];
-    let w = transform_point_f64(unit, model);
-    [w[0] as f32, w[1] as f32, w[2] as f32]
+/// What cross-mode cursors are drawn against: everything visible, as one
+/// unit cube that maps onto its box in world space and onto the slice
+/// camera's plane box. A cursor crosses between the modes through it, so a
+/// slice cursor lands where the volume draws the same point.
+struct CursorBox {
+    /// `[x, y, z]` corner and extent of the plane box: scene-frame X and Y,
+    /// and planes in Z.
+    plane_min: [f64; 3],
+    plane_size: [f64; 3],
+    model: [f64; 16],
+    inv_model: [f64; 16],
+}
+
+impl CursorBox {
+    /// The box of everything visible, or the unit cube in both spaces when
+    /// nothing is.
+    fn of(scene: &Scene) -> Self {
+        let (plane_min, plane_size, unit_to_world) = match scene.visible_bounds() {
+            Some(bounds) => (
+                bounds.plane.min,
+                extent(bounds.plane.min, bounds.plane.max),
+                Affine {
+                    scale: extent(bounds.world.min, bounds.world.max),
+                    offset: bounds.world.min,
+                },
+            ),
+            None => ([0.0; 3], [1.0; 3], Affine::IDENTITY),
+        };
+        CursorBox {
+            plane_min,
+            plane_size,
+            model: matrix_f64(&unit_to_world),
+            inv_model: matrix_f64(&unit_to_world.inverse()),
+        }
+    }
+
+    /// A plane point `[x, y, z]` in the cube. The cube's Y points up.
+    fn plane_to_unit(&self, p: [f64; 3]) -> [f64; 3] {
+        let u: [f64; 3] = std::array::from_fn(|i| (p[i] - self.plane_min[i]) / self.plane_size[i]);
+        [u[0], 1.0 - u[1], u[2]]
+    }
+
+    /// The plane `[x, y]` of a point of the cube.
+    fn unit_to_plane(&self, x_unit: f64, y_unit: f64) -> [f64; 2] {
+        [
+            self.plane_min[0] + x_unit * self.plane_size[0],
+            self.plane_min[1] + (1.0 - y_unit) * self.plane_size[1],
+        ]
+    }
+
+    fn holds_plane_point(&self, x: f64, y: f64) -> bool {
+        let max = |i: usize| self.plane_min[i] + self.plane_size[i];
+        x >= self.plane_min[0] && x <= max(0) && y >= self.plane_min[1] && y <= max(1)
+    }
+
+    fn plane_to_world(&self, p: [f64; 3]) -> [f32; 3] {
+        let w = transform_point_f64(self.plane_to_unit(p), &self.model);
+        [w[0] as f32, w[1] as f32, w[2] as f32]
+    }
+}
+
+/// A box's extent per axis, one where it has none so it can divide.
+fn extent(min: [f64; 3], max: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|i| {
+        let e = max[i] - min[i];
+        if e > 0.0 { e } else { 1.0 }
+    })
+}
+
+fn matrix_f64(a: &Affine) -> [f64; 16] {
+    let [sx, sy, sz] = a.scale;
+    let [ox, oy, oz] = a.offset;
+    [
+        sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, ox, oy, oz, 1.0,
+    ]
 }
 
 /// Compute peer cursor geometry for the GPU and screen positions for labels.
@@ -228,15 +295,7 @@ pub fn compute_peer_cursors(
         Camera::Arcball(_) | Camera::Fly(_) => "arcball",
     };
 
-    let volume_shape = scene.volume_shape();
-    let inv_model_f64: Option<[f64; 16]> = scene
-        .volume_transform()
-        .map(|t| t.inv_model.map(|v| v as f64));
-    let model_f64: Option<[f64; 16]> = scene.volume_transform().map(|t| t.model.map(|v| v as f64));
-
-    let identity: [f64; 16] = [
-        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-    ];
+    let cursor_box = CursorBox::of(scene);
 
     let mut output = CursorOutput {
         gpu: Vec::new(),
@@ -262,7 +321,7 @@ pub fn compute_peer_cursors(
 
         if peer_mode == local_mode {
             if local_mode == "slice" {
-                // 2D→2D: pass through voxel coords as crosshair
+                // 2D→2D: both cursors are in the scene frame, so pass it through
                 if !peer.label_only {
                     output
                         .gpu
@@ -296,8 +355,8 @@ pub fn compute_peer_cursors(
                         None => continue,
                     };
 
-                let inv_m = inv_model_f64.as_ref().unwrap_or(&identity);
-                let model = model_f64.as_ref().unwrap_or(&identity);
+                let inv_m = &cursor_box.inv_model;
+                let model = &cursor_box.model;
                 let ro_unit = transform_point_f64(ro_world, inv_m);
                 let rd_unit = normalize3(transform_dir_f64(rd_world, inv_m));
 
@@ -406,25 +465,18 @@ pub fn compute_peer_cursors(
                 None => continue,
             };
 
-            let inv_m = inv_model_f64.as_ref().unwrap_or(&identity);
+            let inv_m = &cursor_box.inv_model;
             let ro_unit = transform_point_f64(ro_world, inv_m);
             let rd_unit = normalize3(transform_dir_f64(rd_world, inv_m));
 
-            let shape = volume_shape.unwrap_or([1, 1, 1]);
             let local_z = scene.view.z_range.start;
-            let z_unit = (local_z as f64 + 0.5) / shape[0] as f64;
+            let z_unit = cursor_box.plane_to_unit([0.0, 0.0, local_z as f64 + 0.5])[2];
 
             if let Some((x_unit, y_unit)) = ray_z_intersect(ro_unit, rd_unit, z_unit) {
-                let x_voxel = x_unit * shape[2] as f64;
-                let y_voxel = (1.0 - y_unit) * shape[1] as f64;
+                let [x_voxel, y_voxel] = cursor_box.unit_to_plane(x_unit, y_unit);
 
                 // Only render crosshair if within volume bounds and not label_only
-                if !peer.label_only
-                    && x_voxel >= 0.0
-                    && x_voxel <= shape[2] as f64
-                    && y_voxel >= 0.0
-                    && y_voxel <= shape[1] as f64
-                {
+                if !peer.label_only && cursor_box.holds_plane_point(x_voxel, y_voxel) {
                     output
                         .gpu
                         .push(make_crosshair(x_voxel as f32, y_voxel as f32, r, g, b));
@@ -445,9 +497,6 @@ pub fn compute_peer_cursors(
             }
         } else if peer_mode == "slice" && local_mode == "arcball" {
             // Case A: 2D peer → 3D local — vertical ray through the volume
-            let shape = volume_shape.unwrap_or([1, 1, 1]);
-            let model = model_f64.as_ref().unwrap_or(&identity);
-
             let peer_view = match &peer.camera {
                 Some(Camera::Slice(_)) => true,
                 _ => true, // mode=="slice" so assume Slice even if camera missing
@@ -456,16 +505,17 @@ pub fn compute_peer_cursors(
                 continue;
             }
 
-            // Peer's cursor is in voxel coords (x, y). Get their Z from their view.
+            // Peer's cursor is in the scene frame (x, y). Get their Z from their view.
             let peer_z = peer.view_z.unwrap_or(0) as f64;
             let x = cursor[0];
             let y = cursor[1];
 
             // Ray endpoints: vertical line extending 50% past dataset on each side
-            let overshoot = shape[0] as f64 * 0.5;
-            let start = voxel_to_world(x, y, -overshoot, shape, model);
-            let end = voxel_to_world(x, y, shape[0] as f64 + overshoot, shape, model);
-            let marker = voxel_to_world(x, y, peer_z + 0.5, shape, model);
+            let depth = cursor_box.plane_size[2];
+            let overshoot = depth * 0.5;
+            let start = cursor_box.plane_to_world([x, y, -overshoot]);
+            let end = cursor_box.plane_to_world([x, y, depth + overshoot]);
+            let marker = cursor_box.plane_to_world([x, y, peer_z + 0.5]);
 
             if !peer.label_only {
                 output.gpu.push(make_ray(start, end, marker, r, g, b));

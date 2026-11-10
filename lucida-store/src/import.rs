@@ -79,6 +79,7 @@ async fn import_single_image(
     let axes_names = parsed.axes_names;
     let level_entries = parsed.level_entries;
     let downsampling_method = parsed.downsampling_method;
+    let space = parsed.space;
 
     // Channel display names from the OME omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(root_json);
@@ -200,7 +201,8 @@ async fn import_single_image(
         vec![source_layout],
         Some(default_layout_id),
     )
-    .with_labels(labels.specs);
+    .with_labels(labels.specs)
+    .with_space(space);
 
     let mut fetch_images = vec![ProxiedImageSpec {
         image_id: image_id.clone(),
@@ -404,6 +406,9 @@ struct SharedTileGeometry {
     channel_infos: Vec<ChannelInfo>,
     downsampling_method: Option<String>,
     level_metas: Vec<parse::ArrayMeta>,
+    /// The units the tile's axes name. Its origin is left out: tiles are
+    /// placed by the collection's layout.
+    units: [Option<String>; 3],
 }
 
 /// Read and parse one tile's shared multiscale geometry. Any read or parse
@@ -428,6 +433,7 @@ async fn read_tile_geometry(
         channel_infos,
         downsampling_method: parsed.downsampling_method,
         level_metas,
+        units: parsed.space.units,
     })
 }
 
@@ -899,6 +905,7 @@ async fn import_collection(
         channel_infos,
         downsampling_method,
         level_metas,
+        units,
     } = shared_geometry.ok_or_else(|| {
         StoreError::malformed_metadata("collection has no tile with readable geometry")
     })?;
@@ -1430,7 +1437,11 @@ async fn import_collection(
         vec![source_layout],
         Some(default_layout_id),
     )
-    .with_labels(label_specs);
+    .with_labels(label_specs)
+    .with_space(PhysicalSpace {
+        units,
+        origin: [0.0; 3],
+    });
 
     let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
         images: fetch_images,
@@ -4887,6 +4898,45 @@ mod tests {
             serde_json::to_string_pretty(&arr).unwrap(),
         )
         .unwrap();
+    }
+
+    /// A single image's axis units and level-0 translation reach its
+    /// manifest, which places it among other datasets. One declaring neither
+    /// carries no physical space.
+    #[tokio::test]
+    async fn import_single_image_carries_its_units_and_origin() {
+        let dir = temp_dir("import_physical_space");
+        create_single_image_fixture(&dir, None);
+        let root_path = dir.join("zarr.json");
+        let mut root: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&root_path).unwrap()).unwrap();
+        let multiscale = &mut root["attributes"]["ome"]["multiscales"][0];
+        for axis in multiscale["axes"].as_array_mut().unwrap()[2..].iter_mut() {
+            axis["unit"] = serde_json::json!("micrometer");
+        }
+        multiscale["datasets"][0]["coordinateTransformations"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type": "translation",
+                "translation": [0.0, 0.0, 0.0, 5.0, 7.5]
+            }));
+        fs::write(&root_path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+
+        let store = cached_store(dir.to_str().unwrap());
+        let result = import_dataset(&store, "placed", "Placed").await.unwrap();
+        let space = result.manifest.space().expect("a declared space");
+        assert_eq!(space.origin, [0.0, 5.0, 7.5]);
+        assert_eq!(space.meters_per_unit(), Some([1e-6; 3]));
+
+        let bare = temp_dir("import_no_physical_space");
+        create_single_image_fixture(&bare, None);
+        let store = cached_store(bare.to_str().unwrap());
+        let result = import_dataset(&store, "bare", "Bare").await.unwrap();
+        assert!(result.manifest.space().is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&bare);
     }
 
     /// A single image whose omero block carries channel labels yields a

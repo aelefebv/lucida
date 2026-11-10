@@ -277,12 +277,13 @@ export interface SliceAggregateParams {
 
 export interface SliceLayerParams {
   datasetId: string;
+  /** The quad's extent in the scene frame the camera views. */
   dataW: number;
   dataH: number;
   blendMode: "alpha" | "additive" | "max";
-  /** Member position offset in voxels along X (default 0). */
+  /** The quad's corner in the scene frame along X (default 0). */
   offsetX?: number;
-  /** Member position offset in voxels along Y (default 0). */
+  /** The quad's corner in the scene frame along Y (default 0). */
   offsetY?: number;
   /** See {@link VolumeLayerParams.entityId}. */
   entityId?: string;
@@ -304,6 +305,13 @@ export interface SliceLayerParams {
    * plane within the level. See {@link VolumeLayerParams.labelChunk}.
    */
   labelChunk?: { level: number; t: number; z: number; plane: number };
+  /**
+   * A label layer's extent in its source image's level-0 samples,
+   * `[width, height]`: what its quad spans, before placement scales it into
+   * the scene frame. A probe reads sample positions in it. Absent, the quad
+   * measures one scene unit per sample.
+   */
+  labelSamples?: [number, number];
   /**
    * Batched member quads for an aggregate layer. When present the
    * worker renders the whole batch in one pass (one instanced draw)

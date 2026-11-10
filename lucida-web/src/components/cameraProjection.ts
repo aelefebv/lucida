@@ -4,10 +4,14 @@
  *
  * 2D: the camera is `zoom` and `center` in physical pixels against the canvas
  * midpoint; {@link eventToWorld} and {@link makeWorldToScreen} are exact
- * inverses. 3D: projection lives in WASM (`scene.project_annotation`) so it uses
- * the same transform as the volume pass.
+ * inverses. The 2D world is the scene frame every dataset is placed in, and a
+ * pin is stored in its own dataset's frame, so pins go through the dataset's
+ * placement ({@link eventToFrame}, {@link makeFrameToScreen}). 3D: projection
+ * lives in WASM (`scene.project_annotation`) so it uses the same transform as
+ * the volume pass.
  */
 import type { WasmScene } from "lucida-core";
+import { frameToScene, readPlacement, sceneToFrame } from "../placement.ts";
 import type { ScreenPoint } from "./annotationGeometry.ts";
 
 /** The x/y of a pointer event, so plain objects and React events both qualify. */
@@ -59,6 +63,30 @@ export function makeWorldToScreen(
     ((v[0] - centerX) * zoom + physW / 2) / dpr,
     ((v[1] - centerY) * zoom + physH / 2) / dpr,
   ];
+}
+
+/** A pointer event in `datasetId`'s frame, where its pins are stored. */
+export function eventToFrame(
+  scene: WasmScene,
+  canvas: HTMLCanvasElement,
+  e: ClientPoint,
+  datasetId: string,
+): [number, number] {
+  return sceneToFrame(readPlacement(scene, datasetId), eventToWorld(scene, canvas, e));
+}
+
+/**
+ * {@link makeWorldToScreen} for points in `datasetId`'s frame, the inverse of
+ * {@link eventToFrame}. Call once per frame, as it snapshots the placement too.
+ */
+export function makeFrameToScreen(
+  scene: WasmScene,
+  canvas: HTMLCanvasElement,
+  datasetId: string,
+): (v: ScreenPoint) => ScreenPoint {
+  const project = makeWorldToScreen(scene, canvas);
+  const placement = readPlacement(scene, datasetId);
+  return (v: ScreenPoint): ScreenPoint => project(frameToScene(placement, v));
 }
 
 /**

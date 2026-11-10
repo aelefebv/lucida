@@ -29,7 +29,8 @@ import {
   startLongPress,
   useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { eventToWorld, makeWorldToScreen, type ClientPoint } from "./cameraProjection.ts";
+import { eventToFrame, makeFrameToScreen, type ClientPoint } from "./cameraProjection.ts";
+import { frameToScene, readPlacement } from "../placement.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import {
@@ -330,17 +331,17 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   }, [annotations, activeShapeId]);
 
   /** The shared inverse projection, tolerating an unready scene, so a moved pin
-   * lands in the world frame add_annotation stores. */
+   * lands in the dataset frame add_annotation stores. */
   const pointerWorld = (e: ClientPoint): [number, number] => {
     const scene = wasmSceneRef.current;
-    return scene ? eventToWorld(scene, canvas, e) : [0, 0];
+    return scene ? eventToFrame(scene, canvas, e, datasetId) : [0, 0];
   };
 
   /** One's own line or box under a client point, or null. */
   const ownShapeAt = (point: ClientPoint, tolerance: number): string | null => {
     const scene = wasmSceneRef.current;
     if (!scene) return null;
-    const project = makeWorldToScreen(scene, canvas);
+    const project = makeFrameToScreen(scene, canvas, datasetId);
     const rect = canvas.getBoundingClientRect();
     const shapes = annotationsRef.current
       .filter((pin) => isOwnHandledShape(pin, myId))
@@ -363,7 +364,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     setMenu({
       x: point.clientX,
       y: point.clientY,
-      target: scene ? { position: eventToWorld(scene, canvas, point), z: viewContext.z } : null,
+      target: scene ? { position: eventToFrame(scene, canvas, point, datasetId), z: viewContext.z } : null,
     });
   };
 
@@ -409,11 +410,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         setOpenPinId(pin.id);
         const scene = wasmSceneRef.current;
         if (scene) {
-          applyViewportCommand(scene, {
-            type: "set_center",
-            x: pin.position[0],
-            y: pin.position[1],
-          });
+          const [x, y] = frameToScene(readPlacement(scene, datasetId), pin.position);
+          applyViewportCommand(scene, { type: "set_center", x, y });
           // Repaint under the recentered camera; the pull-based loop won't
           // otherwise.
           onViewportChanged?.();
@@ -421,7 +419,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       },
       openContextMenu: (at: ClientPoint) => openMenuRef.current(at, "touch"),
     }),
-    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
+    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId, datasetId],
   );
 
   // A new or changed pin needs a frame to be placed.
@@ -430,9 +428,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
-        // World to screen in CSS px, the inverse of the shared screen-to-world,
+        // Frame to screen in CSS px, the inverse of the shared screen-to-frame,
         // with the camera snapshotted once per frame.
-        const project = makeWorldToScreen(scene, canvas);
+        const project = makeFrameToScreen(scene, canvas, datasetId);
 
         // A pin being moved previews at the pointer, carrying its shape along;
         // a pan doesn't move the pin, so its dot keeps reprojecting.
@@ -476,7 +474,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             // Each handle is nudged outward from the box center, which lifts the
             // `nw` handle off the anchor dot at `position`, so a click or a
             // whole-shape Shift+drag still lands on the dot. Release math uses
-            // eventToWorld, never this offset.
+            // eventToFrame, never this offset.
             const [cx, cy] = project([
               (liveVertices.position[0] + liveVertices.end[0]) / 2,
               (liveVertices.position[1] + liveVertices.end[1]) / 2,
@@ -520,7 +518,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       }
     };
     return frameClock.subscribe(tick);
-  }, [wasmSceneRef, canvas, annotationsRef]);
+  }, [wasmSceneRef, canvas, annotationsRef, datasetId]);
 
   /** A right-click on a marker or shape opens the canvas menu on it. A finger's
    * long press is timed by the gesture instead, so its native menu is only

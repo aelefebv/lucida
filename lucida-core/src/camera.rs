@@ -3,13 +3,14 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::framing::{
-    Aabb, FitBounds, VoxBox, WorldBox, arcball_containment, arcball_view_containment,
+    Aabb, FitBounds, PlaneBox, WorldBox, arcball_containment, arcball_view_containment,
     depth_bracket, slice_framing,
 };
 use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
     unproject,
 };
+use crate::placement::Affine;
 use crate::transform::VolumeTransform;
 
 /// Fit factors for "fit the data to the view", re-exported from [`crate::framing`]
@@ -47,6 +48,27 @@ pub struct VisibleRegion {
     /// Optional frustum planes in full-resolution voxel coordinates for per-chunk culling.
     /// Each plane is [a, b, c, d] where ax + by + cz + d >= 0 means inside.
     pub frustum_planes: Option<[[f64; 4]; 6]>,
+}
+
+impl VisibleRegion {
+    /// This slice region, read in the scene frame, re-expressed in the frame of
+    /// a dataset that `frame_to_scene` places, since planning works in a
+    /// dataset's own samples. A slice region has no frustum or sort center to
+    /// carry.
+    pub fn in_frame(self, frame_to_scene: &Affine) -> VisibleRegion {
+        let to_frame = frame_to_scene.inverse();
+        let [x0, y0, x1, y1] = self.xy_bounds;
+        let (min, max) = to_frame.apply_box([x0, y0, 0.0], [x1, y1, 0.0]);
+        let xy_bounds = [min[0], min[1], max[0], max[1]];
+        VisibleRegion {
+            xy_bounds,
+            effective_zoom: self.effective_zoom * frame_to_scene.plane_sample(),
+            radius_basis_vox: visible_radius_basis_from_bounds(xy_bounds, &self.z_range),
+            sort_center: None,
+            frustum_planes: None,
+            z_range: self.z_range,
+        }
+    }
 }
 
 fn serialize_range_as_array<S: serde::Serializer>(
@@ -537,14 +559,14 @@ impl Camera {
     /// Put `bounds` centered and fully in view, each camera taking the box in
     /// its own space. Leaves the framing state to the caller.
     ///
-    /// Preserves the mode: a `Slice` frames the voxel box's XY extent
+    /// Preserves the mode: a `Slice` frames the plane box's XY extent
     /// ([`FIT_MARGIN_2D`]), an `Arcball` contains the world box's bounding
     /// sphere ([`FIT_MARGIN_3D`]) with a depth range around it, and a `Fly`
     /// keeps its orientation and backs off to a containing distance. The
     /// caller need not patch `near`/`far` afterward.
     pub fn fit(&mut self, bounds: &FitBounds) {
         match self {
-            Camera::Slice(s) => s.fit_to_bounds(bounds.vox, FIT_MARGIN_2D),
+            Camera::Slice(s) => s.fit_to_bounds(bounds.plane, FIT_MARGIN_2D),
             Camera::Arcball(a) => a.fit_to_bounds(bounds.world, FIT_MARGIN_3D),
             Camera::Fly(f) => f.fit_to_bounds(bounds.world, FIT_MARGIN_3D),
         }
@@ -726,7 +748,7 @@ impl Slice {
     /// degenerate axis (single plane / line) is floored so `zoom` stays finite
     /// and positive — the camera then fits the non-degenerate axis. The shared
     /// math lives in [`crate::framing::slice_framing`].
-    pub fn fit_to_bounds(&mut self, bounds: VoxBox, margin: f64) {
+    pub fn fit_to_bounds(&mut self, bounds: PlaneBox, margin: f64) {
         let (min, max) = (bounds.min, bounds.max);
         let (center, zoom) =
             slice_framing([min[0], min[1]], [max[0], max[1]], self.viewport, margin);
@@ -1979,15 +2001,15 @@ mod tests {
     use super::*;
 
     /// A slice fit box over a 2D rect.
-    fn vox2(min: [f64; 2], max: [f64; 2]) -> VoxBox {
-        VoxBox::new([min[0], min[1], 0.0], [max[0], max[1], 0.0])
+    fn vox2(min: [f64; 2], max: [f64; 2]) -> PlaneBox {
+        PlaneBox::new([min[0], min[1], 0.0], [max[0], max[1], 0.0])
     }
 
     /// The same box in both spaces, so a test of one camera's fit reads the
     /// box it gave whichever camera it is.
     fn both(min: [f64; 3], max: [f64; 3]) -> FitBounds {
         FitBounds {
-            vox: VoxBox::new(min, max),
+            plane: PlaneBox::new(min, max),
             world: WorldBox::new(min, max),
         }
     }

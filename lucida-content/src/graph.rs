@@ -10,6 +10,7 @@ use crate::image::{ImageSpec, MultiscaleInfo};
 use crate::kind::DatasetKind;
 use crate::label::{LabelAttachment, LabelSpec};
 use crate::layout::LayoutSpec;
+use crate::space::PhysicalSpace;
 use crate::transform::{TransformEdge, VoxelTransform};
 
 /// The complete description of one opened dataset: its entity hierarchy,
@@ -53,6 +54,10 @@ pub struct DatasetManifest {
     /// discovery is budget-bounded, so the count stays small, and a label's
     /// multiscale legitimately differs from its source image's.
     labels: Vec<LabelSpec>,
+    /// Where the dataset's frame sits in physical space, when its source
+    /// declares units or an origin. Boxed, since most sources declare none
+    /// and a manifest travels inside every open message.
+    space: Option<Box<PhysicalSpace>>,
 }
 
 impl DatasetManifest {
@@ -79,6 +84,7 @@ impl DatasetManifest {
             source_layouts,
             default_layout_id,
             labels: Vec::new(),
+            space: None,
         }
     }
 
@@ -88,6 +94,19 @@ impl DatasetManifest {
     pub fn with_labels(mut self, labels: Vec<LabelSpec>) -> Self {
         self.labels = labels;
         self
+    }
+
+    /// Attach the physical space the source declares. One that declares
+    /// nothing is dropped, so the wire form stays as it was without one.
+    pub fn with_space(mut self, space: PhysicalSpace) -> Self {
+        self.space = (!space.is_unset()).then(|| Box::new(space));
+        self
+    }
+
+    /// Where the dataset's frame sits in physical space, or `None` when its
+    /// source declares no units and no origin.
+    pub fn space(&self) -> Option<&PhysicalSpace> {
+        self.space.as_deref()
     }
 
     pub fn entities(&self) -> &[Entity] {
@@ -304,7 +323,8 @@ impl Serialize for DatasetManifest {
         let field_count = 8
             + usize::from(compact)
             + usize::from(!shared.table.is_empty())
-            + usize::from(!self.labels.is_empty());
+            + usize::from(!self.labels.is_empty())
+            + usize::from(self.space.is_some());
         let mut state = serializer.serialize_struct("DatasetManifest", field_count)?;
         // Leads the object, and only when a compact construct follows, so
         // marker presence is exactly "an inline-form-only decoder cannot
@@ -335,6 +355,9 @@ impl Serialize for DatasetManifest {
         // Omitted when empty, byte-compatible with pre-labels output.
         if !self.labels.is_empty() {
             state.serialize_field("labels", &self.labels)?;
+        }
+        if let Some(space) = &self.space {
+            state.serialize_field("space", space)?;
         }
         state.end()
     }
@@ -413,6 +436,8 @@ struct DatasetManifestWire {
     default_layout_id: Option<LayoutId>,
     #[serde(default)]
     labels: Vec<LabelSpec>,
+    #[serde(default)]
+    space: Option<Box<PhysicalSpace>>,
 }
 
 #[derive(Deserialize)]
@@ -545,6 +570,7 @@ impl TryFrom<DatasetManifestWire> for DatasetManifest {
             source_layouts: wire.source_layouts,
             default_layout_id: wire.default_layout_id,
             labels: wire.labels,
+            space: wire.space.filter(|space| !space.is_unset()),
         })
     }
 }
@@ -754,6 +780,23 @@ mod tests {
         let back: DatasetManifest = serde_json::from_value(value).unwrap();
         assert!(back.label_specs().is_empty());
         assert!(back.labels().is_empty());
+    }
+
+    #[test]
+    fn physical_space_round_trips_and_an_unset_one_stays_off_the_wire() {
+        let space = PhysicalSpace {
+            units: [None, Some("micrometer".into()), Some("micrometer".into())],
+            origin: [0.0, 12.5, -4.0],
+        };
+        let graph = make_single_image_graph().with_space(space.clone());
+        let value = serde_json::to_value(&graph).unwrap();
+        let back: DatasetManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(back.space(), Some(&space));
+
+        let bare = make_single_image_graph().with_space(PhysicalSpace::default());
+        assert!(bare.space().is_none());
+        let value = serde_json::to_value(&bare).unwrap();
+        assert!(value.get("space").is_none(), "got: {value}");
     }
 
     fn collection_multiscale() -> MultiscaleInfo {

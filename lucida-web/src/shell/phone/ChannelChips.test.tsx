@@ -46,6 +46,7 @@ function layer(id: string, channels: LayerChannel[]): LayerInfo {
     displayedLevel: null,
     displayedCoarserThanTarget: false,
     downsamplingMethod: null,
+    physicalScale: true,
   };
 }
 

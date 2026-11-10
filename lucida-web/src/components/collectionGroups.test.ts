@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import initWasm, { WasmScene } from "lucida-core";
 import { groupAt, unionRects } from "./collectionGroups.ts";
 import type { VoxelRect } from "../pipeline/layoutBuilders.ts";
+import { collection } from "../pipeline/simulation/fixtures.ts";
 
 beforeAll(async () => {
   // wasm-bindgen web target: init with the built .wasm bytes (cwd is lucida-web).
@@ -52,22 +53,40 @@ describe("groupAt", () => {
 });
 
 describe("a group click", () => {
+  const tiles = collection({
+    id: "tiles",
+    rows: 3,
+    columns: 4,
+    pyramid: { shape: [1, 1, 1, 512, 512], chunk: [1, 128, 128], levels: 2 },
+  });
+
   // The scene's viewport is the canvas in device pixels, as the slice path sets it.
   for (const dpr of [1, 2]) {
     it(`frames the whole group, centered, at devicePixelRatio ${dpr}`, () => {
-      const rect: VoxelRect = { min: [2400, 1300], max: [2900, 1700] };
-      const scene = new WasmScene(1280 * dpr, 800 * dpr);
-      expect(scene.frame_region(rect.min[0], rect.min[1], rect.max[0], rect.max[1])).toBe(true);
+      const rect: VoxelRect = { min: [1056, 528], max: [1556, 928] };
+      const width = 1280 * dpr;
+      const height = 800 * dpr;
+      const scene = new WasmScene(width, height);
+      scene.apply_command(tiles.openCommand);
+      expect(scene.frame_region(tiles.datasetId, rect.min[0], rect.min[1], rect.max[0], rect.max[1])).toBe(true);
 
-      expect(Array.from(scene.center())).toEqual([2650, 1500]);
-      const [minX, minY, maxX, maxY] = JSON.parse(scene.world_bounds()) as number[];
-      expect(minX).toBeLessThanOrEqual(rect.min[0]);
-      expect(minY).toBeLessThanOrEqual(rect.min[1]);
-      expect(maxX).toBeGreaterThanOrEqual(rect.max[0]);
-      expect(maxY).toBeGreaterThanOrEqual(rect.max[1]);
+      // The collection is the only dataset, so its frame is the scene frame.
+      const [cx, cy] = Array.from(scene.center());
+      expect([cx, cy]).toEqual([1306, 728]);
+      const zoom = scene.zoom();
+      expect(cx - width / 2 / zoom).toBeLessThanOrEqual(rect.min[0]);
+      expect(cy - height / 2 / zoom).toBeLessThanOrEqual(rect.min[1]);
+      expect(cx + width / 2 / zoom).toBeGreaterThanOrEqual(rect.max[0]);
+      expect(cy + height / 2 / zoom).toBeGreaterThanOrEqual(rect.max[1]);
       // The same CSS framing at either ratio: zoom is device pixels per voxel.
-      expect(scene.zoom() / dpr).toBeCloseTo(800 / (400 * 1.15));
+      expect(zoom / dpr).toBeCloseTo(800 / (400 * 1.15));
       expect(scene.camera_framing()).toBe("placed");
     });
   }
+
+  it("is refused for a dataset the scene doesn't hold", () => {
+    const scene = new WasmScene(1280, 800);
+    scene.apply_command(tiles.openCommand);
+    expect(scene.frame_region("absent", 0, 0, 100, 100)).toBe(false);
+  });
 });

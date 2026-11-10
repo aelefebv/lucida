@@ -6,9 +6,9 @@
  * is read from `trace/linkedSelection.ts`, never from the dock.
  *
  * Both modes project voxel to world to `WasmScene.project_to_screen`. Slice:
- * world is voxel plus the tile position. Volume: world is the tile model
- * matrix times voxel / fullVoxel, which bakes in the renderer's Y-flip and
- * physical-extent normalization.
+ * world is voxel plus the tile position, placed in the scene frame as its
+ * dataset is. Volume: world is the tile model matrix times voxel / fullVoxel,
+ * which bakes in the renderer's Y-flip and placement.
  */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
@@ -16,6 +16,7 @@ import { Axis } from "../axes.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "../trace/linkedSelection.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import type { DatasetState } from "../types.ts";
+import { frameToScene, readPlacement, type Placement } from "../placement.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/fetch/index.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
@@ -319,6 +320,8 @@ interface TileFrame {
   pos: [number, number];
   fullVoxel: [number, number, number];
   model: Float32Array | null;
+  /** Where the tile's dataset sits in the scene frame, for the slice path. */
+  placement: Placement;
 }
 
 /** Project a world-space point to CSS-pixel screen coords. */
@@ -356,7 +359,8 @@ function voxelToWorld(
       m[2] * ux + m[6] * uy + m[10] * uz + m[14],
     ];
   }
-  return [frame.pos[0] + vx, frame.pos[1] + vy, vz];
+  const [wx, wy] = frameToScene(frame.placement, [frame.pos[0] + vx, frame.pos[1] + vy]);
+  return [wx, wy, vz];
 }
 
 /** Tile's world-space centroid (the (0.5, 0.5, 0.5) point of its unit cube). */
@@ -636,6 +640,7 @@ export function DebugOverlays({
           pos: [0, 0], // overwritten below
           fullVoxel: [lvl0Shape[Axis.X], lvl0Shape[Axis.Y], lvl0Shape[Axis.Z]],
           model,
+          placement: readPlacement(ws, dsId),
         };
       };
 
@@ -703,6 +708,7 @@ export function DebugOverlays({
                 pos: [0, 0],
                 fullVoxel: [1, 1, 1],
                 model: null,
+                placement: readPlacement(ws, dsId),
               };
             }
             if (!frame) continue;

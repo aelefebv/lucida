@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
+import { IDENTITY_PLACEMENT } from "./placement.ts";
 import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, overviewKeyFor, overviewLayerParams, readMemberRenderMatrices, readMinimapOverviewEpochs, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
 import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
 import type { MinimapState } from "./minimapPath.ts";
@@ -95,6 +96,7 @@ describe("intersectSliceViewWithMember", () => {
         memberId: "tile-0-image",
         modelMatrix,
         position: [0, 0],
+        placement: IDENTITY_PLACEMENT,
         width: 500,
         height: 500,
         depth: 9,
@@ -113,6 +115,7 @@ describe("intersectSliceViewWithMember", () => {
         memberId: "tile-1-image",
         modelMatrix,
         position: [1000, 2000],
+        placement: IDENTITY_PLACEMENT,
         width: 500,
         height: 500,
         depth: 9,
@@ -130,6 +133,7 @@ describe("intersectSliceViewWithMember", () => {
         memberId: "tile-1-image",
         modelMatrix,
         position: [1000, 2000],
+        placement: IDENTITY_PLACEMENT,
         width: 500,
         height: 500,
         depth: 9,
@@ -137,6 +141,25 @@ describe("intersectSliceViewWithMember", () => {
     );
 
     expect(viewport?.bounds).toEqual({ minX: 0, minY: 0, maxX: 100, maxY: 100 });
+  });
+
+  it("reads scene bounds in the member's dataset frame", () => {
+    // Samples half a scene unit across, the frame starting at scene x 50.
+    const viewport = intersectSliceViewWithMember(
+      { minX: 100, minY: 0, maxX: 150, maxY: 50 },
+      {
+        datasetId: "fine",
+        memberId: "fine-image",
+        modelMatrix,
+        position: [0, 0],
+        placement: { offset: [50, 0, 0], scale: [0.5, 0.5, 1] },
+        width: 500,
+        height: 500,
+        depth: 9,
+      },
+    );
+
+    expect(viewport?.bounds).toEqual({ minX: 100, minY: 0, maxX: 200, maxY: 100 });
   });
 
   it("returns null when the scene bounds do not overlap the member", () => {
@@ -147,6 +170,7 @@ describe("intersectSliceViewWithMember", () => {
         memberId: "tile-1-image",
         modelMatrix,
         position: [1000, 2000],
+        placement: IDENTITY_PLACEMENT,
         width: 500,
         height: 500,
         depth: 9,
@@ -288,6 +312,7 @@ describe("tickMinimap overview/overlay split", () => {
       // 36 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj, [35] topDown.
       minimap_camera: () => new Float32Array(36),
       member_positions: () => JSON.stringify({ m0: [0, 0] }),
+      dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
       member_render_ids: () => JSON.stringify(["m0"]),
       member_render_matrices: () => new Float32Array(32),
       scene_model_matrix_for: () => new Float32Array(16),

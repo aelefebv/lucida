@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::{Camera, Framing};
-use crate::framing::{FitBounds, VoxBox, WorldBox};
+use crate::framing::{FitBounds, PlaneBox, WorldBox};
 use crate::saved_view::SavedView;
 use crate::scene::{DatasetDisplaySettings, RenderMode, Scene};
 use crate::view::ViewState;
@@ -22,15 +22,15 @@ use lucida_content::DatasetId;
 /// read off a [`Scene`] by [`ViewExtent::of`].
 ///
 /// The box is held in both spaces, so the Home move fits whichever camera the
-/// view has. Only the voxel box goes on the wire, as `min` and `max`. The
+/// view has. Only the plane box goes on the wire, as `min` and `max`. The
 /// `*_count` fields are the sizes of the non-spatial axes and gate the
 /// dimensional moves: `z_count <= 1` means a flat dataset with no slices to
 /// step through.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ViewExtent {
-    /// The dataset's box in voxel space.
+    /// The dataset's box in the plane the slice camera frames.
     #[serde(flatten)]
-    pub voxels: VoxBox,
+    pub plane: PlaneBox,
     /// The same box in world space, where a volume camera frames it.
     #[serde(skip)]
     pub world: WorldBox,
@@ -80,7 +80,7 @@ impl ViewExtent {
         let mut visible = scene.visible_dataset_ids();
         let alone = visible.next() == Some(dataset_id) && visible.next().is_none();
         Some(ViewExtent {
-            voxels: bounds.vox,
+            plane: bounds.plane,
             world: bounds.world,
             fit_framing: if alone {
                 Framing::Framed
@@ -97,7 +97,7 @@ impl ViewExtent {
     /// The box in both spaces, for [`Camera::fit`].
     pub fn bounds(&self) -> FitBounds {
         FitBounds {
-            vox: self.voxels,
+            plane: self.plane,
             world: self.world,
         }
     }
@@ -783,7 +783,7 @@ mod tests {
 
     fn extent_3d() -> ViewExtent {
         ViewExtent {
-            voxels: VoxBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
+            plane: PlaneBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
             world: WorldBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
             fit_framing: Framing::Framed,
             z_count: 40,
@@ -1313,7 +1313,7 @@ mod tests {
     /// neighbours.
     fn extent_rich() -> ViewExtent {
         ViewExtent {
-            voxels: VoxBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
+            plane: PlaneBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
             world: WorldBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
             fit_framing: Framing::Framed,
             z_count: 40,
@@ -1656,7 +1656,7 @@ mod tests {
         // Equal min/max (a single point) must not panic anywhere in the
         // pipeline — Home just fits a degenerate box, the camera sanitizes it.
         let point = ViewExtent {
-            voxels: VoxBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
+            plane: PlaneBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
             world: WorldBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
             fit_framing: Framing::Framed,
             z_count: 0,
@@ -1676,8 +1676,8 @@ mod tests {
     fn extent_maps_tczyx_to_the_voxel_box_and_counts() {
         // dims = [T, C, Z, Y, X]: the box spans X/Y/Z, counts carry T/C/Z.
         let extent = extent_of([1, 2, 340, 512, 768]);
-        assert_eq!(extent.voxels.min, [0.0, 0.0, 0.0]);
-        assert_eq!(extent.voxels.max, [768.0, 512.0, 340.0]);
+        assert_eq!(extent.plane.min, [0.0, 0.0, 0.0]);
+        assert_eq!(extent.plane.max, [768.0, 512.0, 340.0]);
         assert_eq!(extent.z_count, 340);
         assert_eq!(extent.t_count, 1);
         assert_eq!(extent.c_count, 2);
@@ -1687,7 +1687,7 @@ mod tests {
     fn extent_of_a_flat_dataset() {
         // A flat (Z = 1) multichannel image: z_count = 1 gates out slice steps.
         let extent = extent_of([3, 4, 1, 1024, 2048]);
-        assert_eq!(extent.voxels.max, [2048.0, 1024.0, 1.0]);
+        assert_eq!(extent.plane.max, [2048.0, 1024.0, 1.0]);
         assert_eq!(extent.z_count, 1);
         assert_eq!(extent.t_count, 3);
         assert_eq!(extent.c_count, 4);

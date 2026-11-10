@@ -25,6 +25,7 @@ function makeScene(initial: Annotation[]) {
     annotations: () => JSON.stringify(pins),
     zoom: () => 1,
     center: () => new Float64Array([0, 0]),
+    dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
     export_presence: () => "not json",
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;

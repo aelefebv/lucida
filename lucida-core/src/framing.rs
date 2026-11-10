@@ -11,25 +11,25 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A box in voxel space, corners as `[x, y, z]`: level-0 samples, with a
-/// collection's members at their layout positions. The slice camera works in
-/// this space.
+/// A box the slice camera frames, corners as `[x, y, z]`: X and Y in the
+/// scene frame ([`crate::placement`]), Z counting planes, since the axis
+/// position steps through planes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct VoxBox {
+pub struct PlaneBox {
     pub min: [f64; 3],
     pub max: [f64; 3],
 }
 
 /// A box in world space, corners as `[x, y, z]`: where the renderer places
-/// volumes, the unit cube scaled by physical extent. The volume cameras work
-/// in this space.
+/// volumes, the scene frame as [`crate::placement::WorldSpace`] maps it. The
+/// volume cameras work in this space.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WorldBox {
     pub min: [f64; 3],
     pub max: [f64; 3],
 }
 
-impl VoxBox {
+impl PlaneBox {
     pub fn new(min: [f64; 3], max: [f64; 3]) -> Self {
         Self { min, max }
     }
@@ -62,14 +62,14 @@ fn union(a0: [f64; 3], a1: [f64; 3], b0: [f64; 3], b1: [f64; 3]) -> ([f64; 3], [
 /// and can't be handed the other's.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FitBounds {
-    pub vox: VoxBox,
+    pub plane: PlaneBox,
     pub world: WorldBox,
 }
 
 impl FitBounds {
     pub fn union(self, other: Self) -> Self {
         Self {
-            vox: self.vox.union(other.vox),
+            plane: self.plane.union(other.plane),
             world: self.world.union(other.world),
         }
     }

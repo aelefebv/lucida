@@ -408,6 +408,9 @@ def test_parse_args_reads_every_option() -> None:
             "--sparse",
             "--unwritten-level", "3",
             "--unwritten-level", "1",
+            "--scale", "2,0.5,0.5",
+            "--translation", "0",
+            "--unit", "micrometer",
             "--labels",
             "--level-index",
             "--dtype", "float32",
@@ -429,12 +432,43 @@ def test_parse_args_reads_every_option() -> None:
     assert opts.shard == (8, 8, 8)
     assert opts.sparse is True
     assert opts.unwritten_levels == (1, 3)
+    assert opts.scale == (2.0, 0.5, 0.5)
+    assert opts.translation == (0.0, 0.0, 0.0)
+    assert opts.unit == "micrometer"
     assert opts.labels is True
     assert opts.level_index is True
     assert opts.dtype == "float32"
     assert opts.value_range == (-2.5, 10.0)
     assert opts.seed == 7
     assert opts.overwrite is True
+
+
+def test_scale_translation_and_unit_place_every_level(tmp_path: Path) -> None:
+    out = generate(
+        tmp_path, "placed.ome.zarr",
+        "--size", "8,32,32", "--levels", "2", "--factor", "1,2,2", "--chunk", "8",
+        "--scale", "2,0.5,0.5", "--translation", "1,10,20", "--unit", "micrometer",
+    )
+    ms = multiscale(out)
+    assert [axis.get("unit") for axis in ms["axes"]] == ["micrometer"] * 3
+    level0, level1 = (d["coordinateTransformations"] for d in ms["datasets"])
+    assert level0 == [
+        {"type": "scale", "scale": [2.0, 0.5, 0.5]},
+        {"type": "translation", "translation": [1.0, 10.0, 20.0]},
+    ]
+    assert level1 == [
+        {"type": "scale", "scale": [2.0, 1.0, 1.0]},
+        {"type": "translation", "translation": [1.0, 10.25, 20.25]},
+    ]
+
+
+def test_placement_flags_leave_the_samples_alone(tmp_path: Path) -> None:
+    plain = generate(tmp_path, "plain.ome.zarr", "--size", "16,16", "--chunk", "8")
+    placed = generate(tmp_path, "placed.ome.zarr", "--size", "16,16", "--chunk", "8", "--scale", "3", "--translation", "5", "--unit", "meter")
+    for level in range(3):
+        np.testing.assert_array_equal(level_array(plain, level), level_array(placed, level))
+    assert "translation" not in json.dumps(multiscale(plain))
+    assert all("unit" not in axis for axis in multiscale(plain)["axes"])
 
 
 def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
@@ -449,6 +483,9 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
     assert opts.shard is None
     assert opts.sparse is False
     assert opts.unwritten_levels == ()
+    assert opts.scale is None
+    assert opts.translation is None
+    assert opts.unit is None
     assert opts.labels is False
     assert opts.level_index is False
     assert opts.dtype == "uint16"
@@ -478,6 +515,9 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         ["out.zarr", "--dtype", "uint8"],
         ["out.zarr", "--zarr-version", "2", "--chunk", "8", "--shard", "16"],
         ["out.zarr", "--zarr-version", "2", "--checksum"],
+        ["out.zarr", "--scale", "1,1,1"],
+        ["out.zarr", "--scale", "0"],
+        ["out.zarr", "--translation", "1,2,3"],
     ],
     ids=[
         "size-arity",
@@ -500,6 +540,9 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         "default-range-past-one-byte-type",
         "v2-shard",
         "v2-checksum",
+        "scale-arity",
+        "zero-scale",
+        "translation-arity",
     ],
 )
 def test_parse_args_rejects_inconsistent_options(argv: list[str]) -> None:

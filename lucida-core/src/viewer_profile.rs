@@ -461,7 +461,7 @@ impl Scene {
         }
         let depth = self
             .visible_bounds()
-            .map_or(0, |bounds| bounds.vox.max[2] as u32);
+            .map_or(0, |bounds| bounds.plane.max[2] as u32);
         self.apply(Command::Viewport(ViewportCommand::SetZ {
             z: depth.saturating_sub(1) / 2,
         }));

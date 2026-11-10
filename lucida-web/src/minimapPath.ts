@@ -9,6 +9,7 @@ import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import { datasetSampleFormat } from "./renderer/dataTypeUtil.ts";
 import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import { compositeKey } from "./tickCommon.ts";
+import { readPlacement, sceneToFrame, type Placement } from "./placement.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;
@@ -260,7 +261,10 @@ export interface SliceViewportMemberInput {
   datasetId: string;
   memberId: string;
   modelMatrix: Float32Array;
+  /** The member's layout position in its dataset's frame. */
   position: [number, number];
+  /** Where that frame sits in the scene frame the slice view's bounds are in. */
+  placement: Placement;
   width: number;
   height: number;
   depth: number;
@@ -270,10 +274,12 @@ export function intersectSliceViewWithMember(
   sceneBounds: SliceViewBounds,
   member: SliceViewportMemberInput,
 ): MinimapOverlayData["sliceViewports"][number] | null {
-  const localMinX = Math.max(0, sceneBounds.minX - member.position[0]);
-  const localMinY = Math.max(0, sceneBounds.minY - member.position[1]);
-  const localMaxX = Math.min(member.width, sceneBounds.maxX - member.position[0]);
-  const localMaxY = Math.min(member.height, sceneBounds.maxY - member.position[1]);
+  const [minX, minY] = sceneToFrame(member.placement, [sceneBounds.minX, sceneBounds.minY]);
+  const [maxX, maxY] = sceneToFrame(member.placement, [sceneBounds.maxX, sceneBounds.maxY]);
+  const localMinX = Math.max(0, minX - member.position[0]);
+  const localMinY = Math.max(0, minY - member.position[1]);
+  const localMaxX = Math.min(member.width, maxX - member.position[0]);
+  const localMaxY = Math.min(member.height, maxY - member.position[1]);
 
   if (localMaxX <= localMinX || localMaxY <= localMinY) {
     return null;
@@ -586,6 +592,7 @@ function buildMinimapOverview(
     }
 
     const memberMatrices = readMemberRenderMatrices(scene, dsId);
+    const placement = readPlacement(scene, dsId);
 
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
@@ -613,6 +620,7 @@ function buildMinimapOverview(
           memberId,
           modelMatrix: model,
           position: memberPositions[img.owner] ?? memberPositions[memberId] ?? [0, 0],
+          placement,
           width: level0.shape[Axis.X],
           height: level0.shape[Axis.Y],
           depth: level0.shape[Axis.Z],

@@ -13,6 +13,7 @@ import type { MemberRosterEntry, TickCoordinator, TickCoordinatorResult } from "
 import type { TickContext } from "./renderLoopTypes.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { compositeKey } from "./tickCommon.ts";
+import { IDENTITY_PLACEMENT } from "./placement.ts";
 import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
 
 // pushMemberLayers: the per-(dataset, channel) member-pass budget
@@ -49,6 +50,7 @@ describe("pushMemberLayers", () => {
         blendMode: "additive",
         fullResWidth: 1024,
         fullResHeight: 1024,
+        placement: IDENTITY_PLACEMENT,
         zoom: 0.5,
       });
     }
@@ -67,6 +69,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom: 0.0005, // diag ≈ 0.7 device px per member
     });
     expect(layers).toHaveLength(1);
@@ -85,6 +88,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom: 1, // diag ≈ 1448 px per member
     });
     expect(layers).toHaveLength(9);
@@ -98,6 +102,39 @@ describe("pushMemberLayers", () => {
     expect(layers[4].offsetY).toBe(1024);
   });
 
+  it("places each member layer, and an aggregate's extent, as the dataset's placement puts them", () => {
+    const placement = { offset: [100, -50, 0], scale: [0.5, 0.25, 1] } as const;
+    const members = rosterGrid(4, 2, 1024);
+    const individual: SliceLayerParams[] = [];
+    pushMemberLayers(individual, {
+      members,
+      indexByMember: indexFor(members, 0),
+      channel: 0,
+      blendMode: "alpha",
+      fullResWidth: 1024,
+      fullResHeight: 1024,
+      placement,
+      zoom: 1,
+    });
+    expect([individual[3].offsetX, individual[3].offsetY]).toEqual([100 + 512, -50 + 256]);
+    expect([individual[3].dataW, individual[3].dataH]).toEqual([512, 256]);
+
+    const aggregated: SliceLayerParams[] = [];
+    pushMemberLayers(aggregated, {
+      members,
+      indexByMember: indexFor(members, 0),
+      channel: 0,
+      blendMode: "alpha",
+      fullResWidth: 1024,
+      fullResHeight: 1024,
+      placement,
+      zoom: 0.0005,
+    });
+    expect(aggregated).toHaveLength(1);
+    expect([aggregated[0].offsetX, aggregated[0].offsetY]).toEqual([100, -50]);
+    expect([aggregated[0].dataW, aggregated[0].dataH]).toEqual([1024, 512]);
+  });
+
   it("keeps a LONE tiny member as an individual pass (single small dataset unchanged)", () => {
     const members = rosterGrid(1, 1, 1024);
     const layers: SliceLayerParams[] = [];
@@ -108,6 +145,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
@@ -128,6 +166,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom,
     });
     const individual = layers.filter((l) => !l.aggregate);
@@ -151,6 +190,7 @@ describe("pushMemberLayers", () => {
       blendMode: "max",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
@@ -191,6 +231,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
@@ -207,6 +248,7 @@ describe("pushMemberLayers", () => {
       blendMode: "additive",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
@@ -229,6 +271,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom,
     });
     const individual = layers.filter((l) => !l.aggregate);
@@ -258,6 +301,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 0,
       fullResHeight: 0,
+      placement: IDENTITY_PLACEMENT,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(0);
@@ -284,6 +328,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
+      placement: IDENTITY_PLACEMENT,
       zoom: 0.03, // smallest diag ≈ 42 px — everyone above the threshold
     });
     const agg = layers.find((l) => l.aggregate);
@@ -368,6 +413,7 @@ function makeSeamHarness(opts: {
     zoom: () => opts.zoom,
     center: () => new Float32Array([512, 512]),
     epochs: () => JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),
+    dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
   };
   const manifest = {
     dataset_id: "ds1",

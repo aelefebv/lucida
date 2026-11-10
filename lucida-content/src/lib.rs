@@ -8,6 +8,7 @@ pub mod kind;
 pub mod label;
 pub mod layout;
 pub mod normalize;
+pub mod space;
 pub mod transform;
 pub mod url;
 
@@ -21,4 +22,5 @@ pub use kind::*;
 pub use label::*;
 pub use layout::*;
 pub use normalize::*;
+pub use space::*;
 pub use transform::*;
