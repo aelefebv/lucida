@@ -88,6 +88,8 @@ export interface RendererState {
   currentColdState: ColdStateMessage | null;
   /** The last viewport frame drawn, which a probe reads what is under a point from. */
   lastFrame: SliceRenderMultiPassMessage | VolumeRenderMultiPassMessage | null;
+  /** The newest viewport frame the page gave up on; a banded frame up to it stops at its next band. */
+  abandonedFrameSeq: number;
   /**
    * Per-dataset most-recent cold-state message. A display-only update
    * (`coldStateDisplay`) patches this dataset's entry and rebuilds its
@@ -168,6 +170,7 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     currentEpochs: null,
     currentColdState: null,
     lastFrame: null,
+    abandonedFrameSeq: 0,
     coldStateByDataset: new Map(),
     wantedByDataset: new Map(),
     failedByDataset: new Map(),

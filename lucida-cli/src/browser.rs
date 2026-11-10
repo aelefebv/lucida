@@ -95,10 +95,11 @@ fn mobile_user_agent_params() -> Value {
 }
 
 /// Chrome command-line arguments for a headless run in `viewport`, writing its
-/// throwaway profile to `user_data_dir`. Split out from the spawn so the launch
-/// shape (headless mode, GPU flags, window size) is assertable without a
-/// browser on the machine.
-fn launch_args(viewport: Viewport, user_data_dir: &Path) -> Vec<String> {
+/// throwaway profile to `user_data_dir`, with the caller's `extra` flags after
+/// the driver's own. Split out from the spawn so the launch shape (headless
+/// mode, GPU flags, window size) is assertable without a browser on the
+/// machine.
+fn launch_args(viewport: Viewport, user_data_dir: &Path, extra: &[String]) -> Vec<String> {
     let mut args = vec![
         "--headless=new".to_string(),
         "--enable-unsafe-webgpu".to_string(),
@@ -111,9 +112,19 @@ fn launch_args(viewport: Viewport, user_data_dir: &Path) -> Vec<String> {
         "--remote-debugging-port=0".to_string(),
         format!("--user-data-dir={}", user_data_dir.display()),
         format!("--window-size={},{}", viewport.width, viewport.height),
-        "about:blank".to_string(),
     ]);
+    args.extend(extra.iter().cloned());
+    args.push("about:blank".to_string());
     args
+}
+
+/// Chrome flags from `LUCIDA_BROWSER_ARGS`, split on whitespace.
+/// `--use-webgpu-adapter=swiftshader` runs the page's WebGPU on SwiftShader,
+/// the software adapter CI renders with, as a stand-in for a weak GPU.
+fn browser_args_from_env() -> Vec<String> {
+    std::env::var("LUCIDA_BROWSER_ARGS")
+        .map(|value| value.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 /// Flags that put headless Chrome's GPU process on the machine's GPU.
@@ -170,7 +181,11 @@ impl HeadlessBrowser {
         let user_data_dir = chrome_user_data_dir();
         tokio::fs::create_dir_all(&user_data_dir).await?;
         let mut child = TokioCommand::new(&binary)
-            .args(launch_args(viewport, &user_data_dir))
+            .args(launch_args(
+                viewport,
+                &user_data_dir,
+                &browser_args_from_env(),
+            ))
             .stderr(Stdio::piped())
             .stdout(Stdio::null())
             .stdin(Stdio::null())
@@ -964,7 +979,7 @@ mod tests {
 
     #[test]
     fn launch_args_carry_the_viewport_and_profile_directory() {
-        let args = launch_args(Viewport::new(640, 480, 1.0), Path::new("/tmp/profile"));
+        let args = launch_args(Viewport::new(640, 480, 1.0), Path::new("/tmp/profile"), &[]);
 
         assert!(args.contains(&"--headless=new".to_string()));
         assert!(args.contains(&"--window-size=640,480".to_string()));
@@ -973,8 +988,22 @@ mod tests {
     }
 
     #[test]
+    fn launch_args_put_the_callers_flags_after_the_drivers_and_before_the_page() {
+        let extra = ["--use-webgpu-adapter=swiftshader".to_string()];
+        let args = launch_args(
+            Viewport::new(640, 480, 1.0),
+            Path::new("/tmp/profile"),
+            &extra,
+        );
+
+        let at = args.iter().position(|arg| arg == &extra[0]).unwrap();
+        assert!(at > args.iter().position(|arg| arg == "--headless=new").unwrap());
+        assert_eq!(at, args.len() - 2);
+    }
+
+    #[test]
     fn launch_args_put_the_gpu_process_on_vulkan_only_on_linux() {
-        let args = launch_args(Viewport::new(640, 480, 1.0), Path::new("/tmp/profile"));
+        let args = launch_args(Viewport::new(640, 480, 1.0), Path::new("/tmp/profile"), &[]);
         let vulkan = [
             "--enable-features=Vulkan",
             "--use-angle=vulkan",

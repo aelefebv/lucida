@@ -2320,12 +2320,18 @@ pub fn format_script_human(script: &ScriptRecord) -> String {
 }
 
 /// A step's lag reading in a few words, read off the page's fields: input to
-/// frame at p95 and max, and the frames dropped when any were.
+/// frame for the first input, at p95 and max, and the frames dropped when any
+/// were.
 fn describe_lag(lag: &Value) -> Option<String> {
     let timing = lag.get("inputToFrame")?;
     let p95 = timing.get("p95Ms")?.as_f64()?;
     let max = timing.get("maxMs")?.as_f64()?;
-    let mut text = format!("input to frame p95 {p95} ms, max {max} ms");
+    let first = lag
+        .get("firstInputMs")
+        .and_then(Value::as_f64)
+        .map(|first| format!("first {first} ms, "))
+        .unwrap_or_default();
+    let mut text = format!("input to frame {first}p95 {p95} ms, max {max} ms");
     if let Some(dropped) = lag
         .pointer("/frames/dropped")
         .and_then(Value::as_u64)
@@ -3040,6 +3046,7 @@ mod tests {
         pan.lag = Some(json!({
             "inputs": 25,
             "inputToFrame": { "samples": 25, "p50Ms": 21.3, "p95Ms": 34.1, "maxMs": 40.0 },
+            "firstInputMs": 38.5,
             "unanswered": 0,
             "longTasks": { "count": 0, "longestMs": 0, "totalMs": 0 },
             "frames": { "presented": 25, "dropped": 2, "displayIntervalMs": 16.7 },
@@ -3057,7 +3064,7 @@ mod tests {
         let text = format_script_human(&ScriptRecord { steps: vec![pan] });
         assert!(
             text.contains(
-                "view changed · input to frame p95 34.1 ms, max 40 ms, 2 frame(s) dropped"
+                "view changed · input to frame first 38.5 ms, p95 34.1 ms, max 40 ms, 2 frame(s) dropped"
             ),
             "{text}"
         );
