@@ -512,12 +512,10 @@ impl WasmScene {
     /// Where `view` draws, as `[x, y, width, height]` fractions of the
     /// canvas from its top-left corner; empty for an unknown view.
     pub fn view_rect(&self, view: u32) -> Vec<f64> {
-        self.inner
-            .view(ViewId(view))
-            .map_or_else(Vec::new, |view| {
-                let r = view.rect;
-                vec![r.x, r.y, r.width, r.height]
-            })
+        self.inner.view(ViewId(view)).map_or_else(Vec::new, |view| {
+            let r = view.rect;
+            vec![r.x, r.y, r.width, r.height]
+        })
     }
 
     /// Query the scene for geometric information about all entities in a
