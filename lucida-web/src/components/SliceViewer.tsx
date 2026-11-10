@@ -317,7 +317,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
       const factor = e.deltaY > 0 ? SLICE_ZOOM_OUT_PER_NOTCH : SLICE_ZOOM_IN_PER_NOTCH;
       breakFollow();
       applyViewportCommand(scene, { type: "zoom_by", factor });
-      const newZoom = scene.zoom();
+      const newZoom = scene.zoom(scene.active_view());
 
       const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
       const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
@@ -343,7 +343,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
     const rect = canvas.getBoundingClientRect();
     const [worldX, worldY] = sceneEventToWorld(scene, canvas, from);
     applyViewportCommand(scene, { type: "zoom_by", factor });
-    const zoom = scene.zoom();
+    const zoom = scene.zoom(scene.active_view());
     const offsetX = (to.clientX - rect.left) * dpr - (canvas.clientWidth * dpr) / 2;
     const offsetY = (to.clientY - rect.top) * dpr - (canvas.clientHeight * dpr) / 2;
     applyViewportCommand(scene, { type: "set_center", x: worldX - offsetX / zoom, y: worldY - offsetY / zoom });

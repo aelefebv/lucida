@@ -12,6 +12,7 @@ import {
 /** A scene stub exposing only the 2D camera accessors the projections read. */
 function makeScene2D(zoom: number, center: [number, number]): WasmScene {
   return {
+    active_view: () => 0,
     zoom: () => zoom,
     center: () => new Float64Array(center),
   } as unknown as WasmScene;
@@ -94,6 +95,7 @@ describe("makeWorldToScreen (2D forward camera)", () => {
   it("snapshots the camera at creation: later scene movement doesn't shift this frame's projection", () => {
     let zoom = 1;
     const scene = {
+      active_view: () => 0,
       zoom: () => zoom,
       center: () => new Float64Array([0, 0]),
     } as unknown as WasmScene;

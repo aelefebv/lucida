@@ -70,7 +70,10 @@ function makeLoop() {
     onGpuStatus: () => () => {},
   };
   const loop = new RenderLoop({
-    session: { cpuCache, scene: { z: () => 0 } } as unknown as Session,
+    session: {
+      cpuCache,
+      scene: { z: () => 0, active_view: () => 0, view_ids: () => [0], view_rect: () => [0, 0, 1, 1] },
+    } as unknown as Session,
     datasets: new Map(),
     client: client as unknown as RenderClient,
     canvas: document.createElement("canvas"),

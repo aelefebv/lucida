@@ -1,5 +1,6 @@
 /** Main-thread API wrapping the GPU render worker. */
 import type {
+  ViewRect,
   AbandonFrameMessage,
   CanvasColors,
   Chunk,
@@ -605,6 +606,8 @@ export class RenderClient implements UploadClient {
     fullW: number,
     fullH: number,
     epochs: SceneEpochs,
+    view: number,
+    rect: ViewRect,
     viewProj?: Float32Array,
     camForward?: Float32Array,
     clipDistance?: number,
@@ -617,8 +620,9 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
       epochs,
+      view,
       layers, invViewProj, eye,
-      canvasW, canvasH, fullW, fullH, viewProj,
+      canvasW, canvasH, rect, fullW, fullH, viewProj,
       camForward, clipDistance, clipMode, pixelRatio, marchStepScale, bands,
       frameSeq,
     });
@@ -638,6 +642,8 @@ export class RenderClient implements UploadClient {
     canvasW: number,
     canvasH: number,
     epochs: SceneEpochs,
+    view: number,
+    rect: ViewRect,
     pixelRatio?: number,
   ): number {
     // Aggregate quad buffers are rebuilt per render tick on the main
@@ -651,8 +657,9 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage({
       type: "sliceRenderMultiPass",
       epochs,
+      view,
       layers, zoom, cx, cy,
-      canvasW, canvasH, pixelRatio,
+      canvasW, canvasH, rect, pixelRatio,
       frameSeq,
     }, transfer);
     return frameSeq;

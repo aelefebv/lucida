@@ -14,7 +14,7 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
-import type { TickContext } from "../../renderLoopTypes.ts";
+import { drawnView, type TickContext } from "../../renderLoopTypes.ts";
 import type { ResolvedLayer } from "../../resolvedLayers.ts";
 import type {
   ChunkFeedbackReason,
@@ -284,7 +284,7 @@ export class Uploader {
     const lastView = this.lastViewEpochByDataset.get(datasetId);
     if (lastView === epochs.view) return false;
     const hit = Array.from(
-      ctx.scene.ray_hit_local_image(datasetId),
+      ctx.scene.ray_hit_local_image(drawnView(ctx).id, datasetId),
     ) as [number, number, number];
     ctx.client.viewHotState(build(hit));
     this.lastViewEpochByDataset.set(datasetId, epochs.view);
@@ -466,11 +466,11 @@ export class Uploader {
     // uploads, and at least one always goes so labels never starve.
     let sent: Dispatched | DispatchSkip;
     if (meta.isLabel) {
-      sent = ctx.mode === "slice"
+      sent = drawnView(ctx).mode === "slice"
         ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, cut, epochs)
         : dispatchLabelVolumeChunkDelivery(ctx.client, delivery, meta, epochs);
     } else {
-      sent = dispatchChunkDelivery(ctx.client, delivery, meta, ctx.mode, cut, epochs);
+      sent = dispatchChunkDelivery(ctx.client, delivery, meta, drawnView(ctx).mode, cut, epochs);
     }
     if (sent === "other-plane") {
       this.currentUploadStats.skippedOtherPlane++;

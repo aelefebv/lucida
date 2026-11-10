@@ -21,6 +21,7 @@ function makeScene(initial: Annotation[]): {
   const applied: Array<Record<string, unknown>> = [];
   const scene = {
     annotations: (_datasetId: string) => JSON.stringify(pins),
+    active_view: () => 0,
     zoom: () => 1,
     center: () => new Float64Array([0, 0]),
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
@@ -1131,6 +1132,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     let pins = initial;
     const scene = {
       annotations: (_datasetId: string) => JSON.stringify(pins),
+      active_view: () => 0,
       zoom: () => 1,
       center: () => new Float64Array([0, 0]),
       dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),

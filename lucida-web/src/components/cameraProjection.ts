@@ -37,8 +37,8 @@ export function eventToWorld(
 ): [number, number] {
   const dpr = devicePixelRatio;
   const [cursorX, cursorY] = eventToScreenPx(canvas, e);
-  const zoom = scene.zoom();
-  const center = scene.center();
+  const zoom = scene.zoom(scene.active_view());
+  const center = scene.center(scene.active_view());
   const halfW = (canvas.clientWidth * dpr) / 2;
   const halfH = (canvas.clientHeight * dpr) / 2;
   return [(cursorX - halfW) / zoom + center[0], (cursorY - halfH) / zoom + center[1]];
@@ -55,8 +55,8 @@ export function makeWorldToScreen(
   const dpr = devicePixelRatio;
   const physW = Math.round(canvas.clientWidth * dpr);
   const physH = Math.round(canvas.clientHeight * dpr);
-  const zoom = scene.zoom();
-  const center = scene.center();
+  const zoom = scene.zoom(scene.active_view());
+  const center = scene.center(scene.active_view());
   const centerX = center[0];
   const centerY = center[1];
   return (v: ScreenPoint): ScreenPoint => [

@@ -181,8 +181,10 @@ function msgFor(layers: Array<{
     })),
     invViewProj: new Float32Array(16),
     eye: new Float32Array(3),
+    view: 0,
     canvasW: 64,
     canvasH: 64,
+    rect: [0, 0, 64, 64],
     fullW: 64,
     fullH: 64,
   };

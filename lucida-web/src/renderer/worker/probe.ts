@@ -8,11 +8,13 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
+import { coversCanvas } from "./viewFrame.ts";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
   ProbeMessage,
   ProbeSample,
+  SliceRenderMultiPassMessage,
   VolumeLayerParams,
   VolumeRenderMultiPassMessage,
 } from "../workerProtocol.ts";
@@ -58,10 +60,35 @@ const READ_STRIDE = 4;
 /** A volume march's step budget, as volume.wgsl's loops set it. */
 const MARCH_STEPS = { translucent: 512, max_intensity: 256, label: 512 } as const;
 
-export function handleProbe(ctx: WorkerCtx, msg: ProbeMessage): void {
+type ViewFrameMessage = SliceRenderMultiPassMessage | VolumeRenderMultiPassMessage;
+
+/**
+ * The last frame of the view under the canvas point `(fx, fy)`, fractions
+ * of the canvas, with the point in fractions of that view and the frame
+ * read in the view's own pixels. Null when no view's last frame holds it.
+ */
+export function frameAt(
+  frames: Iterable<ViewFrameMessage>,
+  fx: number,
+  fy: number,
+): { frame: ViewFrameMessage; x: number; y: number } | null {
+  for (const frame of frames) {
+    const [rx, ry, rw, rh] = frame.rect;
+    if (coversCanvas(frame.rect, frame.canvasW, frame.canvasH)) return { frame, x: fx, y: fy };
+    const px = fx * frame.canvasW - rx;
+    const py = fy * frame.canvasH - ry;
+    if (px < 0 || py < 0 || px >= rw || py >= rh) continue;
+    return { frame: { ...frame, canvasW: rw, canvasH: rh }, x: px / rw, y: py / rh };
+  }
+  return null;
+}
+
+export function handleProbe(ctx: WorkerCtx, probe: ProbeMessage): void {
   const samples: ProbeSample[] = [];
   const reads = new TexelReads();
-  const frame = ctx.state.lastFrame;
+  const located = frameAt(ctx.state.lastFrames.values(), probe.x, probe.y);
+  const frame = located?.frame;
+  const msg = { ...probe, x: located?.x ?? probe.x, y: located?.y ?? probe.y };
   if (frame?.type === "sliceRenderMultiPass") {
     const hits = sliceHits(frame, msg.x, msg.y, (poolMemberId, entityIndex) => {
       const datasetId = ctx.state.memberToDataset.get(poolMemberId);

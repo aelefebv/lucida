@@ -289,7 +289,7 @@ export class MinimapNavigator {
     }
     const pick = this.pick(frame, x, y);
     if (!pick) return false;
-    const center = scene.center();
+    const center = scene.center(scene.active_view());
     const grabbed = contains(this.viewBounds(scene), pick.scene);
     this.press = {
       ...base,
@@ -369,11 +369,11 @@ export class MinimapNavigator {
     const [px, py] = pick.scene;
     const factor = deltaY > 0 ? SLICE_ZOOM_OUT_PER_NOTCH : SLICE_ZOOM_IN_PER_NOTCH;
     this.steer(() => {
-      const before = scene.zoom();
-      const [cx, cy] = scene.center();
+      const before = scene.zoom(scene.active_view());
+      const [cx, cy] = scene.center(scene.active_view());
       applyViewportCommand(scene, { type: "zoom_by", factor });
       // The point keeps its place in the view, wherever that is.
-      const k = before / scene.zoom();
+      const k = before / scene.zoom(scene.active_view());
       applyViewportCommand(scene, { type: "set_center", x: px + (cx - px) * k, y: py + (cy - py) * k });
     }, "zoom", atMs);
     return true;
@@ -391,7 +391,7 @@ export class MinimapNavigator {
       this.steer(() => applyViewportCommand(scene, { type: "arcball_pan", dx: -dx * VOLUME_KEY_PAN, dy: -dy * VOLUME_KEY_PAN }), "pan", atMs);
       return true;
     }
-    const center = scene.center();
+    const center = scene.center(scene.active_view());
     const member = memberNear(frame.members, center[0], center[1]);
     const at = member && sceneToMinimap(frame, member, center[0], center[1]);
     if (!member || !at) return false;
@@ -434,7 +434,7 @@ export class MinimapNavigator {
     const ratio = devicePixelRatio;
     const width = Math.round((canvas?.clientWidth ?? 0) * ratio);
     const height = Math.round((canvas?.clientHeight ?? 0) * ratio);
-    return sliceViewSceneBounds(scene.center(), scene.zoom(), width, height);
+    return sliceViewSceneBounds(scene.center(scene.active_view()), scene.zoom(scene.active_view()), width, height);
   }
 
   private centerAt(scene: WasmScene, [x, y]: [number, number], atMs?: number): void {

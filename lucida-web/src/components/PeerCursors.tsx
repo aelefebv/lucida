@@ -123,7 +123,7 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
         let vpMatrix: Float32Array | null = null;
         let projectWorld: ((v: [number, number]) => [number, number]) | null = null;
         if (localIs3d) {
-          vpMatrix = new Float32Array(scene.view_proj());
+          vpMatrix = new Float32Array(scene.view_proj(scene.active_view()));
         } else {
           projectWorld = makeWorldToScreen(scene, canvas);
         }

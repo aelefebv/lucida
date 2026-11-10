@@ -85,13 +85,25 @@ export const MINIMAP_OVERVIEW_SCAN_INTERVAL_MS = 100;
  */
 export const MINIMAP_DISPLAY_HOLD_MS = 250;
 
+/** `[x, y, width, height]` in pixels from a canvas's top-left corner. */
+export type PixelRect = readonly [number, number, number, number];
+
+/** A view the loop draws: its id in the scene, the mode it draws it in, and where. */
+export interface TickView {
+  id: number;
+  mode: "slice" | "volume";
+  /** The view's rectangle of the canvas, in device pixels. */
+  rect: PixelRect;
+}
+
 /** Shared dependency bag passed to all tick functions. */
 export interface TickContext {
   scene: WasmScene;
   datasets: Map<string, DatasetEntry>;
   client: RenderClient;
   canvas: HTMLCanvasElement;
-  mode: "slice" | "volume";
+  /** Every view the loop draws this tick, the active one first. Never empty. */
+  views: readonly TickView[];
   /** The volume path's interaction scale: lower while the camera moves. */
   renderScale: number;
   /**
@@ -106,4 +118,28 @@ export interface TickContext {
   bands: number;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
+}
+
+/**
+ * The view whose frame of each dataset the worker holds: the first the loop
+ * draws. Its mode picks the pools chunks go to.
+ */
+export function drawnView(ctx: Pick<TickContext, "views">): TickView {
+  return ctx.views[0];
+}
+
+/**
+ * A view's rectangle of a canvas of `canvasW` x `canvasH` pixels, from its
+ * fractions of the canvas. Edges round on their own, so views that tile the
+ * canvas tile its pixels, and the whole canvas is the canvas exactly.
+ */
+export function viewRectInPixels(
+  rect: ArrayLike<number>,
+  canvasW: number,
+  canvasH: number,
+): PixelRect {
+  const [x, y, width, height] = rect.length === 4 ? Array.from(rect) : [0, 0, 1, 1];
+  const left = Math.round(x * canvasW);
+  const top = Math.round(y * canvasH);
+  return [left, top, Math.round((x + width) * canvasW) - left, Math.round((y + height) * canvasH) - top];
 }

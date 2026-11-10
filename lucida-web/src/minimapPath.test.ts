@@ -337,7 +337,7 @@ describe("tickMinimap overview/overlay split", () => {
       datasets: makeDatasets(),
       client,
       canvas,
-      mode,
+      views: [{ id: 0, mode, rect: [0, 0, 800 * devicePixelRatio, 600 * devicePixelRatio] }],
     } as unknown as TickContext;
   }
 
@@ -618,7 +618,7 @@ describe("tickMinimap overview/overlay split", () => {
       datasets: makeDatasets(),
       client,
       canvas,
-      mode: "slice",
+      views: [{ id: 0, mode: "slice", rect: [0, 0, 800, 600] }],
     } as unknown as TickContext;
 
     // First rebuild at DPR 2: backing size = round(200 × 2) = 400.

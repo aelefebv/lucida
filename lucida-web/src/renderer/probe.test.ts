@@ -132,8 +132,10 @@ function sliceFrame(overrides: Partial<SliceRenderMultiPassMessage> = {}): Slice
     zoom: 2,
     cx: 20,
     cy: 20,
+    view: 0,
     canvasW: 100,
     canvasH: 80,
+    rect: [0, 0, 100, 80],
     ...overrides,
   };
 }
@@ -228,8 +230,10 @@ function volumeFrame(clipDistance: number, clipMode = 0): VolumeRenderMultiPassM
     invViewProj: identity,
     eye: new Float32Array([0, 0, -1]),
     camForward: new Float32Array([0, 0, 1]),
+    view: 0,
     canvasW: 100,
     canvasH: 100,
+    rect: [0, 0, 100, 100],
     fullW: 100,
     fullH: 100,
     clipDistance,

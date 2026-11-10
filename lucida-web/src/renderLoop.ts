@@ -1,7 +1,8 @@
 /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
 import type { DatasetManifest } from "./manifestTypes.ts";
-import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+import type { WasmScene } from "lucida-core";
+import type { PixelRect, TickContext, TickView, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
+import { RESIDENCY_RENDER_INTERVAL_MS, viewRectInPixels } from "./renderLoopTypes.ts";
 import { TickWake } from "./invalidation.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import { debugLog } from "./debug/logging.ts";
@@ -382,12 +383,15 @@ export class RenderLoop implements TraceEnvironment {
       const w = this.canvas.clientWidth;
       const h = this.canvas.clientHeight;
       const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
+      // An empty frame of the whole canvas, so nothing of the last frame stays.
+      const view = this.session.scene?.active_view() ?? 0;
+      const whole: PixelRect = [0, 0, w, h];
       this.client.resize(w, h);
       if (this.mode === "slice") {
-        this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);
+        this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs, view, whole);
       } else {
         const identity = identityMatrix();
-        this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, zeroEpochs, identity, new Float32Array([0, 0, -1]), 0, 0);
+        this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, zeroEpochs, view, whole, identity, new Float32Array([0, 0, -1]), 0, 0);
       }
       this.publishCaptureReady(false, "no_datasets");
     }
@@ -797,15 +801,29 @@ export class RenderLoop implements TraceEnvironment {
     return { renderScale, factor, marchStepScale, bands, full, held };
   }
 
+  /**
+   * The views the loop draws: every view of the scene, the active one first,
+   * each in its rectangle of the canvas. The loop draws them all in the mode
+   * its viewer runs.
+   */
+  private drawnViews(scene: WasmScene): TickView[] {
+    const canvasW = Math.round(this.canvas.clientWidth * devicePixelRatio);
+    const canvasH = Math.round(this.canvas.clientHeight * devicePixelRatio);
+    const active = scene.active_view();
+    const ids = [active, ...Array.from(scene.view_ids()).filter((id) => id !== active)];
+    return ids.map((id) => ({ id, mode: this.mode, rect: viewRectInPixels(scene.view_rect(id), canvasW, canvasH) }));
+  }
+
   private buildContext(quality?: FrameQuality): TickContext {
     const factor = quality?.factor ?? this.resolution.scale;
     const renderScale = quality?.renderScale ?? this._renderScale;
+    const scene = this.session.scene!;
     return {
-      scene: this.session.scene!,
+      scene,
       datasets: this.datasets,
       client: this.client,
       canvas: this.canvas,
-      mode: this.mode,
+      views: this.drawnViews(scene),
       renderScale,
       resolutionScale: cappedPixelRatioScale(devicePixelRatio) * factor,
       marchStepScale: quality?.marchStepScale ?? marchStepScaleFor(renderScale),

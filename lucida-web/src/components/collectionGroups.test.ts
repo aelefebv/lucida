@@ -71,9 +71,9 @@ describe("a group click", () => {
       expect(scene.frame_region(tiles.datasetId, rect.min[0], rect.min[1], rect.max[0], rect.max[1])).toBe(true);
 
       // The collection is the only dataset, so its frame is the scene frame.
-      const [cx, cy] = Array.from(scene.center());
+      const [cx, cy] = Array.from(scene.center(scene.active_view()));
       expect([cx, cy]).toEqual([1306, 728]);
-      const zoom = scene.zoom();
+      const zoom = scene.zoom(scene.active_view());
       expect(cx - width / 2 / zoom).toBeLessThanOrEqual(rect.min[0]);
       expect(cy - height / 2 / zoom).toBeLessThanOrEqual(rect.min[1]);
       expect(cx + width / 2 / zoom).toBeGreaterThanOrEqual(rect.max[0]);

@@ -239,11 +239,11 @@ function makeCtx(args: {
       ...args.client,
     } as TickContext["client"],
     canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
-    mode: args.mode ?? "slice",
+    views: [{ id: 0, mode: args.mode ?? "slice", rect: [0, 0, 800, 600] }],
     renderScale: 1,
     resolutionScale: 1,
     cpuCache: args.cpuCache ?? makeCpuCache(),
-  } as TickContext;
+  } as unknown as TickContext;
 }
 
 describe("Uploader unified delivery", () => {

@@ -210,8 +210,10 @@ function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMulti
     zoom: 1,
     cx: dataW / 2,
     cy: dataH / 2,
+    view: 0,
     canvasW: 64,
     canvasH: 64,
+    rect: [0, 0, 64, 64],
   };
 }
 
@@ -396,8 +398,10 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
       zoom: 0.01,
       cx: 1124,
       cy: 712,
+      view: 0,
       canvasW: 64,
       canvasH: 64,
+      rect: [0, 0, 64, 64],
     };
   }
 
@@ -606,7 +610,7 @@ describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () 
         });
       }
     }
-    return { type: "sliceRenderMultiPass", epochs: EPOCHS, layers, zoom: 1, cx: 256, cy: 192, canvasW: 512, canvasH: 384 };
+    return { type: "sliceRenderMultiPass", epochs: EPOCHS, view: 0, layers, zoom: 1, cx: 256, cy: 192, canvasW: 512, canvasH: 384, rect: [0, 0, 512, 384] };
   }
 
   function collectionCtx() {

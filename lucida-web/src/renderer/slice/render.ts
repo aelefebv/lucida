@@ -35,6 +35,7 @@ import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { trimOffscreenPool } from "../worker/resources.ts";
+import { beginViewFrame } from "../worker/viewFrame.ts";
 
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
@@ -294,7 +295,7 @@ export function memberCameraUV(msg: SliceRenderMultiPassMessage, layer: SliceLay
 
 export async function handleSliceRenderMultiPass(
   ctx: WorkerCtx,
-  msg: SliceRenderMultiPassMessage,
+  frame: SliceRenderMultiPassMessage,
 ): Promise<void> {
   const renderer = ctx.getSliceRenderer();
   const comp = ctx.getCompositor();
@@ -302,9 +303,9 @@ export async function handleSliceRenderMultiPass(
   // The wait holds every message behind this one (`worker/inOrder.ts`).
   await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
 
-  const canvas = ctx.context.canvas as OffscreenCanvas;
-  canvas.width = msg.canvasW;
-  canvas.height = msg.canvasH;
+  const target = beginViewFrame(ctx, frame.view, frame.canvasW, frame.canvasH, frame.rect);
+  // The view draws in its own pixels, as if its rectangle were the canvas.
+  const msg = { ...frame, canvasW: frame.rect[2], canvasH: frame.rect[3] };
 
   // One target per drawn group, a (dataset, channel), so target memory
   // follows the channel count and not the member count. Grown per drawn
@@ -347,8 +348,7 @@ export async function handleSliceRenderMultiPass(
   }
   trimOffscreenPool(renderedLayers.length);
 
-  const canvasTexture = ctx.context.getCurrentTexture();
-  const canvasView = canvasTexture.createView();
+  const canvasView = target.texture.createView();
   const compEncoder = ctx.device.createCommandEncoder();
   comp.composite(canvasView, renderedLayers, compEncoder, true, timing);
   comp.underlayBackground(canvasView, compEncoder, timing);
@@ -360,10 +360,11 @@ export async function handleSliceRenderMultiPass(
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
 
+  target.land();
   timing.endFrame();
   // The frame can be read only here, after its last pass and before the
   // texture expires with this handler.
-  captureRenderedFrame(ctx, canvasTexture);
+  captureRenderedFrame(ctx, target.canvasTexture);
 }
 
 /**

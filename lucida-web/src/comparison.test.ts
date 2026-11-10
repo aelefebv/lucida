@@ -5,23 +5,23 @@ import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 
 /** A scene whose comparison shows each dataset over the given span. */
 function spans(byId: Record<string, [number, number]>) {
-  return { comparison_span: (id: string) => new Float64Array(byId[id] ?? []) };
+  return { comparison_span: (_view: number, id: string) => new Float64Array(byId[id] ?? []) };
 }
 
 describe("where a compared dataset shows", () => {
   it("is a column of the target, and the two sides meet on one pixel boundary", () => {
     const scene = spans({ a: [0, 1 / 3], b: [1 / 3, 1] });
-    const a = comparisonClip(scene, "a", 1001, 600);
-    const b = comparisonClip(scene, "b", 1001, 600);
+    const a = comparisonClip(scene, 0, "a", 1001, 600);
+    const b = comparisonClip(scene, 0, "b", 1001, 600);
     expect(a).toEqual([0, 0, 334, 600]);
     expect(b).toEqual([334, 0, 667, 600]);
   });
 
   it("is everywhere for a dataset the comparison leaves alone, and nowhere for one a blink hides", () => {
     const scene = spans({ a: [0, 1], b: [0, 0] });
-    expect(comparisonClip(scene, "other", 800, 600)).toBeNull();
-    expect(comparisonClip(scene, "a", 800, 600)).toEqual([0, 0, 800, 600]);
-    expect(comparisonClip(scene, "b", 800, 600)).toBe("hidden");
+    expect(comparisonClip(scene, 0, "other", 800, 600)).toBeNull();
+    expect(comparisonClip(scene, 0, "a", 800, 600)).toEqual([0, 0, 800, 600]);
+    expect(comparisonClip(scene, 0, "b", 800, 600)).toBe("hidden");
   });
 
   it("narrows a volume layer's march to its side, and drops a layer left with no pixels", () => {

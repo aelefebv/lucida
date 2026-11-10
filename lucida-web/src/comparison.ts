@@ -77,11 +77,12 @@ export type ComparisonClip = PixelRect | null | "hidden";
 
 export function comparisonClip(
   scene: Pick<WasmScene, "comparison_span">,
+  view: number,
   datasetId: string,
   width: number,
   height: number,
 ): ComparisonClip {
-  const span = scene.comparison_span(datasetId);
+  const span = scene.comparison_span(view, datasetId);
   if (span.length < 2) return null;
   // Both sides round the divider alike, so they meet on one pixel boundary
   // with no column drawn twice or left out.
