@@ -1,0 +1,24 @@
+/* At the view's top: the bottom of the stage holds the floating controls. */
+.lc-withheld-notice {
+  position: absolute;
+  left: var(--lc-space-2);
+  right: var(--lc-space-2);
+  top: var(--lc-space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  padding: var(--lc-space-1) var(--lc-space-2);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-float);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.lc-withheld-notice p {
+  margin: 0;
+}

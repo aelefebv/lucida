@@ -432,7 +432,7 @@ class Simulation {
       transferControlToOffscreen: () => ({}),
     } as unknown as HTMLCanvasElement;
     const client = new RenderClient(canvas);
-    const loop = new RenderLoop({ session, datasets: new Map(), client, canvas, mode });
+    const loop = new RenderLoop({ session, datasets: new Map(), client, canvas });
     this.loop = loop;
     loop.start();
     loop.addDataset(dataset.datasetId, manifest);

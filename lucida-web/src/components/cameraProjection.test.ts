@@ -55,26 +55,26 @@ describe("eventToWorld (2D inverse camera)", () => {
   it("at zoom=1, center=(0,0): world = clientPx − canvas half", () => {
     const scene = makeScene2D(1, [0, 0]);
     const canvas = makeCanvas(); // 800x600 → half (400, 300)
-    expect(eventToWorld(scene, canvas, { clientX: 500, clientY: 400 })).toEqual([100, 100]);
-    expect(eventToWorld(scene, canvas, { clientX: 400, clientY: 300 })).toEqual([0, 0]);
+    expect(eventToWorld(scene, { view: 0, element: canvas }, { clientX: 500, clientY: 400 })).toEqual([100, 100]);
+    expect(eventToWorld(scene, { view: 0, element: canvas }, { clientX: 400, clientY: 300 })).toEqual([0, 0]);
   });
 
   it("applies zoom and center: world = (screenPx − half)/zoom + center", () => {
     const scene = makeScene2D(2, [50, -20]);
     const canvas = makeCanvas();
     // screenPx (500, 400) → ((500−400)/2 + 50, (400−300)/2 − 20) = (100, 30)
-    expect(eventToWorld(scene, canvas, { clientX: 500, clientY: 400 })).toEqual([100, 30]);
+    expect(eventToWorld(scene, { view: 0, element: canvas }, { clientX: 500, clientY: 400 })).toEqual([100, 30]);
   });
 
   it("is dpr-aware: cursor and canvas half both scale, so a CSS point maps identically", () => {
     const canvas = makeCanvas();
     const scene = makeScene2D(1, [0, 0]);
-    const at1 = eventToWorld(scene, canvas, { clientX: 500, clientY: 400 });
+    const at1 = eventToWorld(scene, { view: 0, element: canvas }, { clientX: 500, clientY: 400 });
     setDpr(2);
     // With zoom in PHYSICAL px per world unit, doubling dpr doubles both the
     // cursor offset and the half-extents; at the same zoom the world point's
     // offset from center doubles too.
-    const at2 = eventToWorld(scene, canvas, { clientX: 500, clientY: 400 });
+    const at2 = eventToWorld(scene, { view: 0, element: canvas }, { clientX: 500, clientY: 400 });
     expect(at2).toEqual([at1[0] * 2, at1[1] * 2]);
   });
 });
@@ -84,8 +84,8 @@ describe("makeWorldToScreen (2D forward camera)", () => {
     const scene = makeScene2D(1.7, [12.5, -3.25]);
     const canvas = makeCanvas();
     setDpr(2);
-    const world = eventToWorld(scene, canvas, { clientX: 231, clientY: 377 });
-    const project = makeWorldToScreen(scene, canvas);
+    const world = eventToWorld(scene, { view: 0, element: canvas }, { clientX: 231, clientY: 377 });
+    const project = makeWorldToScreen(scene, { view: 0, element: canvas });
     const [sx, sy] = project(world);
     // Screen coords are canvas-relative CSS px; the canvas box sits at (0,0).
     expect(sx).toBeCloseTo(231, 10);
@@ -100,7 +100,7 @@ describe("makeWorldToScreen (2D forward camera)", () => {
       center: () => new Float64Array([0, 0]),
     } as unknown as WasmScene;
     const canvas = makeCanvas();
-    const project = makeWorldToScreen(scene, canvas);
+    const project = makeWorldToScreen(scene, { view: 0, element: canvas });
     const before = project([100, 100]);
     zoom = 4; // the camera moves mid-frame…
     expect(project([100, 100])).toEqual(before); // …but this frame stays consistent

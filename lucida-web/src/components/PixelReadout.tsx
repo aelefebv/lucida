@@ -10,6 +10,7 @@
  * arriving data without asking for frames of its own.
  */
 
+import { isViewPane } from "../viewer/viewPane.ts";
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from "react";
 import type { WasmScene } from "lucida-core";
 import type { RenderClient } from "../renderer/renderClient.ts";
@@ -33,7 +34,13 @@ export interface PixelReadoutHandle {
 }
 
 interface Props {
+  /** The canvas every view divides, which a probe reads a point of. */
   canvas: HTMLCanvasElement;
+  /**
+   * What holds the views' panes. Pointers over any view reach it, so the
+   * readout follows whichever view is under the pointer.
+   */
+  eventRoot: HTMLElement;
   client: RenderClient;
   scene: WasmScene;
   datasets: Map<string, DatasetState>;
@@ -51,7 +58,7 @@ interface Point {
 /** Gap between the point and the card, in CSS pixels. */
 const OFFSET = 14;
 
-export function PixelReadout({ canvas, client, scene, datasets, layers, ref }: Props) {
+export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layers, ref }: Props) {
   const [shown, setShown] = useState<{ at: Point; samples: ProbeSample[] } | null>(null);
   const probe = useRef({
     pointer: null as Point | null,
@@ -81,7 +88,9 @@ export function PixelReadout({ canvas, client, scene, datasets, layers, ref }: P
   useEffect(() => {
     const state = probe.current;
     const onMove = (e: PointerEvent) => {
-      if (e.pointerType !== "touch") point(pointAt(e.clientX, e.clientY, false));
+      if (e.pointerType === "touch") return;
+      // Over a marker drawn on a view, as off the canvas, nothing is read.
+      point(isViewPane(e.target) ? pointAt(e.clientX, e.clientY, false) : null);
     };
     const onLeave = (e: PointerEvent) => {
       if (e.pointerType !== "touch") point(null);
@@ -95,22 +104,22 @@ export function PixelReadout({ canvas, client, scene, datasets, layers, ref }: P
       clearTimeout(state.linger);
       state.linger = setTimeout(() => point(null), REVEAL_LINGER_MS);
     };
-    canvas.addEventListener("pointermove", onMove);
-    canvas.addEventListener("pointerleave", onLeave);
-    canvas.addEventListener("pointerdown", onDown);
-    canvas.addEventListener("pointerup", onUp);
-    canvas.addEventListener("pointercancel", onUp);
+    eventRoot.addEventListener("pointermove", onMove);
+    eventRoot.addEventListener("pointerleave", onLeave);
+    eventRoot.addEventListener("pointerdown", onDown);
+    eventRoot.addEventListener("pointerup", onUp);
+    eventRoot.addEventListener("pointercancel", onUp);
     return () => {
       clearTimeout(state.linger);
-      canvas.removeEventListener("pointermove", onMove);
-      canvas.removeEventListener("pointerleave", onLeave);
-      canvas.removeEventListener("pointerdown", onDown);
-      canvas.removeEventListener("pointerup", onUp);
-      canvas.removeEventListener("pointercancel", onUp);
+      eventRoot.removeEventListener("pointermove", onMove);
+      eventRoot.removeEventListener("pointerleave", onLeave);
+      eventRoot.removeEventListener("pointerdown", onDown);
+      eventRoot.removeEventListener("pointerup", onUp);
+      eventRoot.removeEventListener("pointercancel", onUp);
     };
     // `point` and `pointAt` read only refs and the canvas.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canvas]);
+  }, [canvas, eventRoot]);
 
   useEffect(() => {
     const state = probe.current;

@@ -37,7 +37,6 @@ function makeLoop() {
       setCanvasColors: (colors: CanvasColors) => sent.push(colors),
     } as unknown as RenderClient,
     canvas: document.createElement("canvas"),
-    mode: "slice",
   });
   return { loop, sent };
 }

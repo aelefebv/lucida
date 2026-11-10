@@ -79,7 +79,7 @@ describe("AnnotationOverlay (2D) — visible prop", () => {
       <AnnotationOverlay
         datasetId="wds-1"
         wasmSceneRef={sceneRef}
-        canvas={canvas}
+        surface={{ view: 0, element: canvas }}
         version={0}
         viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}
@@ -93,7 +93,7 @@ describe("AnnotationOverlay (2D) — visible prop", () => {
         <AnnotationOverlay
           datasetId="wds-1"
           wasmSceneRef={sceneRef}
-          canvas={canvas}
+          surface={{ view: 0, element: canvas }}
           version={0}
           viewContext={{ z: 3, t: 0, channels: [0] }}
           myId={MY_ID}
@@ -186,7 +186,7 @@ describe("AnnotationOverlay3D — visible prop", () => {
       <AnnotationOverlay3D
         datasetId="wds-1"
         wasmSceneRef={sceneRef}
-        canvas={canvas}
+        surface={{ view: 0, element: canvas }}
         version={0}
         viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}
@@ -200,7 +200,7 @@ describe("AnnotationOverlay3D — visible prop", () => {
         <AnnotationOverlay3D
           datasetId="wds-1"
           wasmSceneRef={sceneRef}
-          canvas={canvas}
+          surface={{ view: 0, element: canvas }}
           version={0}
           viewContext={{ z: 3, t: 0, channels: [0] }}
           myId={MY_ID}
@@ -260,7 +260,7 @@ describe("toolbar toggle wiring — button flips overlay visibility", () => {
         <AnnotationOverlay
           datasetId="wds-1"
           wasmSceneRef={sceneRef}
-          canvas={canvas}
+          surface={{ view: 0, element: canvas }}
           version={0}
           viewContext={{ z: 3, t: 0, channels: [0] }}
           myId={MY_ID}

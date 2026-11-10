@@ -46,7 +46,7 @@ function peersElement(peers: Map<ClientId, PresenceState>) {
       myId={0}
       followTarget={null}
       wasmSceneRef={{ current: null }}
-      canvas={document.createElement("canvas")}
+      surface={{ view: 0, element: document.createElement("canvas") }}
       viewMode="2d"
       z={0}
       t={0}

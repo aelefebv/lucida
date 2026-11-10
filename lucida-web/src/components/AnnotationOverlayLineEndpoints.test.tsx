@@ -69,7 +69,7 @@ function renderOverlay(opts: { pins: Annotation[]; myId?: string }) {
     <AnnotationOverlay
       datasetId="wds-1"
       wasmSceneRef={sceneRef}
-      canvas={canvas}
+      surface={{ view: 0, element: canvas }}
       version={0}
       viewContext={{ z: 3, t: 0, channels: [0] }}
       myId={opts.myId ?? MY_ID}

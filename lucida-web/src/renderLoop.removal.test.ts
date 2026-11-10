@@ -41,7 +41,6 @@ function makeLoop() {
       sliceRenderMultiPass: () => 0,
     } as unknown as RenderClient,
     canvas,
-    mode: "slice",
   });
   return { loop, cpuCache };
 }
