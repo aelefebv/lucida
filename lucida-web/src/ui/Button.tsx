@@ -5,7 +5,7 @@ import { ariaKeyShortcut, combosOf, type KeyCombo } from "./shortcuts.ts";
 import { Tooltip, type TooltipPlacement } from "./Tooltip.tsx";
 import "./Button.css";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "warning";
 
 export interface ButtonProps {
   children: ReactNode;
@@ -21,6 +21,11 @@ export interface ButtonProps {
   isDisabled?: boolean;
   type?: "button" | "submit";
   autoFocus?: boolean;
+  /**
+   * Names the button when its visible text alone says too little, such as a
+   * bare count. Start it with the visible text, so speech input still finds it.
+   */
+  "aria-label"?: string;
   /** For a disclosure: whether the region it shows and hides is open. */
   "aria-expanded"?: boolean;
   /** The id of the region a disclosure shows and hides. */
