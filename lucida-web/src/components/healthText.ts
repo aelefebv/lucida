@@ -18,6 +18,8 @@ export function healthReasons(health: DatasetSourceHealth): HealthReason[] {
   if (health.binding.status !== "healthy") {
     reasons.push({ text: "The server can't read this dataset right now, so none of it can be shown.", degrades: true });
   }
+  // Absent reads are no reason: a chunk never written draws its fill, which
+  // is the dataset as stored.
   const failedReads = health.source_cache?.backend_errors ?? 0;
   if (failedReads > 0) {
     const reads = failedReads === 1 ? "read" : "reads";

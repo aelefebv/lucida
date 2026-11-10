@@ -110,6 +110,10 @@ pub struct DatasetSourceCacheStats {
     pub misses: u64,
     pub evictions: u64,
     pub backend_errors: u64,
+    /// Chunk reads that found nothing written, served as fill. Valid data,
+    /// so never part of `backend_errors` and never a reason to degrade.
+    #[serde(default)]
+    pub absent_reads: u64,
     /// Backend round trips this source has performed, across metadata import
     /// and chunk reads alike.
     pub source_reads: u64,
