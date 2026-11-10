@@ -363,7 +363,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
   state.lastOverviewScanMs = now;
 
   const { scene, client, datasets } = ctx;
-  const layers = readResolvedLayers(scene);
+  const layers = readResolvedLayers(scene, scene.active_view());
   refreshFailedKeys(ctx, state);
 
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
@@ -727,7 +727,7 @@ export function tickMinimap(
   const theta = scene.camera_theta();
   const phi = scene.camera_phi();
 
-  const resolved = readResolvedLayers(scene);
+  const resolved = readResolvedLayers(scene, scene.active_view());
   // What the overview draws and how, less the z slab: the overview takes no
   // Z, so a Z-scrub refreshes only the overlay.
   const settingsSnap = JSON.stringify(
@@ -823,7 +823,7 @@ export function tickMinimap(
     // Slice view bounds in scene XY.
     let sliceViewports: MinimapOverlayData["sliceViewports"] = [];
     // The overlay outlines an XY cut at its Z; a side view's cut is not drawn.
-    if (mode === "slice" && scene.slice_plane() === "xy") {
+    if (mode === "slice" && scene.slice_plane(scene.active_view()) === "xy") {
       const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
       const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
       const sceneBounds = sliceViewSceneBounds(scene.center(), scene.zoom(), mainW, mainH);

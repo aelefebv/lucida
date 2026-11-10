@@ -1,8 +1,8 @@
 /**
  * Planner role. Builds the `PlanningSnapshot` from live WASM scene state
- * each tick, calls `plan()` per dataset, caches on the epoch ladder, and
- * routes output through {@link Uploader} for cold-state emission and chunk
- * delivery.
+ * each tick, one view at a time, calls `plan()` per dataset, caches on the
+ * epoch ladder, and routes output through {@link Uploader} for cold-state
+ * emission and chunk delivery.
  */
 
 import type { TickContext } from "../renderLoopTypes.ts";
@@ -25,10 +25,11 @@ import {
   isCutStep,
   emptyPlanStats,
   initialPlanningState,
+  scrubbedPlanningState,
   type PlanningConfig,
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
-import { buildPlanningSnapshot, sliceCut } from "./planning/snapshot.ts";
+import { buildViewSnapshot, sliceCut } from "./planning/snapshot.ts";
 import { cutAxis, type SlicePlane, type SpatialAxis } from "../renderer/slicePlane.ts";
 import {
   applyViewQueryDelta,
@@ -53,6 +54,7 @@ import type {
   RequestPlan,
   PlanningSnapshot,
   SelectionState,
+  ViewSnapshot,
 } from "./planning/index.ts";
 import type { SceneEpochs } from "./epochs.ts";
 import type { VisibleRegion } from "./viewport.ts";
@@ -96,14 +98,48 @@ export interface TickCoordinatorResult {
   entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
+/** A view a tick plans for: its id in the scene, and the mode the loop draws it in. */
+interface TickView {
+  id: number;
+  mode: "slice" | "volume";
+}
+
+/**
+ * The view the loop draws: the scene's active one, in the mode its viewer
+ * runs. The worker holds one frame of each dataset, this view's.
+ */
+function drawnView(ctx: TickContext): TickView {
+  return { id: ctx.scene.active_view(), mode: ctx.mode };
+}
+
+/**
+ * The views a tick plans for: each view the loop draws, the drawn one first.
+ * The fast paths prove their case against the drawn view alone, so a tick
+ * that plans another view as well takes the full rebuild.
+ */
+function plannedViews(ctx: TickContext): TickView[] {
+  return [drawnView(ctx)];
+}
+
+/** One view of a planned dataset. */
+interface PlannedView {
+  view: TickView;
+  snapshot: ViewSnapshot;
+  /** The dataset's layer as the view resolves it. */
+  layer: ResolvedLayer | undefined;
+  /** Whether the selection stepped along its cut since the view's previous plan ({@link isCutStep}). */
+  cutStep: boolean;
+}
+
 interface PlannedDataset {
   dsId: string;
   dsSettings: SceneSettings["allSettings"][string] | undefined;
-  layer: ResolvedLayer | undefined;
-  snapshot: PlanningSnapshot;
-  entities: EntitySnapshot[];
-  visibleRegion: VisibleRegion;
-  selection: SelectionState;
+  views: PlannedView[];
+  /**
+   * The view whose frame of the dataset the worker holds: the first planned
+   * view that shows it, which is the drawn view whenever that one does.
+   */
+  drawn: PlannedView;
   result: RequestPlan;
   /**
    * The active set the worker holds for this dataset, captured from
@@ -111,8 +147,6 @@ interface PlannedDataset {
    * it. The view-move delta diffs `result.activeSet` against this.
    */
   previousActiveSet: ActiveSetEntry[];
-  /** Whether the selection stepped along Z since the previous plan ({@link isCutStep}). */
-  cutStep: boolean;
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -244,9 +278,9 @@ function withCutRange(region: VisibleRegion, range: [number, number]): VisibleRe
   return { ...region, xyBoundsVox };
 }
 
-/** The plane the view cuts: the slice plane, or null in the volume view, which cuts none. */
-function viewCutPlane(ctx: TickContext): SlicePlane | null {
-  return ctx.mode === "slice" ? (ctx.scene.slice_plane() as SlicePlane) : null;
+/** The plane `view` cuts: its slice plane, or null in the volume view, which cuts none. */
+function viewCutPlane(ctx: TickContext, view: TickView): SlicePlane | null {
+  return view.mode === "slice" ? (ctx.scene.slice_plane(view.id) as SlicePlane) : null;
 }
 
 /**
@@ -274,17 +308,18 @@ function sameCut(a: RegionCut, b: RegionCut): boolean {
 }
 
 /**
- * The planes WASM reports a dataset's region spans along its cut axis, with
- * the same null handling as {@link buildPlanningSnapshot} so it compares
+ * The planes WASM reports a dataset's region in `view` spans along its cut
+ * axis, with the same null handling as {@link buildViewSnapshot} so it compares
  * exactly against the captured cut. Read directly rather than from
  * `scene.z()`, which is only the slab start, so the fast paths notice a slab
  * extension that moves the end.
  */
 function readCut(
   scene: TickContext["scene"],
+  view: number,
   datasetId: string,
 ): RegionCut {
-  const raw = scene.visible_region(scene.active_view(), datasetId);
+  const raw = scene.visible_region(view, datasetId);
   const parsed = raw && raw !== "null"
     ? (JSON.parse(raw) as {
       xy_bounds?: [number, number, number, number];
@@ -355,7 +390,8 @@ function admitDatasetPlans(
   report: GpuCapacityReport | null,
 ): Admission[] {
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
-  const sliceAxis = cutAxis(ctx.scene.slice_plane() as SlicePlane);
+  // The worker's pools hold what the drawn view samples.
+  const sliceAxis = cutAxis(ctx.scene.slice_plane(drawnView(ctx).id) as SlicePlane);
   return admitPlans(
     plans.map(({ dsId, requests }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
@@ -508,7 +544,7 @@ export class TickCoordinator {
   }>();
   /**
    * Per-dataset cache of the camera-independent inputs to
-   * {@link buildPlanningSnapshot}: parsed `member_positions` and the
+   * {@link buildViewSnapshot}: parsed `member_positions` and the
    * `imageSpecById` / `parentByEntityId` manifest maps. A view move leaves
    * all three identical. An entry is valid only while both keys match:
    *   - `epochKey`, the content|layout fingerprint. A reflow or
@@ -525,9 +561,9 @@ export class TickCoordinator {
     parentByEntityId: Map<string, string | null>;
   }>();
   /**
-   * Per-dataset cursor for the incremental view-query fold: the last
-   * reconstructed `image_id → EntitySnapshot` map and the basis it was built
-   * against. A replan folds the scene's `view_query_delta` onto `map` instead
+   * Per dataset and view, the cursor for the incremental view-query fold: the
+   * last reconstructed `image_id → EntitySnapshot` map and the basis it was
+   * built against. A replan folds the scene's `view_query_delta` onto `map` instead
    * of parsing the full visible set.
    *
    * The fold is safe because every active-set input is either in the delta's
@@ -543,11 +579,11 @@ export class TickCoordinator {
    * change drops the entry too. A dropped entry reseeds from the full
    * `view_query` at the same tick, so a Delta never folds onto a missing base.
    */
-  private readonly viewDeltaCursor = new Map<string, {
+  private readonly viewDeltaCursor = new Map<string, Map<number, {
     /** Identity of the snapshot-inputs entry (manifest maps + placement). */
     basisInputs: object;
     map: Map<string, EntitySnapshot>;
-  }>();
+  }>>();
   /**
    * The `WasmScene` the {@link viewDeltaCursor} entries were built against.
    * Compared by object identity every fold; a mismatch (a reconstructed
@@ -720,7 +756,11 @@ export class TickCoordinator {
     // Past the coalescing gate. Read the shared inputs once so all datasets
     // and the display-only fast path below see the same config.
     const settings = getSceneSettings(ctx.scene);
-    const layers = readResolvedLayers(ctx.scene);
+    const views = plannedViews(ctx);
+    const drawn = views[0];
+    const layersByView = new Map(views.map((view) => [view.id, readResolvedLayers(ctx.scene, view.id)]));
+    // The fast paths and the result describe what the worker draws.
+    const layers = layersByView.get(drawn.id)!;
     const planningConfig = configStore.get();
 
     const structural = isStructural(causes);
@@ -791,15 +831,16 @@ export class TickCoordinator {
     const memberRoster = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
-    const view = ctx.scene.active_view();
 
-    const cutPlane = viewCutPlane(ctx);
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
-      const layer = layers.get(dsId);
-      // A layer the cut misses draws nothing, so nothing of it is planned.
-      if (outsideCut(layer, cutPlane)) continue;
+      // A layer a view's cut misses draws nothing there, so nothing of it is
+      // planned for that view.
+      const viewsOfDataset = views.filter(
+        (view) => !outsideCut(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)),
+      );
+      if (viewsOfDataset.length === 0) continue;
 
       // See `snapshotInputCacheByDataset` for why both keys are checked.
       const snapshotInputEpochKey = `${currentEpochs.content}|${currentEpochs.layout}`;
@@ -838,44 +879,53 @@ export class TickCoordinator {
         parentByEntityId: snapshotInputs.parentByEntityId,
         positions: snapshotInputs.positions,
       };
-      const entitiesOverride = this.foldViewDeltaEntities(
-        ctx.scene, view, dsId, deps, snapshotInputs,
-      );
-      if (entitiesOverride === "skip") continue;
-
-      // The builder skips `view_query` when given `entitiesOverride` but
-      // still computes `visible_region` and `selection` fresh.
-      // `minimapPendingFetch` flows into the snapshot so the minimap lane
-      // plans first.
-      const built = buildPlanningSnapshot({
-        scene: ctx.scene,
-        view,
-        datasetId: dsId,
-        dataset: ds,
-        layer,
-        minimapPending: minimapPendingFetch,
-        mode: ctx.mode as "slice" | "volume",
-        currentEpochs,
-        requestEpoch: this.requestEpoch,
-        config: planningConfig,
-        precomputed: {
-          positions: snapshotInputs.positions,
-          imageSpecById: snapshotInputs.imageSpecById,
-          parentByEntityId: snapshotInputs.parentByEntityId,
-        },
-        entitiesOverride,
-      });
-      if (!built) continue;
-      const { snapshot, entities, visibleRegion, selection } = built;
-
-      // Plan. Opaque carry-forward state travels via {@link PlanningState};
-      // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? initialPlanningState();
+      const plannedViewsOfDataset: PlannedView[] = [];
+      for (const view of viewsOfDataset) {
+        const entitiesOverride = this.foldViewDeltaEntities(
+          ctx.scene, view.id, dsId, deps, snapshotInputs,
+        );
+        if (entitiesOverride === "skip") continue;
+
+        // The builder skips `view_query` when given `entitiesOverride` but
+        // still computes `visible_region` and `selection` fresh.
+        const layer = layersByView.get(view.id)!.get(dsId);
+        const snapshot = buildViewSnapshot({
+          scene: ctx.scene,
+          view: view.id,
+          datasetId: dsId,
+          dataset: ds,
+          layer,
+          mode: view.mode,
+          precomputed: {
+            positions: snapshotInputs.positions,
+            imageSpecById: snapshotInputs.imageSpecById,
+            parentByEntityId: snapshotInputs.parentByEntityId,
+          },
+          entitiesOverride,
+        });
+        if (!snapshot) continue;
+        const previousCut = planningStateForDataset.views.get(view.id)?.previousCut ?? null;
+        const cutStep = isCutStep(previousCut, snapshot.selection, planningConfig.sliceBandPlanes);
+        plannedViewsOfDataset.push({ view, snapshot, layer, cutStep });
+      }
+      const drawnOfDataset = plannedViewsOfDataset[0];
+      if (drawnOfDataset === undefined) continue;
+      const { entities, visibleRegion, selection } = drawnOfDataset.snapshot;
+
+      // Plan. Opaque carry-forward state travels via {@link PlanningState};
+      // `nextState` is stored for the next tick. `minimapPendingFetch` flows
+      // into the snapshot so the minimap lane plans first.
+      const snapshot: PlanningSnapshot = {
+        datasetId: dsId,
+        epochs: currentEpochs,
+        views: plannedViewsOfDataset.map((planned) => planned.snapshot),
+        minimapPending: minimapPendingFetch,
+      };
       // Capture what the worker holds before `nextState` overwrites it. The
       // view-move delta diffs the fresh active set against this.
       const previousActiveSet = planningStateForDataset.previousActiveSet;
-      const cutStep = isCutStep(planningStateForDataset.previousCut, selection, planningConfig.sliceBandPlanes);
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
@@ -896,14 +946,10 @@ export class TickCoordinator {
       plannedDatasets.push({
         dsId,
         dsSettings,
-        layer,
-        snapshot,
-        entities,
-        visibleRegion,
-        selection,
+        views: plannedViewsOfDataset,
+        drawn: drawnOfDataset,
         result,
         previousActiveSet,
-        cutStep,
       });
     }
 
@@ -916,7 +962,8 @@ export class TickCoordinator {
       plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
     );
     for (const [index, planned] of plannedDatasets.entries()) {
-      const { dsId, dsSettings, layer, entities, visibleRegion, selection, cutStep } = planned;
+      const { dsId, dsSettings } = planned;
+      const { layer, snapshot: { entities, visibleRegion, selection } } = planned.drawn;
       const admission = admissions[index];
       const result: RequestPlan = {
         ...planned.result,
@@ -1023,20 +1070,20 @@ export class TickCoordinator {
       // label's mapped Z-plane are fetched, as the image's are; in `volume`
       // mode the whole label volume (every z-chunk) is fetched for the 3D
       // first-hit surface. Scoped under each label's own image id, so they
-      // never perturb intensity-chunk eviction.
-      const labelRequests = computeLabelChunkRequests({
+      // never perturb intensity-chunk eviction. Each view asks for its own.
+      const labelRequests = planned.views.flatMap((view) => computeLabelChunkRequests({
         datasetId: dsId,
         manifest: ctx.datasets.get(dsId)!.manifest,
-        t: selection.t,
-        z: selection.z,
+        t: view.snapshot.selection.t,
+        z: view.snapshot.selection.z,
         // Fetch only the labels the render path will draw (visible +
         // eligible), so a hidden label is neither fetched nor drawn.
         labelSettings: dsSettings?.label_settings,
-        mode: ctx.mode as "slice" | "volume",
+        mode: view.view.mode,
         config: planningConfig,
-        cutStep,
-        cutAxis: selection.cut.axis,
-      });
+        cutStep: view.cutStep,
+        cutAxis: view.snapshot.selection.cut.axis,
+      }));
       const requestsWithLabels =
         labelRequests.length > 0
           ? [...result.requests, ...labelRequests]
@@ -1086,7 +1133,7 @@ export class TickCoordinator {
       mode: ctx.mode as "slice" | "volume",
     };
     this.lastLayerOrderKey = JSON.stringify(settings.layerOrder);
-    this.lastDrawnDatasetIds = drawnDatasetIds(settings, layers, cutPlane);
+    this.lastDrawnDatasetIds = drawnDatasetIds(settings, layers, viewCutPlane(ctx, drawn));
 
     // Stamped at completion; see `lastRebuildAt`.
     const rebuildEnd = performance.now();
@@ -1216,7 +1263,7 @@ export class TickCoordinator {
     // A visibility toggle bumps the selection epoch but changes the roster.
     // This also catches a dataset turning visible, which the per-dataset
     // loop below would never see.
-    if (!sameIds(drawnDatasetIds(settings, layers, viewCutPlane(ctx)), this.lastDrawnDatasetIds)) {
+    if (!sameIds(drawnDatasetIds(settings, layers, viewCutPlane(ctx, drawnView(ctx))), this.lastDrawnDatasetIds)) {
       return false;
     }
 
@@ -1233,7 +1280,7 @@ export class TickCoordinator {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) return false;
       if (nonDisplayKeyForDataset(dsSettings) !== sig.nonDisplayKey) return false;
-      if (!sameCut(readCut(ctx.scene, dsId), sig.cut)) return false;
+      if (!sameCut(readCut(ctx.scene, drawnView(ctx).id, dsId), sig.cut)) return false;
       const layer = layers.get(dsId);
       if (!numberArraysEqual(shownChannels(layer), sig.visibleChannels)) return false;
       const displayState = buildDisplayStateByChannel(layer);
@@ -1295,7 +1342,8 @@ export class TickCoordinator {
 
     // Slice view only, the one mode this compact patch is proven against.
     const scalars = this.lastRebuildScalars;
-    const mode = ctx.mode as "slice" | "volume";
+    const drawn = drawnView(ctx);
+    const mode = drawn.mode;
     if (mode !== "slice" || scalars.mode !== "slice") return false;
 
     // Layer order and the drawn-dataset set each change the roster, and the
@@ -1303,7 +1351,7 @@ export class TickCoordinator {
     // scrub axis; Z is proven per dataset via the z-range. A scrub that takes
     // the cut past a layer, or back into one, changes the drawn set.
     if (JSON.stringify(settings.layerOrder) !== this.lastLayerOrderKey) return false;
-    if (!sameIds(drawnDatasetIds(settings, layers, viewCutPlane(ctx)), this.lastDrawnDatasetIds)) {
+    if (!sameIds(drawnDatasetIds(settings, layers, viewCutPlane(ctx, drawnView(ctx))), this.lastDrawnDatasetIds)) {
       return false;
     }
 
@@ -1336,7 +1384,7 @@ export class TickCoordinator {
       if (!numberArraysEqual(visibleChannels, sig.visibleChannels)) return false;
       const displayState = buildDisplayStateByChannel(layer);
       if (!displayStatesEqual(displayState, sig.displayState)) return false;
-      const cut = readCut(ctx.scene, dsId);
+      const cut = readCut(ctx.scene, drawn.id, dsId);
       if (cut.axis !== sig.cut.axis) return false;
       const oldWidth = sig.cut.range[1] - sig.cut.range[0];
       const newWidth = cut.range[1] - cut.range[0];
@@ -1378,7 +1426,7 @@ export class TickCoordinator {
       const selection: SelectionState = {
         t: pd.layer?.t ?? newT,
         z: pd.layer?.z_range.start ?? ctx.scene.z(),
-        cut: sliceCut(ctx.scene, pd.layer),
+        cut: sliceCut(ctx.scene, drawn.id, pd.layer),
         visibleChannels: pd.visibleChannels,
         renderMode: "slice",
         interactionState: "idle",
@@ -1386,28 +1434,20 @@ export class TickCoordinator {
       const snapshot: PlanningSnapshot = {
         datasetId: pd.dsId,
         epochs: scrubEpochs,
-        entities: pd.entities,
-        visibleRegion,
-        selection,
+        views: [{ view: drawn.id, entities: pd.entities, visibleRegion, selection }],
         minimapPending: minimapPendingFetch,
       };
       const stats = emptyPlanStats();
-      const cutStep = isCutStep(pd.planningState.previousCut, selection, planningConfig.sliceBandPlanes);
-      const requests = emitPlanRequests(
-        pd.planningState.previousActiveSet,
-        snapshot,
-        stats,
-        planningConfig,
-        pd.planningState.zoomDirection,
-        cutStep,
-      );
+      const previousCut = pd.planningState.views.get(drawn.id)?.previousCut ?? null;
+      const cutStep = isCutStep(previousCut, selection, planningConfig.sliceBandPlanes);
+      const requests = emitPlanRequests(snapshot, pd.planningState, stats, planningConfig);
       return {
         dsId: pd.dsId,
         dsSettings: pd.dsSettings,
         snapshot,
         visibleRegion,
         selection,
-        planningState: { ...pd.planningState, previousCut: selection.cut },
+        planningState: scrubbedPlanningState(snapshot, pd.planningState),
         requests,
         stats,
         cutStep,
@@ -1496,9 +1536,10 @@ export class TickCoordinator {
   }
 
   /**
-   * Reconstruct a dataset's `entities` by folding the scene's
-   * `view_query_delta` onto the per-dataset cursor. Returns `"skip"` when the
-   * dataset is not registered, as the full `view_query` path does.
+   * Reconstruct what `view` sees of a dataset's `entities` by folding the
+   * scene's `view_query_delta` onto the cursor for the two. Returns `"skip"`
+   * when the view does not show the dataset or the dataset is not
+   * registered, as the full `view_query` path does.
    * `inputsRef` is the identity of the snapshot-inputs entry `deps` came
    * from, which is the cursor's basis.
    *
@@ -1522,16 +1563,22 @@ export class TickCoordinator {
       this.viewDeltaScene = scene;
     }
 
+    let cursors = this.viewDeltaCursor.get(datasetId);
+    if (cursors === undefined) {
+      cursors = new Map();
+      this.viewDeltaCursor.set(datasetId, cursors);
+    }
     const deltaJson = scene.view_query_delta(view, datasetId);
-    // `null` means the dataset is unknown and the Rust cursor did not
-    // advance, so dropping ours keeps the two consistent for a later re-add.
+    // `null` means the dataset is unknown to the view and the Rust cursor did
+    // not advance, so dropping ours keeps the two consistent for a later
+    // re-add.
     if (!deltaJson || deltaJson === "null") {
-      this.viewDeltaCursor.delete(datasetId);
+      cursors.delete(view);
       return "skip";
     }
     const delta = JSON.parse(deltaJson) as ViewQueryDeltaJson;
 
-    const existing = this.viewDeltaCursor.get(datasetId);
+    const existing = cursors.get(view);
     // Fold only onto a cursor with the same manifest/placement basis (see the
     // field doc). Otherwise reseed from the full query.
     const prev =
@@ -1551,7 +1598,7 @@ export class TickCoordinator {
         // Rust cursor the delta call just advanced.
         const seeded = this.buildEntityMapFromViewQuery(scene, view, datasetId, deps);
         if (seeded === null) {
-          this.viewDeltaCursor.delete(datasetId);
+          cursors.delete(view);
           return "skip";
         }
         next = seeded;
@@ -1559,10 +1606,10 @@ export class TickCoordinator {
         next = applyViewQueryDelta(prev, delta, deps);
       }
 
-      this.viewDeltaCursor.set(datasetId, { basisInputs: inputsRef, map: next });
+      cursors.set(view, { basisInputs: inputsRef, map: next });
       return [...next.values()];
     } catch (e) {
-      this.viewDeltaCursor.delete(datasetId);
+      cursors.delete(view);
       throw e;
     }
   }

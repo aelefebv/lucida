@@ -93,8 +93,9 @@ describe("the slice view's requests", () => {
 
   it("cut a side view's plane along its axis, through every chunk along Z", () => {
     // An XZ cut at Y 70 of 128, in 64-row chunks: row 6 of chunk row 1.
+    const base = snapshot({ z: 0 }).views[0];
     const xz = createSyntheticSnapshot({
-      ...snapshot({ z: 0 }),
+      entities: base.entities,
       visibleRegion: {
         xyBoundsVox: [0, 70, 128, 71],
         zRangeVox: [0, 100],
@@ -103,8 +104,8 @@ describe("the slice view's requests", () => {
         frustumPlanes: null,
         cutAxis: "y",
       },
+      selection: { ...base.selection, cut: { axis: "y", index: 70 } },
     });
-    xz.selection = { ...xz.selection, cut: { axis: "y", index: 70 } };
     const detail = lane(plan(xz, createSyntheticState(), noPrefetch).requests, "detail");
     // Two chunks across, four deep.
     expect(detail).toHaveLength(8);
@@ -150,7 +151,7 @@ describe("a step along Z", () => {
   it("prefetches the whole chunks the plane lies in, ahead of every other prefetch", () => {
     const opened = plan(snapshot({ z: 40 }), createSyntheticState(), noPrefetch);
     expect(lane(opened.requests, "prefetch")).toHaveLength(0);
-    expect(opened.nextState.previousCut).toEqual({ axis: "z", index: 40 });
+    expect(opened.nextState.views.get(0)?.previousCut).toEqual({ axis: "z", index: 40 });
 
     const stepped = plan(snapshot({ z: 41 }), opened.nextState, noPrefetch);
     const prefetch = lane(stepped.requests, "prefetch");

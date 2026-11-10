@@ -325,11 +325,11 @@ function uploadAndRenderSlice(
   const canvasW = Math.max(1, Math.round(fullW * backingScale));
   const canvasH = Math.max(1, Math.round(fullH * backingScale));
 
-  const plane = scene.slice_plane() as SlicePlane;
+  const plane = scene.slice_plane(scene.active_view()) as SlicePlane;
   const budgetExhausted = uploader.deliverToWorker(
     ctx,
     MAIN_VIEW_UPLOAD_BUDGET_BYTES,
-    (datasetId) => sliceCut(scene, resolvedLayers.get(datasetId)),
+    (datasetId) => sliceCut(scene, scene.active_view(), resolvedLayers.get(datasetId)),
   );
 
   if (!shouldRender) return budgetExhausted;

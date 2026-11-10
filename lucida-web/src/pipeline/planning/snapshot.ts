@@ -1,23 +1,16 @@
 /**
- * Translates live WASM scene state into a {@link PlanningSnapshot}. The
- * one boundary between WASM scene queries and the pure planning core:
- * snake_case becomes camelCase here and fallbacks are explicit. Pure: no
- * module state, no input mutation.
+ * Translates live WASM scene state into one view's half of a
+ * {@link PlanningSnapshot}. The one boundary between WASM scene queries and
+ * the pure planning core: snake_case becomes camelCase here and fallbacks are
+ * explicit. Pure: no module state, no input mutation.
  */
 
 import type { WasmScene } from "lucida-core";
 import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
 import { layerCut, shownChannels, type ResolvedLayer } from "../../resolvedLayers.ts";
 import { cutAxis, type SliceCut, type SlicePlane, type SpatialAxis } from "../../renderer/slicePlane.ts";
-import type {
-  EntitySnapshot,
-  MinimapChunkCoord,
-  PlanningSnapshot,
-  SelectionState,
-} from "./index.ts";
-import type { SceneEpochs } from "../epochs.ts";
+import type { EntitySnapshot, SelectionState, ViewSnapshot } from "./index.ts";
 import type { VisibleRegion } from "../viewport.ts";
-import type { PlanningConfig } from "./config.ts";
 import {
   makeEntitySnapshot,
   type SnapshotEntityDeps,
@@ -64,26 +57,17 @@ export interface SnapshotDatasetEntry {
   manifest: DatasetManifest;
 }
 
-/** Inputs to {@link buildPlanningSnapshot}. */
-export interface BuildPlanningSnapshotArgs {
+/** Inputs to {@link buildViewSnapshot}. */
+export interface BuildViewSnapshotArgs {
   scene: WasmScene;
   /** The view whose camera and axis positions the snapshot reads. */
   view: number;
   datasetId: string;
   /** Manifest entry for `datasetId`; supplies image specs and parent edges. */
   dataset: SnapshotDatasetEntry;
-  /** The scene's resolved layer: the channels to plan, and the clamped t and z. */
+  /** The layer as the view resolves it: the channels to plan, and the clamped t and z. */
   layer: ResolvedLayer | undefined;
-  /**
-   * Forwarded verbatim into {@link PlanningSnapshot.minimapPending}. Pass
-   * `new Map()` for no minimap requests.
-   */
-  minimapPending: Map<string, MinimapChunkCoord[]>;
   mode: "slice" | "volume";
-  /** Passed through verbatim. */
-  currentEpochs: SceneEpochs;
-  requestEpoch: number;
-  config: PlanningConfig;
   /**
    * Camera-independent inputs a caller may cache per dataset across
    * view-only replans, to skip the `member_positions` parse and the
@@ -111,50 +95,25 @@ export interface BuildPlanningSnapshotArgs {
 }
 
 /**
- * The snapshot plus the parts the orchestrator uses directly: `entities`
- * for telemetry and the roster, `visibleRegion` for the
- * coordinate-diagnostic panel.
- */
-export interface BuildPlanningSnapshotResult {
-  snapshot: PlanningSnapshot;
-  entities: EntitySnapshot[];
-  visibleRegion: VisibleRegion;
-  selection: SelectionState;
-}
-
-/**
- * Where the slice view cuts `layer`: along the scene's slice plane at the
- * layer's clamped axis position, or the scene's own for a layer it lacks.
+ * Where `view`'s slice cut meets `layer`: along the view's slice plane at the
+ * layer's clamped axis position, or the view's own for a layer it lacks.
  */
 export function sliceCut(
   scene: Pick<WasmScene, "slice_plane" | "cut_index">,
+  view: number,
   layer: ResolvedLayer | undefined,
 ): SliceCut {
-  const plane = scene.slice_plane() as SlicePlane;
-  return layer ? layerCut(layer, plane) : { axis: cutAxis(plane), index: scene.cut_index() };
+  const plane = scene.slice_plane(view) as SlicePlane;
+  return layer ? layerCut(layer, plane) : { axis: cutAxis(plane), index: scene.cut_index(view) };
 }
 
 /**
- * Translate live WASM scene state into a {@link PlanningSnapshot}. Returns
- * `null` when `view_query` has no `visible_entities`; the caller skips the dataset.
+ * Translate live WASM scene state into what `view` sees of a dataset.
+ * Returns `null` when `view_query` has no `visible_entities`, as for a
+ * dataset the view does not show; the caller leaves the view out.
  */
-export function buildPlanningSnapshot(
-  args: BuildPlanningSnapshotArgs,
-): BuildPlanningSnapshotResult | null {
-  const {
-    scene,
-    view,
-    datasetId,
-    dataset,
-    layer,
-    minimapPending,
-    mode,
-    currentEpochs,
-  } = args;
-  // Not read here: the caller already folded `requestEpoch` into
-  // `currentEpochs`, and `plan()` reads `config`.
-  void args.requestEpoch;
-  void args.config;
+export function buildViewSnapshot(args: BuildViewSnapshotArgs): ViewSnapshot | null {
+  const { scene, view, datasetId, dataset, layer, mode } = args;
 
   // With `entitiesOverride`, steps 1 to 4 are skipped. Steps 5 and 6 still
   // run so the region and selection stay fresh.
@@ -233,22 +192,11 @@ export function buildPlanningSnapshot(
   const selection: SelectionState = {
     t: layer?.t ?? scene.t(),
     z: layer?.z_range.start ?? scene.z(),
-    cut: sliceCut(scene, layer),
+    cut: sliceCut(scene, view, layer),
     visibleChannels: shownChannels(layer),
     renderMode: mode,
     interactionState: "idle",
   };
 
-  // `previousActiveSet` is not on the snapshot; it travels in
-  // {@link PlanningState}.
-  const snapshot: PlanningSnapshot = {
-    datasetId,
-    epochs: currentEpochs,
-    entities,
-    visibleRegion,
-    selection,
-    minimapPending,
-  };
-
-  return { snapshot, entities, visibleRegion, selection };
+  return { view, entities, visibleRegion, selection };
 }

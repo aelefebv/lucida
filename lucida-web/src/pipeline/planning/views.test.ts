@@ -1,0 +1,146 @@
+/**
+ * A dataset several views show is planned once for all of them: each view
+ * asks for what it draws, a chunk two views ask for alike is asked for once,
+ * and each view keeps its own memory between plans.
+ */
+import { beforeAll, describe, expect, it } from "vitest";
+
+import {
+  createSyntheticEntity,
+  createSyntheticSnapshot,
+  createSyntheticState,
+  createSyntheticView,
+  emitPlanRequests,
+  emptyPlanStats,
+  mergeConfig,
+  plan,
+  scrubbedPlanningState,
+} from "./index.ts";
+import type { ChunkRequest, SelectionState, ViewSnapshot } from "./index.ts";
+import type { LevelGeometry } from "../../manifestTypes.ts";
+import { loadWasm } from "../../viewProperties.ts";
+
+beforeAll(loadWasm);
+
+function level(index: number, depth: number, side: number, chunk: [number, number]): LevelGeometry {
+  const [cz, cxy] = chunk;
+  return {
+    level_index: index,
+    shape: [1, 1, depth, side, side],
+    chunk_shape: [1, 1, cz, cxy, cxy],
+    grid_shape: [1, 1, Math.ceil(depth / cz), Math.ceil(side / cxy), Math.ceil(side / cxy)],
+    scale: [1, 1, 1, 1, 1],
+  };
+}
+
+/** A 100-plane volume in 32-plane chunks, its two levels each a source level. */
+const LEVELS = [level(0, 100, 128, [32, 64]), level(1, 50, 64, [32, 64])];
+
+/** View `id` of the volume at plane `z`, targeting `targetLevel`, at `effectiveZoom`. */
+function viewAt(id: number, z: number, targetLevel = 0, effectiveZoom = 1): ViewSnapshot {
+  const selection: SelectionState = {
+    t: 0,
+    z,
+    cut: { axis: "z", index: z },
+    visibleChannels: [0],
+    renderMode: "slice",
+    interactionState: "idle",
+  };
+  return createSyntheticView({
+    view: id,
+    entities: [
+      createSyntheticEntity({
+        entityId: "vol",
+        imageId: "img",
+        levels: LEVELS,
+        sourceLevels: [0, 1],
+        targetLevel,
+        coarseLevel: null,
+      }),
+    ],
+    visibleRegion: {
+      xyBoundsVox: [0, 0, 128, 128],
+      zRangeVox: [z, z + 1],
+      effectiveZoom,
+      sortCenterVox: null,
+      frustumPlanes: null,
+    },
+    selection,
+  });
+}
+
+const noPrefetch = mergeConfig({ prefetchDepth: 0 });
+
+function keys(requests: ChunkRequest[]): string[] {
+  return requests.map((req) => `${req.chunkKey} ${req.plane ?? "whole"}`).sort();
+}
+
+describe("a plan for several views", () => {
+  it("asks once for what two views at one place both want", () => {
+    const one = plan(createSyntheticSnapshot({ views: [viewAt(0, 40)] }), createSyntheticState(), noPrefetch);
+    const two = plan(
+      createSyntheticSnapshot({ views: [viewAt(0, 40), viewAt(1, 40)] }),
+      createSyntheticState(),
+      noPrefetch,
+    );
+    expect(keys(two.requests)).toEqual(keys(one.requests));
+  });
+
+  it("asks for what each view draws", () => {
+    const near = plan(createSyntheticSnapshot({ views: [viewAt(0, 10)] }), createSyntheticState(), noPrefetch);
+    const far = plan(createSyntheticSnapshot({ views: [viewAt(1, 80)] }), createSyntheticState(), noPrefetch);
+    const both = plan(
+      createSyntheticSnapshot({ views: [viewAt(0, 10), viewAt(1, 80)] }),
+      createSyntheticState(),
+      noPrefetch,
+    );
+    expect(keys(both.requests)).toEqual([...keys(near.requests), ...keys(far.requests)].sort());
+  });
+
+  it("holds every view's detail levels in one active set, finest first", () => {
+    const { activeSet, nextState } = plan(
+      createSyntheticSnapshot({ views: [viewAt(0, 40, 1), viewAt(1, 40, 0)] }),
+      createSyntheticState(),
+      noPrefetch,
+    );
+    expect(activeSet).toEqual([
+      { kind: "tile", entityId: "vol", imageId: "img", detailLevels: [0, 1], coarseLevel: null },
+    ]);
+    expect(nextState.previousActiveSet).toBe(activeSet);
+    // Each view keeps the set its own entities made.
+    expect(nextState.views.get(0)?.activeSet[0]).toMatchObject({ detailLevels: [1] });
+    expect(nextState.views.get(1)?.activeSet[0]).toMatchObject({ detailLevels: [0] });
+  });
+
+  it("remembers each view's own zoom and cut", () => {
+    const first = plan(
+      createSyntheticSnapshot({ views: [viewAt(0, 40, 0, 1), viewAt(1, 60, 0, 1)] }),
+      createSyntheticState(),
+    );
+    // View 0 zooms in; view 1 holds still.
+    const second = plan(
+      createSyntheticSnapshot({ views: [viewAt(0, 40, 0, 2), viewAt(1, 60, 0, 1)] }),
+      first.nextState,
+    );
+    expect(second.nextState.views.get(0)).toMatchObject({ zoomDirection: "in", previousCut: { index: 40 } });
+    expect(second.nextState.views.get(1)).toMatchObject({ zoomDirection: null, previousCut: { index: 60 } });
+  });
+
+  it("regenerates each view's requests from its own active set on a scrub", () => {
+    const planned = plan(
+      createSyntheticSnapshot({ views: [viewAt(0, 10), viewAt(1, 80)] }),
+      createSyntheticState(),
+      noPrefetch,
+    );
+    // View 1 scrubs to plane 20.
+    const scrubbed = createSyntheticSnapshot({ views: [viewAt(0, 10), viewAt(1, 20)] });
+    const requests = emitPlanRequests(scrubbed, planned.nextState, emptyPlanStats(), noPrefetch);
+    const fresh = plan(scrubbed, planned.nextState, noPrefetch);
+    expect(keys(requests)).toEqual(keys(fresh.requests));
+
+    const state = scrubbedPlanningState(scrubbed, planned.nextState);
+    expect(state.previousActiveSet).toBe(planned.nextState.previousActiveSet);
+    expect(state.views.get(1)?.previousCut).toEqual({ axis: "z", index: 20 });
+    expect(state.views.get(0)?.previousCut).toEqual({ axis: "z", index: 10 });
+  });
+});

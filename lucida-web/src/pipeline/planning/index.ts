@@ -6,6 +6,7 @@
 export {
   emptyPlanStats,
   initialPlanningState,
+  initialViewPlanningState,
   type ZoomDirection,
   type ActiveSetEntry,
   type BaseEntitySnapshot,
@@ -23,6 +24,9 @@ export {
   type PlanStats,
   type RequestPlan,
   type SelectionState,
+  type ViewPlanningState,
+  type ViewSnapshot,
+  type DatasetView,
   type MemberGroup,
   type GroupSnapshot,
 } from "./types.ts";
@@ -33,7 +37,7 @@ export { chunkKey, compareChunkRequests, isCutStep, slicePlaneIn, type PlaneInCh
 
 export { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
 
-export { plan, emitPlanRequests } from "./plan.ts";
+export { plan, emitPlanRequests, scrubbedPlanningState } from "./plan.ts";
 
 export {
   DEFAULT_PLANNING_CONFIG,
@@ -56,6 +60,7 @@ export {
 export {
   createSyntheticEntity,
   createSyntheticSnapshot,
+  createSyntheticView,
   createSyntheticState,
   type CreateSyntheticEntityOverrides,
 } from "./synthetic.ts";

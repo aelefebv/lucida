@@ -303,7 +303,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
           z,
           // In 3D `z` is the picked depth, while T is the view's selector.
           t: scene.t(),
-          c: shownChannels(readResolvedLayers(scene).get(datasetId))[0],
+          c: shownChannels(readResolvedLayers(scene, scene.active_view()).get(datasetId))[0],
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),

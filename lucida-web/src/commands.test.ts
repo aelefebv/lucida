@@ -345,7 +345,7 @@ describe("command vocabulary: state-visible commands change the scene", () => {
   it("set_channel_solo solos one channel of the addressed layer", () => {
     const scene = freshScene();
     apply(scene, viewportCases.set_channel_solo);
-    const layers = JSON.parse(scene.resolved_layers()) as {
+    const layers = JSON.parse(scene.resolved_layers(scene.active_view())) as {
       dataset_id: string;
       solo: number | null;
       channels: { channel: number }[];

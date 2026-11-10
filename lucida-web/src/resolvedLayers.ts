@@ -80,9 +80,9 @@ interface Cached {
   layers: ResolvedLayers;
 }
 
-const cache = new WeakMap<WasmScene, Cached>();
+const cache = new WeakMap<WasmScene, Map<number, Cached>>();
 
-/** Parse `resolved_layers()`-shaped JSON into a map by dataset id, in panel order. */
+/** Parse `resolved_layers`-shaped JSON into a map by dataset id, in panel order. */
 export function parseResolvedLayers(json: string): ResolvedLayers {
   const map = new Map<string, ResolvedLayer>();
   try {
@@ -94,15 +94,20 @@ export function parseResolvedLayers(json: string): ResolvedLayers {
 }
 
 /**
- * The scene's resolved layers. Only the content, layout and selection epochs
- * can change them, so a camera move reuses the last answer.
+ * The layers as `view` resolves them. Only the content, layout and selection
+ * epochs can change them, so a camera move reuses the last answer.
  */
-export function readResolvedLayers(scene: WasmScene): ResolvedLayers {
+export function readResolvedLayers(scene: WasmScene, view: number): ResolvedLayers {
   const key = layerEpochKey(scene);
-  const hit = cache.get(scene);
+  let byView = cache.get(scene);
+  if (byView === undefined) {
+    byView = new Map();
+    cache.set(scene, byView);
+  }
+  const hit = byView.get(view);
   if (hit && key !== null && hit.key === key) return hit.layers;
-  const layers = parseResolvedLayers(scene.resolved_layers());
-  if (key !== null) cache.set(scene, { key, layers });
+  const layers = parseResolvedLayers(scene.resolved_layers(view));
+  if (key !== null) byView.set(view, { key, layers });
   return layers;
 }
 

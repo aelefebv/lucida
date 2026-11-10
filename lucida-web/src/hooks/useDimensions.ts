@@ -91,7 +91,7 @@ export function useDimensions({
       applyViewportCommand(scene, { type: "set_t", t: dimT - 1 });
       clamped = true;
     }
-    if (cut !== "z" && scene.cut_index() >= dimCut) {
+    if (cut !== "z" && scene.cut_index(scene.active_view()) >= dimCut) {
       const last = dimCut - 1;
       applyViewportCommand(scene, cut === "y" ? { type: "set_y", y: last } : { type: "set_x", x: last });
       clamped = true;
@@ -130,8 +130,8 @@ export function useDimensions({
     loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
-      const axis = cutAxis(scene.slice_plane() as SlicePlane);
-      const index = resolveIndex(v, scene.cut_index());
+      const axis = cutAxis(scene.slice_plane(scene.active_view()) as SlicePlane);
+      const index = resolveIndex(v, scene.cut_index(scene.active_view()));
       applyViewportCommand(scene, axis === "z"
         ? { type: "set_z", z: index }
         : axis === "y" ? { type: "set_y", y: index } : { type: "set_x", x: index });
@@ -142,7 +142,7 @@ export function useDimensions({
   // A plane is another camera, as a mode is, so it fits the data again.
   const handleSlicePlaneChange = useCallback((plane: SlicePlane) => {
     const scene = wasmSceneRef.current;
-    if (!scene || scene.slice_plane() === plane) return;
+    if (!scene || scene.slice_plane(scene.active_view()) === plane) return;
     bridgeCallbacksRef.current.breakFollow();
     loopRef.current?.markInput("plane");
     applyViewportCommand(scene, { type: "set_slice_plane", plane });

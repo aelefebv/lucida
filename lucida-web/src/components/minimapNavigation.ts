@@ -411,7 +411,7 @@ export class MinimapNavigator {
     const scene = this.deps.scene();
     const frame = this.deps.frame();
     if (!scene || !frame || frame.members.length === 0 || scene.camera_mode() === "fly") return null;
-    if (frame.mode === "slice" && scene.slice_plane() !== "xy") return null;
+    if (frame.mode === "slice" && scene.slice_plane(scene.active_view()) !== "xy") return null;
     return { scene, frame };
   }
 

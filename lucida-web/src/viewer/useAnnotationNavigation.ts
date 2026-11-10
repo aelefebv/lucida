@@ -77,7 +77,7 @@ export function useAnnotationNavigation({
       contextChanged = true;
     }
     const datasetId = resolveAnnotationDatasetId(scene, selectedDatasetId);
-    const layer = datasetId ? readResolvedLayers(scene).get(datasetId) : undefined;
+    const layer = datasetId ? readResolvedLayers(scene, scene.active_view()).get(datasetId) : undefined;
     const placement = pinChannels(pin);
     if (datasetId && layer && !inChannelContext(placement, shownChannels(layer))) {
       // A pin placed on a solo gets that solo back; one placed in the

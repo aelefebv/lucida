@@ -409,12 +409,12 @@ impl WasmScene {
         self.inner.apply(ViewportCommand::SetT { t }.into());
     }
 
-    /// What every layer shows in the active view, as JSON:
-    /// [`crate::scene::ResolvedLayer`]s in panel order. The renderer, the
-    /// minimap, explore thumbnails and the layer panel all read this rather
-    /// than derive it from the settings.
-    pub fn resolved_layers(&self) -> String {
-        serde_json::to_string(&self.inner.resolved_layers(self.active().id()))
+    /// What every layer shows in `view`, as JSON:
+    /// [`crate::scene::ResolvedLayer`]s in panel order, none for an unknown
+    /// view. The renderer, the minimap, explore thumbnails and the layer
+    /// panel all read this rather than derive it from the settings.
+    pub fn resolved_layers(&self, view: u32) -> String {
+        serde_json::to_string(&self.inner.resolved_layers(ViewId(view)))
             .unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -449,15 +449,19 @@ impl WasmScene {
         self.active().axes.t
     }
 
-    /// The plane the active view's slice camera cuts: `xy`, `xz` or `yz`.
-    pub fn slice_plane(&self) -> String {
-        self.active().slice_plane().to_string()
+    /// The plane `view`'s slice camera cuts: `xy`, `xz` or `yz`, and `xy`
+    /// for an unknown view.
+    pub fn slice_plane(&self, view: u32) -> String {
+        self.inner
+            .view(ViewId(view))
+            .map_or(crate::slice_plane::SlicePlane::Xy, View::slice_plane)
+            .to_string()
     }
 
-    /// The active view's axis position along its slice plane's cut axis,
-    /// before any layer clamps it.
-    pub fn cut_index(&self) -> u32 {
-        self.active().cut_index()
+    /// `view`'s axis position along its slice plane's cut axis, before any
+    /// layer clamps it; 0 for an unknown view.
+    pub fn cut_index(&self, view: u32) -> u32 {
+        self.inner.view(ViewId(view)).map_or(0, View::cut_index)
     }
 
     /// How many positions the active view's cut axis steps through: Z's

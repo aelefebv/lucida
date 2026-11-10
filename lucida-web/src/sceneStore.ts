@@ -157,15 +157,15 @@ function sameEpochs(a: ViewEpochs | null, b: ViewEpochs | null): boolean {
 function readView(scene: WasmScene, knownLayersJson: string | null, previous: SceneView): SceneView {
   const mode = scene.camera_mode();
   const cameraMode: CameraMode = mode === "fly" ? "fly" : mode === "arcball" ? "arcball" : "slice";
-  const layersJson = knownLayersJson ?? scene.resolved_layers();
+  const layersJson = knownLayersJson ?? scene.resolved_layers(scene.active_view());
   const layers = layersJson === layersJsonOf.get(previous)
     ? previous.layers
     : parseResolvedLayers(layersJson);
   const view: SceneView = {
     z: scene.z(),
     t: scene.t(),
-    slicePlane: scene.slice_plane() as SlicePlane,
-    cutIndex: scene.cut_index(),
+    slicePlane: scene.slice_plane(scene.active_view()) as SlicePlane,
+    cutIndex: scene.cut_index(scene.active_view()),
     layers,
     cameraMode,
     viewMode: cameraMode === "slice" ? "2d" : "3d",

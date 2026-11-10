@@ -263,7 +263,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
           // The overlay shows the pin off-context when the view's T differs or
           // none of the channels its layer shows now did then.
           t: scene.t(),
-          c: shownChannels(readResolvedLayers(scene).get(datasetId))[0],
+          c: shownChannels(readResolvedLayers(scene, scene.active_view()).get(datasetId))[0],
           author: String(myIdRef.current),
           kind: drawShape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),

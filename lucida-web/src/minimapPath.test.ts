@@ -280,6 +280,7 @@ describe("tickMinimap overview/overlay split", () => {
     s.wasm = {
       camera_theta: () => s.theta,
       camera_phi: () => s.phi,
+      active_view: () => 0,
       resolved_layers: () => s.settings,
       dataset_order: () => s.order,
       z: () => s.z,
@@ -854,7 +855,7 @@ describe("tickMinimapOverview throttle", () => {
     const state = createMinimapState();
     state.enabled = true;
     const ctx = {
-      scene: { resolved_layers: tSpy },
+      scene: { active_view: () => 0, resolved_layers: tSpy },
       datasets: new Map(),
       cpuCache: noFailures,
     } as unknown as TickContext;
@@ -878,7 +879,7 @@ describe("tickMinimapOverview throttle", () => {
     const state = createMinimapState();
     state.enabled = true;
     const ctx = {
-      scene: { t: () => 0, resolved_layers: () => "[]" },
+      scene: { t: () => 0, active_view: () => 0, resolved_layers: () => "[]" },
       datasets: new Map(),
       cpuCache: noFailures,
     } as unknown as TickContext;
@@ -900,7 +901,7 @@ describe("tickMinimapOverview throttle", () => {
     state.enabled = true;
     const cache = new Map<string, { data: ArrayBuffer; dataType: string }>();
     const ctx = {
-      scene: { t: () => 0, resolved_layers: () => "[]" },
+      scene: { t: () => 0, active_view: () => 0, resolved_layers: () => "[]" },
       datasets: new Map(),
       cpuCache: {
         ...noFailures,
@@ -938,7 +939,7 @@ describe("tickMinimapOverview on a collection", () => {
     cache.set("ds:tile:A/1/0/1/0/0/0/0/0", { data: new ArrayBuffer(8), dataType: "uint16" });
     const uploads: { overview: string; keys: string[] }[] = [];
     const ctx = {
-      scene: { t: () => 0, resolved_layers: () => "[]" },
+      scene: { t: () => 0, active_view: () => 0, resolved_layers: () => "[]" },
       datasets: new Map([
         [
           "ds",
@@ -988,7 +989,7 @@ describe("tickMinimapOverview with a chunk that failed for good", () => {
     state.enabled = true;
     const uploads: { overview: string; chunks: number; imageId: string; level: number }[] = [];
     const ctx = {
-      scene: { t: () => 0, resolved_layers: () => "[]" },
+      scene: { t: () => 0, active_view: () => 0, resolved_layers: () => "[]" },
       datasets: new Map([
         [
           "ds",

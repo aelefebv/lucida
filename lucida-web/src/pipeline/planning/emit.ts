@@ -22,9 +22,9 @@ import { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enume
 import type {
   ActiveSetEntry,
   ChunkRequest,
+  DatasetView,
   EntitySnapshot,
   MinimapChunkCoord,
-  PlanningSnapshot,
   PlanStats,
   SelectionState,
   TileEntry,
@@ -92,7 +92,7 @@ export function slicePlaneIn(
 function slicePlaneAt(
   entity: EntitySnapshot,
   level: number,
-  snapshot: PlanningSnapshot,
+  snapshot: DatasetView,
   config: PlanningConfig,
 ): PlaneInChunks | null {
   if (snapshot.selection.renderMode !== "slice" || !entity.sourceLevels.includes(level)) return null;
@@ -239,7 +239,7 @@ export interface PlanChunks {
  */
 export function enumeratePlanChunks(
   activeSet: readonly ActiveSetEntry[],
-  snapshot: PlanningSnapshot,
+  snapshot: DatasetView,
   entityById: ReadonlyMap<string, EntitySnapshot>,
   config: PlanningConfig,
   zoomDirection: ZoomDirection | null,
@@ -297,7 +297,7 @@ function emitQuery(
   entity: EntitySnapshot,
   query: number,
   level: number,
-  snapshot: PlanningSnapshot,
+  snapshot: DatasetView,
   config: PlanningConfig,
   t: number,
   lane: ChunkRequest["lane"],
@@ -339,7 +339,7 @@ function emitQuery(
 }
 
 /** Add a query's culling counts once per channel. */
-function count(chunks: PlanChunks, query: number, snapshot: PlanningSnapshot, stats: PlanStats): void {
+function count(chunks: PlanChunks, query: number, snapshot: DatasetView, stats: PlanStats): void {
   chunks.found.addCounts(query, stats.culling, snapshot.selection.visibleChannels.length);
 }
 
@@ -408,7 +408,7 @@ export function emitMinimapLane(
 /** Detail lane: each visible tile's chunks at its detail-tier levels. */
 export function emitDetailLane(
   chunks: PlanChunks,
-  snapshot: PlanningSnapshot,
+  snapshot: DatasetView,
   stats: PlanStats,
   out: LaneRequests,
   config: PlanningConfig,
@@ -459,7 +459,7 @@ function levelInZoomDirection(
  */
 export function emitPrefetchLane(
   chunks: PlanChunks,
-  snapshot: PlanningSnapshot,
+  snapshot: DatasetView,
   stats: PlanStats,
   out: LaneRequests,
   config: PlanningConfig,
@@ -505,7 +505,7 @@ function emitLevelStep(
   chunks: PlanChunks,
   entity: EntitySnapshot,
   step: LevelStep,
-  snapshot: PlanningSnapshot,
+  snapshot: DatasetView,
   stats: PlanStats,
   config: PlanningConfig,
   allowance: number,
@@ -533,7 +533,7 @@ function emitLevelStep(
  */
 export function emitCoarseLane(
   chunks: PlanChunks,
-  snapshot: PlanningSnapshot,
+  snapshot: DatasetView,
   stats: PlanStats,
   out: LaneRequests,
   config: PlanningConfig,

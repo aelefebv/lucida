@@ -136,6 +136,7 @@ vi.mock("lucida-core", () => {
       })));
     }
     camera_mode() { return this.mode; }
+    active_view() { return 0; }
     slice_plane() { return "xy"; }
     cut_index() { return this.view.z; }
     zoom() { return 1; }

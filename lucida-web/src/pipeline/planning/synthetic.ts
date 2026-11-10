@@ -9,6 +9,7 @@ import {
   type PlanningSnapshot,
   type PlanningState,
   type GroupSnapshot,
+  type ViewSnapshot,
 } from "./index.ts";
 
 /**
@@ -59,25 +60,10 @@ export function createSyntheticEntity(
   return image;
 }
 
-/**
- * Create a valid {@link PlanningSnapshot} with sensible defaults,
- * merged with overrides. `previousActiveSet` does not live on the
- * snapshot — tests that need to seed prev state should construct a
- * {@link PlanningState} (see {@link createSyntheticState}) and pass
- * it via the second argument to `plan()`.
- */
-export function createSyntheticSnapshot(
-  overrides?: Partial<PlanningSnapshot>,
-): PlanningSnapshot {
+/** Build a valid {@link ViewSnapshot} with defaults, merged with overrides. */
+export function createSyntheticView(overrides?: Partial<ViewSnapshot>): ViewSnapshot {
   return {
-    datasetId: "synthetic-ds",
-    epochs: {
-      content: 0,
-      layout: 0,
-      view: 0,
-      selection: 0,
-      request: 0,
-    },
+    view: 0,
     entities: [],
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -94,8 +80,38 @@ export function createSyntheticSnapshot(
       renderMode: "slice",
       interactionState: "idle",
     },
-    minimapPending: new Map<string, MinimapChunkCoord[]>(),
     ...overrides,
+  };
+}
+
+/**
+ * Create a valid {@link PlanningSnapshot} with sensible defaults, merged
+ * with overrides. Without `views`, it has one view, built from the view
+ * fields among the overrides. `previousActiveSet` does not live on the
+ * snapshot — tests that need to seed prev state should construct a
+ * {@link PlanningState} (see {@link createSyntheticState}) and pass
+ * it via the second argument to `plan()`.
+ */
+export function createSyntheticSnapshot(
+  overrides?: Partial<PlanningSnapshot> & Partial<Omit<ViewSnapshot, "view">>,
+): PlanningSnapshot {
+  const { entities, visibleRegion, selection, ...rest } = overrides ?? {};
+  const view: Partial<ViewSnapshot> = {};
+  if (entities) view.entities = entities;
+  if (visibleRegion) view.visibleRegion = visibleRegion;
+  if (selection) view.selection = selection;
+  return {
+    datasetId: "synthetic-ds",
+    epochs: {
+      content: 0,
+      layout: 0,
+      view: 0,
+      selection: 0,
+      request: 0,
+    },
+    views: [createSyntheticView(view)],
+    minimapPending: new Map<string, MinimapChunkCoord[]>(),
+    ...rest,
   };
 }
 
