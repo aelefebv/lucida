@@ -5,7 +5,7 @@
     "type": "dataset_opened",
     "manifest": {
       "dataset_id": "wds-0f3a",
-      "name": "kidney-multiplex.zarr",
+      "name": "multichannel-volume.zarr",
       "kind": "Single",
       "entities": [
         {
@@ -13,7 +13,7 @@
           "kind": "Image",
           "parent": null,
           "labels": {
-            "name": "kidney-multiplex.zarr"
+            "name": "multichannel-volume.zarr"
           }
         }
       ],

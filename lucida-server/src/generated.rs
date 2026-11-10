@@ -6206,7 +6206,7 @@ mod tests {
         let (entities, images): (Vec<_>, Vec<_>) = ["A/1/0", "A/2/0", "B/1/0"]
             .iter()
             .map(|tile| {
-                let owner = EntityId(format!("plate:tile:{tile}"));
+                let owner = EntityId(format!("collection:tile:{tile}"));
                 let entity = Entity {
                     id: owner.clone(),
                     kind: EntityKind::Tile,
@@ -6214,7 +6214,7 @@ mod tests {
                     labels: EntityLabels::default(),
                 };
                 let image = lucida_content::ImageSpec {
-                    image_id: ImageId(format!("plate:image:{tile}")),
+                    image_id: ImageId(format!("collection:image:{tile}")),
                     owner,
                     multiscale: template.multiscale.clone(),
                 };
@@ -6222,8 +6222,8 @@ mod tests {
             })
             .unzip();
         let mut manifest = DatasetManifest::new(
-            DatasetId("plate".into()),
-            "plate".into(),
+            DatasetId("collection".into()),
+            "collection".into(),
             DatasetKind::Collection {
                 rows: vec!["A".into(), "B".into()],
                 columns: vec!["1".into(), "2".into()],

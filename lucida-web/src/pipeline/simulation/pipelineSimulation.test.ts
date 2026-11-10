@@ -696,7 +696,7 @@ describe("auto-contrast limits", () => {
     {
       name: "two-channel collection",
       dataset: collection({
-        id: "plate",
+        id: "grid",
         rows: 3,
         columns: 4,
         pyramid: { shape: [1, 2, 1, 256, 256], chunk: [1, 64, 64], levels: 2 },
