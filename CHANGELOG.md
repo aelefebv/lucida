@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.30.0](https://github.com/aelefebv/lucida/compare/v0.29.0...v0.30.0) (2026-11-10)
+
+
+### Features
+
+* place datasets by their declared scale, translation and units ([#1483](https://github.com/aelefebv/lucida/issues/1483)) ([dd3e35c](https://github.com/aelefebv/lucida/commit/dd3e35cfcbc9cbda5c5fc5380b27d05e813316df))
+* swipe and blink between datasets that line up ([#1488](https://github.com/aelefebv/lucida/issues/1488)) ([a35c688](https://github.com/aelefebv/lucida/commit/a35c68839d6079900d95e2e46b69eb1f5296a97b))
+* the slice view cuts XZ and YZ planes as well as XY ([#1485](https://github.com/aelefebv/lucida/issues/1485)) ([d80196e](https://github.com/aelefebv/lucida/commit/d80196e6af6d7185958aaacdeb962c2021904323))
+* **web:** views divide one canvas, each drawn in its own mode ([#1496](https://github.com/aelefebv/lucida/issues/1496)) ([5dcfcd0](https://github.com/aelefebv/lucida/commit/5dcfcd08d68f76076bf98cd5232d45870d2c4ad3))
+
+
+### Bug Fixes
+
+* draw nothing of a layer the cut misses, and say so ([#1489](https://github.com/aelefebv/lucida/issues/1489)) ([cacd0db](https://github.com/aelefebv/lucida/commit/cacd0dbc260138910c770988421873ff21e3662f))
+
+
+### Refactors
+
+* **core:** a view is a value, and the scene holds a list of them ([#1491](https://github.com/aelefebv/lucida/issues/1491)) ([349a9da](https://github.com/aelefebv/lucida/commit/349a9da70cf22cb73d345c64bf7596944e67f5f3))
+* **web:** the planner plans every view of a dataset from one snapshot ([#1492](https://github.com/aelefebv/lucida/issues/1492)) ([2c1b485](https://github.com/aelefebv/lucida/commit/2c1b4851fbea10eea511be22e1a71b2f519194e5))
+* **web:** the render loop and worker draw each view in its rectangle ([#1495](https://github.com/aelefebv/lucida/issues/1495)) ([c1b6a3f](https://github.com/aelefebv/lucida/commit/c1b6a3f7081113d9b94df039edffb24030b3dff8))
+
 ## [0.29.0](https://github.com/aelefebv/lucida/compare/v0.28.0...v0.29.0) (2026-11-10)
 
 
