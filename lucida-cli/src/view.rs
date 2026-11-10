@@ -11,7 +11,7 @@ use lucida_core::scene::{
     BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
     RenderMode, Scene, declared_channels,
 };
-use lucida_core::view::ViewState;
+use lucida_core::view::AxisPositions;
 use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
 use lucida_protocol::{GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedLevelSummary};
 use serde::de::DeserializeOwned;
@@ -43,7 +43,7 @@ pub struct ViewApplyResult {
     pub source: ViewPresenceSource,
     pub command: ViewportCommand,
     pub camera: Camera,
-    pub view: ViewState,
+    pub view: AxisPositions,
     pub display: DisplayState,
     #[serde(skip)]
     pub break_follow: bool,
@@ -125,7 +125,7 @@ pub struct ViewerProfileResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<ViewportCommand>,
     pub camera: Camera,
-    pub view: ViewState,
+    pub view: AxisPositions,
     pub display: DisplayState,
     pub layers: Vec<LayerState>,
 }
@@ -136,7 +136,7 @@ pub struct ViewerSourceResult {
     pub own_client_id: ClientId,
     pub source: DiagnosticViewSource,
     pub camera: Camera,
-    pub view: ViewState,
+    pub view: AxisPositions,
     pub display: DisplayState,
     pub layers: Vec<LayerState>,
     #[serde(skip)]
@@ -175,7 +175,7 @@ pub struct PeerSummary {
     pub cursor: Option<[f64; 2]>,
     /// `None` until the peer reports a camera, view and display.
     pub camera: Option<Camera>,
-    pub view: Option<ViewState>,
+    pub view: Option<AxisPositions>,
     pub display: Option<DisplayState>,
     /// `None` until the peer reports its dataset presence.
     pub dataset_order: Option<Vec<DatasetId>>,
@@ -222,7 +222,7 @@ pub struct DebugStateResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct DebugViewerState {
     pub camera: Camera,
-    pub view: ViewState,
+    pub view: AxisPositions,
     pub display: DisplayState,
     pub dataset_order: Vec<String>,
 }
@@ -668,8 +668,8 @@ impl ViewerProfileClient {
         send_client_message(
             &mut write,
             &ClientMessage::Presence {
-                camera: scene.camera,
-                view: scene.view,
+                camera: scene.active_view().camera.clone(),
+                view: scene.active_view().axes.clone(),
                 display: scene.display,
             },
         )
@@ -757,8 +757,8 @@ impl ViewerProfileClient {
         send_client_message(
             &mut write,
             &ClientMessage::Presence {
-                camera: scene.camera,
-                view: scene.view,
+                camera: scene.active_view().camera.clone(),
+                view: scene.active_view().axes.clone(),
                 display: scene.display,
             },
         )
@@ -1278,8 +1278,8 @@ fn apply_presence_command(
             },
         },
         command,
-        camera: scene.camera,
-        view: scene.view,
+        camera: scene.active_view().camera.clone(),
+        view: scene.active_view().axes.clone(),
         display: scene.display,
         break_follow: own_presence.following.is_some(),
     })
@@ -1390,11 +1390,11 @@ pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceS
     scene.load_document(document.clone());
     match (&presence.camera, &presence.view, &presence.display) {
         (Some(camera), Some(view), Some(display)) => {
-            scene.camera = camera.clone();
+            scene.active_view_mut().camera = camera.clone();
             // Peer-sourced camera: clamp into the ranges the interactive
             // mutators enforce (same rule as `Scene::import_presence`).
-            scene.camera.sanitize();
-            scene.view = view.clone();
+            scene.active_view_mut().camera.sanitize();
+            scene.active_view_mut().axes = view.clone();
             scene.display = display.clone();
         }
         // An empty workspace has nothing to frame and keeps the blank camera.
@@ -1635,7 +1635,7 @@ fn resolve_dataset_id(document: &DocumentState, selector: &str) -> Result<Datase
 /// solo, else the first channel its composite shows.
 fn current_channel(scene: &Scene, dataset_id: &DatasetId) -> u32 {
     scene
-        .resolved_layer(dataset_id)
+        .resolved_layer(scene.active_view().id(), dataset_id)
         .and_then(|layer| layer.channels.first().map(|c| c.channel))
         .unwrap_or(0)
 }
@@ -1644,7 +1644,7 @@ fn current_channel(scene: &Scene, dataset_id: &DatasetId) -> u32 {
 /// [`Scene::resolved_layers`], the same answer the viewer draws.
 fn layer_states(scene: &Scene) -> Vec<LayerState> {
     scene
-        .resolved_layers()
+        .resolved_layers(scene.active_view().id())
         .into_iter()
         .filter(|layer| scene.dataset_order.contains(&layer.dataset_id))
         .filter_map(|layer| {
@@ -1818,8 +1818,8 @@ fn debug_state_result(
         source,
         diagnostic_kind: "workspace_scene_state",
         viewer: DebugViewerState {
-            camera: scene.camera.clone(),
-            view: scene.view.clone(),
+            camera: scene.active_view().camera.clone(),
+            view: scene.active_view().axes.clone(),
             display: scene.display.clone(),
             dataset_order: scene
                 .dataset_order
@@ -1968,8 +1968,8 @@ fn viewer_profile_result(
         updated_at: record.updated_at,
         seed_source: record.seed_source,
         command,
-        camera: scene.camera,
-        view: scene.view,
+        camera: scene.active_view().camera.clone(),
+        view: scene.active_view().axes.clone(),
         display: scene.display,
         layers,
     }
@@ -1986,8 +1986,8 @@ fn viewer_source_result(
         snapshot_seq: snapshot.seq,
         own_client_id: snapshot.your_id,
         source,
-        camera: scene.camera,
-        view: scene.view,
+        camera: scene.active_view().camera.clone(),
+        view: scene.active_view().axes.clone(),
         display: scene.display,
         layers,
         saved_view,
@@ -2200,7 +2200,7 @@ fn format_camera(camera: &Camera) -> String {
     }
 }
 
-fn format_view(view: &ViewState) -> String {
+fn format_view(view: &AxisPositions) -> String {
     let mut text = format!("T{} Z{}..{}", view.t, view.z_range.start, view.z_range.end);
     for (axis, index) in [("Y", view.y), ("X", view.x)] {
         if let Some(index) = index {
@@ -2314,7 +2314,7 @@ mod tests {
     use lucida_core::camera::{Camera, Slice};
     use lucida_core::protocol::PresenceState;
     use lucida_core::scene::{DisplayState, DocumentState};
-    use lucida_core::view::ViewState;
+    use lucida_core::view::AxisPositions;
     use lucida_protocol::{
         GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
         GeneratedLevelAvailability, GeneratedLevelSummary,
@@ -2334,7 +2334,7 @@ mod tests {
                 framing: lucida_core::camera::Framing::Placed,
                 plane: lucida_core::slice_plane::SlicePlane::Xy,
             })),
-            view: Some(ViewState::new()),
+            view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
             following: None,
             cursor: None,
@@ -2542,7 +2542,7 @@ mod tests {
                     framing: lucida_core::camera::Framing::Placed,
                     plane: lucida_core::slice_plane::SlicePlane::Xy,
                 }),
-                view: ViewState::new(),
+                view: AxisPositions::new(),
                 display: DisplayState::default(),
                 layers: Vec::new(),
             },
@@ -2940,7 +2940,7 @@ mod tests {
     fn a_new_viewer_profile_starts_from_a_fitted_view() {
         let document = document_with_pyramid();
         let seeded = ProfileScene::fitted(&document).scene;
-        match &seeded.camera {
+        match &seeded.active_view().camera {
             Camera::Slice(slice) => {
                 assert_eq!(slice.viewport, FITTED_VIEWPORT);
                 assert_eq!(slice.center, [2048.0, 2048.0]);
@@ -2960,7 +2960,7 @@ mod tests {
         // A client that joined and reported nothing reads as the same view.
         let joined = PresenceState::joined(7, None);
         let scene = scene_from_presence(&document, &joined);
-        assert_eq!(scene.camera, seeded.camera);
+        assert_eq!(scene.active_view().camera, seeded.active_view().camera);
         assert_eq!(scene.dataset_order, seeded.dataset_order);
     }
 
@@ -2975,7 +2975,7 @@ mod tests {
 
         scene.frame_visible_2d([320, 320]).unwrap();
 
-        match scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(slice) => {
                 assert_eq!(slice.viewport, [320, 320]);
                 assert_eq!(slice.center, [16.0, 32.0]);
@@ -2983,8 +2983,8 @@ mod tests {
             }
             _ => panic!("expected slice camera"),
         }
-        assert_eq!(scene.view.z_range.start, 2);
-        assert_eq!(scene.view.z_range.end, 3);
+        assert_eq!(scene.active_view().axes.z_range.start, 2);
+        assert_eq!(scene.active_view().axes.z_range.end, 3);
     }
 
     #[test]

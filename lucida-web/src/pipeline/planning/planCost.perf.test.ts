@@ -78,6 +78,7 @@ function snapshotFor(c: Case, dpr: number): { snapshot: PlanningSnapshot; scene:
   const layer = parseResolvedLayers(scene.resolved_layers()).get(c.dataset.datasetId);
   const built = buildPlanningSnapshot({
     scene,
+    view: scene.active_view(),
     datasetId: c.dataset.datasetId,
     dataset: { manifest: c.dataset.manifest },
     layer,

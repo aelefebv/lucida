@@ -8,6 +8,7 @@ use crate::mat4::{invert4_f64, normalize3, unproject};
 use crate::placement::Affine;
 use crate::scene::Scene;
 use crate::slice_plane::SlicePlane;
+use crate::view::ViewId;
 
 /// The one peer palette, in 8-bit sRGB. The page reads it through
 /// [`peer_palette_css`] for the labels it draws beside each cursor, so a
@@ -201,8 +202,8 @@ fn make_ray(start: [f32; 3], end: [f32; 3], marker: [f32; 3], r: f32, g: f32, b:
     ]
 }
 
-/// What cross-mode cursors are drawn against: everything visible, as one
-/// unit cube that maps onto its box in world space and onto the slice
+/// What cross-mode cursors are drawn against: everything a view shows, as
+/// one unit cube that maps onto its box in world space and onto the slice
 /// camera's plane box. A cursor crosses between the modes through it, so a
 /// slice cursor lands where the volume draws the same point.
 struct CursorBox {
@@ -215,10 +216,10 @@ struct CursorBox {
 }
 
 impl CursorBox {
-    /// The box of everything visible, or the unit cube in both spaces when
-    /// nothing is.
-    fn of(scene: &Scene) -> Self {
-        let (plane_min, plane_size, unit_to_world) = match scene.visible_bounds() {
+    /// The box of everything `view` shows, or the unit cube in both spaces
+    /// when it shows nothing.
+    fn of(scene: &Scene, view: ViewId) -> Self {
+        let (plane_min, plane_size, unit_to_world) = match scene.visible_bounds(view) {
             Some(bounds) => (
                 bounds.plane.min,
                 extent(bounds.plane.min, bounds.plane.max),
@@ -278,7 +279,8 @@ fn matrix_f64(a: &Affine) -> [f64; 16] {
     ]
 }
 
-/// Compute peer cursor geometry for the GPU and screen positions for labels.
+/// Compute peer cursor geometry for the GPU and screen positions for labels,
+/// as `view` draws them. Nothing for an unknown view.
 ///
 /// Each GPU cursor is 16 floats: `[position(4), color(4), end_point(4), marker(4)]`
 ///
@@ -286,22 +288,25 @@ fn matrix_f64(a: &Affine) -> [f64; 16] {
 /// so `screen_w` and `screen_h` are the canvas in device pixels too.
 pub fn compute_peer_cursors(
     scene: &Scene,
+    view: ViewId,
     peers: &[PeerInput],
     my_id: u64,
     screen_w: f64,
     screen_h: f64,
 ) -> CursorOutput {
-    let (local_mode, local_plane) = match &scene.camera {
-        Camera::Slice(slice) => ("slice", slice.plane),
-        Camera::Arcball(_) | Camera::Fly(_) => ("arcball", SlicePlane::Xy),
-    };
-
-    let cursor_box = CursorBox::of(scene);
-
     let mut output = CursorOutput {
         gpu: Vec::new(),
         labels: Vec::new(),
     };
+    let Some(local) = scene.view(view) else {
+        return output;
+    };
+    let (local_mode, local_plane) = match &local.camera {
+        Camera::Slice(slice) => ("slice", slice.plane),
+        Camera::Arcball(_) | Camera::Fly(_) => ("arcball", SlicePlane::Xy),
+    };
+
+    let cursor_box = CursorBox::of(scene, view);
 
     for peer in peers {
         if peer.id == my_id {
@@ -342,7 +347,7 @@ pub fn compute_peer_cursors(
                         .push(make_crosshair(cursor[0] as f32, cursor[1] as f32, r, g, b));
                 }
 
-                if let Camera::Slice(v) = &scene.camera {
+                if let Camera::Slice(v) = &local.camera {
                     let sx = (cursor[0] - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
                     let sy = (cursor[1] - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
                     output.labels.push(LabelOutput {
@@ -450,7 +455,7 @@ pub fn compute_peer_cursors(
                     b,
                 ));
 
-                if let Some(local_vp) = camera_vp_f64(&scene.camera)
+                if let Some(local_vp) = camera_vp_f64(&local.camera)
                     && let Some((sx, sy)) =
                         project_to_screen_vp(marker, local_vp, screen_w, screen_h)
                 {
@@ -483,7 +488,7 @@ pub fn compute_peer_cursors(
             let ro_unit = transform_point_f64(ro_world, inv_m);
             let rd_unit = normalize3(transform_dir_f64(rd_world, inv_m));
 
-            let local_z = scene.view.z_range.start;
+            let local_z = local.axes.z_range.start;
             let z_unit = cursor_box.plane_to_unit([0.0, 0.0, local_z as f64 + 0.5])[2];
 
             if let Some((x_unit, y_unit)) = ray_z_intersect(ro_unit, rd_unit, z_unit) {
@@ -497,7 +502,7 @@ pub fn compute_peer_cursors(
                 }
 
                 // Always emit label so JS can show edge indicator
-                if let Camera::Slice(v) = &scene.camera {
+                if let Camera::Slice(v) = &local.camera {
                     let sx = (x_voxel - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
                     let sy = (y_voxel - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
                     output.labels.push(LabelOutput {
@@ -536,7 +541,7 @@ pub fn compute_peer_cursors(
             }
 
             // Project marker to screen for label
-            if let Some(local_vp) = camera_vp_f64(&scene.camera) {
+            if let Some(local_vp) = camera_vp_f64(&local.camera) {
                 let marker_f64 = [marker[0] as f64, marker[1] as f64, marker[2] as f64];
                 if let Some((sx, sy)) =
                     project_to_screen_vp(marker_f64, local_vp, screen_w, screen_h)
@@ -632,6 +637,7 @@ mod tests {
         let scene = scene_2d([800, 600]);
         let result = compute_peer_cursors(
             &scene,
+            scene.active_view().id(),
             &[peer(1, Some([100.0, 200.0]), "slice")],
             1,
             800.0,
@@ -643,7 +649,14 @@ mod tests {
     #[test]
     fn filters_no_cursor() {
         let scene = scene_2d([800, 600]);
-        let result = compute_peer_cursors(&scene, &[peer(2, None, "slice")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            scene.active_view().id(),
+            &[peer(2, None, "slice")],
+            1,
+            800.0,
+            600.0,
+        );
         assert!(result.gpu.is_empty());
     }
 
@@ -652,6 +665,7 @@ mod tests {
         let scene = scene_2d([800, 600]);
         let result = compute_peer_cursors(
             &scene,
+            scene.active_view().id(),
             &[peer(2, Some([0.5, 0.5]), "arcball")],
             1,
             800.0,
@@ -665,6 +679,7 @@ mod tests {
         let scene = scene_2d([800, 600]);
         let result = compute_peer_cursors(
             &scene,
+            scene.active_view().id(),
             &[peer(2, Some([100.0, 200.0]), "slice")],
             1,
             800.0,
@@ -689,16 +704,23 @@ mod tests {
         };
         let xz_peer = peer_with_camera(2, Some([100.0, 50.0]), side(SlicePlane::Xz));
         let xy = scene_2d([800, 600]);
-        let none = compute_peer_cursors(&xy, std::slice::from_ref(&xz_peer), 1, 800.0, 600.0);
+        let none = compute_peer_cursors(
+            &xy,
+            xy.active_view().id(),
+            std::slice::from_ref(&xz_peer),
+            1,
+            800.0,
+            600.0,
+        );
         assert!(none.gpu.is_empty() && none.labels.is_empty());
 
         let mut xz = scene_2d([800, 600]);
-        xz.camera = side(SlicePlane::Xz);
-        let shown = compute_peer_cursors(&xz, &[xz_peer], 1, 800.0, 600.0);
+        xz.active_view_mut().camera = side(SlicePlane::Xz);
+        let shown = compute_peer_cursors(&xz, xz.active_view().id(), &[xz_peer], 1, 800.0, 600.0);
         assert_eq!(shown.gpu.len(), 1);
         let xy_peer = peer(3, Some([100.0, 50.0]), "slice");
         assert!(
-            compute_peer_cursors(&xz, &[xy_peer], 1, 800.0, 600.0)
+            compute_peer_cursors(&xz, xz.active_view().id(), &[xy_peer], 1, 800.0, 600.0)
                 .gpu
                 .is_empty()
         );
@@ -709,6 +731,7 @@ mod tests {
         let scene = scene_2d([800, 600]);
         let result = compute_peer_cursors(
             &scene,
+            scene.active_view().id(),
             &[peer(2, Some([0.0, 0.0]), "slice")],
             1,
             800.0,
@@ -722,12 +745,13 @@ mod tests {
     #[test]
     fn screen_position_with_zoom() {
         let mut scene = scene_2d([800, 600]);
-        if let Camera::Slice(ref mut v) = scene.camera {
+        if let Camera::Slice(ref mut v) = scene.active_view_mut().camera {
             v.zoom = 2.0;
             v.center = [50.0, 50.0];
         }
         let result = compute_peer_cursors(
             &scene,
+            scene.active_view().id(),
             &[peer(2, Some([100.0, 100.0]), "slice")],
             1,
             800.0,
@@ -746,7 +770,8 @@ mod tests {
             peer(3, Some([30.0, 40.0]), "slice"),
             peer(4, None, "slice"),
         ];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 2);
     }
 
@@ -770,14 +795,15 @@ mod tests {
     #[test]
     fn peer_3d_to_local_2d_center_screen() {
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.view.set_z(50);
+        scene.active_view_mut().axes.set_z(50);
 
         let peers = vec![peer_with_camera(
             2,
             Some([0.5, 0.5]),
             Camera::Arcball(Arcball::new([800, 600])),
         )];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert!(gpu[0] >= 0.0 && gpu[0] <= 300.0, "x_voxel: {}", gpu[0]);
@@ -790,6 +816,7 @@ mod tests {
         let scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
         let result = compute_peer_cursors(
             &scene,
+            scene.active_view().id(),
             &[peer(2, Some([0.5, 0.5]), "arcball")],
             1,
             800.0,
@@ -803,7 +830,7 @@ mod tests {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
         let mut p = peer(2, Some([150.0, 100.0]), "slice");
         p.view_z = Some(50);
-        let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[3], 1.0); // type=ray
@@ -816,7 +843,7 @@ mod tests {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
         let mut p = peer(2, Some([150.0, 100.0]), "slice");
         p.view_z = Some(50);
-        let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         let gpu = &result.gpu[0];
         let start_z = gpu[2];
         let end_z = gpu[10];
@@ -846,7 +873,8 @@ mod tests {
             Some([0.5, 0.5]),
             Camera::Arcball(peer_cam),
         )];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[3], 1.0); // type=ray
@@ -857,6 +885,7 @@ mod tests {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
         let result = compute_peer_cursors(
             &scene,
+            scene.active_view().id(),
             &[peer(2, Some([0.5, 0.5]), "arcball")],
             1,
             800.0,
@@ -898,7 +927,8 @@ mod tests {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
         let fly_cam = Fly::new([800, 600]);
         let peers = vec![peer_with_camera(2, Some([0.5, 0.5]), Camera::Fly(fly_cam))];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[3], 1.0, "should be a ray cursor (type=1)");
@@ -911,7 +941,8 @@ mod tests {
         let mut fly_cam = Fly::new([800, 600]);
         fly_cam.position = [1.0, 1.0, 1.0]; // different position
         let peers = vec![peer_with_camera(2, Some([0.5, 0.5]), Camera::Fly(fly_cam))];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[3], 1.0, "should be a ray cursor (type=1)");
@@ -921,10 +952,11 @@ mod tests {
     fn fly_peer_to_local_2d_produces_crosshair() {
         // Fly peer viewed from Slice local: should produce crosshair (3D→2D)
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.view.set_z(50);
+        scene.active_view_mut().axes.set_z(50);
         let fly_cam = Fly::new([800, 600]);
         let peers = vec![peer_with_camera(2, Some([0.5, 0.5]), Camera::Fly(fly_cam))];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[3], 0.0, "should be a crosshair cursor (type=0)");
@@ -936,7 +968,7 @@ mod tests {
         let scene = scene_fly_with_shape([800, 600], [100, 200, 300]);
         let mut p = peer(2, Some([150.0, 100.0]), "slice");
         p.view_z = Some(50);
-        let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[3], 1.0, "should be a ray cursor (type=1)");
@@ -953,7 +985,8 @@ mod tests {
             Some([0.5, 0.5]),
             Camera::Arcball(arcball_cam),
         )];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[3], 1.0, "should be a ray cursor (type=1)");
@@ -963,8 +996,14 @@ mod tests {
     fn fly_peer_without_camera_skipped() {
         // Fly mode but no camera data: should be skipped
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
-        let result =
-            compute_peer_cursors(&scene, &[peer(2, Some([0.5, 0.5]), "fly")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            scene.active_view().id(),
+            &[peer(2, Some([0.5, 0.5]), "fly")],
+            1,
+            800.0,
+            600.0,
+        );
         assert!(
             result.gpu.is_empty(),
             "fly peer without camera should be skipped"
@@ -975,13 +1014,14 @@ mod tests {
     fn peer_3d_to_local_2d_out_of_bounds_emits_label() {
         // Peer cursor ray intersects Z-plane outside volume → no GPU crosshair, but label emitted
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.view.set_z(50);
+        scene.active_view_mut().axes.set_z(50);
 
         // Camera looking far off to the side so ray hits Z-plane outside volume bounds
         let mut cam = Arcball::new([800, 600]);
         cam.theta = 2.5; // rotated far to the side
         let peers = vec![peer_with_camera(2, Some([0.1, 0.1]), Camera::Arcball(cam))];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
 
         // Should have a label even if no GPU crosshair
         if !result.labels.is_empty() {
@@ -998,14 +1038,15 @@ mod tests {
     fn peer_3d_to_local_2d_in_bounds_emits_both() {
         // In-bounds case: both GPU crosshair and label should be emitted (no regression)
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.view.set_z(50);
+        scene.active_view_mut().axes.set_z(50);
 
         let peers = vec![peer_with_camera(
             2,
             Some([0.5, 0.5]),
             Camera::Arcball(Arcball::new([800, 600])),
         )];
-        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        let result =
+            compute_peer_cursors(&scene, scene.active_view().id(), &peers, 1, 800.0, 600.0);
         assert_eq!(
             result.gpu.len(),
             1,
@@ -1020,7 +1061,7 @@ mod tests {
         let scene = scene_2d([800, 600]);
         let mut p = peer(2, Some([100.0, 200.0]), "slice");
         p.label_only = true;
-        let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         assert!(
             result.gpu.is_empty(),
             "label_only should produce no GPU data"
@@ -1043,7 +1084,7 @@ mod tests {
             Camera::Arcball(Arcball::new([800, 600])),
         );
         p.label_only = true;
-        let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1, "3D→3D should always produce ray");
         assert_eq!(result.gpu[0][3], 1.0, "should be a ray cursor (type=1)");
         assert_eq!(result.labels.len(), 1, "should still produce label");

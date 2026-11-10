@@ -135,10 +135,11 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
 
   return {
     epochs: () => JSON.stringify(config.epochs),
-    view_query: (_dsId: string) => JSON.stringify(config.viewQuery),
-    view_query_delta: (_dsId: string) => JSON.stringify({ Full: config.viewQuery }),
+    active_view: () => 0,
+    view_query: (_view: number, _dsId: string) => JSON.stringify(config.viewQuery),
+    view_query_delta: (_view: number, _dsId: string) => JSON.stringify({ Full: config.viewQuery }),
     member_positions: (_dsId: string) => JSON.stringify(config.memberPositions),
-    visible_region: (_dsId: string) => JSON.stringify(config.visibleRegion),
+    visible_region: (_view: number, _dsId: string) => JSON.stringify(config.visibleRegion),
     slice_plane: () => "xy",
     cut_index: () => 0,
     t: () => config.t,

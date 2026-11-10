@@ -1013,7 +1013,7 @@ mod tests {
     use lucida_core::camera::{Camera, Slice};
     use lucida_core::protocol::PresenceState;
     use lucida_core::scene::DisplayState;
-    use lucida_core::view::ViewState;
+    use lucida_core::view::AxisPositions;
 
     use super::*;
 
@@ -1027,7 +1027,7 @@ mod tests {
                 framing: lucida_core::camera::Framing::Placed,
                 plane: lucida_core::slice_plane::SlicePlane::Xy,
             })),
-            view: Some(ViewState::new()),
+            view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
             following: None,
             cursor: None,

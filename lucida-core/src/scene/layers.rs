@@ -12,7 +12,7 @@ use super::{BlendMode, Colormap, DatasetDisplaySettings, RenderMode, Scene};
 use crate::placement::Affine;
 use crate::saved_view::SavedView;
 use crate::slice_plane::SlicePlane;
-use crate::view::{LegacyChannels, ViewState};
+use crate::view::{AxisPositions, LegacyChannels, ViewId};
 use lucida_content::SpatialAxis;
 
 /// One channel a layer shows.
@@ -29,7 +29,7 @@ pub struct ShownChannel {
     pub blend_mode: BlendMode,
 }
 
-/// What one layer shows.
+/// What one layer shows in one view.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedLayer {
     pub dataset_id: DatasetId,
@@ -41,19 +41,19 @@ pub struct ResolvedLayer {
     pub solo: Option<u32>,
     /// Ascending by channel, never empty.
     pub channels: Vec<ShownChannel>,
-    /// The scene's z slab, clamped into this layer's depth.
+    /// The view's z slab, clamped into this layer's depth.
     pub z_range: Range<u32>,
-    /// The scene's timepoint, clamped into this layer's timepoints.
+    /// The view's timepoint, clamped into this layer's timepoints.
     pub t: u32,
     /// The plane of this layer an XZ view cuts along Y, and the one a YZ
-    /// view cuts along X: the scene's axis position, a place in the scene
+    /// view cuts along X: the view's axis position, a place in the scene
     /// frame, in the layer's own samples.
     pub y: u32,
     pub x: u32,
-    /// Whether the scene's z slab reaches past this layer, so it shows its
+    /// Whether the view's z slab reaches past this layer, so it shows its
     /// nearest plane instead.
     pub z_clamped: bool,
-    /// Whether the scene's timepoint is past this layer's last.
+    /// Whether the view's timepoint is past this layer's last.
     pub t_clamped: bool,
 }
 
@@ -139,7 +139,7 @@ impl LayerExtent {
     }
 
     /// The planes a slice view of `plane` cuts here under `view`.
-    fn clamp_cut(&self, view: &ViewState, plane: SlicePlane, to_scene: &Affine) -> Range<u32> {
+    fn clamp_cut(&self, view: &AxisPositions, plane: SlicePlane, to_scene: &Affine) -> Range<u32> {
         let single = |index: u32| index..index + 1;
         match plane.cut() {
             SpatialAxis::Z => self.clamp_z(&view.z_range),
@@ -154,7 +154,7 @@ fn resolve(
     dataset_id: &DatasetId,
     manifest: &DatasetManifest,
     settings: &DatasetDisplaySettings,
-    view: &ViewState,
+    view: &AxisPositions,
     to_scene: &Affine,
 ) -> ResolvedLayer {
     let extent = LayerExtent::of(manifest);
@@ -200,15 +200,18 @@ fn resolve(
 }
 
 impl Scene {
-    /// Every layer in panel order, then any dataset the order does not list.
-    pub fn resolved_layers(&self) -> Vec<ResolvedLayer> {
+    /// Every layer as `view` shows it, in panel order, then any dataset the
+    /// order does not list. Empty for an unknown view.
+    pub fn resolved_layers(&self, view: ViewId) -> Vec<ResolvedLayer> {
         self.layer_ids()
-            .filter_map(|id| self.resolved_layer(id))
+            .filter_map(|id| self.resolved_layer(view, id))
             .collect()
     }
 
-    /// What `dataset_id` shows, or `None` for a dataset the document lacks.
-    pub fn resolved_layer(&self, dataset_id: &DatasetId) -> Option<ResolvedLayer> {
+    /// What `dataset_id` shows in `view`, or `None` for a dataset the
+    /// document lacks or an unknown view.
+    pub fn resolved_layer(&self, view: ViewId, dataset_id: &DatasetId) -> Option<ResolvedLayer> {
+        let axes = &self.view(view)?.axes;
         let manifest = self.document.manifests.get(dataset_id)?;
         let seeded;
         let settings = match self.dataset_settings.get(dataset_id) {
@@ -219,9 +222,7 @@ impl Scene {
             }
         };
         let to_scene = self.placement(dataset_id).unwrap_or(Affine::IDENTITY);
-        Some(resolve(
-            dataset_id, manifest, settings, &self.view, &to_scene,
-        ))
+        Some(resolve(dataset_id, manifest, settings, axes, &to_scene))
     }
 
     /// What this scene's layers would show under `view`, as restoring it here
@@ -264,26 +265,32 @@ impl Scene {
         self.dataset_order.iter().chain(unlisted)
     }
 
-    /// The scene's z slab clamped into `dataset_id`, or the slab itself for a
-    /// dataset the document lacks.
-    pub fn layer_z_range(&self, dataset_id: &DatasetId) -> Range<u32> {
+    /// The z slab of `axes` clamped into `dataset_id`, or the slab itself
+    /// for a dataset the document lacks.
+    pub(crate) fn layer_z_range(&self, axes: &AxisPositions, dataset_id: &DatasetId) -> Range<u32> {
         match self.document.manifests.get(dataset_id) {
-            Some(manifest) => LayerExtent::of(manifest).clamp_z(&self.view.z_range),
-            None => self.view.z_range.clone(),
+            Some(manifest) => LayerExtent::of(manifest).clamp_z(&axes.z_range),
+            None => axes.z_range.clone(),
         }
     }
 
-    /// The planes a slice view of `plane` cuts in `dataset_id`, clamped into
-    /// it, or the scene's own for a dataset the document lacks.
-    pub fn layer_cut(&self, dataset_id: &DatasetId, plane: SlicePlane) -> Range<u32> {
+    /// The planes a slice view of `plane` standing at `axes` cuts in
+    /// `dataset_id`, clamped into it, or its own for a dataset the document
+    /// lacks.
+    pub(crate) fn layer_cut(
+        &self,
+        axes: &AxisPositions,
+        dataset_id: &DatasetId,
+        plane: SlicePlane,
+    ) -> Range<u32> {
         match (
             self.document.manifests.get(dataset_id),
             self.placement(dataset_id),
         ) {
             (Some(manifest), Some(to_scene)) => {
-                LayerExtent::of(manifest).clamp_cut(&self.view, plane, &to_scene)
+                LayerExtent::of(manifest).clamp_cut(axes, plane, &to_scene)
             }
-            _ => self.view.cut(plane),
+            _ => axes.cut(plane),
         }
     }
 
@@ -335,7 +342,7 @@ mod tests {
 
     fn shown(scene: &Scene, id: &str) -> Vec<u32> {
         scene
-            .resolved_layer(&DatasetId(id.to_string()))
+            .resolved_layer(scene.active_view().id(), &DatasetId(id.to_string()))
             .unwrap()
             .channel_indices()
     }
@@ -343,7 +350,9 @@ mod tests {
     #[test]
     fn a_multichannel_layer_opens_as_its_composite() {
         let scene = scene_with(&[("a", 3)]);
-        let layer = scene.resolved_layer(&DatasetId("a".into())).unwrap();
+        let layer = scene
+            .resolved_layer(scene.active_view().id(), &DatasetId("a".into()))
+            .unwrap();
         assert_eq!(layer.channel_indices(), vec![0, 1, 2]);
         assert_eq!(layer.solo, None);
         let colormaps: Vec<Colormap> = layer.channels.iter().map(|c| c.colormap).collect();
@@ -362,7 +371,9 @@ mod tests {
     #[test]
     fn a_one_channel_layer_opens_gray() {
         let mut scene = scene_with(&[("a", 1)]);
-        let layer = scene.resolved_layer(&DatasetId("a".into())).unwrap();
+        let layer = scene
+            .resolved_layer(scene.active_view().id(), &DatasetId("a".into()))
+            .unwrap();
         assert_eq!(layer.channels[0].colormap, Colormap::Gray);
 
         // A channel entry made by a command, not by the open, is gray too.
@@ -380,7 +391,9 @@ mod tests {
             }
             .into(),
         );
-        let layer = scene.resolved_layer(&DatasetId("a".into())).unwrap();
+        let layer = scene
+            .resolved_layer(scene.active_view().id(), &DatasetId("a".into()))
+            .unwrap();
         assert_eq!(layer.channels[0].colormap, Colormap::Gray);
     }
 
@@ -392,7 +405,12 @@ mod tests {
         assert_eq!(shown(&scene, "b"), vec![0, 1]);
         // A layer with fewer channels than the solo stays visible.
         assert_eq!(shown(&scene, "c"), vec![0]);
-        assert!(scene.resolved_layers().iter().all(|l| l.visible));
+        assert!(
+            scene
+                .resolved_layers(scene.active_view().id())
+                .iter()
+                .all(|l| l.visible)
+        );
 
         solo(&mut scene, "a", None);
         assert_eq!(shown(&scene, "a"), vec![0, 1, 2]);
@@ -427,7 +445,9 @@ mod tests {
     fn a_soloed_layer_draws_through_its_layer_blend() {
         let mut scene = scene_with(&[("a", 3)]);
         solo(&mut scene, "a", Some(0));
-        let layer = scene.resolved_layer(&DatasetId("a".into())).unwrap();
+        let layer = scene
+            .resolved_layer(scene.active_view().id(), &DatasetId("a".into()))
+            .unwrap();
         assert_eq!(layer.channels[0].blend_mode, BlendMode::Alpha);
     }
 
@@ -449,15 +469,21 @@ mod tests {
         }
         scene.apply(ViewportCommand::SetZ { z: 30 }.into());
         scene.apply(ViewportCommand::SetT { t: 3 }.into());
-        let deep = scene.resolved_layer(&DatasetId("deep".into())).unwrap();
+        let deep = scene
+            .resolved_layer(scene.active_view().id(), &DatasetId("deep".into()))
+            .unwrap();
         assert_eq!((deep.z_range.clone(), deep.t), (30..31, 3));
         assert!(!deep.z_clamped && !deep.t_clamped);
-        let flat = scene.resolved_layer(&DatasetId("flat".into())).unwrap();
+        let flat = scene
+            .resolved_layer(scene.active_view().id(), &DatasetId("flat".into()))
+            .unwrap();
         assert_eq!((flat.z_range.clone(), flat.t), (0..1, 0));
         assert!(flat.z_clamped && flat.t_clamped);
 
         // The plan asks for the clamped plane, not for nothing.
-        let plans = scene.chunk_plan_for(&DatasetId("flat".into())).unwrap();
+        let plans = scene
+            .chunk_plan_for(scene.active_view().id(), &DatasetId("flat".into()))
+            .unwrap();
         assert!(plans.iter().any(|p| !p.needed.is_empty()));
         assert!(
             plans
@@ -472,7 +498,7 @@ mod tests {
         let mut scene = scene_with(&[("a", 3)]);
         let channels = |scene: &Scene| {
             let mut cs: Vec<u32> = scene
-                .chunk_plan_for(&DatasetId("a".into()))
+                .chunk_plan_for(scene.active_view().id(), &DatasetId("a".into()))
                 .unwrap()
                 .iter()
                 .flat_map(|p| p.needed.iter().map(|c| c.c))
@@ -499,13 +525,16 @@ mod tests {
         );
         solo(&mut scene, "b", Some(1));
         let mut view = SavedView::empty([800, 600]);
-        view.view = scene.view.clone();
+        view.view = scene.active_view().axes.clone();
         view.dataset_order = scene.dataset_order.clone();
         for id in &scene.dataset_order {
             view.dataset_settings
                 .insert(id.clone(), scene.dataset_settings[id].clone());
         }
-        assert_eq!(scene.resolved_view_layers(&view), scene.resolved_layers());
+        assert_eq!(
+            scene.resolved_view_layers(&view),
+            scene.resolved_layers(scene.active_view().id())
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::placement::{
 };
 use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
-use crate::view::ViewState;
+use crate::view::{AxisPositions, ViewId};
 
 use super::{LayerExtent, MemberState, Scene};
 
@@ -82,36 +82,42 @@ impl Scene {
         }
     }
 
-    /// Carry `view`'s side-view axis positions, recorded in `from`, into this
-    /// scene's spaces, so they cut the planes they cut there.
-    pub fn carry_view(&self, view: &mut ViewState, from: &CameraSpace) {
+    /// Carry side-view axis positions, recorded in `from`, into this scene's
+    /// spaces, so they cut the planes they cut there.
+    pub fn carry_axes(&self, axes: &mut AxisPositions, from: &CameraSpace) {
         if let Some(map) = self.map_from(from) {
-            view.map_cut_positions(&map.scene);
+            axes.map_cut_positions(&map.scene);
         }
     }
 
-    /// Carry this scene's placed cameras, the active one and the parked one,
-    /// from `from`, its spaces before its datasets changed, into its spaces
-    /// now. Says whether the active camera moved. A framed camera is the
-    /// scene's own fit, which it fits again, and an unframed one is a
+    /// Carry every view's placed cameras, the active one and the parked one,
+    /// from `from`, the scene's spaces before its datasets changed, into its
+    /// spaces now. Says whether an active camera moved. A framed camera is
+    /// the scene's own fit, which it fits again, and an unframed one is a
     /// stand-in, so neither is carried.
     pub(crate) fn carry_placed_cameras(&mut self, from: &CameraSpace) -> bool {
         let Some(map) = self.map_from(from) else {
             return false;
         };
-        let before = self.camera.clone();
-        for camera in std::iter::once(&mut self.camera).chain(self.parked_camera.as_mut()) {
-            if camera.framing().is_placed() {
-                camera.change_space(&map);
+        let mut moved = false;
+        let mut axes_moved = false;
+        for view in &mut self.views {
+            let before = view.camera.clone();
+            for camera in view.cameras_mut() {
+                if camera.framing().is_placed() {
+                    camera.change_space(&map);
+                }
             }
+            moved |= view.camera != before;
+            // A side view's axis positions are places in the scene frame too.
+            let axes_before = view.axes.clone();
+            view.axes.map_cut_positions(&map.scene);
+            axes_moved |= view.axes != axes_before;
         }
-        // A side view's axis positions are places in the scene frame too.
-        let view_before = self.view.clone();
-        self.view.map_cut_positions(&map.scene);
-        if self.view != view_before {
+        if axes_moved {
             self.epochs.selection += 1;
         }
-        self.camera != before
+        moved
     }
 
     /// The map from `dataset_id`'s frame into world space, where the volume
@@ -145,11 +151,11 @@ impl Scene {
         }
     }
 
-    /// The visible datasets' extent along `axis` in the scene frame, as
-    /// `(min, max)`, or `None` with nothing visible.
-    fn visible_scene_extent(&self, axis: SpatialAxis) -> Option<(f64, f64)> {
+    /// The extent along `axis` in the scene frame of the datasets `view`
+    /// shows, as `(min, max)`, or `None` with nothing shown.
+    fn shown_scene_extent(&self, view: ViewId, axis: SpatialAxis) -> Option<(f64, f64)> {
         let a = axis.xyz();
-        self.visible_dataset_ids()
+        self.shown_dataset_ids(view)
             .filter_map(|id| Some((self.placement(id)?, self.derived.get(id)?)))
             .flat_map(|(to_scene, derived)| {
                 derived.members.iter().filter_map(move |member| {
@@ -161,29 +167,29 @@ impl Scene {
             .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
     }
 
-    /// How many axis positions a view cutting `axis` steps through, at least
-    /// one. Z counts the planes of the deepest visible layer, since each
+    /// How many axis positions `view` steps through cutting `axis`, at least
+    /// one. Z counts the planes of the deepest layer it shows, since each
     /// layer steps through its own. A side view's position is a place in the
     /// scene frame, so datasets over one region cut the same plane, and it
-    /// counts the frame's whole units up to the far edge of what is visible.
-    pub fn cut_extent(&self, axis: SpatialAxis) -> u32 {
+    /// counts the frame's whole units up to the far edge of what it shows.
+    pub fn cut_extent(&self, view: ViewId, axis: SpatialAxis) -> u32 {
         if axis.is_z() {
             return self
-                .visible_dataset_ids()
+                .shown_dataset_ids(view)
                 .filter_map(|id| self.document.manifests.get(id))
                 .map(|manifest| LayerExtent::of(manifest).z)
                 .max()
                 .unwrap_or(1);
         }
         // An edge a rounding error puts just past a whole unit stays on it.
-        self.visible_scene_extent(axis).map_or(1, |(_, max)| {
+        self.shown_scene_extent(view, axis).map_or(1, |(_, max)| {
             (max - max.abs() * 1e-12).ceil().clamp(1.0, u32::MAX as f64) as u32
         })
     }
 
-    /// The axis position in the middle of what is visible along `axis`.
-    pub(crate) fn cut_middle(&self, axis: SpatialAxis) -> u32 {
-        self.visible_scene_extent(axis).map_or(0, |(min, max)| {
+    /// The axis position in the middle of what `view` shows along `axis`.
+    pub(crate) fn cut_middle(&self, view: ViewId, axis: SpatialAxis) -> u32 {
+        self.shown_scene_extent(view, axis).map_or(0, |(min, max)| {
             ((min + max) / 2.0).floor().clamp(0.0, u32::MAX as f64) as u32
         })
     }
@@ -197,22 +203,24 @@ impl Scene {
             .is_some_and(|d| d.frame.has_physical_scale())
     }
 
-    /// What of `dataset_id` the camera shows, in the dataset's own frame:
-    /// the samples planning enumerates. A slice view re-expresses its region
-    /// of the scene frame there. A volume view culls against the box of the
-    /// dataset's first member set at the frame's origin, so a member's
+    /// What of `dataset_id` `view`'s camera shows, in the dataset's own
+    /// frame: the samples planning enumerates. A slice view re-expresses its
+    /// region of the scene frame there. A volume view culls against the box
+    /// of the dataset's first member set at the frame's origin, so a member's
     /// frustum test is a shift by its layout position. `None` for a dataset
-    /// with no image.
-    pub fn visible_region(&self, dataset_id: &DatasetId) -> Option<VisibleRegion> {
+    /// with no image, or an unknown view.
+    pub fn visible_region(&self, view: ViewId, dataset_id: &DatasetId) -> Option<VisibleRegion> {
+        let view = self.view(view)?;
         let member = self.derived.get(dataset_id)?.members.first()?;
         let level0 = member.levels.first()?;
         let placed = self.placed(dataset_id)?;
-        // A layer shallower than the scene's slab plans its nearest plane.
-        let z_range = self.layer_z_range(dataset_id);
-        Some(match &self.camera {
-            Camera::Slice(slice) => {
-                slice.visible_region(&placed.to_scene, &self.layer_cut(dataset_id, slice.plane))
-            }
+        // A layer shallower than the view's slab plans its nearest plane.
+        let z_range = self.layer_z_range(&view.axes, dataset_id);
+        Some(match &view.camera {
+            Camera::Slice(slice) => slice.visible_region(
+                &placed.to_scene,
+                &self.layer_cut(&view.axes, dataset_id, slice.plane),
+            ),
             Camera::Arcball(_) | Camera::Fly(_) => {
                 let cube = member_cube_to_frame([0.0, 0.0], level0.shape)
                     .then(&placed.to_world)
@@ -222,7 +230,7 @@ impl Scene {
                     level0.shape[3] as u32,
                     level0.shape[4] as u32,
                 ];
-                self.camera
+                view.camera
                     .visible_region(&z_range, Some(&cube), Some(&shape))
             }
         })
@@ -358,7 +366,8 @@ mod tests {
     #[test]
     fn datasets_over_one_physical_region_overlay_in_both_spaces() {
         let scene = two_over_one_region();
-        let [coarse, fine] = ["coarse", "fine"].map(|id| scene.dataset_bounds(id).unwrap());
+        let [coarse, fine] = ["coarse", "fine"]
+            .map(|id| scene.dataset_bounds(scene.active_view().id(), id).unwrap());
         assert!(close(coarse.plane.min, fine.plane.min));
         // Z counts each dataset's own planes, so only X and Y match.
         assert!(close(
@@ -381,19 +390,26 @@ mod tests {
             .into(),
         );
         // The middle of the region along Y, in the coarse dataset's samples.
-        assert_eq!(scene.view.y, Some(32));
+        assert_eq!(scene.active_view().axes.y, Some(32));
         let plane = crate::slice_plane::SlicePlane::Xz;
-        let [coarse, fine] =
-            ["coarse", "fine"].map(|id| scene.layer_cut(&DatasetId::from(id), plane));
+        let [coarse, fine] = ["coarse", "fine"]
+            .map(|id| scene.layer_cut(&scene.active_view().axes, &DatasetId::from(id), plane));
         // Coarse sample 32 spans 64 to 66 micrometers, which fine samples
         // 128 to 131 cover; the fine plane is one of them.
         assert_eq!(coarse, 32..33);
         assert!((128..132).contains(&fine.start), "{fine:?}");
         // Both draw over the same X and Z of the scene frame.
-        let [a, b] = ["coarse", "fine"].map(|id| scene.dataset_plane_bounds(id).unwrap());
+        let [a, b] = ["coarse", "fine"].map(|id| {
+            scene
+                .dataset_plane_bounds(scene.active_view().id(), id)
+                .unwrap()
+        });
         assert!(close([a.min[0], a.min[1], 0.0], [b.min[0], b.min[1], 0.0]));
         assert!(close([a.max[0], a.max[1], 0.0], [b.max[0], b.max[1], 0.0]));
-        assert_eq!(scene.cut_extent(lucida_content::SpatialAxis::Y), 64);
+        assert_eq!(
+            scene.cut_extent(scene.active_view().id(), lucida_content::SpatialAxis::Y),
+            64
+        );
     }
 
     #[test]
@@ -415,8 +431,12 @@ mod tests {
             [0.0, 10.0, 32.0],
             Some("micrometer"),
         );
-        let a = scene.dataset_plane_bounds("a").unwrap();
-        let b = scene.dataset_plane_bounds("b").unwrap();
+        let a = scene
+            .dataset_plane_bounds(scene.active_view().id(), "a")
+            .unwrap();
+        let b = scene
+            .dataset_plane_bounds(scene.active_view().id(), "b")
+            .unwrap();
         assert!(close(b.min, [a.min[0] + 32.0, a.min[1] + 10.0, 0.0]));
 
         // In world space Y points up, so a dataset further down sits lower.
@@ -440,8 +460,11 @@ mod tests {
         let mut bare = Scene::new([800, 600]);
         open(&mut bare, "a", [8, 64, 96], [2.0, 1.0, 1.0], [0.0; 3], None);
         let id = DatasetId::from("a");
-        assert_eq!(moved.dataset_bounds("a"), bare.dataset_bounds("a"));
-        assert_eq!(moved.camera, bare.camera);
+        assert_eq!(
+            moved.dataset_bounds(moved.active_view().id(), "a"),
+            bare.dataset_bounds(bare.active_view().id(), "a")
+        );
+        assert_eq!(moved.active_view().camera, bare.active_view().camera);
         assert_ne!(moved.placement(&id), None);
     }
 
@@ -449,8 +472,12 @@ mod tests {
     fn a_slice_region_reads_in_each_datasets_own_samples() {
         let mut scene = two_over_one_region();
         assert!(scene.frame(&FrameTarget::Visible, [800, 600]));
-        let coarse = scene.visible_region(&DatasetId::from("coarse")).unwrap();
-        let fine = scene.visible_region(&DatasetId::from("fine")).unwrap();
+        let coarse = scene
+            .visible_region(scene.active_view().id(), &DatasetId::from("coarse"))
+            .unwrap();
+        let fine = scene
+            .visible_region(scene.active_view().id(), &DatasetId::from("fine"))
+            .unwrap();
         // A fine sample is a quarter of a coarse one, so the same view spans
         // four times the samples at a quarter of the pixels each.
         for i in 0..4 {
@@ -474,7 +501,9 @@ mod tests {
         assert!(scene.has_physical_scale(&DatasetId::from("a")));
         assert!(!scene.has_physical_scale(&DatasetId::from("b")));
         // Its declared numbers compare with the reference's as they stand.
-        let b = scene.dataset_plane_bounds("b").unwrap();
+        let b = scene
+            .dataset_plane_bounds(scene.active_view().id(), "b")
+            .unwrap();
         assert!(close([b.max[0], b.max[1], 0.0], [128.0, 128.0, 0.0]));
     }
 
@@ -483,7 +512,10 @@ mod tests {
         let fit = || {
             let mut scene = two_over_one_region();
             scene.set_mode_3d();
-            (scene.camera.clone(), scene.volume_diagonal().to_bits())
+            (
+                scene.active_view().camera.clone(),
+                scene.volume_diagonal(scene.active_view().id()).to_bits(),
+            )
         };
         let first = fit();
         // Each scene's maps hash with their own random state, so twenty loads
@@ -530,7 +562,7 @@ mod tests {
     /// region of it exactly when these match.
     fn on_screen(scene: &Scene, id: &str) -> Vec<[f64; 2]> {
         let id = DatasetId::from(id);
-        let to_view = if scene.camera.is_volume() {
+        let to_view = if scene.active_view().camera.is_volume() {
             scene.frame_to_world(&id)
         } else {
             scene.placement(&id)
@@ -544,7 +576,13 @@ mod tests {
         ];
         samples
             .iter()
-            .map(|p| scene.camera.project_to_screen(to_view.apply(*p)).unwrap())
+            .map(|p| {
+                scene
+                    .active_view()
+                    .camera
+                    .project_to_screen(to_view.apply(*p))
+                    .unwrap()
+            })
             .collect()
     }
 
@@ -561,7 +599,7 @@ mod tests {
     fn place_slice_on_b(scene: &mut Scene) {
         let region = PlaneBox::new([100.0, 60.0, 0.0], [180.0, 140.0, 1.0]);
         assert!(scene.frame_region(&DatasetId::from("b"), region));
-        assert!(scene.camera.framing().is_placed());
+        assert!(scene.active_view().camera.framing().is_placed());
     }
 
     /// Turn, zoom and pan the arcball, which leaves it placed.
@@ -580,7 +618,7 @@ mod tests {
         ] {
             scene.apply(command.into());
         }
-        assert!(scene.camera.framing().is_placed());
+        assert!(scene.active_view().camera.framing().is_placed());
     }
 
     #[test]
@@ -591,10 +629,12 @@ mod tests {
         let epoch = scene.epochs.view;
         remove(&mut scene, "a");
         assert_same_region(on_screen(&scene, "b"), before);
-        assert!(scene.camera.framing().is_placed());
+        assert!(scene.active_view().camera.framing().is_placed());
         assert!(scene.epochs.view > epoch);
         // B now fixes the scene frame: its samples are its units.
-        let b = scene.dataset_plane_bounds("b").unwrap();
+        let b = scene
+            .dataset_plane_bounds(scene.active_view().id(), "b")
+            .unwrap();
         assert!(close(b.max, [256.0, 256.0, 32.0]));
     }
 
@@ -621,7 +661,7 @@ mod tests {
             let before = on_screen(&scene, "b");
             remove(&mut scene, "a");
             assert_same_region(on_screen(&scene, "b"), before);
-            assert!(scene.camera.framing().is_placed());
+            assert!(scene.active_view().camera.framing().is_placed());
         }
     }
 
@@ -663,8 +703,8 @@ mod tests {
             let mut alone = Scene::new([800, 600]);
             open_b(&mut alone);
             fit(&mut alone);
-            assert_eq!(scene.camera, alone.camera);
-            assert_eq!(scene.camera.framing(), Framing::Framed);
+            assert_eq!(scene.active_view().camera, alone.active_view().camera);
+            assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
         }
     }
 
@@ -696,7 +736,7 @@ mod tests {
             }
             .into(),
         );
-        assert!(scene.camera.framing().is_placed());
+        assert!(scene.active_view().camera.framing().is_placed());
         let b = DatasetId::from("b");
         // B's samples where an XZ view draws them: X across, Z down.
         let side = |scene: &Scene| -> Vec<[f64; 2]> {
@@ -705,19 +745,29 @@ mod tests {
                 .iter()
                 .map(|p| {
                     let at = to_scene.apply(*p);
-                    scene.camera.project_to_screen([at[0], at[2], 0.0]).unwrap()
+                    scene
+                        .active_view()
+                        .camera
+                        .project_to_screen([at[0], at[2], 0.0])
+                        .unwrap()
                 })
                 .collect()
         };
-        let (cut, before) = (scene.layer_cut(&b, SlicePlane::Xz), side(&scene));
+        let (cut, before) = (
+            scene.layer_cut(&scene.active_view().axes, &b, SlicePlane::Xz),
+            side(&scene),
+        );
 
         // A's going makes B the scene frame's reference.
         let mut document = scene.document.clone();
         document.remove_dataset(&DatasetId::from("a"));
         scene.load_document(document);
-        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
+        assert_eq!(scene.active_view().slice_plane(), SlicePlane::Xz);
         assert_same_region(side(&scene), before);
-        assert_eq!(scene.layer_cut(&b, SlicePlane::Xz), cut);
+        assert_eq!(
+            scene.layer_cut(&scene.active_view().axes, &b, SlicePlane::Xz),
+            cut
+        );
     }
 
     #[test]
@@ -731,7 +781,7 @@ mod tests {
             }
             let before = on_screen(&saved_from, "b");
             let view = SavedView {
-                camera: saved_from.camera.clone(),
+                camera: saved_from.active_view().camera.clone(),
                 camera_space: saved_from.camera_space(),
                 ..SavedView::empty([800, 600])
             };

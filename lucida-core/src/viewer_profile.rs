@@ -32,11 +32,12 @@ impl ProfileScene {
     /// the document no longer holds are dropped.
     pub fn open(document: &DocumentState, view: &SavedView) -> Self {
         let mut scene = Scene::new(view.camera.viewport());
-        scene.camera = view.camera.clone();
+        let active = scene.active_view_mut();
+        active.camera = view.camera.clone();
         // A stored camera must not hand the scene a state its own mutators
         // could never produce.
-        scene.camera.sanitize();
-        scene.view = view.view.clone();
+        active.camera.sanitize();
+        active.axes = view.view.clone();
         scene.display = view.display.clone();
         scene.dataset_order = view.dataset_order.clone();
         scene.dataset_settings = view.dataset_settings.clone().into_iter().collect();
@@ -116,8 +117,8 @@ impl ProfileScene {
             v: SAVED_VIEW_VERSION,
             datasets: Vec::new(),
             active_layouts: active_layouts(&scene.document),
-            camera: scene.camera.clone(),
-            view: scene.view.clone(),
+            camera: scene.active_view().camera.clone(),
+            view: scene.active_view().axes.clone(),
             display: scene.display.clone(),
             dataset_order: scene.dataset_order.clone(),
             // In layer order, so the same view always serializes the same.
@@ -159,9 +160,10 @@ impl ProfileScene {
                 | ViewportCommand::SetCenter { .. }
                 | ViewportCommand::SetZoom { .. }
         );
-        if moves_slice_camera && !matches!(scene.camera, Camera::Slice(_)) {
+        let camera = &scene.active_view().camera;
+        if moves_slice_camera && !matches!(camera, Camera::Slice(_)) {
             return Err(E::NeedsSliceCamera {
-                mode: camera_mode_name(&scene.camera),
+                mode: camera_mode_name(camera),
             });
         }
         if !command.inputs_finite() {
@@ -454,8 +456,9 @@ impl fmt::Display for FrameError {
 impl std::error::Error for FrameError {}
 
 impl Scene {
-    /// Frame every visible image in a 2D camera on a `viewport` canvas, at the
-    /// middle Z plane: the fit any client makes ([`Scene::frame`]).
+    /// Frame every visible image in the active view's 2D camera on a
+    /// `viewport` canvas, at the middle Z plane: the fit any client makes
+    /// ([`Scene::frame`]).
     pub fn frame_visible_2d(&mut self, viewport: [u32; 2]) -> Result<(), FrameError> {
         if viewport[0] == 0 || viewport[1] == 0 {
             return Err(FrameError::EmptyViewport);
@@ -465,7 +468,7 @@ impl Scene {
             return Err(FrameError::NothingVisible);
         }
         let depth = self
-            .visible_bounds()
+            .visible_bounds(self.active_view().id())
             .map_or(0, |bounds| bounds.plane.max[2] as u32);
         self.apply(Command::Viewport(ViewportCommand::SetZ {
             z: depth.saturating_sub(1) / 2,
@@ -595,14 +598,17 @@ mod tests {
     #[test]
     fn a_fitted_view_frames_the_visible_datasets_at_the_fitted_canvas() {
         let profile = opened();
-        let Camera::Slice(slice) = &profile.scene.camera else {
-            panic!("expected a slice camera, got {:?}", profile.scene.camera);
+        let Camera::Slice(slice) = &profile.scene.active_view().camera else {
+            panic!(
+                "expected a slice camera, got {:?}",
+                profile.scene.active_view().camera
+            );
         };
         assert_eq!(slice.viewport, FITTED_VIEWPORT);
         assert_eq!(slice.center, [128.0, 256.0]);
         let limiting = FITTED_VIEWPORT[1] as f64 / 512.0;
         assert!((slice.zoom - limiting / crate::framing::FIT_MARGIN_2D).abs() < 1e-12);
-        assert_eq!(profile.scene.view.z_range, 19..20);
+        assert_eq!(profile.scene.active_view().axes.z_range, 19..20);
     }
 
     #[test]
@@ -669,7 +675,12 @@ mod tests {
         assert!(view.camera_space.is_some());
 
         let fine = DatasetId("wds-fine".into());
-        let region = |p: &ProfileScene| p.scene.visible_region(&fine).unwrap().xy_bounds;
+        let region = |p: &ProfileScene| {
+            p.scene
+                .visible_region(p.scene.active_view().id(), &fine)
+                .unwrap()
+                .xy_bounds
+        };
         let mut only_fine = both.clone();
         only_fine.remove_dataset(&DatasetId("wds-a".into()));
         let reopened = ProfileScene::open(&only_fine, &view);
@@ -702,7 +713,7 @@ mod tests {
         profile
             .apply(ViewportCommand::Pan { dx: 1e300, dy: 0.0 })
             .unwrap();
-        let Camera::Slice(slice) = &profile.scene.camera else {
+        let Camera::Slice(slice) = &profile.scene.active_view().camera else {
             panic!("expected a slice camera");
         };
         assert!(slice.center[0].is_finite());
@@ -717,7 +728,10 @@ mod tests {
                 d_phi: 0.0,
             })
             .unwrap();
-        assert!(matches!(profile.scene.camera, Camera::Arcball(_)));
+        assert!(matches!(
+            profile.scene.active_view().camera,
+            Camera::Arcball(_)
+        ));
     }
 
     #[test]

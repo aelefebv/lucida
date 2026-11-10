@@ -25,7 +25,7 @@ use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::slice_plane::SlicePlane;
 use crate::target_level::{self, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios};
 use crate::transform::VolumeTransform;
-use crate::view::ViewState;
+use crate::view::{AxisPositions, View, ViewDatasets, ViewId};
 use lucida_content::SpatialAxis;
 pub use placement::member_transform;
 use placement::{Placed, slice_box};
@@ -89,13 +89,8 @@ pub enum FrameTarget {
 /// The complete viewer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
-    pub camera: Camera,
-    /// The last camera of the family not in use: the slice camera while a
-    /// volume camera is active, and the other way round. Switching back
-    /// brings it back, so each mode keeps the view it had. Client-local.
-    #[serde(skip)]
-    pub(crate) parked_camera: Option<Camera>,
-    pub view: ViewState,
+    /// Never empty. Client-local, like the cameras they hold.
+    views: Vec<View>,
     /// Shared document state (dataset manifests).
     #[serde(flatten)]
     pub document: DocumentState,
@@ -112,11 +107,11 @@ pub struct Scene {
     /// Monotonic epoch counters for change detection.
     #[serde(default)]
     pub epochs: SceneEpochs,
-    /// Per-dataset snapshot of the last [`Scene::view_query_delta`], used to
-    /// diff successive queries. Client-local scratch, not part of shared or
-    /// serialized state.
+    /// Per view and dataset, a snapshot of the last
+    /// [`Scene::view_query_delta`], used to diff successive queries.
+    /// Client-local scratch, not part of shared or serialized state.
     #[serde(skip)]
-    pub(crate) view_query_cursors: HashMap<DatasetId, ViewQueryCursor>,
+    pub(crate) view_query_cursors: HashMap<(ViewId, DatasetId), ViewQueryCursor>,
     /// The device pixel ratio the canvas was last sized at, once the client
     /// has said. Client-local, like the canvas size.
     #[serde(skip)]
@@ -166,8 +161,8 @@ impl QuantizedEntity {
     }
 }
 
-/// Snapshot of the last query for one dataset. The delta compares against this
-/// to decide what changed, and whether a full resync is required.
+/// Snapshot of the last query for one view and dataset. The delta compares
+/// against this to decide what changed, and whether a full resync is required.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewQueryCursor {
     /// Structural epochs at snapshot time. A move in any of these means the
@@ -194,9 +189,7 @@ impl ViewQueryCursor {
 impl Scene {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
-            camera: Camera::new_2d(viewport),
-            parked_camera: None,
-            view: ViewState::new(),
+            views: vec![View::new(ViewId(0), viewport)],
             document: DocumentState::default(),
             display: DisplayState::default(),
             dataset_order: Vec::new(),
@@ -208,112 +201,104 @@ impl Scene {
         }
     }
 
-    /// World-space bounding-box diagonal of everything visible, in the
+    /// Every view of the scene.
+    pub fn views(&self) -> &[View] {
+        &self.views
+    }
+
+    /// The view `id` names, or `None` for one the scene doesn't hold.
+    pub fn view(&self, id: ViewId) -> Option<&View> {
+        self.views.iter().find(|view| view.id() == id)
+    }
+
+    fn view_mut(&mut self, id: ViewId) -> Option<&mut View> {
+        self.views.iter_mut().find(|view| view.id() == id)
+    }
+
+    /// The view commands steer, presence reports and a saved view records:
+    /// the first.
+    pub fn active_view(&self) -> &View {
+        &self.views[0]
+    }
+
+    /// [`Self::active_view`], to change directly. Leaves the epochs to the
+    /// caller.
+    pub fn active_view_mut(&mut self) -> &mut View {
+        &mut self.views[0]
+    }
+
+    /// World-space bounding-box diagonal of everything `view` shows, in the
     /// volume cameras' space. Consumers size world-space motion from it
     /// (fly-camera base speed). It reads the same union a framed camera
     /// fits, so it doesn't depend on which dataset a map yields first.
-    /// Returns `1.0` with nothing visible, so speed seeding always has a sane
+    /// Returns `1.0` with nothing shown, so speed seeding always has a sane
     /// basis.
-    pub fn volume_diagonal(&self) -> f64 {
-        let Some(bounds) = self.visible_bounds() else {
+    pub fn volume_diagonal(&self, view: ViewId) -> f64 {
+        let Some(bounds) = self.visible_bounds(view) else {
             return 1.0;
         };
         let d: [f64; 3] = std::array::from_fn(|i| bounds.world.max[i] - bounds.world.min[i]);
         (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
     }
 
-    /// The plane the slice camera cuts, whether it is active or parked. A
-    /// scene that never had one cuts XY.
-    pub fn slice_plane(&self) -> SlicePlane {
-        match (&self.camera, &self.parked_camera) {
-            (Camera::Slice(s), _) | (_, Some(Camera::Slice(s))) => s.plane,
-            _ => SlicePlane::Xy,
-        }
-    }
-
-    /// Cut `plane` with the active slice camera and fit it to the data again,
-    /// since its center and zoom are in the plane of the scene frame it cut.
-    /// The first view of an X or Y cut stands in the middle of what is
-    /// visible. A volume camera ignores it.
+    /// Cut `plane` with the active view's slice camera and fit it to the data
+    /// again, since its center and zoom are in the plane of the scene frame
+    /// it cut. The first view of an X or Y cut stands in the middle of what
+    /// is visible. A volume camera ignores it.
     pub fn set_slice_plane(&mut self, plane: SlicePlane) {
-        let Camera::Slice(slice) = &mut self.camera else {
-            return;
-        };
-        if slice.plane == plane {
-            return;
+        let id = self.active_view().id();
+        match &self.active_view().camera {
+            Camera::Slice(slice) if slice.plane != plane => {}
+            _ => return,
         }
-        slice.plane = plane;
-        slice.framing = Framing::Framed;
         let cut = plane.cut();
-        let middle = self.cut_middle(cut);
+        let middle = self.cut_middle(id, cut);
+        let view = self.active_view_mut();
+        if let Camera::Slice(slice) = &mut view.camera {
+            slice.plane = plane;
+            slice.framing = Framing::Framed;
+        }
         match cut {
             SpatialAxis::Y => {
-                self.view.y.get_or_insert(middle);
+                view.axes.y.get_or_insert(middle);
             }
             SpatialAxis::X => {
-                self.view.x.get_or_insert(middle);
+                view.axes.x.get_or_insert(middle);
             }
             SpatialAxis::Z => {}
         }
-        self.reframe();
+        self.reframe(id);
     }
 
-    /// Switch to the slice camera: the one this scene last had, or a new one
-    /// fitted to the data.
+    /// Switch the active view to its slice camera: the one it last had, or a
+    /// new one fitted to the data.
     pub fn set_mode_2d(&mut self) {
-        if self.camera.is_volume() {
-            let slice = match self.parked_camera.take() {
-                Some(parked @ Camera::Slice(_)) => parked,
-                _ => Camera::new_2d(self.camera.viewport()),
-            };
-            self.parked_camera = Some(std::mem::replace(&mut self.camera, slice));
-            self.reframe();
+        if self.active_view_mut().set_mode_2d() {
+            self.reframe(self.active_view().id());
         }
     }
 
-    /// Switch to the arcball. From fly mode it converts, keeping the eye and
-    /// the view direction. From 2D it brings back the volume camera this
-    /// scene last had, or a new arcball fitted to the data.
+    /// Switch the active view to the arcball. From fly mode it converts,
+    /// keeping the eye and the view direction. From 2D it brings back the
+    /// volume camera the view last had, or a new arcball fitted to the data.
     pub fn set_mode_3d(&mut self) {
-        let arcball = match &self.camera {
-            Camera::Arcball(_) => return,
-            Camera::Fly(fly) => fly.to_arcball(),
-            Camera::Slice(_) => match self.parked_camera.take() {
-                Some(Camera::Arcball(parked)) => parked,
-                Some(Camera::Fly(parked)) => parked.to_arcball(),
-                _ => crate::camera::Arcball::new(self.camera.viewport()),
-            },
-        };
-        self.enter_volume(Camera::Arcball(arcball));
-    }
-
-    /// Switch to the fly camera. From the arcball it converts, keeping the
-    /// eye and the view direction. From 2D it brings back the volume camera
-    /// this scene last had, or a new fly camera fitted to the data.
-    pub fn set_mode_fly(&mut self) {
-        let fly = match &self.camera {
-            Camera::Fly(_) => return,
-            Camera::Arcball(arcball) => arcball.to_fly(),
-            Camera::Slice(_) => match self.parked_camera.take() {
-                Some(Camera::Fly(parked)) => parked,
-                Some(Camera::Arcball(parked)) => parked.to_fly(),
-                _ => crate::camera::Fly::new(self.camera.viewport()),
-            },
-        };
-        self.enter_volume(Camera::Fly(fly));
-    }
-
-    /// Make `camera`, a volume camera, the active one, parking the slice
-    /// camera if that is what it replaces.
-    fn enter_volume(&mut self, camera: Camera) {
-        let previous = std::mem::replace(&mut self.camera, camera);
-        if !previous.is_volume() {
-            self.parked_camera = Some(previous);
+        if self.active_view_mut().set_mode_3d() {
+            self.reframe(self.active_view().id());
         }
-        self.reframe();
     }
 
-    /// Set viewport on camera (avoids name clash with ViewportCommand::SetViewport).
+    /// Switch the active view to the fly camera. From the arcball it
+    /// converts, keeping the eye and the view direction. From 2D it brings
+    /// back the volume camera the view last had, or a new fly camera fitted
+    /// to the data.
+    pub fn set_mode_fly(&mut self) {
+        if self.active_view_mut().set_mode_fly() {
+            self.reframe(self.active_view().id());
+        }
+    }
+
+    /// Set the canvas size (avoids name clash with ViewportCommand::SetViewport).
+    /// Each view takes its rectangle of it.
     ///
     /// A resize keeps a placed camera's zoom, and fits a framed or unframed
     /// one again on the new canvas. A new pixel ratio resizes the canvas in
@@ -321,35 +306,39 @@ impl Scene {
     /// the view keeps its CSS size and region. A volume camera's view does not
     /// depend on the ratio.
     pub(crate) fn inner_set_viewport(&mut self, width: u32, height: u32, pixel_ratio: Option<f64>) {
-        let before = self.camera.clone();
-        self.resize(width, height, pixel_ratio);
-        if self.camera != before {
-            self.reframe();
-        }
-    }
-
-    /// Resize both cameras' canvases, the parked one too so it comes back
-    /// sized for the canvas it returns to.
-    fn resize(&mut self, width: u32, height: u32, pixel_ratio: Option<f64>) {
-        let to = pixel_ratio.filter(|r| r.is_finite() && *r > 0.0);
-        let from = self.pixel_ratio;
-        for camera in std::iter::once(&mut self.camera).chain(self.parked_camera.as_mut()) {
-            if let (Some(from), Some(to), Camera::Slice(s)) = (from, to, &mut *camera)
-                && from != to
-            {
-                s.set_zoom(s.zoom * to / from);
+        let ratio = self.ratio_change(pixel_ratio);
+        let mut resized = Vec::new();
+        for view in &mut self.views {
+            let before = view.camera.clone();
+            view.resize(view.rect.size_on([width, height]), ratio);
+            if view.camera != before {
+                resized.push(view.id());
             }
-            camera.set_viewport(width, height);
         }
-        if to.is_some() {
-            self.pixel_ratio = to;
+        self.note_pixel_ratio(pixel_ratio);
+        for id in resized {
+            self.reframe(id);
         }
     }
 
-    /// Fit the camera to `target` on a canvas of `viewport` device pixels,
-    /// which this resizes it to. The canvas is an argument because a fit
-    /// against a size the scene has not caught up with frames the wrong
-    /// canvas.
+    /// The pixel ratio the canvas was last sized at and `pixel_ratio`, when
+    /// both are known and differ.
+    fn ratio_change(&self, pixel_ratio: Option<f64>) -> Option<(f64, f64)> {
+        let to = pixel_ratio.filter(|r| r.is_finite() && *r > 0.0)?;
+        let from = self.pixel_ratio?;
+        (from != to).then_some((from, to))
+    }
+
+    fn note_pixel_ratio(&mut self, pixel_ratio: Option<f64>) {
+        if let Some(to) = pixel_ratio.filter(|r| r.is_finite() && *r > 0.0) {
+            self.pixel_ratio = Some(to);
+        }
+    }
+
+    /// Fit the active view's camera to `target` on a canvas of `viewport`
+    /// device pixels, which this resizes the view to its rectangle of. The
+    /// canvas is an argument because a fit against a size the scene has not
+    /// caught up with frames the wrong canvas.
     ///
     /// A fit of everything visible leaves the camera framed, so a new canvas
     /// or new content fits it again. A fit of one dataset among others is a
@@ -361,44 +350,47 @@ impl Scene {
         if viewport[0] == 0 || viewport[1] == 0 {
             return false;
         }
+        let id = self.active_view().id();
         let bounds = match target {
-            FrameTarget::Visible => self.visible_bounds(),
-            FrameTarget::Dataset(id) => self.dataset_bounds(&id.0),
+            FrameTarget::Visible => self.visible_bounds(id),
+            FrameTarget::Dataset(dataset) => self.dataset_bounds(id, &dataset.0),
         };
         let Some(bounds) = bounds else {
             return false;
         };
         let framing = match target {
             FrameTarget::Visible => Framing::Framed,
-            FrameTarget::Dataset(id) => {
-                let mut visible = self.visible_dataset_ids();
-                if visible.next() == Some(id) && visible.next().is_none() {
+            FrameTarget::Dataset(dataset) => {
+                let mut visible = self.shown_dataset_ids(id);
+                if visible.next() == Some(dataset) && visible.next().is_none() {
                     Framing::Framed
                 } else {
                     Framing::Placed
                 }
             }
         };
-        let before = self.camera.clone();
-        self.resize(viewport[0], viewport[1], None);
-        self.camera.fit(&bounds);
-        self.camera.set_framing(framing);
-        if self.camera != before {
+        let view = self.active_view_mut();
+        let before = view.camera.clone();
+        view.resize(view.rect.size_on(viewport), None);
+        view.camera.fit(&bounds);
+        view.camera.set_framing(framing);
+        if view.camera != before {
             self.epochs.view += 1;
         }
         true
     }
 
-    /// Fit the slice camera to `region`, a box in `dataset_id`'s frame, on
-    /// its canvas: a part of the data, so the camera is left placed. A volume
-    /// camera ignores it, as does a dataset the scene doesn't hold. Bumps
-    /// `epochs.view` and returns `true` when the camera changed.
+    /// Fit the active view's slice camera to `region`, a box in
+    /// `dataset_id`'s frame, on its canvas: a part of the data, so the camera
+    /// is left placed. A volume camera ignores it, as does a dataset the
+    /// scene doesn't hold. Bumps `epochs.view` and returns `true` when the
+    /// camera changed.
     pub fn frame_region(&mut self, dataset_id: &DatasetId, region: PlaneBox) -> bool {
         let Some(to_scene) = self.placement(dataset_id) else {
             return false;
         };
         let (min, max) = to_scene.apply_box(region.min, region.max);
-        let Camera::Slice(slice) = &mut self.camera else {
+        let Camera::Slice(slice) = &mut self.active_view_mut().camera else {
             return false;
         };
         let before = slice.clone();
@@ -411,43 +403,60 @@ impl Scene {
         changed
     }
 
-    /// Fit the camera to everything visible again when its pose is the fit or
-    /// a stand-in, after something that fit depends on changed: the canvas,
-    /// the content, what is visible, or the mode. A placed camera stays where
-    /// it was put. Leaves the epochs to the caller and says whether the camera
-    /// changed.
-    pub(crate) fn reframe(&mut self) -> bool {
-        if self.camera.framing() == Framing::Placed {
+    /// Fit `view`'s camera to everything it shows again when its pose is the
+    /// fit or a stand-in, after something that fit depends on changed: the
+    /// canvas, the content, what is visible, or the mode. A placed camera
+    /// stays where it was put. Leaves the epochs to the caller and says
+    /// whether the camera changed.
+    pub(crate) fn reframe(&mut self, id: ViewId) -> bool {
+        let Some(view) = self.view(id) else {
+            return false;
+        };
+        if view.camera.framing() == Framing::Placed {
             return false;
         }
-        let [width, height] = self.camera.viewport();
+        let [width, height] = view.camera.viewport();
         if width == 0 || height == 0 {
             return false;
         }
-        let Some(bounds) = self.visible_bounds() else {
+        let Some(bounds) = self.visible_bounds(id) else {
             return false;
         };
-        let before = self.camera.clone();
-        self.camera.fit(&bounds);
-        self.camera.set_framing(Framing::Framed);
-        self.camera != before
+        let Some(view) = self.view_mut(id) else {
+            return false;
+        };
+        let before = view.camera.clone();
+        view.camera.fit(&bounds);
+        view.camera.set_framing(Framing::Framed);
+        view.camera != before
+    }
+
+    /// [`Self::reframe`] every view. Says whether any camera changed.
+    fn reframe_all(&mut self) -> bool {
+        let ids: Vec<ViewId> = self.views.iter().map(View::id).collect();
+        ids.into_iter()
+            .fold(false, |changed, id| self.reframe(id) | changed)
     }
 
     /// Follow a change to the document's datasets, from `before`, the
     /// scene's camera spaces ahead of it. The datasets fix those spaces, so a
     /// placed camera is carried into the new ones and keeps its region. A
-    /// scene with no datasets left has nothing its cameras frame, so the
-    /// active one becomes a stand-in and the parked one is dropped; otherwise
-    /// the camera reframes. Bumps `epochs.view` when the camera changed.
+    /// scene with no datasets left has nothing its cameras frame, so each
+    /// view's active camera becomes a stand-in and its parked one is dropped;
+    /// otherwise every view reframes. Bumps `epochs.view` when a camera
+    /// changed.
     pub(crate) fn content_changed(&mut self, before: Option<CameraSpace>) {
         let carried = before.is_some_and(|from| self.carry_placed_cameras(&from));
         let changed = if self.document.manifests.is_empty() {
-            self.parked_camera = None;
-            let stand_in = self.camera.framing() != Framing::Unframed;
-            self.camera.set_framing(Framing::Unframed);
+            let mut stand_in = false;
+            for view in &mut self.views {
+                view.parked_camera = None;
+                stand_in |= view.camera.framing() != Framing::Unframed;
+                view.camera.set_framing(Framing::Unframed);
+            }
             stand_in
         } else {
-            self.reframe()
+            self.reframe_all()
         };
         if carried || changed {
             self.epochs.view += 1;
@@ -460,10 +469,20 @@ impl Scene {
         self.dataset_order.retain(|s| s != id);
         self.dataset_settings.remove(id);
         self.derived.remove(id);
-        self.view_query_cursors.remove(id);
+        self.forget_dataset_in_views(id);
         self.content_changed(before);
     }
 
+    /// Drop what the views hold of a dataset the scene no longer has.
+    pub(crate) fn forget_dataset_in_views(&mut self, id: &DatasetId) {
+        self.view_query_cursors
+            .retain(|(_, dataset), _| dataset != id);
+        for view in &mut self.views {
+            if let ViewDatasets::Only(ids) = &mut view.datasets {
+                ids.retain(|shown| shown != id);
+            }
+        }
+    }
     /// The per-member **world placement matrix** (`[f32; 16]`, column-major):
     /// the forward `model` of [`Self::rendering_transform`], so the renderer,
     /// minimap framing, and [`Self::dataset_world_bounds`] cannot drift from
@@ -539,20 +558,19 @@ impl Scene {
         }
     }
 
-    /// Bounds of a single dataset's members in the plane the
-    /// [`Camera::Slice`] camera works in: the plane twin of
-    /// [`Self::dataset_world_bounds`].
+    /// Bounds of a single dataset's members in the plane `view`'s slice
+    /// camera works in: the plane twin of [`Self::dataset_world_bounds`].
     ///
     /// Each member with a level 0 contributes its layout box, its level-0
     /// shape from its position, placed in the scene frame on the two axes
     /// the slice plane draws. The third counts the member's planes along the
     /// cut, since the axis position steps through planes ([`slice_box`]).
-    /// Returns `None` when no member has levels.
-    pub fn dataset_plane_bounds(&self, dataset_id: &str) -> Option<PlaneBox> {
+    /// Returns `None` when no member has levels, or for an unknown view.
+    pub fn dataset_plane_bounds(&self, view: ViewId, dataset_id: &str) -> Option<PlaneBox> {
+        let plane = self.view(view)?.slice_plane();
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
         let to_scene = self.placement(&ds_id)?;
-        let plane = self.slice_plane();
         derived
             .members
             .iter()
@@ -563,16 +581,17 @@ impl Scene {
             .reduce(PlaneBox::union)
     }
 
-    /// A dataset's bounds in both spaces, or `None` when it has none.
-    pub fn dataset_bounds(&self, dataset_id: &str) -> Option<FitBounds> {
+    /// A dataset's bounds in both of `view`'s spaces, or `None` when it has
+    /// none.
+    pub fn dataset_bounds(&self, view: ViewId, dataset_id: &str) -> Option<FitBounds> {
         Some(FitBounds {
-            plane: self.dataset_plane_bounds(dataset_id)?,
+            plane: self.dataset_plane_bounds(view, dataset_id)?,
             world: self.dataset_world_bounds(dataset_id)?,
         })
     }
 
-    /// The datasets a fit of everything visible covers: each one the document
-    /// holds whose layer is shown.
+    /// The datasets whose layer is shown: each one the document holds,
+    /// unless its layer is hidden.
     pub fn visible_dataset_ids(&self) -> impl Iterator<Item = &DatasetId> {
         self.document.manifests.keys().filter(|id| {
             self.dataset_settings
@@ -581,20 +600,32 @@ impl Scene {
         })
     }
 
-    /// The union of every visible dataset's bounds, what a framed camera
-    /// fits. `None` when nothing visible has bounds.
-    pub fn visible_bounds(&self) -> Option<FitBounds> {
+    /// The datasets a fit of everything `view` shows covers: the visible ones
+    /// the view shows. None for an unknown view.
+    pub fn shown_dataset_ids(&self, view: ViewId) -> impl Iterator<Item = &DatasetId> {
+        let view = self.view(view);
         self.visible_dataset_ids()
-            .filter_map(|id| self.dataset_bounds(&id.0))
+            .filter(move |id| view.is_some_and(|view| view.shows(id)))
+    }
+
+    /// The union of the bounds of every dataset `view` shows, what its framed
+    /// camera fits. `None` when nothing it shows has bounds.
+    pub fn visible_bounds(&self, view: ViewId) -> Option<FitBounds> {
+        self.shown_dataset_ids(view)
+            .filter_map(|id| self.dataset_bounds(view, &id.0))
             .reduce(FitBounds::union)
     }
 
-    /// The named dataset's box in the space the current camera works in, as
+    /// The named dataset's box in the space `view`'s camera works in, as
     /// `(min, max)`: the plane with a zero Z extent for the slice camera,
     /// world space for a volume camera. `None` when it has no bounds.
-    pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
-        if let Camera::Slice(_) = self.camera {
-            let b = self.dataset_plane_bounds(dataset_id)?;
+    pub fn dataset_fit_bounds(
+        &self,
+        view: ViewId,
+        dataset_id: &str,
+    ) -> Option<([f64; 3], [f64; 3])> {
+        if let Camera::Slice(_) = self.view(view)?.camera {
+            let b = self.dataset_plane_bounds(view, dataset_id)?;
             Some(([b.min[0], b.min[1], 0.0], [b.max[0], b.max[1], 0.0]))
         } else {
             let b = self.dataset_world_bounds(dataset_id)?;
@@ -602,10 +633,10 @@ impl Scene {
         }
     }
 
-    /// Fit the named dataset's full extent on the current canvas. See
+    /// Fit the named dataset's full extent on the active view's canvas. See
     /// [`Self::frame`].
     pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
-        let viewport = self.camera.viewport();
+        let viewport = self.active_view().camera.viewport();
         self.frame(
             &FrameTarget::Dataset(DatasetId(dataset_id.to_string())),
             viewport,
@@ -613,18 +644,19 @@ impl Scene {
     }
 
     /// Device pixels per level-0 sample of `dataset_id`'s first image at the
-    /// view's center: the measure its target level is chosen from, and the
+    /// center of `view`: the measure its target level is chosen from, and the
     /// one [`Self::zoom_to_pixels_per_sample`] sets. `None` when the dataset
-    /// has no image with a level 0.
-    pub fn pixels_per_sample(&self, dataset_id: &DatasetId) -> Option<f64> {
+    /// has no image with a level 0, or for an unknown view.
+    pub fn pixels_per_sample(&self, view: ViewId, dataset_id: &DatasetId) -> Option<f64> {
+        let view = self.view(view)?;
         let member = self.first_image(dataset_id)?;
-        Some(self.member_pixels_per_sample(&self.placed(dataset_id)?, member))
+        Some(self.member_pixels_per_sample(view, &self.placed(dataset_id)?, member))
     }
 
-    /// Move the camera until `dataset_id`'s first image measures
-    /// `pixels_per_sample` at the view's center, so a caller can name the
-    /// level the view targets. A slice camera takes it as its zoom. An
-    /// arcball slides along its view axis, keeping its target and angles.
+    /// Move the active view's camera until `dataset_id`'s first image
+    /// measures `pixels_per_sample` at the view's center, so a caller can
+    /// name the level the view targets. A slice camera takes it as its zoom.
+    /// An arcball slides along its view axis, keeping its target and angles.
     /// Either is left placed, since a zoom is a choice.
     ///
     /// Returns `false`, changing nothing, when the dataset has no image, the
@@ -650,8 +682,9 @@ impl Scene {
         ) else {
             return false;
         };
-        let before = self.camera.clone();
-        let reached = match &mut self.camera {
+        let camera = &mut self.active_view_mut().camera;
+        let before = camera.clone();
+        let reached = match &mut *camera {
             Camera::Slice(slice) => {
                 let zoom = pixels_per_sample / slice.plane.sample_extent(&to_scene);
                 slice.set_zoom(zoom);
@@ -663,11 +696,11 @@ impl Scene {
             Camera::Fly(_) => false,
         };
         if !reached {
-            self.camera = before;
+            *camera = before;
             return false;
         }
-        self.camera.set_framing(Framing::Placed);
-        if self.camera != before {
+        camera.set_framing(Framing::Placed);
+        if *camera != before {
             self.epochs.view += 1;
         }
         true
@@ -682,21 +715,22 @@ impl Scene {
             .find(|member| !member.levels.is_empty())
     }
 
-    /// The chunks the first dataset's view needs, every member's in turn.
-    pub fn chunk_plan(&self) -> Vec<ChunkCoord> {
+    /// The chunks `view` needs of the first dataset, every member's in turn.
+    pub fn chunk_plan(&self, view: ViewId) -> Vec<ChunkCoord> {
         let Some(ds_id) = self.document.manifests.keys().next() else {
             return Vec::new();
         };
-        self.chunk_plan_for(ds_id)
+        self.chunk_plan_for(view, ds_id)
             .into_iter()
             .flatten()
             .flat_map(|member| member.needed)
             .collect()
     }
 
-    /// Compute the chunk request plan for a specific dataset by ID.
+    /// Compute `view`'s chunk request plan for a specific dataset by ID.
     ///
-    /// Returns one `MemberChunkPlan` per visible member.
+    /// Returns one `MemberChunkPlan` per visible member, or `None` for an
+    /// unknown view or dataset.
     ///
     /// Every chunk of a member is at the member's target level, from
     /// [`Scene::member_target_level`]. That is the rule and the hysteresis
@@ -709,18 +743,24 @@ impl Scene {
     /// For multi-member datasets (collections), each member's AABB is checked
     /// against the visible region, and its chunks are enumerated at its
     /// layout position.
-    pub fn chunk_plan_for(&self, dataset_id: &DatasetId) -> Option<Vec<MemberChunkPlan>> {
+    pub fn chunk_plan_for(
+        &self,
+        view: ViewId,
+        dataset_id: &DatasetId,
+    ) -> Option<Vec<MemberChunkPlan>> {
+        let id = view;
+        let view = self.view(id)?;
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
 
-        let last_query = self.last_query_entries(dataset_id);
+        let last_query = self.last_query_entries(view, dataset_id);
         let pin = self.level_pin(dataset_id);
         let multiscale_by_image = multiscale_by_image(manifest);
-        let layer = self.resolved_layer(dataset_id)?;
+        let layer = self.resolved_layer(id, dataset_id)?;
         let channels = layer.channel_indices();
 
         // The region is in the dataset's frame, where member positions are.
-        let region = self.visible_region(dataset_id)?;
+        let region = self.visible_region(id, dataset_id)?;
         let placed = self.placed(dataset_id)?;
         let mut plans = Vec::new();
         for member in &derived.members {
@@ -734,7 +774,7 @@ impl Scene {
 
             // AABB culling (same logic as current but using member.position).
             // A slice view's cut is in the member's own samples.
-            let cut = (!self.camera.is_volume()).then_some(region.cut_axis);
+            let cut = (!view.camera.is_volume()).then_some(region.cut_axis);
             let placed_at = |axis: SpatialAxis, at: f64| if cut == Some(axis) { 0.0 } else { at };
             let pos_x = placed_at(SpatialAxis::X, member.position[0]);
             let pos_y = placed_at(SpatialAxis::Y, member.position[1]);
@@ -753,10 +793,11 @@ impl Scene {
             }
 
             let (level, _) = self.member_target_level(
+                view,
                 member,
                 multiscale_by_image[&member.image_id],
                 pin,
-                self.member_pixels_per_sample(&placed, member),
+                self.member_pixels_per_sample(view, &placed, member),
                 last_query,
             );
             let level_geo = &member.levels[level as usize];
@@ -837,7 +878,8 @@ impl Scene {
         }
     }
 
-    /// Pick the closest entity hit by a ray cast from screen coordinates.
+    /// Pick the closest entity hit by a ray cast from screen coordinates in
+    /// `view`. `None` for an unknown view.
     ///
     /// For Slice (2D) mode: tests the ray's scene-frame point against each
     /// member's layout box, placed in the scene frame as its dataset is.
@@ -846,14 +888,16 @@ impl Scene {
     /// world space, so the ray test matches what the camera actually sees.
     pub fn ray_pick(
         &self,
+        view: ViewId,
         dataset_id: &DatasetId,
         screen_x: f64,
         screen_y: f64,
     ) -> Option<crate::ray::RayHit> {
+        let view = self.view(view)?;
         let derived = self.derived.get(dataset_id)?;
         let placed = self.placed(dataset_id)?;
-        let world_ray = self.camera.unproject_ray(screen_x, screen_y);
-        let is_2d = matches!(self.camera, Camera::Slice(_));
+        let world_ray = view.camera.unproject_ray(screen_x, screen_y);
+        let is_2d = matches!(view.camera, Camera::Slice(_));
         let mut closest: Option<crate::ray::RayHit> = None;
 
         for member in &derived.members {
@@ -864,7 +908,7 @@ impl Scene {
             let hit_result = if is_2d {
                 // Slice mode: the ray stands at a point of the slice plane,
                 // which the member's placed box holds or doesn't.
-                let Some((min, max)) = slice_box(self.slice_plane(), &placed.to_scene, member)
+                let Some((min, max)) = slice_box(view.slice_plane(), &placed.to_scene, member)
                 else {
                     continue;
                 };
@@ -919,44 +963,47 @@ impl Scene {
     // data exactly and a depth pick is the exact inverse of the projection
     // that draws it.
 
-    /// Place a pin's frame point where the active camera looks: the scene
+    /// Place a pin's frame point where `view`'s camera looks: the scene
     /// frame for the slice camera, world space for a volume camera. `None`
     /// for a dataset the scene doesn't hold.
     fn annotation_point_in_view(
         &self,
+        view: &View,
         dataset_id: &DatasetId,
         point: [f64; 3],
     ) -> Option<[f64; 3]> {
         let placed = self.placed(dataset_id)?;
-        Some(match self.camera {
+        Some(match view.camera {
             Camera::Slice(_) => placed.to_scene.apply(point),
             Camera::Arcball(_) | Camera::Fly(_) => placed.to_world.apply(point),
         })
     }
 
     /// Project a pin's stored frame point `(x, y, z)` to screen-space pixels
-    /// through the active camera, placed as its dataset is.
+    /// through `view`'s camera, placed as its dataset is.
     ///
     /// In 2D slice mode this is the in-plane projection, depth ignored. In a 3D
     /// mode the marker tracks the volume as the camera orbits.
     /// Returns `None` when the point is behind the camera or the scene doesn't
-    /// hold the dataset; the caller then hides the marker.
+    /// hold the view or the dataset; the caller then hides the marker.
     pub fn project_annotation(
         &self,
+        view: ViewId,
         dataset_id: &DatasetId,
         x: f64,
         y: f64,
         z: f64,
     ) -> Option<[f64; 2]> {
-        if let Camera::Slice(slice) = &self.camera
+        let view = self.view(view)?;
+        if let Camera::Slice(slice) = &view.camera
             && !slice.plane.is_xy()
         {
             // A pin's place is an XY point at a Z, which a side view has no
             // place to draw, so it hides there.
             return None;
         }
-        let point = self.annotation_point_in_view(dataset_id, [x, y, z])?;
-        self.camera.project_to_screen(point)
+        let point = self.annotation_point_in_view(view, dataset_id, [x, y, z])?;
+        view.camera.project_to_screen(point)
     }
 
     /// Lift a pin's stored frame point `(x, y, z)` to world space, the same
@@ -973,7 +1020,7 @@ impl Scene {
         Some(self.frame_to_world(dataset_id)?.apply(point))
     }
 
-    /// Depth pick for a pin dropped in a view: ray-cast from screen into the
+    /// Depth pick for a pin dropped in `view`: ray-cast from screen into the
     /// dataset and return the hit as a frame point `[x, y, z]`, ready to store
     /// as `(position, z)`. This is the exact inverse of the placement
     /// [`Self::project_annotation`] draws with, so the new marker re-projects
@@ -982,13 +1029,14 @@ impl Scene {
     /// a pin into empty space.
     pub fn pick_annotation_voxel(
         &self,
+        view: ViewId,
         dataset_id: &DatasetId,
         screen_x: f64,
         screen_y: f64,
     ) -> Option<[f64; 3]> {
-        let hit = self.ray_pick(dataset_id, screen_x, screen_y)?;
+        let hit = self.ray_pick(view, dataset_id, screen_x, screen_y)?;
         let placed = self.placed(dataset_id)?;
-        Some(match self.camera {
+        Some(match self.view(view)?.camera {
             Camera::Slice(_) => {
                 let [x, y, _] = placed.to_scene.inverse().apply(hit.world_position);
                 [x, y, 0.0]
@@ -1042,7 +1090,12 @@ impl Scene {
         self.dataset_settings
             .retain(|id, _| dataset_ids.contains(id));
         self.view_query_cursors
-            .retain(|id, _| dataset_ids.contains(id));
+            .retain(|(_, id), _| dataset_ids.contains(id));
+        for view in &mut self.views {
+            if let ViewDatasets::Only(ids) = &mut view.datasets {
+                ids.retain(|id| dataset_ids.contains(id));
+            }
+        }
 
         // Kept settings may have been adopted from a peer whose label list
         // differs; realign them to the restored manifest's labels by name.
@@ -1075,13 +1128,13 @@ impl Scene {
         self.content_changed(before);
     }
 
-    /// Adopt another client's camera + view + display: follow, and every
-    /// restore of a stored view. A placed camera keeps the region it showed on
-    /// the canvas it came from, fitted to this scene's viewport
-    /// ([`Camera::fit_region_to_viewport`]), so a view crosses pixel ratios and
-    /// canvas shapes without changing what it shows. A framed or unframed one
-    /// fits this scene's visible datasets on this canvas instead, so a fit
-    /// made on a wide canvas fills a tall one.
+    /// Adopt another client's camera, axis positions and display into the
+    /// active view: follow, and every restore of a stored view. A placed
+    /// camera keeps the region it showed on the canvas it came from, fitted to
+    /// the view's canvas ([`Camera::fit_region_to_viewport`]), so a view
+    /// crosses pixel ratios and canvas shapes without changing what it shows.
+    /// A framed or unframed one fits the datasets the view shows on its canvas
+    /// instead, so a fit made on a wide canvas fills a tall one.
     ///
     /// A camera of the other family parks the one it replaces, as a mode
     /// switch does.
@@ -1095,9 +1148,9 @@ impl Scene {
     /// `epochs.view` bumps iff the camera changed, and `epochs.selection` iff
     /// view, display or a solo changed, so an unchanged presence heartbeat does
     /// not invalidate consumers' caches but a real remote camera move does.
-    pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
-        let mut view = view;
-        if let Some(legacy) = view.take_legacy_channels()
+    pub fn import_presence(&mut self, camera: Camera, axes: AxisPositions, display: DisplayState) {
+        let mut axes = axes;
+        if let Some(legacy) = axes.take_legacy_channels()
             && self.adopt_legacy_channels(legacy)
         {
             self.epochs.selection += 1;
@@ -1109,18 +1162,22 @@ impl Scene {
         // functions of their inputs, so the equality check below still sees
         // an unchanged re-import as unchanged.
         camera.sanitize();
-        camera.fit_region_to_viewport(self.camera.viewport());
-        let before = self.camera.clone();
-        let previous = std::mem::replace(&mut self.camera, camera);
-        if previous.is_volume() != self.camera.is_volume() {
-            self.parked_camera = Some(previous);
+        let view = self.active_view_mut();
+        camera.fit_region_to_viewport(view.camera.viewport());
+        let before = view.camera.clone();
+        view.adopt_camera(camera);
+        let id = view.id();
+        self.reframe(id);
+        let view = self.active_view_mut();
+        let moved = view.camera != before;
+        let axes_changed = view.axes != axes;
+        if axes_changed {
+            view.axes = axes;
         }
-        self.reframe();
-        if self.camera != before {
+        if moved {
             self.epochs.view += 1;
         }
-        if self.view != view || self.display != display {
-            self.view = view;
+        if axes_changed || self.display != display {
             self.display = display;
             self.epochs.selection += 1;
         }
@@ -1194,10 +1251,11 @@ impl Scene {
         self.visible_dataset_ids().cloned().collect()
     }
 
-    /// Reframe when the visible datasets differ from `before`, since a framed
-    /// camera fits exactly those. Bumps `epochs.view` when the camera changed.
+    /// Reframe every view when the visible datasets differ from `before`,
+    /// since a framed camera fits exactly those. Bumps `epochs.view` when a
+    /// camera changed.
     pub(crate) fn visibility_changed(&mut self, before: Vec<DatasetId>) {
-        if self.visible_set() != before && self.reframe() {
+        if self.visible_set() != before && self.reframe_all() {
             self.epochs.view += 1;
         }
     }
@@ -1256,12 +1314,12 @@ impl Scene {
     /// pixels apart, and a sample spans its dataset's placement. A volume
     /// view measures where the center-screen ray meets the box the renderer
     /// draws for the member, so placement counts there too.
-    fn member_pixels_per_sample(&self, placed: &Placed, member: &MemberState) -> f64 {
-        match &self.camera {
+    fn member_pixels_per_sample(&self, view: &View, placed: &Placed, member: &MemberState) -> f64 {
+        match &view.camera {
             Camera::Slice(slice) => {
-                self.camera.effective_zoom() * slice.plane.sample_extent(&placed.to_scene)
+                view.camera.effective_zoom() * slice.plane.sample_extent(&placed.to_scene)
             }
-            _ => self.camera.pixels_per_sample(
+            _ => view.camera.pixels_per_sample(
                 &member_transform(&placed.to_world, member),
                 level0_shape(member),
             ),
@@ -1269,21 +1327,23 @@ impl Scene {
     }
 
     /// The quantized record per image that the last [`Scene::view_query_delta`]
-    /// for `dataset_id` left behind, when it still describes the current
-    /// membership base and camera family. `None` without such a query.
+    /// for `view` and `dataset_id` left behind, when it still describes the
+    /// current membership base and the view's camera family. `None` without
+    /// such a query.
     fn last_query_entries(
         &self,
+        view: &View,
         dataset_id: &DatasetId,
     ) -> Option<&HashMap<ImageId, QuantizedEntity>> {
         self.view_query_cursors
-            .get(dataset_id)
-            .filter(|c| c.matches(&self.epochs, CameraModeKind::of(&self.camera)))
+            .get(&(view.id(), dataset_id.clone()))
+            .filter(|c| c.matches(&self.epochs, CameraModeKind::of(&view.camera)))
             .map(|c| &c.entries)
     }
 
     /// The level the screen calls for in `member`. Applies
     /// [`crate::target_level::target_level`] to `pixels_per_sample` and the
-    /// member's level geometry along the axes the camera resolves.
+    /// member's level geometry along the axes `view`'s camera resolves.
     ///
     /// `last_query` is [`Scene::last_query_entries`] for the member's dataset.
     /// The level it holds for the member while on screen is the hysteresis
@@ -1292,6 +1352,7 @@ impl Scene {
     /// query.
     fn screen_target_level(
         &self,
+        view: &View,
         member: &MemberState,
         pixels_per_sample: f64,
         last_query: Option<&HashMap<ImageId, QuantizedEntity>>,
@@ -1300,7 +1361,7 @@ impl Scene {
             .and_then(|entries| entries.get(&member.image_id))
             .filter(|entry| entry.visible)
             .map(|entry| entry.target_level);
-        let ratios = match &self.camera {
+        let ratios = match &view.camera {
             // A slice view resolves the two axes it draws: a level that only
             // downsamples the cut axis is no coarser on screen.
             Camera::Slice(slice) => {
@@ -1356,6 +1417,7 @@ impl Scene {
     /// point would.
     fn member_target_level(
         &self,
+        view: &View,
         member: &MemberState,
         multiscale: &MultiscaleInfo,
         pin: Option<u32>,
@@ -1365,7 +1427,7 @@ impl Scene {
         if let Some(pinned) = pin.and_then(|pin| multiscale.clamp_to_source_levels(pin)) {
             return (pinned, true);
         }
-        let screen = self.screen_target_level(member, pixels_per_sample, last_query);
+        let screen = self.screen_target_level(view, member, pixels_per_sample, last_query);
         (
             multiscale.clamp_to_source_levels(screen).unwrap_or(screen),
             false,
@@ -1386,7 +1448,8 @@ impl Scene {
     }
 
     /// Query the scene for geometric information about all entities in a dataset
-    /// from the current camera viewpoint.
+    /// from `view`'s camera. `None` for an unknown view or dataset, or a
+    /// dataset the view doesn't show.
     ///
     /// Each record's `target_level` comes from [`Scene::member_target_level`],
     /// the dataset's level pin when it has one and otherwise
@@ -1397,12 +1460,13 @@ impl Scene {
     /// through [`Scene::view_query_delta`], so a full query agrees with the
     /// delta a caller is folding. A caller that only ever asks for full
     /// queries has no history and gets the rule without hysteresis.
-    pub fn view_query(&self, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
+    pub fn view_query(&self, view: ViewId, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
+        let view = self.view(view).filter(|view| view.shows(dataset_id))?;
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
         let placed = self.placed(dataset_id)?;
-        let vp = self.camera.viewport();
-        let eye = self.camera.eye_position();
+        let vp = view.camera.viewport();
+        let eye = view.camera.eye_position();
         let pin = self.level_pin(dataset_id);
         let multiscale_by_image = multiscale_by_image(manifest);
 
@@ -1417,8 +1481,8 @@ impl Scene {
 
         let mut results = Vec::with_capacity(derived.members.len());
 
-        let is_2d = matches!(self.camera, Camera::Slice(_));
-        let last_query = self.last_query_entries(dataset_id);
+        let is_2d = matches!(view.camera, Camera::Slice(_));
+        let last_query = self.last_query_entries(view, dataset_id);
 
         for member in &derived.members {
             // Compute screen-space bounding box.
@@ -1432,7 +1496,7 @@ impl Scene {
 
             let pixels_per_sample = if is_2d {
                 // Corners and centroid in the slice camera's space.
-                let (min, max) = slice_box(self.slice_plane(), &placed.to_scene, member)
+                let (min, max) = slice_box(view.slice_plane(), &placed.to_scene, member)
                     .unwrap_or(([0.0; 3], [1.0; 3]));
                 centroid = [
                     (min[0] + max[0]) / 2.0,
@@ -1446,7 +1510,7 @@ impl Scene {
                     [max[0], max[1], 0.0],
                 ];
                 for corner in &corners {
-                    if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
+                    if let Some([sx, sy]) = view.camera.project_to_screen(*corner) {
                         screen_min[0] = screen_min[0].min(sx);
                         screen_min[1] = screen_min[1].min(sy);
                         screen_max[0] = screen_max[0].max(sx);
@@ -1454,13 +1518,13 @@ impl Scene {
                         any_visible = true;
                     }
                 }
-                self.member_pixels_per_sample(&placed, member)
+                self.member_pixels_per_sample(view, &placed, member)
             } else {
                 let placed = member_transform(&placed.to_world, member);
                 let corners = placed.world_corners();
                 centroid = placed.world_centroid();
                 for corner in &corners {
-                    if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
+                    if let Some([sx, sy]) = view.camera.project_to_screen(*corner) {
                         screen_min[0] = screen_min[0].min(sx);
                         screen_min[1] = screen_min[1].min(sy);
                         screen_max[0] = screen_max[0].max(sx);
@@ -1468,7 +1532,7 @@ impl Scene {
                         any_visible = true;
                     }
                 }
-                self.camera.pixels_per_sample(&placed, level0_shape(member))
+                view.camera.pixels_per_sample(&placed, level0_shape(member))
             };
 
             // Check if screen rect overlaps viewport
@@ -1488,6 +1552,7 @@ impl Scene {
 
             let (level, level_pinned) = if visible {
                 self.member_target_level(
+                    view,
                     member,
                     multiscale_by_image[&member.image_id],
                     pin,
@@ -1546,23 +1611,23 @@ impl Scene {
 
     /// Incremental counterpart to [`Scene::view_query`].
     ///
-    /// The first query for a dataset, a query after the membership base was
-    /// rebuilt (a move in the content or layout epoch), and a query
-    /// after the camera changed geometry family all return
-    /// [`ViewQueryDelta::Full`] — a complete snapshot that also (re)seeds this
-    /// dataset's cursor. Any other query returns [`ViewQueryDelta::Delta`]
-    /// describing only the entities that entered, left, or whose quantized
-    /// state changed since the previous query.
+    /// The first query for a view and dataset, a query after the membership
+    /// base was rebuilt (a move in the content or layout epoch), and a query
+    /// after the view's camera changed geometry family all return
+    /// [`ViewQueryDelta::Full`] — a complete snapshot that also (re)seeds the
+    /// cursor for the view and dataset. Any other query returns
+    /// [`ViewQueryDelta::Delta`] describing only the entities that entered,
+    /// left, or whose quantized state changed since the previous query.
     ///
     /// The per-entity records are produced by [`Scene::view_query`] itself, so
     /// they are byte-for-byte what a full query would report. The delta only
     /// decides *which* of those records to carry. Returns `None` exactly when
-    /// [`Scene::view_query`] would (an unknown dataset).
+    /// [`Scene::view_query`] would (an unknown view or dataset).
     ///
-    /// Each dataset keeps an independent cursor, so datasets resync on their
-    /// own schedule. A resync fully drops the prior snapshot before reseeding,
-    /// so an entity that leaves and later returns arrives in `entered` with a
-    /// full record rather than being silently retained.
+    /// Each view and dataset keeps an independent cursor, so they resync on
+    /// their own schedule. A resync fully drops the prior snapshot before
+    /// reseeding, so an entity that leaves and later returns arrives in
+    /// `entered` with a full record rather than being silently retained.
     ///
     /// A delta reports only quantized changes; see [`ViewQueryDelta`] for the
     /// tracked set and the two obligations it places on consumers. In short: a
@@ -1571,14 +1636,19 @@ impl Scene {
     /// projected size, say) must be recomputed by the consumer rather than
     /// inferred from delta membership; and selection or structural changes surface
     /// only through the returned `epochs`, not through entered/left/changed.
-    pub fn view_query_delta(&mut self, dataset_id: &DatasetId) -> Option<ViewQueryDelta> {
+    pub fn view_query_delta(
+        &mut self,
+        view: ViewId,
+        dataset_id: &DatasetId,
+    ) -> Option<ViewQueryDelta> {
         // Reuse the full projection verbatim: the records the delta hands back
         // are exactly what a full query produces this frame.
-        let result = self.view_query(dataset_id)?;
+        let result = self.view_query(view, dataset_id)?;
+        let key = (view, dataset_id.clone());
 
         let content = self.epochs.content;
         let layout = self.epochs.layout;
-        let mode = CameraModeKind::of(&self.camera);
+        let mode = CameraModeKind::of(&self.view(view)?.camera);
 
         // A cursor whose structural epochs and camera family match the current
         // scene describes the same projection space, so a difference against it
@@ -1588,7 +1658,7 @@ impl Scene {
         // base could ship a wrong tile.
         let can_delta = self
             .view_query_cursors
-            .get(dataset_id)
+            .get(&key)
             .is_some_and(|c| c.matches(&self.epochs, mode));
 
         let new_entries: HashMap<ImageId, QuantizedEntity> = result
@@ -1599,7 +1669,7 @@ impl Scene {
 
         if !can_delta {
             self.view_query_cursors.insert(
-                dataset_id.clone(),
+                key,
                 ViewQueryCursor {
                     content,
                     layout,
@@ -1614,12 +1684,12 @@ impl Scene {
 
         let (entered, left, changed) = {
             // Present because `can_delta` is true.
-            let cursor = &self.view_query_cursors[dataset_id];
+            let cursor = &self.view_query_cursors[&key];
             view_query_diff(&cursor.entries, &result.visible_entities, &new_entries)
         };
 
         self.view_query_cursors.insert(
-            dataset_id.clone(),
+            key,
             ViewQueryCursor {
                 content,
                 layout,
@@ -1925,7 +1995,10 @@ pub(crate) mod test_helpers {
     /// device pixel, so opening a dataset leaves it there.
     pub fn placed_scene(viewport: [u32; 2]) -> super::Scene {
         let mut scene = super::Scene::new(viewport);
-        scene.camera.set_framing(crate::camera::Framing::Placed);
+        scene
+            .active_view_mut()
+            .camera
+            .set_framing(crate::camera::Framing::Placed);
         scene
     }
 
@@ -2657,7 +2730,7 @@ mod tests {
     #[test]
     fn empty_scene_produces_empty_plan() {
         let scene = Scene::new([800, 600]);
-        assert!(scene.chunk_plan().is_empty());
+        assert!(scene.chunk_plan(scene.active_view().id()).is_empty());
     }
 
     #[test]
@@ -2724,7 +2797,7 @@ mod tests {
             5,
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert!(!scene.chunk_plan().is_empty());
+        assert!(!scene.chunk_plan(scene.active_view().id()).is_empty());
     }
 
     #[test]
@@ -2740,9 +2813,9 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let plan_z0 = scene.chunk_plan();
-        scene.view.set_slice("z", 100).unwrap();
-        let plan_z100 = scene.chunk_plan();
+        let plan_z0 = scene.chunk_plan(scene.active_view().id());
+        scene.active_view_mut().axes.set_slice("z", 100).unwrap();
+        let plan_z100 = scene.chunk_plan(scene.active_view().id());
 
         assert_eq!(plan_z0[0].z, 0);
         assert_eq!(plan_z100[0].z, 1);
@@ -2760,8 +2833,8 @@ mod tests {
             5,
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        scene.view.set_z_range(0..128);
-        let plan = scene.chunk_plan();
+        scene.active_view_mut().axes.set_z_range(0..128);
+        let plan = scene.chunk_plan(scene.active_view().id());
         let z_values: Vec<u32> = plan.iter().map(|c| c.z).collect();
         assert!(z_values.contains(&0));
         assert!(z_values.contains(&1));
@@ -2770,22 +2843,22 @@ mod tests {
     #[test]
     fn mode_switching_preserves_viewport() {
         let mut scene = Scene::new([800, 600]);
-        assert!(matches!(scene.camera, Camera::Slice(_)));
+        assert!(matches!(scene.active_view().camera, Camera::Slice(_)));
 
         scene.set_mode_3d();
-        assert!(matches!(scene.camera, Camera::Arcball(_)));
-        assert_eq!(scene.camera.viewport(), [800, 600]);
+        assert!(matches!(scene.active_view().camera, Camera::Arcball(_)));
+        assert_eq!(scene.active_view().camera.viewport(), [800, 600]);
 
         scene.set_mode_2d();
-        assert!(matches!(scene.camera, Camera::Slice(_)));
-        assert_eq!(scene.camera.viewport(), [800, 600]);
+        assert!(matches!(scene.active_view().camera, Camera::Slice(_)));
+        assert_eq!(scene.active_view().camera.viewport(), [800, 600]);
     }
 
     #[test]
     fn scene_serialization_round_trip() {
         let mut scene = Scene::new([800, 600]);
-        scene.view.set_z(5);
-        scene.view.t = 2;
+        scene.active_view_mut().axes.set_z(5);
+        scene.active_view_mut().axes.t = 2;
 
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -2795,8 +2868,8 @@ mod tests {
         // Rebuild derived state after deserialization
         parsed.rebuild_derived();
 
-        assert_eq!(parsed.view.z_range, 5..6);
-        assert_eq!(parsed.view.t, 2);
+        assert_eq!(parsed.active_view().axes.z_range, 5..6);
+        assert_eq!(parsed.active_view().axes.t, 2);
         assert_eq!(parsed.document.manifests.len(), 1);
         assert!(
             parsed
@@ -2804,7 +2877,7 @@ mod tests {
                 .manifests
                 .contains_key(&DatasetId("ds1".into()))
         );
-        if let Camera::Slice(v) = &parsed.camera {
+        if let Camera::Slice(v) = &parsed.active_view().camera {
             assert_eq!(v.viewport, [800, 600]);
         } else {
             panic!("expected Slice");
@@ -2849,11 +2922,11 @@ mod tests {
         );
 
         // A first delta query seeds the per-dataset cursor.
-        scene.view_query_delta(&DatasetId("ds1".into()));
+        scene.view_query_delta(scene.active_view().id(), &DatasetId("ds1".into()));
         assert!(
             scene
                 .view_query_cursors
-                .contains_key(&DatasetId("ds1".into()))
+                .contains_key(&(scene.active_view().id(), DatasetId("ds1".into())))
         );
 
         // The reachable production removal path (command apply) must prune it.
@@ -2866,7 +2939,7 @@ mod tests {
         assert!(
             !scene
                 .view_query_cursors
-                .contains_key(&DatasetId("ds1".into()))
+                .contains_key(&(scene.active_view().id(), DatasetId("ds1".into())))
         );
     }
 
@@ -2932,7 +3005,9 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
-        let plans = scene.chunk_plan_for(&ds_id).unwrap();
+        let plans = scene
+            .chunk_plan_for(scene.active_view().id(), &ds_id)
+            .unwrap();
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].image_id, ImageId("ds1-image".into()));
         assert!(!plans[0].needed.is_empty());
@@ -2950,9 +3025,11 @@ mod tests {
             5,
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let flat = scene.chunk_plan();
+        let flat = scene.chunk_plan(scene.active_view().id());
         let ds_id = DatasetId("ds1".into());
-        let member_plans = scene.chunk_plan_for(&ds_id).unwrap();
+        let member_plans = scene
+            .chunk_plan_for(scene.active_view().id(), &ds_id)
+            .unwrap();
         assert_eq!(member_plans.len(), 1);
         assert_eq!(flat.len(), member_plans[0].needed.len());
         for (a, b) in flat.iter().zip(member_plans[0].needed.iter()) {
@@ -2964,17 +3041,21 @@ mod tests {
     fn chunk_plan_for_missing_dataset_returns_none() {
         let scene = Scene::new([512, 512]);
         let ds_id = DatasetId("nonexistent".into());
-        assert!(scene.chunk_plan_for(&ds_id).is_none());
+        assert!(
+            scene
+                .chunk_plan_for(scene.active_view().id(), &ds_id)
+                .is_none()
+        );
     }
 
     fn set_slice_zoom(scene: &mut Scene, zoom: f64) {
-        if let Camera::Slice(s) = &mut scene.camera {
+        if let Camera::Slice(s) = &mut scene.active_view_mut().camera {
             s.set_zoom(zoom);
         }
     }
 
     fn set_slice_center(scene: &mut Scene, x: f64, y: f64) {
-        if let Camera::Slice(s) = &mut scene.camera {
+        if let Camera::Slice(s) = &mut scene.active_view_mut().camera {
             s.set_center(x, y);
         }
     }
@@ -2983,7 +3064,7 @@ mod tests {
     /// order.
     fn planned_levels(scene: &Scene, ds: &DatasetId) -> Vec<u32> {
         let mut levels: Vec<u32> = scene
-            .chunk_plan_for(ds)
+            .chunk_plan_for(scene.active_view().id(), ds)
             .unwrap()
             .iter()
             .flat_map(|plan| &plan.needed)
@@ -3039,7 +3120,7 @@ mod tests {
 
     /// The level the view query reports for the one image of `ds`.
     fn queried_target(scene: &Scene, ds: &DatasetId) -> u32 {
-        let result = scene.view_query(ds).unwrap();
+        let result = scene.view_query(scene.active_view().id(), ds).unwrap();
         assert_eq!(result.visible_entities.len(), 1);
         assert!(
             result.visible_entities[0].visible,
@@ -3109,12 +3190,12 @@ mod tests {
         let ds = DatasetId::from("vol");
         scene.set_mode_3d();
         assert!(scene.fit_camera_to_dataset("vol"));
-        let fitted = scene.camera.clone();
+        let fitted = scene.active_view().camera.clone();
 
         let mut levels = Vec::new();
         for factor in [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 64.0] {
-            scene.camera = fitted.clone();
-            if let Camera::Arcball(a) = &mut scene.camera {
+            scene.active_view_mut().camera = fitted.clone();
+            if let Camera::Arcball(a) = &mut scene.active_view_mut().camera {
                 a.zoom(factor - 1.0);
             }
             let target = queried_target(&scene, &ds);
@@ -3141,16 +3222,25 @@ mod tests {
         set_slice_zoom(&mut scene, 4.0);
         pin_level(&mut scene, &ds, Some(2));
         assert_eq!(planned_levels(&scene, &ds), vec![2]);
-        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 2);
+        assert_eq!(
+            scene.chunk_plan_for(scene.active_view().id(), &ds).unwrap()[0].target_level,
+            2
+        );
 
         set_slice_zoom(&mut scene, 0.01);
         pin_level(&mut scene, &ds, Some(0));
         assert_eq!(planned_levels(&scene, &ds), vec![0]);
-        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 0);
+        assert_eq!(
+            scene.chunk_plan_for(scene.active_view().id(), &ds).unwrap()[0].target_level,
+            0
+        );
 
         pin_level(&mut scene, &ds, None);
         assert_eq!(planned_levels(&scene, &ds), vec![3]);
-        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 3);
+        assert_eq!(
+            scene.chunk_plan_for(scene.active_view().id(), &ds).unwrap()[0].target_level,
+            3
+        );
     }
 
     /// A two-member collection whose members have pyramids of different
@@ -3177,7 +3267,7 @@ mod tests {
     fn chunk_plan_clamps_a_pin_past_a_members_pyramid_to_its_coarsest_level() {
         let (scene, ds) = mixed_depth_scene_pinned_to_2();
 
-        let plans = scene.chunk_plan_for(&ds).unwrap();
+        let plans = scene.chunk_plan_for(scene.active_view().id(), &ds).unwrap();
         let by_image: HashMap<&str, &MemberChunkPlan> =
             plans.iter().map(|p| (p.image_id.0.as_str(), p)).collect();
         assert_eq!(by_image["deep-image"].target_level, 2);
@@ -3234,7 +3324,10 @@ mod tests {
             .detail_level_override = Some(3);
 
         assert_eq!(planned_levels(&scene, &ds), vec![2]);
-        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 2);
+        assert_eq!(
+            scene.chunk_plan_for(scene.active_view().id(), &ds).unwrap()[0].target_level,
+            2
+        );
         assert_eq!(queried_target(&scene, &ds), 2);
     }
 
@@ -3258,7 +3351,7 @@ mod tests {
     fn view_query_clamps_a_stale_pin_per_member() {
         let (scene, ds) = mixed_depth_scene_pinned_to_2();
 
-        let result = scene.view_query(&ds).unwrap();
+        let result = scene.view_query(scene.active_view().id(), &ds).unwrap();
         let by_image: HashMap<&str, &EntityQueryResult> = result
             .visible_entities
             .iter()
@@ -3276,7 +3369,10 @@ mod tests {
         set_slice_zoom(&mut scene, 0.01);
         assert_eq!(queried_target(&scene, &ds), 2);
         assert_eq!(planned_levels(&scene, &ds), vec![2]);
-        assert_eq!(scene.chunk_plan_for(&ds).unwrap()[0].target_level, 2);
+        assert_eq!(
+            scene.chunk_plan_for(scene.active_view().id(), &ds).unwrap()[0].target_level,
+            2
+        );
     }
 
     #[test]
@@ -3284,12 +3380,17 @@ mod tests {
         let (mut scene, ds) = regular_slice_scene([512, 512]);
         set_slice_zoom(&mut scene, 4.0);
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
 
         fn changed_level(scene: &mut Scene, ds: &DatasetId) -> Option<u32> {
-            match scene.view_query_delta(ds).unwrap() {
+            match scene
+                .view_query_delta(scene.active_view().id(), ds)
+                .unwrap()
+            {
                 ViewQueryDelta::Delta {
                     entered,
                     left,
@@ -3318,14 +3419,20 @@ mod tests {
         // has to reach it even when the level itself does not move.
         let (mut scene, ds) = regular_slice_scene([512, 512]);
         set_slice_zoom(&mut scene, 4.0);
-        let ViewQueryDelta::Full(full) = scene.view_query_delta(&ds).unwrap() else {
+        let ViewQueryDelta::Full(full) = scene
+            .view_query_delta(scene.active_view().id(), &ds)
+            .unwrap()
+        else {
             panic!("the first query must be a full snapshot");
         };
         assert_eq!(full.visible_entities[0].target_level, 0);
         assert!(!full.visible_entities[0].level_pinned);
 
         pin_level(&mut scene, &ds, Some(0));
-        match scene.view_query_delta(&ds).unwrap() {
+        match scene
+            .view_query_delta(scene.active_view().id(), &ds)
+            .unwrap()
+        {
             ViewQueryDelta::Delta { changed, .. } => {
                 assert_eq!(changed.len(), 1);
                 assert_eq!(changed[0].target_level, 0);
@@ -3344,7 +3451,9 @@ mod tests {
         assert_eq!(queried_target(&scene, &ds), 3);
 
         pin_level(&mut scene, &ds, Some(2));
-        scene.view_query_delta(&ds).unwrap();
+        scene
+            .view_query_delta(scene.active_view().id(), &ds)
+            .unwrap();
         pin_level(&mut scene, &ds, None);
         assert_eq!(queried_target(&scene, &ds), 2);
 
@@ -3377,7 +3486,9 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("collection".into());
-        let plans = scene.chunk_plan_for(&ds_id).unwrap();
+        let plans = scene
+            .chunk_plan_for(scene.active_view().id(), &ds_id)
+            .unwrap();
         // Only the member at origin should be visible
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].image_id, ImageId("m1-image".into()));
@@ -3390,7 +3501,12 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // Ray through viewport center should hit the single image
-        let hit = scene.ray_pick(&DatasetId::from("ds1"), 400.0, 300.0);
+        let hit = scene.ray_pick(
+            scene.active_view().id(),
+            &DatasetId::from("ds1"),
+            400.0,
+            300.0,
+        );
         assert!(hit.is_some());
         let h = hit.unwrap();
         assert_eq!(h.entity_id, EntityId::from("ds1-entity"));
@@ -3402,7 +3518,12 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // Ray way off screen should miss
-        let hit = scene.ray_pick(&DatasetId::from("ds1"), -10000.0, -10000.0);
+        let hit = scene.ray_pick(
+            scene.active_view().id(),
+            &DatasetId::from("ds1"),
+            -10000.0,
+            -10000.0,
+        );
         assert!(hit.is_none());
     }
 
@@ -3411,7 +3532,12 @@ mod tests {
         let scene = Scene::new([800, 600]);
         assert!(
             scene
-                .ray_pick(&DatasetId::from("nope"), 400.0, 300.0)
+                .ray_pick(
+                    scene.active_view().id(),
+                    &DatasetId::from("nope"),
+                    400.0,
+                    300.0
+                )
                 .is_none()
         );
     }
@@ -3424,8 +3550,14 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let id = DatasetId::from("ds1");
-        let with_z = scene.project_annotation(&id, 40.0, 30.0, 7.0).unwrap();
-        let without_z = scene.camera.project_to_screen([40.0, 30.0, 0.0]).unwrap();
+        let with_z = scene
+            .project_annotation(scene.active_view().id(), &id, 40.0, 30.0, 7.0)
+            .unwrap();
+        let without_z = scene
+            .active_view()
+            .camera
+            .project_to_screen([40.0, 30.0, 0.0])
+            .unwrap();
         assert_eq!(with_z, without_z);
     }
 
@@ -3457,10 +3589,10 @@ mod tests {
         let id = DatasetId::from("ds1");
         let (sx, sy) = (400.0, 300.0); // viewport center → hits the cube
         let voxel = scene
-            .pick_annotation_voxel(&id, sx, sy)
+            .pick_annotation_voxel(scene.active_view().id(), &id, sx, sy)
             .expect("center ray should hit the volume");
         let screen = scene
-            .project_annotation(&id, voxel[0], voxel[1], voxel[2])
+            .project_annotation(scene.active_view().id(), &id, voxel[0], voxel[1], voxel[2])
             .expect("picked point should project in front of the camera");
         assert!(
             (screen[0] - sx).abs() < 1.0 && (screen[1] - sy).abs() < 1.0,
@@ -3518,7 +3650,7 @@ mod tests {
         let id = DatasetId::from("ds1");
         assert!(
             scene
-                .pick_annotation_voxel(&id, -10_000.0, -10_000.0)
+                .pick_annotation_voxel(scene.active_view().id(), &id, -10_000.0, -10_000.0)
                 .is_none()
         );
     }
@@ -3529,7 +3661,13 @@ mod tests {
         scene.set_mode_3d();
         assert!(
             scene
-                .project_annotation(&DatasetId::from("nope"), 1.0, 2.0, 3.0)
+                .project_annotation(
+                    scene.active_view().id(),
+                    &DatasetId::from("nope"),
+                    1.0,
+                    2.0,
+                    3.0
+                )
                 .is_none()
         );
     }
@@ -3567,7 +3705,7 @@ mod tests {
         // from the viewport center.
         let pin = [8.0, 8.0, 8.0];
         let before = scene
-            .project_annotation(&id, pin[0], pin[1], pin[2])
+            .project_annotation(scene.active_view().id(), &id, pin[0], pin[1], pin[2])
             .expect("corner pin should project in front of the camera");
         let off_center = ((before[0] - center[0]).powi(2) + (before[1] - center[1]).powi(2)).sqrt();
         assert!(
@@ -3586,7 +3724,7 @@ mod tests {
         );
 
         let after = scene
-            .project_annotation(&id, pin[0], pin[1], pin[2])
+            .project_annotation(scene.active_view().id(), &id, pin[0], pin[1], pin[2])
             .expect("pin should still project in front of the camera after centering");
 
         let moved = ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2)).sqrt();
@@ -3620,7 +3758,9 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         scene.set_mode_3d();
         let id = DatasetId::from("ds1");
-        let before = scene.project_annotation(&id, 8.0, 8.0, 8.0).unwrap();
+        let before = scene
+            .project_annotation(scene.active_view().id(), &id, 8.0, 8.0, 8.0)
+            .unwrap();
         scene.apply(
             crate::command::ViewportCommand::CenterOnVoxel3D {
                 dataset_id: "does-not-exist".to_string(),
@@ -3630,7 +3770,9 @@ mod tests {
             }
             .into(),
         );
-        let after = scene.project_annotation(&id, 8.0, 8.0, 8.0).unwrap();
+        let after = scene
+            .project_annotation(scene.active_view().id(), &id, 8.0, 8.0, 8.0)
+            .unwrap();
         assert_eq!(before, after, "unknown dataset must not move the camera");
     }
 
@@ -3639,7 +3781,7 @@ mod tests {
         // Two adjacent members within the viewport.
         let mut scene = Scene::new([1024, 512]);
         // Pan camera to see both members
-        if let Camera::Slice(ref mut v) = scene.camera {
+        if let Camera::Slice(ref mut v) = scene.active_view_mut().camera {
             v.center = [256.0, 128.0];
         }
         let reg = test_helpers::make_collection_dataset_opened(
@@ -3651,7 +3793,9 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("collection".into());
-        let plans = scene.chunk_plan_for(&ds_id).unwrap();
+        let plans = scene
+            .chunk_plan_for(scene.active_view().id(), &ds_id)
+            .unwrap();
         let ids: Vec<&ImageId> = plans.iter().map(|p| &p.image_id).collect();
         assert!(
             ids.contains(&&ImageId("m1-image".into())),
@@ -4042,8 +4186,13 @@ mod tests {
                 .sqrt()
         };
         let mut scene = scene_with_big_and_collection();
-        let expected = diagonal(scene.visible_bounds().unwrap().world);
-        assert!((scene.volume_diagonal() - expected).abs() < 1e-12);
+        let expected = diagonal(
+            scene
+                .visible_bounds(scene.active_view().id())
+                .unwrap()
+                .world,
+        );
+        assert!((scene.volume_diagonal(scene.active_view().id()) - expected).abs() < 1e-12);
 
         scene
             .dataset_settings
@@ -4051,7 +4200,7 @@ mod tests {
             .unwrap()
             .visible = false;
         let collection = diagonal(scene.dataset_world_bounds("collection").unwrap());
-        assert!((scene.volume_diagonal() - collection).abs() < 1e-12);
+        assert!((scene.volume_diagonal(scene.active_view().id()) - collection).abs() < 1e-12);
         assert!(collection < expected, "big held the collection inside it");
     }
 
@@ -4064,7 +4213,7 @@ mod tests {
             1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let mut scene = Scene::new([800, 600]);
-        assert_eq!(scene.volume_diagonal(), 1.0);
+        assert_eq!(scene.volume_diagonal(scene.active_view().id()), 1.0);
         assert_eq!(scene.dataset_model_matrix("nope"), identity);
         assert_eq!(scene.dataset_inv_model_matrix("nope"), identity);
 
@@ -4075,7 +4224,8 @@ mod tests {
         assert_eq!(scene.dataset_model_matrix("nope"), identity);
         assert_eq!(scene.dataset_inv_model_matrix("nope"), identity);
         assert!(
-            scene.volume_diagonal().is_finite() && scene.volume_diagonal() > 0.0,
+            scene.volume_diagonal(scene.active_view().id()).is_finite()
+                && scene.volume_diagonal(scene.active_view().id()) > 0.0,
             "diagonal must stay finite once data is loaded"
         );
     }
@@ -4141,13 +4291,13 @@ mod tests {
             min: min2,
             max: max2,
         } = scene
-            .dataset_plane_bounds("ds1")
+            .dataset_plane_bounds(scene.active_view().id(), "ds1")
             .expect("known dataset has voxel bounds");
         let mid_x = (min2[0] + max2[0]) / 2.0;
         let mid_y = (min2[1] + max2[1]) / 2.0;
 
         assert!(scene.fit_camera_to_dataset("ds1"));
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(s) => {
                 assert!(
                     (s.center[0] - mid_x).abs() < 1e-9 && (s.center[1] - mid_y).abs() < 1e-9,
@@ -4168,7 +4318,7 @@ mod tests {
     fn fit_camera_to_dataset_targets_midpoint_in_3d_with_valid_clip() {
         let mut scene = Scene::new([800, 600]);
         // Put the camera in 3D arcball mode first; the fit must preserve it.
-        scene.camera = Camera::new_3d([800, 600]);
+        scene.active_view_mut().camera = Camera::new_3d([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
@@ -4180,7 +4330,7 @@ mod tests {
         ];
 
         assert!(scene.fit_camera_to_dataset("ds1"));
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(a) => {
                 for (axis, &m) in mid.iter().enumerate() {
                     assert!(
@@ -4238,21 +4388,27 @@ mod tests {
             for three_d in [false, true] {
                 for (theta, phi) in [(0.5, 0.8), (2.6, 2.2), (-1.0, 0.1)] {
                     let mut scene = fitted_volume(shape, viewport, three_d);
-                    if let Camera::Arcball(arcball) = &mut scene.camera {
+                    if let Camera::Arcball(arcball) = &mut scene.active_view_mut().camera {
                         arcball.rotate(theta - arcball.theta, phi - arcball.phi);
                     }
                     for zoom in [8.0, 2.0, 0.177, 0.08, 0.004] {
-                        let before = scene.camera.clone();
+                        let before = scene.active_view().camera.clone();
                         let epoch = scene.epochs.view;
                         assert!(scene.zoom_to_pixels_per_sample(&id, zoom));
-                        let measured = scene.pixels_per_sample(&id).unwrap();
+                        let measured = scene
+                            .pixels_per_sample(scene.active_view().id(), &id)
+                            .unwrap();
                         assert!(
                             (measured - zoom).abs() <= zoom * 1e-6,
                             "{shape:?} on {viewport:?}, 3D {three_d}: asked {zoom}, measures {measured}"
                         );
-                        assert_eq!(scene.camera.framing(), Framing::Placed);
-                        assert!(scene.camera == before || scene.epochs.view == epoch + 1);
-                        if let (Camera::Arcball(a), Camera::Arcball(b)) = (&scene.camera, &before) {
+                        assert_eq!(scene.active_view().camera.framing(), Framing::Placed);
+                        assert!(
+                            scene.active_view().camera == before || scene.epochs.view == epoch + 1
+                        );
+                        if let (Camera::Arcball(a), Camera::Arcball(b)) =
+                            (&scene.active_view().camera, &before)
+                        {
                             assert_eq!((a.target, a.theta, a.phi), (b.target, b.theta, b.phi));
                             assert!(0.0 < a.near && a.near < a.far);
                         }
@@ -4269,7 +4425,7 @@ mod tests {
         let WorldBox { min, max } = scene.dataset_world_bounds("v").unwrap();
         for zoom in [0.5, 0.05] {
             assert!(scene.zoom_to_pixels_per_sample(&id, zoom));
-            let Camera::Arcball(arcball) = &scene.camera else {
+            let Camera::Arcball(arcball) = &scene.active_view().camera else {
                 panic!("expected an arcball camera");
             };
             let eye = arcball.eye_position();
@@ -4298,23 +4454,26 @@ mod tests {
     fn zoom_to_pixels_per_sample_refuses_what_it_cannot_reach() {
         let id = DatasetId("v".to_string());
         let mut scene = fitted_volume([1, 1, 128, 512, 512], [800, 600], true);
-        let (fitted, epoch) = (scene.camera.clone(), scene.epochs.view);
+        let (fitted, epoch) = (scene.active_view().camera.clone(), scene.epochs.view);
         for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(!scene.zoom_to_pixels_per_sample(&id, zoom), "zoom {zoom}");
         }
         assert!(!scene.zoom_to_pixels_per_sample(&DatasetId("none".to_string()), 1.0));
-        assert_eq!((&scene.camera, scene.epochs.view), (&fitted, epoch));
+        assert_eq!(
+            (&scene.active_view().camera, scene.epochs.view),
+            (&fitted, epoch)
+        );
         // Looking past the volume, the view axis never meets it.
-        if let Camera::Arcball(arcball) = &mut scene.camera {
+        if let Camera::Arcball(arcball) = &mut scene.active_view_mut().camera {
             arcball.target = [10.0, 10.0, 10.0];
         }
-        let moved = scene.camera.clone();
+        let moved = scene.active_view().camera.clone();
         assert!(!scene.zoom_to_pixels_per_sample(&id, 1.0));
-        assert_eq!(scene.camera, moved);
+        assert_eq!(scene.active_view().camera, moved);
         scene.set_mode_fly();
-        let fly = scene.camera.clone();
+        let fly = scene.active_view().camera.clone();
         assert!(!scene.zoom_to_pixels_per_sample(&id, 1.0));
-        assert_eq!(scene.camera, fly);
+        assert_eq!(scene.active_view().camera, fly);
     }
 
     #[test]
@@ -4322,10 +4481,11 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let before = scene.camera.clone();
+        let before = scene.active_view().camera.clone();
         assert!(!scene.fit_camera_to_dataset("ghost"));
         assert_eq!(
-            scene.camera, before,
+            scene.active_view().camera,
+            before,
             "camera must be untouched on no-bounds"
         );
     }
@@ -4348,7 +4508,7 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let PlaneBox { min, max } = scene
-            .dataset_plane_bounds("ds1")
+            .dataset_plane_bounds(scene.active_view().id(), "ds1")
             .expect("known dataset has voxel bounds");
         for v in min.iter().chain(max.iter()) {
             assert!(v.is_finite(), "non-finite voxel bound leaked: {v}");
@@ -4380,15 +4540,21 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let (min, max) = scene.dataset_fit_bounds("ds1").expect("slice bounds");
+        let (min, max) = scene
+            .dataset_fit_bounds(scene.active_view().id(), "ds1")
+            .expect("slice bounds");
         assert_eq!((min, max), ([0.0, 0.0, 0.0], [2048.0, 1024.0, 0.0]));
 
-        scene.camera = Camera::new_3d([800, 600]);
+        scene.active_view_mut().camera = Camera::new_3d([800, 600]);
         assert_eq!(
-            scene.dataset_fit_bounds("ds1"),
+            scene.dataset_fit_bounds(scene.active_view().id(), "ds1"),
             scene.dataset_world_bounds("ds1").map(|b| (b.min, b.max)),
         );
-        assert!(scene.dataset_fit_bounds("nope").is_none());
+        assert!(
+            scene
+                .dataset_fit_bounds(scene.active_view().id(), "nope")
+                .is_none()
+        );
     }
 
     #[test]
@@ -4396,7 +4562,11 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert!(scene.dataset_plane_bounds("nope").is_none());
+        assert!(
+            scene
+                .dataset_plane_bounds(scene.active_view().id(), "nope")
+                .is_none()
+        );
     }
 
     #[test]
@@ -4416,10 +4586,10 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        scene.camera = Camera::new_2d([vw, vh]);
+        scene.active_view_mut().camera = Camera::new_2d([vw, vh]);
         assert!(scene.fit_camera_to_dataset("ds1"));
 
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(s) => {
                 assert!(
                     (s.center[0] - w as f64 / 2.0).abs() < 1e-9
@@ -4469,10 +4639,10 @@ mod tests {
             (min3[2] + max3[2]) / 2.0,
         ];
 
-        scene.camera = Camera::new_3d([vw, vh]);
+        scene.active_view_mut().camera = Camera::new_3d([vw, vh]);
         assert!(scene.fit_camera_to_dataset("ds1"));
 
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(a) => {
                 for (axis, &m) in mid.iter().enumerate() {
                     assert!(
@@ -4541,22 +4711,24 @@ mod tests {
                 plane: SlicePlane::Xz,
             },
         );
-        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
-        assert_eq!(scene.view.y, Some(256));
+        assert_eq!(scene.active_view().slice_plane(), SlicePlane::Xz);
+        assert_eq!(scene.active_view().axes.y, Some(256));
         assert!(scene.epochs.view > epochs.view);
         assert!(scene.epochs.selection > epochs.selection);
-        assert_eq!(scene.camera.framing(), Framing::Framed);
+        assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
         // 128 planes four times as deep as a sample is wide draw as tall as
         // the 512 samples across.
-        let bounds = scene.dataset_plane_bounds("vol").unwrap();
+        let bounds = scene
+            .dataset_plane_bounds(scene.active_view().id(), "vol")
+            .unwrap();
         assert_eq!((bounds.min, bounds.max), ([0.0; 3], [512.0, 512.0, 512.0]));
-        let Camera::Slice(slice) = &scene.camera else {
+        let Camera::Slice(slice) = &scene.active_view().camera else {
             panic!("a slice camera");
         };
         assert_eq!(slice.center, [256.0, 256.0]);
 
         // The plan cuts chunk row 2 along Y, through both chunks along Z.
-        let plans = scene.chunk_plan_for(&ds).unwrap();
+        let plans = scene.chunk_plan_for(scene.active_view().id(), &ds).unwrap();
         let needed = &plans[0].needed;
         assert!(!needed.is_empty());
         assert!(needed.iter().all(|c| c.y == 2), "{needed:?}");
@@ -4565,10 +4737,13 @@ mod tests {
 
         // Scrubbing moves the cut along Y; the plane survives a trip to 3D.
         apply_vp(&mut scene, SetY { y: 400 });
-        assert_eq!(scene.layer_cut(&ds, SlicePlane::Xz), 400..401);
+        assert_eq!(
+            scene.layer_cut(&scene.active_view().axes, &ds, SlicePlane::Xz),
+            400..401
+        );
         apply_vp(&mut scene, SetMode3D);
         apply_vp(&mut scene, SetMode2D);
-        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
+        assert_eq!(scene.active_view().slice_plane(), SlicePlane::Xz);
         apply_vp(
             &mut scene,
             SetSlicePlane {
@@ -4576,22 +4751,26 @@ mod tests {
             },
         );
         assert_eq!(
-            scene.dataset_plane_bounds("vol").unwrap().max,
+            scene
+                .dataset_plane_bounds(scene.active_view().id(), "vol")
+                .unwrap()
+                .max,
             [512.0, 512.0, 128.0]
         );
-        assert_eq!(scene.view.y, Some(400));
+        assert_eq!(scene.active_view().axes.y, Some(400));
     }
 
     #[test]
     fn opening_a_dataset_frames_a_new_scene() {
         let scene = opened_volume([800, 600]);
-        assert_eq!(scene.camera.framing(), Framing::Framed);
+        assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
         let mut fitted = Scene::new([800, 600]);
         fitted.document = scene.document.clone();
         fitted.rebuild_derived();
-        fitted.camera.fit(&fitted.visible_bounds().unwrap());
-        fitted.camera.set_framing(Framing::Framed);
-        assert_eq!(scene.camera, fitted.camera);
+        let bounds = fitted.visible_bounds(fitted.active_view().id()).unwrap();
+        fitted.active_view_mut().camera.fit(&bounds);
+        fitted.active_view_mut().camera.set_framing(Framing::Framed);
+        assert_eq!(scene.active_view().camera, fitted.active_view().camera);
     }
 
     #[test]
@@ -4605,12 +4784,12 @@ mod tests {
                 dy: -10.0,
             },
         );
-        let slice = scene.camera.clone();
+        let slice = scene.active_view().camera.clone();
         assert_eq!(slice.framing(), Framing::Placed);
 
         // The first visit to 3D fits the data.
         apply_vp(&mut scene, SetMode3D);
-        assert_eq!(scene.camera.framing(), Framing::Framed);
+        assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
         apply_vp(
             &mut scene,
             Rotate3D {
@@ -4618,12 +4797,20 @@ mod tests {
                 d_phi: 0.1,
             },
         );
-        let arcball = scene.camera.clone();
+        let arcball = scene.active_view().camera.clone();
 
         apply_vp(&mut scene, SetMode2D);
-        assert_eq!(scene.camera, slice, "2D comes back as the person left it");
+        assert_eq!(
+            scene.active_view().camera,
+            slice,
+            "2D comes back as the person left it"
+        );
         apply_vp(&mut scene, SetMode3D);
-        assert_eq!(scene.camera, arcball, "3D comes back as the person left it");
+        assert_eq!(
+            scene.active_view().camera,
+            arcball,
+            "3D comes back as the person left it"
+        );
     }
 
     #[test]
@@ -4631,7 +4818,7 @@ mod tests {
         use crate::command::ViewportCommand::*;
         let mut scene = opened_volume([800, 600]);
         apply_vp(&mut scene, Pan { dx: 30.0, dy: 0.0 });
-        let zoom = scene.camera.effective_zoom();
+        let zoom = scene.active_view().camera.effective_zoom();
         apply_vp(&mut scene, SetMode3D);
         apply_vp(
             &mut scene,
@@ -4642,9 +4829,9 @@ mod tests {
             },
         );
         apply_vp(&mut scene, SetMode2D);
-        assert_eq!(scene.camera.viewport(), [1000, 700]);
+        assert_eq!(scene.active_view().camera.viewport(), [1000, 700]);
         assert_eq!(
-            scene.camera.effective_zoom(),
+            scene.active_view().camera.effective_zoom(),
             zoom,
             "a resize keeps a placed zoom"
         );
@@ -4654,24 +4841,24 @@ mod tests {
     fn a_framed_camera_fits_a_resized_canvas_and_a_placed_one_keeps_its_zoom() {
         use crate::command::ViewportCommand::*;
         let mut framed = opened_volume([800, 600]);
-        let zoom = framed.camera.effective_zoom();
+        let zoom = framed.active_view().camera.effective_zoom();
         let resize = SetViewport {
             width: 400,
             height: 600,
             pixel_ratio: None,
         };
         apply_vp(&mut framed, resize.clone());
-        assert_eq!(framed.camera.framing(), Framing::Framed);
+        assert_eq!(framed.active_view().camera.framing(), Framing::Framed);
         assert!(
-            framed.camera.effective_zoom() < zoom,
+            framed.active_view().camera.effective_zoom() < zoom,
             "a narrower canvas fits smaller"
         );
 
         let mut placed = opened_volume([800, 600]);
         apply_vp(&mut placed, Pan { dx: 1.0, dy: 0.0 });
-        let zoom = placed.camera.effective_zoom();
+        let zoom = placed.active_view().camera.effective_zoom();
         apply_vp(&mut placed, resize);
-        assert_eq!(placed.camera.effective_zoom(), zoom);
+        assert_eq!(placed.active_view().camera.effective_zoom(), zoom);
     }
 
     #[test]
@@ -4679,10 +4866,10 @@ mod tests {
         use crate::command::ViewportCommand::*;
         let mut scene = Scene::new([800, 600]);
         apply_vp(&mut scene, Pan { dx: 50.0, dy: 50.0 });
-        assert_eq!(scene.camera.framing(), Framing::Unframed);
+        assert_eq!(scene.active_view().camera.framing(), Framing::Unframed);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert_eq!(scene.camera.framing(), Framing::Framed);
+        assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
     }
 
     #[test]
@@ -4697,11 +4884,11 @@ mod tests {
             }
             .into(),
         );
-        assert_eq!(scene.camera.framing(), Framing::Unframed);
-        assert!(scene.parked_camera.is_none());
+        assert_eq!(scene.active_view().camera.framing(), Framing::Unframed);
+        assert!(scene.active_view().parked_camera.is_none());
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert_eq!(scene.camera.framing(), Framing::Framed);
+        assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
     }
 
     #[test]
@@ -4719,7 +4906,7 @@ mod tests {
             );
             scene.apply(DocumentCommand::DatasetOpened(reg).into());
         }
-        let both = scene.camera.effective_zoom();
+        let both = scene.active_view().camera.effective_zoom();
         apply_vp(
             &mut scene,
             SetDatasetVisible {
@@ -4727,8 +4914,8 @@ mod tests {
                 visible: false,
             },
         );
-        assert!(scene.camera.effective_zoom() > both * 10.0);
-        assert_eq!(scene.camera.framing(), Framing::Framed);
+        assert!(scene.active_view().camera.effective_zoom() > both * 10.0);
+        assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
     }
 
     #[test]
@@ -4737,11 +4924,14 @@ mod tests {
         let mut page = opened_volume([390, 844]);
         page.apply(crate::command::ViewportCommand::Pan { dx: 9.0, dy: 0.0 }.into());
         page.import_presence(
-            source.camera.clone(),
-            source.view.clone(),
+            source.active_view().camera.clone(),
+            source.active_view().axes.clone(),
             source.display.clone(),
         );
-        assert_eq!(page.camera, opened_volume([390, 844]).camera);
+        assert_eq!(
+            page.active_view().camera,
+            opened_volume([390, 844]).active_view().camera
+        );
     }
 
     #[test]
@@ -4751,15 +4941,15 @@ mod tests {
         apply_vp(&mut leader, SetMode3D);
         let mut page = opened_volume([800, 600]);
         apply_vp(&mut page, Pan { dx: 9.0, dy: 0.0 });
-        let own = page.camera.clone();
+        let own = page.active_view().camera.clone();
         page.import_presence(
-            leader.camera.clone(),
-            leader.view.clone(),
+            leader.active_view().camera.clone(),
+            leader.active_view().axes.clone(),
             leader.display.clone(),
         );
-        assert!(page.camera.is_volume());
+        assert!(page.active_view().camera.is_volume());
         apply_vp(&mut page, SetMode2D);
-        assert_eq!(page.camera, own);
+        assert_eq!(page.active_view().camera, own);
     }
 
     #[test]
@@ -4793,7 +4983,7 @@ mod tests {
         let mut scene = test_helpers::placed_scene([640, 480]);
         scene.apply(crate::command::ViewportCommand::SetCenter { x: 42.0, y: 7.0 }.into());
         let baseline = scene.epochs.clone();
-        let camera_before = scene.camera.clone();
+        let camera_before = scene.active_view().camera.clone();
 
         scene.load_document(doc);
 
@@ -4822,7 +5012,7 @@ mod tests {
         assert!(scene.epochs.selection > baseline.selection);
         // ...but the local camera is placed and untouched, so view does not.
         assert_eq!(scene.epochs.view, baseline.view);
-        assert_eq!(scene.camera, camera_before);
+        assert_eq!(scene.active_view().camera, camera_before);
     }
 
     #[test]
@@ -4875,7 +5065,7 @@ mod tests {
             framing: Framing::Placed,
             plane: SlicePlane::Xy,
         });
-        let mut remote_view = ViewState::new();
+        let mut remote_view = AxisPositions::new();
         remote_view.t = 3;
         let remote_display = DisplayState {
             gamma: 2.0,
@@ -4890,7 +5080,7 @@ mod tests {
 
         // The peer's 960 x 540 region spans this canvas's width, centered
         // where it was, with more of the world above and below.
-        let Camera::Slice(v) = &scene.camera else {
+        let Camera::Slice(v) = &scene.active_view().camera else {
             panic!("expected Slice camera");
         };
         assert_eq!(v.viewport, [800, 600]);
@@ -4898,7 +5088,7 @@ mod tests {
         assert!((x0 - (100.0 - 480.0)).abs() < 1e-9 && (x1 - (100.0 + 480.0)).abs() < 1e-9);
         assert!(y0 < 200.0 - 270.0 && y1 > 200.0 + 270.0);
         assert_eq!(v.center, [100.0, 200.0]);
-        assert_eq!(scene.view.t, 3);
+        assert_eq!(scene.active_view().axes.t, 3);
         assert_eq!(scene.display.gamma, 2.0);
         assert_eq!(scene.epochs.view, baseline.view + 1);
         assert_eq!(scene.epochs.selection, baseline.selection + 1);
@@ -4925,8 +5115,12 @@ mod tests {
             framing: Framing::Placed,
             plane: SlicePlane::Xy,
         });
-        scene.import_presence(zero_zoom.clone(), ViewState::new(), DisplayState::default());
-        match &scene.camera {
+        scene.import_presence(
+            zero_zoom.clone(),
+            AxisPositions::new(),
+            DisplayState::default(),
+        );
+        match &scene.active_view().camera {
             Camera::Slice(v) => {
                 assert!(
                     v.zoom >= SLICE_ZOOM_MIN && v.zoom.is_finite(),
@@ -4941,12 +5135,12 @@ mod tests {
         // Sanitizing is idempotent: re-importing the identical (still
         // out-of-range) presence clamps to the same camera → epoch-silent.
         let epochs = scene.epochs.clone();
-        scene.import_presence(zero_zoom, ViewState::new(), DisplayState::default());
+        scene.import_presence(zero_zoom, AxisPositions::new(), DisplayState::default());
         assert_eq!(scene.epochs, epochs);
 
         // Pan after the clamp stays finite.
         scene.apply(crate::command::ViewportCommand::Pan { dx: 3.0, dy: 0.0 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(v) => {
                 assert!(v.center[0].is_finite() && v.center[1].is_finite());
             }
@@ -4959,8 +5153,8 @@ mod tests {
             distance: 0.0,
             ..Arcball::new([32, 32])
         });
-        scene.import_presence(bad_arcball, ViewState::new(), DisplayState::default());
-        match &scene.camera {
+        scene.import_presence(bad_arcball, AxisPositions::new(), DisplayState::default());
+        match &scene.active_view().camera {
             Camera::Arcball(v) => {
                 assert!(
                     v.distance.is_finite() && v.distance >= v.near && v.near > 0.0,
@@ -5379,7 +5573,7 @@ mod tests {
             let scene = grouped_scene(groups);
             let ds_id = DatasetId("coll".into());
             best_of_3(|| {
-                std::hint::black_box(scene.view_query(&ds_id).unwrap());
+                std::hint::black_box(scene.view_query(scene.active_view().id(), &ds_id).unwrap());
             })
         };
 
@@ -5623,5 +5817,146 @@ mod tests {
         assert_eq!(entered[0].target_level, 5);
         assert!(left.is_empty());
         assert!(changed.is_empty());
+    }
+
+    /// A scene of `a` and `b` with a second view beside the first, half the
+    /// canvas wide. Nothing makes one yet but these tests.
+    fn two_view_scene() -> (Scene, ViewId) {
+        let mut scene = Scene::new([800, 600]);
+        let second = ViewId(1);
+        let mut view = View::new(second, [400, 600]);
+        view.rect = crate::view::ViewRect {
+            x: 0.5,
+            y: 0.0,
+            width: 0.5,
+            height: 1.0,
+        };
+        scene.views.push(view);
+        for id in ["a", "b"] {
+            let opened = test_helpers::make_dataset_opened(id, id, 1);
+            scene.apply(DocumentCommand::DatasetOpened(opened).into());
+        }
+        (scene, second)
+    }
+
+    #[test]
+    fn a_new_scene_has_one_view_across_the_whole_canvas() {
+        let scene = Scene::new([800, 600]);
+        assert_eq!(scene.views().len(), 1);
+        let view = scene.active_view();
+        assert_eq!(view.rect, crate::view::ViewRect::WHOLE);
+        assert_eq!(view.datasets, ViewDatasets::All);
+        assert_eq!(view.camera.viewport(), [800, 600]);
+        assert_eq!(scene.view(view.id()), Some(view));
+    }
+
+    #[test]
+    fn the_whole_canvas_is_the_canvas_to_the_pixel() {
+        for canvas in [[1, 1], [799, 601], [3348, 1841]] {
+            assert_eq!(crate::view::ViewRect::WHOLE.size_on(canvas), canvas);
+        }
+    }
+
+    #[test]
+    fn each_view_takes_its_rectangle_of_the_canvas() {
+        let (mut scene, second) = two_view_scene();
+        apply_vp(
+            &mut scene,
+            crate::command::ViewportCommand::SetViewport {
+                width: 1000,
+                height: 500,
+                pixel_ratio: None,
+            },
+        );
+        assert_eq!(scene.active_view().camera.viewport(), [1000, 500]);
+        assert_eq!(scene.view(second).unwrap().camera.viewport(), [500, 500]);
+    }
+
+    #[test]
+    fn opening_a_dataset_fits_every_framed_view() {
+        let (scene, second) = two_view_scene();
+        for view in scene.views() {
+            assert_eq!(view.camera.framing(), Framing::Framed);
+        }
+        let mut alone = Scene::new([400, 600]);
+        alone.document = scene.document.clone();
+        alone.rebuild_derived();
+        let bounds = alone.visible_bounds(alone.active_view().id()).unwrap();
+        alone.active_view_mut().camera.fit(&bounds);
+        alone.active_view_mut().camera.set_framing(Framing::Framed);
+        assert_eq!(
+            scene.view(second).unwrap().camera,
+            alone.active_view().camera
+        );
+    }
+
+    #[test]
+    fn commands_steer_the_active_view_alone() {
+        let (mut scene, second) = two_view_scene();
+        let other = scene.view(second).unwrap().clone();
+        let before = scene.active_view().camera.clone();
+        apply_vp(
+            &mut scene,
+            crate::command::ViewportCommand::Pan { dx: 30.0, dy: 0.0 },
+        );
+        apply_vp(&mut scene, crate::command::ViewportCommand::SetZ { z: 0 });
+        apply_vp(&mut scene, crate::command::ViewportCommand::SetMode3D);
+        assert_ne!(scene.active_view().camera, before);
+        assert_eq!(scene.view(second), Some(&other));
+    }
+
+    #[test]
+    fn each_view_keeps_its_own_query_cursor() {
+        let (mut scene, second) = two_view_scene();
+        let first = scene.active_view().id();
+        let a = DatasetId("a".into());
+        let full = |delta: Option<ViewQueryDelta>| matches!(delta, Some(ViewQueryDelta::Full(_)));
+        assert!(full(scene.view_query_delta(first, &a)));
+        assert!(full(scene.view_query_delta(second, &a)));
+        assert!(!full(scene.view_query_delta(first, &a)));
+        assert!(!full(scene.view_query_delta(second, &a)));
+
+        // A mode switch changes one view's camera family, so that view
+        // resyncs and the other goes on with deltas.
+        apply_vp(&mut scene, crate::command::ViewportCommand::SetMode3D);
+        assert!(full(scene.view_query_delta(first, &a)));
+        assert!(!full(scene.view_query_delta(second, &a)));
+
+        scene.apply(DocumentCommand::RemoveDataset { id: a.clone() }.into());
+        assert!(
+            scene
+                .view_query_cursors
+                .keys()
+                .all(|(_, dataset)| *dataset != a)
+        );
+    }
+
+    #[test]
+    fn a_view_of_some_datasets_fits_and_queries_those_alone() {
+        let (mut scene, second) = two_view_scene();
+        let (a, b) = (DatasetId("a".into()), DatasetId("b".into()));
+        scene.view_mut(second).unwrap().datasets = ViewDatasets::Only(vec![b.clone()]);
+        assert_eq!(scene.shown_dataset_ids(second).collect::<Vec<_>>(), [&b]);
+        assert!(scene.view_query(second, &a).is_none());
+        assert!(scene.view_query(second, &b).is_some());
+        assert!(scene.view_query(scene.active_view().id(), &a).is_some());
+
+        scene.apply(DocumentCommand::RemoveDataset { id: b }.into());
+        assert_eq!(
+            scene.view(second).unwrap().datasets,
+            ViewDatasets::Only(Vec::new())
+        );
+    }
+
+    #[test]
+    fn an_unknown_view_answers_nothing() {
+        let scene = opened_volume([800, 600]);
+        let vol = DatasetId("vol".into());
+        let nowhere = ViewId(7);
+        assert!(scene.view(nowhere).is_none());
+        assert!(scene.view_query(nowhere, &vol).is_none());
+        assert!(scene.visible_region(nowhere, &vol).is_none());
+        assert!(scene.visible_bounds(nowhere).is_none());
+        assert!(scene.resolved_layers(nowhere).is_empty());
     }
 }

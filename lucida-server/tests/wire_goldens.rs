@@ -46,7 +46,7 @@ use lucida_core::scene::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, RenderMode,
 };
-use lucida_core::view::ViewState;
+use lucida_core::view::AxisPositions;
 use lucida_protocol::codec::{ChunkCodec, ChunkRelayReport, ChunkRelaySetting};
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
@@ -854,11 +854,11 @@ fn slice_camera() -> Camera {
     })
 }
 
-fn shared_view_state() -> ViewState {
-    ViewState {
+fn shared_view_state() -> AxisPositions {
+    AxisPositions {
         z_range: 10..14,
         t: 2,
-        ..ViewState::new()
+        ..AxisPositions::new()
     }
 }
 
@@ -933,10 +933,10 @@ fn fly_peer_presence() -> PresenceState {
             clip_mode: ClipMode::Sphere,
             framing: lucida_core::camera::Framing::Placed,
         })),
-        view: Some(ViewState {
+        view: Some(AxisPositions {
             z_range: 0..50,
             t: 0,
-            ..ViewState::new()
+            ..AxisPositions::new()
         }),
         display: Some(DisplayState::default()),
         following: None,

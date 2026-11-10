@@ -253,7 +253,7 @@ function readCut(
   scene: TickContext["scene"],
   datasetId: string,
 ): RegionCut {
-  const raw = scene.visible_region(datasetId);
+  const raw = scene.visible_region(scene.active_view(), datasetId);
   const parsed = raw && raw !== "null"
     ? (JSON.parse(raw) as {
       xy_bounds?: [number, number, number, number];
@@ -760,6 +760,7 @@ export class TickCoordinator {
     const memberRoster = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
+    const view = ctx.scene.active_view();
 
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
@@ -804,7 +805,7 @@ export class TickCoordinator {
         positions: snapshotInputs.positions,
       };
       const entitiesOverride = this.foldViewDeltaEntities(
-        ctx.scene, dsId, deps, snapshotInputs,
+        ctx.scene, view, dsId, deps, snapshotInputs,
       );
       if (entitiesOverride === "skip") continue;
 
@@ -814,6 +815,7 @@ export class TickCoordinator {
       // plans first.
       const built = buildPlanningSnapshot({
         scene: ctx.scene,
+        view,
         datasetId: dsId,
         dataset: ds,
         layer,
@@ -1485,6 +1487,7 @@ export class TickCoordinator {
    */
   private foldViewDeltaEntities(
     scene: TickContext["scene"],
+    view: number,
     datasetId: string,
     deps: SnapshotEntityDeps,
     inputsRef: object,
@@ -1496,7 +1499,7 @@ export class TickCoordinator {
       this.viewDeltaScene = scene;
     }
 
-    const deltaJson = scene.view_query_delta(datasetId);
+    const deltaJson = scene.view_query_delta(view, datasetId);
     // `null` means the dataset is unknown and the Rust cursor did not
     // advance, so dropping ours keeps the two consistent for a later re-add.
     if (!deltaJson || deltaJson === "null") {
@@ -1523,7 +1526,7 @@ export class TickCoordinator {
         // scene, or a basis change), so this delta is against a base we never
         // held. Reseed from the full query at this tick, which matches the
         // Rust cursor the delta call just advanced.
-        const seeded = this.buildEntityMapFromViewQuery(scene, datasetId, deps);
+        const seeded = this.buildEntityMapFromViewQuery(scene, view, datasetId, deps);
         if (seeded === null) {
           this.viewDeltaCursor.delete(datasetId);
           return "skip";
@@ -1547,10 +1550,11 @@ export class TickCoordinator {
    */
   private buildEntityMapFromViewQuery(
     scene: TickContext["scene"],
+    view: number,
     datasetId: string,
     deps: SnapshotEntityDeps,
   ): Map<string, EntitySnapshot> | null {
-    const vqJson = scene.view_query(datasetId);
+    const vqJson = scene.view_query(view, datasetId);
     const vq = JSON.parse(vqJson) as
       | { visible_entities?: ViewQueryEntityJson[] }
       | null;

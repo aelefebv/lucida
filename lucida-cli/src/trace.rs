@@ -1713,16 +1713,17 @@ pub fn compose_camera(
     }
     // The driver records the level this exact camera targets, so the page
     // must keep it rather than fit its own.
-    scene.camera.set_framing(Framing::Placed);
+    scene.active_view_mut().camera.set_framing(Framing::Placed);
 
-    let zoom = scene.pixels_per_sample(dataset_id).ok_or_else(|| {
+    let view = scene.active_view().id();
+    let zoom = scene.pixels_per_sample(view, dataset_id).ok_or_else(|| {
         CliError::new(
             ErrorKind::MissingResource,
             format!("dataset {} has no image to measure", dataset_id.0),
         )
     })?;
     let levels: Vec<u32> = scene
-        .view_query(dataset_id)
+        .view_query(view, dataset_id)
         .map(|query| {
             query
                 .visible_entities
@@ -1740,7 +1741,7 @@ pub fn compose_camera(
     };
 
     Ok(ComposedFraming {
-        camera: scene.camera.clone(),
+        camera: scene.active_view().camera.clone(),
         record: ComposedCamera {
             mode: request.kind,
             zoom,

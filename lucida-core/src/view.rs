@@ -2,15 +2,212 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
+use crate::camera::Camera;
 use crate::placement::Affine;
 use crate::slice_plane::SlicePlane;
-use lucida_content::SpatialAxis;
+use lucida_content::{DatasetId, SpatialAxis};
 
-/// Selected indices for non-displayed dimensions. Which channels show is per
-/// layer, in [`crate::scene::DatasetDisplaySettings::solo`] and each channel's
-/// `visible` flag.
+/// A view's identity within its scene, kept while the scene holds the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ViewId(pub u32);
+
+/// Where a view is drawn on the canvas: a rectangle in fractions of the
+/// canvas's width and height from its top-left corner, so a resize keeps the
+/// layout.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ViewRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ViewRect {
+    pub const WHOLE: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+
+    /// The rectangle's size in device pixels on a canvas of `canvas` device
+    /// pixels. The whole canvas is the canvas exactly.
+    pub fn size_on(&self, canvas: [u32; 2]) -> [u32; 2] {
+        let along = |fraction: f64, length: u32| (fraction * f64::from(length)).round() as u32;
+        [along(self.width, canvas[0]), along(self.height, canvas[1])]
+    }
+}
+
+/// Which of the scene's datasets a view shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ViewState {
+#[serde(rename_all = "snake_case")]
+pub enum ViewDatasets {
+    /// Every dataset the scene holds, including ones opened later.
+    All,
+    /// These alone.
+    Only(Vec<DatasetId>),
+}
+
+impl ViewDatasets {
+    pub fn shows(&self, dataset_id: &DatasetId) -> bool {
+        match self {
+            ViewDatasets::All => true,
+            ViewDatasets::Only(ids) => ids.contains(dataset_id),
+        }
+    }
+}
+
+/// One view of a scene: a camera onto the datasets it shows, standing at its
+/// own axis positions, drawn in its own rectangle of the canvas. Its 2D/3D
+/// mode is its camera's family, and its slice plane is its slice camera's.
+/// Every view shares the scene's datasets, display settings and memory
+/// budgets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct View {
+    id: ViewId,
+    pub camera: Camera,
+    /// The last camera of the family not in use: the slice camera while a
+    /// volume camera is active, and the other way round. Switching back
+    /// brings it back, so each mode keeps the view it had. Client-local.
+    #[serde(skip)]
+    pub(crate) parked_camera: Option<Camera>,
+    pub axes: AxisPositions,
+    pub datasets: ViewDatasets,
+    pub rect: ViewRect,
+}
+
+impl View {
+    /// A view of every dataset across the whole canvas, through a slice
+    /// camera on a canvas of `viewport` device pixels.
+    pub fn new(id: ViewId, viewport: [u32; 2]) -> Self {
+        Self {
+            id,
+            camera: Camera::new_2d(viewport),
+            parked_camera: None,
+            axes: AxisPositions::new(),
+            datasets: ViewDatasets::All,
+            rect: ViewRect::WHOLE,
+        }
+    }
+
+    pub fn id(&self) -> ViewId {
+        self.id
+    }
+
+    pub fn shows(&self, dataset_id: &DatasetId) -> bool {
+        self.datasets.shows(dataset_id)
+    }
+
+    /// The plane the slice camera cuts, whether it is active or parked. A
+    /// view that never had one cuts XY.
+    pub fn slice_plane(&self) -> SlicePlane {
+        match (&self.camera, &self.parked_camera) {
+            (Camera::Slice(s), _) | (_, Some(Camera::Slice(s))) => s.plane,
+            _ => SlicePlane::Xy,
+        }
+    }
+
+    /// The axis position along the slice plane's cut axis, before any layer
+    /// clamps it.
+    pub fn cut_index(&self) -> u32 {
+        self.axes.cut(self.slice_plane()).start
+    }
+
+    /// Both cameras, the active one first, so what every camera follows
+    /// reaches the parked one too.
+    pub(crate) fn cameras_mut(&mut self) -> impl Iterator<Item = &mut Camera> {
+        std::iter::once(&mut self.camera).chain(self.parked_camera.as_mut())
+    }
+
+    /// Resize both cameras to `size` device pixels, the parked one too so it
+    /// comes back sized for the canvas it returns to. A pixel ratio change,
+    /// `(from, to)`, resizes the canvas in device pixels but not on screen,
+    /// so the slice zoom scales with it and keeps the view's CSS size and
+    /// region.
+    pub(crate) fn resize(&mut self, size: [u32; 2], ratio: Option<(f64, f64)>) {
+        for camera in self.cameras_mut() {
+            if let (Some((from, to)), Camera::Slice(s)) = (ratio, &mut *camera) {
+                s.set_zoom(s.zoom * to / from);
+            }
+            camera.set_viewport(size[0], size[1]);
+        }
+    }
+
+    /// Switch to the slice camera: the one this view last had, or a new one.
+    /// Returns whether the camera changed family.
+    pub(crate) fn set_mode_2d(&mut self) -> bool {
+        if !self.camera.is_volume() {
+            return false;
+        }
+        let slice = match self.parked_camera.take() {
+            Some(parked @ Camera::Slice(_)) => parked,
+            _ => Camera::new_2d(self.camera.viewport()),
+        };
+        self.parked_camera = Some(std::mem::replace(&mut self.camera, slice));
+        true
+    }
+
+    /// Switch to the arcball. From fly mode it converts, keeping the eye and
+    /// the view direction. From 2D it brings back the volume camera this view
+    /// last had, or a new arcball. Returns whether the camera changed.
+    pub(crate) fn set_mode_3d(&mut self) -> bool {
+        let arcball = match &self.camera {
+            Camera::Arcball(_) => return false,
+            Camera::Fly(fly) => fly.to_arcball(),
+            Camera::Slice(_) => match self.parked_camera.take() {
+                Some(Camera::Arcball(parked)) => parked,
+                Some(Camera::Fly(parked)) => parked.to_arcball(),
+                _ => crate::camera::Arcball::new(self.camera.viewport()),
+            },
+        };
+        self.enter_volume(Camera::Arcball(arcball));
+        true
+    }
+
+    /// Switch to the fly camera. From the arcball it converts, keeping the
+    /// eye and the view direction. From 2D it brings back the volume camera
+    /// this view last had, or a new fly camera. Returns whether the camera
+    /// changed.
+    pub(crate) fn set_mode_fly(&mut self) -> bool {
+        let fly = match &self.camera {
+            Camera::Fly(_) => return false,
+            Camera::Arcball(arcball) => arcball.to_fly(),
+            Camera::Slice(_) => match self.parked_camera.take() {
+                Some(Camera::Fly(parked)) => parked,
+                Some(Camera::Arcball(parked)) => parked.to_fly(),
+                _ => crate::camera::Fly::new(self.camera.viewport()),
+            },
+        };
+        self.enter_volume(Camera::Fly(fly));
+        true
+    }
+
+    /// Make `camera`, a volume camera, the active one, parking the slice
+    /// camera if that is what it replaces.
+    fn enter_volume(&mut self, camera: Camera) {
+        let previous = std::mem::replace(&mut self.camera, camera);
+        if !previous.is_volume() {
+            self.parked_camera = Some(previous);
+        }
+    }
+
+    /// Make `camera` the active one. One of the other family parks the camera
+    /// it replaces, as a mode switch does.
+    pub(crate) fn adopt_camera(&mut self, camera: Camera) {
+        let previous = std::mem::replace(&mut self.camera, camera);
+        if previous.is_volume() != self.camera.is_volume() {
+            self.parked_camera = Some(previous);
+        }
+    }
+}
+
+/// Where a view stands on the axes it does not draw: its Z slab, its
+/// timepoint, and the Y or X place a side view cuts. Which channels show is
+/// per layer, in [`crate::scene::DatasetDisplaySettings::solo`] and each
+/// channel's `visible` flag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AxisPositions {
     /// Z slab range. A single slice is a range of length 1 (e.g. 42..43).
     pub z_range: Range<u32>,
     pub t: u32,
@@ -45,7 +242,7 @@ pub enum LegacyChannels {
     Solo(u32),
 }
 
-impl ViewState {
+impl AxisPositions {
     pub fn new() -> Self {
         Self {
             z_range: 0..1,
@@ -131,7 +328,7 @@ impl ViewState {
     }
 }
 
-impl Default for ViewState {
+impl Default for AxisPositions {
     fn default() -> Self {
         Self::new()
     }
@@ -143,7 +340,7 @@ mod tests {
 
     #[test]
     fn default_view_starts_at_zero() {
-        let v = ViewState::new();
+        let v = AxisPositions::new();
         assert_eq!(v.z_range, 0..1);
         assert_eq!(v.t, 0);
         assert_eq!(v.legacy_channels(), None);
@@ -151,7 +348,7 @@ mod tests {
 
     #[test]
     fn set_slice_updates_z_as_single_plane() {
-        let mut v = ViewState::new();
+        let mut v = AxisPositions::new();
         v.set_slice("z", 42).unwrap();
         assert_eq!(v.z_range, 42..43);
         assert_eq!(v.t, 0);
@@ -159,7 +356,7 @@ mod tests {
 
     #[test]
     fn each_plane_cuts_at_its_own_axis_position() {
-        let mut v = ViewState::new();
+        let mut v = AxisPositions::new();
         v.set_z_range(4..6);
         assert_eq!(v.cut(SlicePlane::Xy), 4..6);
         assert_eq!(v.cut(SlicePlane::Xz), 0..1);
@@ -169,45 +366,45 @@ mod tests {
         assert_eq!(v.cut(SlicePlane::Yz), 3..4);
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(json, r#"{"z_range":{"start":4,"end":6},"t":0,"y":9,"x":3}"#);
-        assert_eq!(serde_json::from_str::<ViewState>(&json).unwrap(), v);
+        assert_eq!(serde_json::from_str::<AxisPositions>(&json).unwrap(), v);
     }
 
     #[test]
     fn set_z_range_for_slab() {
-        let mut v = ViewState::new();
+        let mut v = AxisPositions::new();
         v.set_z_range(10..20);
         assert_eq!(v.z_range, 10..20);
     }
 
     #[test]
     fn set_slice_rejects_unknown_axis_and_the_channel() {
-        let mut v = ViewState::new();
+        let mut v = AxisPositions::new();
         assert!(v.set_slice("q", 1).is_err());
         assert!(v.set_slice("c", 1).is_err());
     }
 
     #[test]
     fn a_current_view_serializes_no_channel_selector() {
-        let json = serde_json::to_string(&ViewState::new()).unwrap();
+        let json = serde_json::to_string(&AxisPositions::new()).unwrap();
         assert_eq!(json, r#"{"z_range":{"start":0,"end":1},"t":0}"#);
-        let back: ViewState = serde_json::from_str(&json).unwrap();
+        let back: AxisPositions = serde_json::from_str(&json).unwrap();
         assert_eq!(back.legacy_channels(), None);
     }
 
     #[test]
     fn a_legacy_view_decodes_its_scene_wide_mode() {
-        let single: ViewState = serde_json::from_str(
+        let single: AxisPositions = serde_json::from_str(
             r#"{"z_range":{"start":0,"end":1},"t":0,"c":2,"multi_channel":false}"#,
         )
         .unwrap();
         assert_eq!(single.legacy_channels(), Some(LegacyChannels::Solo(2)));
 
         // Views from before the flag existed meant single-channel.
-        let flagless: ViewState =
+        let flagless: AxisPositions =
             serde_json::from_str(r#"{"z_range":{"start":0,"end":1},"t":0,"c":1}"#).unwrap();
         assert_eq!(flagless.legacy_channels(), Some(LegacyChannels::Solo(1)));
 
-        let mut composite: ViewState = serde_json::from_str(
+        let mut composite: AxisPositions = serde_json::from_str(
             r#"{"z_range":{"start":0,"end":1},"t":0,"c":1,"multi_channel":true}"#,
         )
         .unwrap();
@@ -215,6 +412,6 @@ mod tests {
             composite.take_legacy_channels(),
             Some(LegacyChannels::Composite)
         );
-        assert_eq!(composite, ViewState::new());
+        assert_eq!(composite, AxisPositions::new());
     }
 }

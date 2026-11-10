@@ -24,7 +24,7 @@ use wasm_bindgen::prelude::*;
 use crate::camera::{Arcball, Camera, Framing};
 use crate::placement::CameraSpace;
 use crate::scene::{DatasetDisplaySettings, DisplayState, Scene};
-use crate::view::ViewState;
+use crate::view::AxisPositions;
 
 mod payload;
 
@@ -87,7 +87,7 @@ pub struct SavedView {
 
     /// Z slab + T + C selection. Reuses the same struct as
     /// [`crate::protocol::PresenceState`].
-    pub view: ViewState,
+    pub view: AxisPositions,
 
     /// Global contrast + gamma. Reuses the same struct as
     /// [`crate::protocol::PresenceState`].
@@ -135,7 +135,7 @@ struct SavedViewWire {
     #[serde(default)]
     active_layouts: IndexMap<DatasetId, LayoutId>,
     camera: Camera,
-    view: ViewState,
+    view: AxisPositions,
     display: DisplayState,
     #[serde(default)]
     dataset_order: Vec<DatasetId>,
@@ -216,7 +216,7 @@ impl SavedView {
             datasets: Vec::new(),
             active_layouts: IndexMap::new(),
             camera: Camera::new_2d(viewport),
-            view: ViewState::new(),
+            view: AxisPositions::new(),
             display: DisplayState::default(),
             dataset_order: Vec::new(),
             dataset_settings: IndexMap::new(),
@@ -237,10 +237,10 @@ impl SavedView {
 
     /// This view's selectors in `scene`'s spaces: its side-view axis positions
     /// carried from the spaces it was saved in should they differ.
-    pub fn view_in(&self, scene: &Scene) -> ViewState {
+    pub fn view_in(&self, scene: &Scene) -> AxisPositions {
         let mut view = self.view.clone();
         if let Some(from) = &self.camera_space {
-            scene.carry_view(&mut view, from);
+            scene.carry_axes(&mut view, from);
         }
         view
     }
@@ -602,10 +602,13 @@ mod tests {
         recorded.framing = Framing::Placed;
         let mut camera = Camera::Arcball(recorded);
         assert!(reframe_sample_unit_camera(&mut camera));
-        scene.import_presence(camera, ViewState::new(), DisplayState::default());
+        scene.import_presence(camera, AxisPositions::new(), DisplayState::default());
 
-        let Camera::Arcball(arcball) = &scene.camera else {
-            panic!("expected an arcball camera, got {:?}", scene.camera);
+        let Camera::Arcball(arcball) = &scene.active_view().camera else {
+            panic!(
+                "expected an arcball camera, got {:?}",
+                scene.active_view().camera
+            );
         };
         let WorldBox { min, max } = scene.dataset_world_bounds("v").unwrap();
         assert_eq!(arcball.framing, Framing::Framed);

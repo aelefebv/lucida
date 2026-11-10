@@ -10,7 +10,7 @@ use crate::saved_view::SavedView;
 use crate::scene::{
     DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene, member_transform,
 };
-use crate::view::ViewState;
+use crate::view::{AxisPositions, View, ViewId};
 
 #[wasm_bindgen]
 pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
@@ -136,17 +136,18 @@ impl WasmScene {
         Ok(())
     }
 
-    /// Export camera + view + display as JSON for presence updates.
+    /// Export the active view's camera and axis positions, and the display,
+    /// as JSON for presence updates.
     pub fn export_presence(&self) -> String {
         #[derive(serde::Serialize)]
         struct Presence<'a> {
             camera: &'a Camera,
-            view: &'a ViewState,
+            view: &'a AxisPositions,
             display: &'a DisplayState,
         }
         let p = Presence {
-            camera: &self.inner.camera,
-            view: &self.inner.view,
+            camera: &self.active().camera,
+            view: &self.active().axes,
             display: &self.inner.display,
         };
         serde_json::to_string(&p).unwrap()
@@ -168,7 +169,7 @@ impl WasmScene {
         #[derive(serde::Deserialize)]
         struct Presence {
             camera: Camera,
-            view: ViewState,
+            view: AxisPositions,
             display: DisplayState,
             #[serde(default)]
             camera_space: Option<CameraSpace>,
@@ -177,7 +178,7 @@ impl WasmScene {
         let (mut camera, mut view) = (p.camera, p.view);
         if let Some(from) = &p.camera_space {
             self.inner.carry_camera(&mut camera, from);
-            self.inner.carry_view(&mut view, from);
+            self.inner.carry_axes(&mut view, from);
         }
         self.inner.import_presence(camera, view, p.display);
         Ok(())
@@ -189,8 +190,8 @@ impl WasmScene {
         Ok(())
     }
 
-    /// Fit everything visible on a canvas of `width` × `height` device
-    /// pixels, in the current mode, leaving the camera framed
+    /// Fit everything the active view shows on a canvas of `width` ×
+    /// `height` device pixels, in its mode, leaving the camera framed
     /// ([`Scene::frame`]). The fit key and double tap call it. Returns whether
     /// there was anything to fit; when there wasn't, the camera is unchanged.
     pub fn frame(&mut self, width: u32, height: u32) -> bool {
@@ -232,10 +233,10 @@ impl WasmScene {
             .has_physical_scale(&DatasetId(dataset_id.to_string()))
     }
 
-    /// The camera's framing: `"placed"`, `"framed"`, or `"unframed"`. An
-    /// unframed camera shows a stand-in, which a client never persists.
+    /// The active view's framing: `"placed"`, `"framed"`, or `"unframed"`.
+    /// An unframed camera shows a stand-in, which a client never persists.
     pub fn camera_framing(&self) -> String {
-        match self.inner.camera.framing() {
+        match self.active().camera.framing() {
             Framing::Placed => "placed",
             Framing::Framed => "framed",
             Framing::Unframed => "unframed",
@@ -243,10 +244,13 @@ impl WasmScene {
         .to_string()
     }
 
-    /// The dataset's bounds in the current camera's coordinate space as
+    /// The dataset's bounds in the active view's camera space as
     /// `[min_x, min_y, min_z, max_x, max_y, max_z]`; empty when it has none.
     pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Vec<f64> {
-        match self.inner.dataset_fit_bounds(dataset_id) {
+        match self
+            .inner
+            .dataset_fit_bounds(self.active().id(), dataset_id)
+        {
             Some((min, max)) => vec![min[0], min[1], min[2], max[0], max[1], max[2]],
             None => Vec::new(),
         }
@@ -301,7 +305,7 @@ impl WasmScene {
     }
 
     pub fn camera_mode(&self) -> String {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Slice(_) => "slice".to_string(),
             Camera::Arcball(_) => "arcball".to_string(),
             Camera::Fly(_) => "fly".to_string(),
@@ -324,7 +328,7 @@ impl WasmScene {
     }
 
     pub fn center(&self) -> Vec<f64> {
-        if let Camera::Slice(ref v) = self.inner.camera {
+        if let Camera::Slice(ref v) = self.active().camera {
             vec![v.center[0], v.center[1]]
         } else {
             vec![0.0, 0.0]
@@ -342,11 +346,13 @@ impl WasmScene {
         self.inner.apply(ViewportCommand::SetT { t }.into());
     }
 
-    /// What every layer shows, as JSON: [`crate::scene::ResolvedLayer`]s in
-    /// panel order. The renderer, the minimap, explore thumbnails and the
-    /// layer panel all read this rather than derive it from the settings.
+    /// What every layer shows in the active view, as JSON:
+    /// [`crate::scene::ResolvedLayer`]s in panel order. The renderer, the
+    /// minimap, explore thumbnails and the layer panel all read this rather
+    /// than derive it from the settings.
     pub fn resolved_layers(&self) -> String {
-        serde_json::to_string(&self.inner.resolved_layers()).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string(&self.inner.resolved_layers(self.active().id()))
+            .unwrap_or_else(|_| "[]".to_string())
     }
 
     /// What every layer would show under the saved view in `view_json`, as
@@ -355,7 +361,7 @@ impl WasmScene {
     pub fn resolved_view_layers(&self, view_json: &str) -> String {
         let layers = match serde_json::from_str::<crate::saved_view::SavedView>(view_json) {
             Ok(view) => self.inner.resolved_view_layers(&view),
-            Err(_) => self.inner.resolved_layers(),
+            Err(_) => self.inner.resolved_layers(self.active().id()),
         };
         serde_json::to_string(&layers).unwrap_or_else(|_| "[]".to_string())
     }
@@ -373,33 +379,34 @@ impl WasmScene {
     }
 
     pub fn z(&self) -> u32 {
-        self.inner.view.z_range.start
+        self.active().axes.z_range.start
     }
 
     pub fn t(&self) -> u32 {
-        self.inner.view.t
+        self.active().axes.t
     }
 
-    /// The plane the slice camera cuts: `xy`, `xz` or `yz`.
+    /// The plane the active view's slice camera cuts: `xy`, `xz` or `yz`.
     pub fn slice_plane(&self) -> String {
-        self.inner.slice_plane().to_string()
+        self.active().slice_plane().to_string()
     }
 
-    /// The scene's axis position along the slice plane's cut axis, before
-    /// any layer clamps it.
+    /// The active view's axis position along its slice plane's cut axis,
+    /// before any layer clamps it.
     pub fn cut_index(&self) -> u32 {
-        self.inner.view.cut(self.inner.slice_plane()).start
+        self.active().cut_index()
     }
 
-    /// How many positions the slice view's cut axis steps through: Z's
-    /// planes for an XY view, scene-frame units across what is visible for a
+    /// How many positions the active view's cut axis steps through: Z's
+    /// planes for an XY view, scene-frame units across what it shows for a
     /// side view.
     pub fn cut_extent(&self) -> u32 {
-        self.inner.cut_extent(self.inner.slice_plane().cut())
+        let view = self.active();
+        self.inner.cut_extent(view.id(), view.slice_plane().cut())
     }
 
     pub fn zoom(&self) -> f64 {
-        self.inner.camera.effective_zoom()
+        self.active().camera.effective_zoom()
     }
 
     /// Project a world-space point to screen-space pixel coordinates,
@@ -412,33 +419,41 @@ impl WasmScene {
     /// JS callers should treat `result.length === 0` as "behind the
     /// camera" and otherwise use `[result[0], result[1]]`.
     pub fn project_to_screen(&self, x: f64, y: f64, z: f64) -> Vec<f64> {
-        match self.inner.camera.project_to_screen([x, y, z]) {
+        match self.active().camera.project_to_screen([x, y, z]) {
             Some([sx, sy]) => vec![sx, sy],
             None => Vec::new(),
         }
     }
 
-    /// Query the scene for geometric information about all entities in a dataset.
-    pub fn view_query(&self, dataset_id: &str) -> String {
+    /// The view [`Self::apply_command`] steers and the camera readers here
+    /// describe.
+    pub fn active_view(&self) -> u32 {
+        self.active().id().0
+    }
+
+    /// Query the scene for geometric information about all entities in a
+    /// dataset, as `view` sees them. `"null"` for an unknown view or dataset.
+    pub fn view_query(&self, view: u32, dataset_id: &str) -> String {
         let id = DatasetId(dataset_id.into());
-        match self.inner.view_query(&id) {
+        match self.inner.view_query(ViewId(view), &id) {
             Some(result) => serde_json::to_string(&result).unwrap_or_default(),
             None => "null".to_string(),
         }
     }
 
     /// Incremental counterpart to [`Self::view_query`]: reports only what
-    /// changed since this scene last answered a delta query for the dataset.
+    /// changed since this scene last answered a delta query for the view and
+    /// dataset.
     ///
-    /// The per-dataset cursor is `#[serde(skip)]`, so the first call after the
-    /// scene is constructed yields a `Full` snapshot and later calls a `Delta`,
+    /// The cursor is `#[serde(skip)]`, so the first call after the scene is
+    /// constructed yields a `Full` snapshot and later calls a `Delta`,
     /// serialized as `{"Full": {...}}` or `{"Delta": {...}}` (see
     /// [`crate::query::ViewQueryDelta`]). An unknown dataset returns `"null"`,
     /// as [`Self::view_query`] does. Takes `&mut self` because answering
     /// advances the cursor.
-    pub fn view_query_delta(&mut self, dataset_id: &str) -> String {
+    pub fn view_query_delta(&mut self, view: u32, dataset_id: &str) -> String {
         let id = DatasetId(dataset_id.into());
-        match self.inner.view_query_delta(&id) {
+        match self.inner.view_query_delta(ViewId(view), &id) {
             Some(delta) => serde_json::to_string(&delta).unwrap_or_default(),
             None => "null".to_string(),
         }
@@ -446,16 +461,16 @@ impl WasmScene {
 
     /// Debug helper: the camera's effective zoom, for the Render tab.
     pub fn debug_effective_zoom(&self) -> f64 {
-        self.inner.camera.effective_zoom()
+        self.active().camera.effective_zoom()
     }
 
-    /// The visible region of a dataset as JSON, in the dataset's own frame,
-    /// where member positions are ([`Scene::visible_region`]). `"null"` for a
-    /// dataset with no image.
-    pub fn visible_region(&self, dataset_id: &str) -> String {
+    /// The region of a dataset `view` shows as JSON, in the dataset's own
+    /// frame, where member positions are ([`Scene::visible_region`]).
+    /// `"null"` for a dataset with no image or an unknown view.
+    pub fn visible_region(&self, view: u32, dataset_id: &str) -> String {
         match self
             .inner
-            .visible_region(&DatasetId(dataset_id.to_string()))
+            .visible_region(ViewId(view), &DatasetId(dataset_id.to_string()))
         {
             Some(region) => serde_json::to_string(&region).unwrap(),
             None => "null".to_string(),
@@ -604,7 +619,7 @@ impl WasmScene {
 
     /// Return the fly camera's current speed multiplier.
     pub fn fly_speed_multiplier(&self) -> f64 {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Fly(v) => v.speed_multiplier,
             _ => 1.0,
         }
@@ -615,11 +630,11 @@ impl WasmScene {
     /// The placement math is owned by [`Scene::volume_diagonal`] (non-gated,
     /// alongside the rest of the global-correction plumbing); this delegates.
     pub fn volume_diagonal(&self) -> f64 {
-        self.inner.volume_diagonal()
+        self.inner.volume_diagonal(self.active().id())
     }
 
     pub fn clip_distance(&self) -> f64 {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Arcball(v) => v.clip_distance,
             Camera::Fly(v) => v.clip_distance,
             Camera::Slice(_) => 0.0,
@@ -627,7 +642,7 @@ impl WasmScene {
     }
 
     pub fn clip_mode(&self) -> String {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Arcball(v) => match v.clip_mode {
                 ClipMode::Plane => "plane".to_string(),
                 ClipMode::Sphere => "sphere".to_string(),
@@ -647,7 +662,7 @@ impl WasmScene {
 
     /// Camera forward direction in world space (normalized). Returns [fx, fy, fz].
     pub fn camera_forward(&self) -> Vec<f32> {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Arcball(v) => {
                 let fwd = v.forward_direction();
                 vec![fwd[0] as f32, fwd[1] as f32, fwd[2] as f32]
@@ -661,7 +676,7 @@ impl WasmScene {
     }
 
     pub fn view_proj(&self) -> Vec<f32> {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Arcball(v) => v.view_proj().to_vec(),
             Camera::Fly(v) => v.view_proj().to_vec(),
             _ => vec![
@@ -671,7 +686,7 @@ impl WasmScene {
     }
 
     pub fn inv_view_proj(&self) -> Vec<f32> {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Arcball(v) => v.inv_view_proj().to_vec(),
             Camera::Fly(v) => v.inv_view_proj().to_vec(),
             _ => vec![
@@ -681,7 +696,7 @@ impl WasmScene {
     }
 
     pub fn eye_position(&self) -> Vec<f32> {
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Arcball(v) => {
                 let eye = v.eye_position();
                 vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
@@ -701,7 +716,7 @@ impl WasmScene {
         for (i, val) in inv_model_vec.iter().enumerate() {
             im[i] = *val as f64;
         }
-        match &self.inner.camera {
+        match &self.active().camera {
             Camera::Arcball(v) => {
                 let hit = v.ray_hit_local(&im);
                 vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
@@ -725,7 +740,10 @@ impl WasmScene {
     /// Returns a JSON-serialized `RayHit` or `"null"` if nothing was hit.
     pub fn ray_pick(&self, dataset_id: &str, screen_x: f64, screen_y: f64) -> String {
         let id = DatasetId(dataset_id.into());
-        match self.inner.ray_pick(&id, screen_x, screen_y) {
+        match self
+            .inner
+            .ray_pick(self.active().id(), &id, screen_x, screen_y)
+        {
             Some(hit) => serde_json::to_string(&hit).unwrap_or_default(),
             None => "null".to_string(),
         }
@@ -742,7 +760,10 @@ impl WasmScene {
     /// overlay uses to hide a pin that swings behind the volume.
     pub fn project_annotation(&self, dataset_id: &str, x: f64, y: f64, z: f64) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
-        match self.inner.project_annotation(&id, x, y, z) {
+        match self
+            .inner
+            .project_annotation(self.active().id(), &id, x, y, z)
+        {
             Some([sx, sy]) => vec![sx, sy],
             None => Vec::new(),
         }
@@ -762,7 +783,10 @@ impl WasmScene {
         screen_y: f64,
     ) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
-        match self.inner.pick_annotation_voxel(&id, screen_x, screen_y) {
+        match self
+            .inner
+            .pick_annotation_voxel(self.active().id(), &id, screen_x, screen_y)
+        {
             Some([x, y, z]) => vec![x, y, z],
             None => Vec::new(),
         }
@@ -888,7 +912,7 @@ impl WasmScene {
     }
 
     pub fn camera_theta(&self) -> f64 {
-        if let Camera::Arcball(ref v) = self.inner.camera {
+        if let Camera::Arcball(ref v) = self.active().camera {
             v.theta
         } else {
             0.5
@@ -896,7 +920,7 @@ impl WasmScene {
     }
 
     pub fn camera_phi(&self) -> f64 {
-        if let Camera::Arcball(ref v) = self.inner.camera {
+        if let Camera::Arcball(ref v) = self.active().camera {
             v.phi
         } else {
             0.8
@@ -915,6 +939,7 @@ impl WasmScene {
             serde_json::from_str(peers_json).unwrap_or_default();
         let output = crate::cursor::compute_peer_cursors(
             &self.inner,
+            self.active().id(),
             &peers,
             my_id as u64,
             screen_w,
@@ -991,6 +1016,11 @@ impl WasmScene {
         out.extend(view_proj.iter().map(|&v| v as f32));
         out.push(if top_down { 1.0 } else { 0.0 });
         out
+    }
+
+    /// The view the camera readers describe: the active one.
+    fn active(&self) -> &View {
+        self.inner.active_view()
     }
 
     /// Every member's world box, visibility, and plane count, for

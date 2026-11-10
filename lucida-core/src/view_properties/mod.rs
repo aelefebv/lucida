@@ -115,9 +115,9 @@ pub fn join(f: &Fixture, vp: Viewport, dpr: u32) -> Shown {
 
 /// The camera, selection and display of `scene`, as a saved view records them.
 pub fn capture(scene: &Scene) -> SavedView {
-    let mut view = SavedView::empty(scene.camera.viewport());
-    view.camera = scene.camera.clone();
-    view.view = scene.view.clone();
+    let mut view = SavedView::empty(scene.active_view().camera.viewport());
+    view.camera = scene.active_view().camera.clone();
+    view.view = scene.active_view().axes.clone();
     view.display = scene.display.clone();
     view.camera_space = scene.camera_space();
     view
@@ -234,7 +234,7 @@ impl fmt::Display for ScreenRect {
 fn screen_rect(shown: &Shown, id: &DatasetId) -> Result<ScreenRect, String> {
     let scene = &shown.scene;
     let (lo, hi) = scene
-        .dataset_fit_bounds(&id.0)
+        .dataset_fit_bounds(scene.active_view().id(), &id.0)
         .ok_or("the dataset has no bounds")?;
     let mut rect = ScreenRect {
         min: [f64::INFINITY; 2],
@@ -249,6 +249,7 @@ fn screen_rect(shown: &Shown, id: &DatasetId) -> Result<ScreenRect, String> {
             }
         };
         let [x, y] = scene
+            .active_view()
             .camera
             .project_to_screen([pick(0), pick(1), pick(2)])
             .ok_or("part of the dataset is behind the camera")?;
@@ -266,7 +267,7 @@ fn fill(size: [f64; 2], viewport: [u32; 2]) -> f64 {
 /// The whole dataset is inside the viewport and fills at least `floor` of the
 /// limiting axis.
 fn framed(shown: &Shown, id: &DatasetId, floor: f64) -> Result<(), String> {
-    let vp = shown.scene.camera.viewport();
+    let vp = shown.scene.active_view().camera.viewport();
     let rect = screen_rect(shown, id)?;
     let inside = rect.min[0] >= -EDGE_SLACK_PX
         && rect.min[1] >= -EDGE_SLACK_PX
@@ -290,7 +291,7 @@ fn framed(shown: &Shown, id: &DatasetId, floor: f64) -> Result<(), String> {
 /// The part of the dataset inside the viewport fills at least [`FILL_FLOOR`]
 /// of the limiting axis.
 fn covers(shown: &Shown, id: &DatasetId) -> Result<(), String> {
-    let vp = shown.scene.camera.viewport();
+    let vp = shown.scene.active_view().camera.viewport();
     let rect = screen_rect(shown, id)?;
     let visible = [
         (rect.max[0].min(vp[0] as f64) - rect.min[0].max(0.0)).max(0.0),
@@ -330,10 +331,10 @@ fn same_css_size(a: &Shown, b: &Shown, id: &DatasetId) -> Result<(), String> {
 fn plans_what_is_visible(shown: &Shown, id: &DatasetId) -> Result<(), String> {
     let scene = &shown.scene;
     let query = scene
-        .view_query(id)
+        .view_query(scene.active_view().id(), id)
         .ok_or("the view query does not know the dataset")?;
     let plans = scene
-        .chunk_plan_for(id)
+        .chunk_plan_for(scene.active_view().id(), id)
         .ok_or("the chunk plan does not know the dataset")?;
     let unplanned: Vec<String> = query
         .visible_entities
