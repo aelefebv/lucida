@@ -50,7 +50,7 @@ export function startLongPress(onFire: () => void): () => void {
  */
 export function forwardPressToCanvas(
   from: Element,
-  canvas: HTMLCanvasElement,
+  canvas: HTMLElement,
   press: { pointerId: number; pointerType: string; startX: number; startY: number },
   buttons: number,
 ): void {

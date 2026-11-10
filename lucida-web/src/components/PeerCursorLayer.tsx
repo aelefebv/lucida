@@ -12,6 +12,7 @@ import { requestRender } from "../invalidation.ts";
 import { usePeerState, type PeerStore } from "../peerStore.ts";
 import type { ViewMode } from "../types.ts";
 import { PeerCursors, type CursorLabel } from "./PeerCursors.tsx";
+import type { ViewSurface } from "./cameraProjection.ts";
 
 interface Props {
   peerStore: PeerStore;
@@ -24,6 +25,8 @@ interface Props {
   wasmReady: boolean;
   /** Changes when a panel moves the canvas edges, so the labels re-project. */
   canvasSize: unknown;
+  /** The view the labels sit over, and the element over its rectangle. */
+  surface: ViewSurface;
 }
 
 function PeerCursorLayerBody({
@@ -35,6 +38,7 @@ function PeerCursorLayerBody({
   clientReady,
   wasmReady,
   canvasSize,
+  surface,
 }: Props) {
   const engine = useEngine();
   const { peers, myId, followTarget } = usePeerState(peerStore);
@@ -68,10 +72,9 @@ function PeerCursorLayerBody({
         }
         return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
       });
-    const canvasEl = engine.canvas();
     const dpr = window.devicePixelRatio || 1;
-    const screenW = Math.round((canvasEl?.clientWidth ?? 800) * dpr);
-    const screenH = Math.round((canvasEl?.clientHeight ?? 600) * dpr);
+    const screenW = Math.round(surface.element.clientWidth * dpr);
+    const screenH = Math.round(surface.element.clientHeight * dpr);
     const result = JSON.parse(scene.compute_peer_cursors(JSON.stringify(peerList), myId, screenW, screenH)) as {
       gpu: number[][];
       labels: CursorLabel[];
@@ -89,17 +92,16 @@ function PeerCursorLayerBody({
 
     setCursorLabels(result.labels);
     requestRender(engine.loop(), "peer_cursors");
-  }, [engine, peers, myId, followTarget, viewMode, clientReady, wasmReady, canvasSize]);
+  }, [engine, peers, myId, followTarget, viewMode, clientReady, wasmReady, canvasSize, surface]);
 
-  const canvas = engine.canvas();
-  if (peers.size === 0 || !engine.scene() || !canvas) return null;
+  if (peers.size === 0 || !engine.scene()) return null;
   return (
     <PeerCursors
       peers={peers}
       myId={myId}
       followTarget={followTarget}
       wasmSceneRef={wasmSceneRef}
-      canvas={canvas}
+      surface={surface}
       viewMode={viewMode}
       z={z}
       t={t}

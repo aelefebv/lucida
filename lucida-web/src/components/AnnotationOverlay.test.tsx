@@ -90,7 +90,7 @@ function renderOverlay(opts: {
     <AnnotationOverlay
       datasetId="wds-1"
       wasmSceneRef={sceneRef}
-      canvas={canvas}
+      surface={{ view: 0, element: canvas }}
       version={0}
       viewContext={opts.viewContext ?? { z: 3, t: 0, channels: [0] }}
       myId={opts.myId ?? MY_ID}
@@ -109,7 +109,7 @@ function renderOverlay(opts: {
       <AnnotationOverlay
         datasetId="wds-1"
         wasmSceneRef={sceneRef}
-        canvas={canvas}
+        surface={{ view: 0, element: canvas }}
         version={0}
         viewContext={viewContext}
         myId={opts.myId ?? MY_ID}
@@ -1178,7 +1178,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     const props = (version: number) => ({
       datasetId: "wds-1",
       wasmSceneRef: sceneRef,
-      canvas,
+      surface: { view: 0, element: canvas },
       version,
       viewContext: { z: 0, t: 0, channels: [0] },
       myId: MY_ID,
@@ -1214,7 +1214,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     const props = (version: number) => ({
       datasetId: "wds-1",
       wasmSceneRef: sceneRef,
-      canvas,
+      surface: { view: 0, element: canvas },
       version,
       viewContext: { z: 0, t: 0, channels: [0] },
       myId: MY_ID,
@@ -1267,7 +1267,7 @@ describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's 
       <AnnotationOverlay
         datasetId="wds-1"
         wasmSceneRef={sceneRef}
-        canvas={canvas}
+        surface={{ view: 0, element: canvas }}
         version={0}
         viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}

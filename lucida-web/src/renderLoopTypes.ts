@@ -15,7 +15,6 @@ export interface RenderLoopOptions {
   datasets: Map<string, DatasetEntry>;
   client: RenderClient;
   canvas: HTMLCanvasElement;
-  mode: "slice" | "volume";
 }
 
 export interface MinimapOverlayData {

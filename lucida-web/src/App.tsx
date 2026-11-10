@@ -1204,6 +1204,7 @@ function Viewer({
               onGoToAuthorView={goToAuthorView}
               canvasSize={canvasSize}
               showDebugOverlays={showDebugOverlays}
+              viewLayout={viewLayout}
             />
             <SwipeDivider comparison={comparison.current} actions={comparison.actions} nameOf={comparison.nameOf} />
           </CanvasStage>

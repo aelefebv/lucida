@@ -9,13 +9,20 @@ function fakeScene() {
     t: 0,
     layers: [] as unknown[],
     mode: "slice",
+    views: [0],
+    active: 0,
+    withheld: "[]",
     comparison: null as unknown,
     epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0, comparison: 0 },
   };
   const scene = {
     z: () => state.z,
     t: () => state.t,
-    active_view: () => 0,
+    active_view: () => state.active,
+    view_ids: () => state.views,
+    view_rect: (id: number) => (state.views.length === 1 ? [0, 0, 1, 1] : [state.views.indexOf(id) / 2, 0, 0.5, 1]),
+    view_camera_mode: () => state.mode,
+    withheld: (id: number) => (id === state.active ? "[]" : state.withheld),
     slice_plane: () => "xy",
     cut_index: () => state.z,
     resolved_layers: () => JSON.stringify(state.layers),
@@ -42,6 +49,24 @@ describe("SceneStore", () => {
 
     expect(store.getView()).toMatchObject({ z: 7, cameraMode: "arcball", viewMode: "3d" });
     expect(listener).toHaveBeenCalled();
+  });
+
+  it("reads every view, the active one marked, and keeps them while nothing in them changed", () => {
+    const { scene, state } = fakeScene();
+    const store = new SceneStore(() => scene);
+    store.subscribe(() => {});
+    state.views = [0, 2];
+    state.active = 2;
+    state.withheld = JSON.stringify([{ dataset_id: "a", holder: 2, held: { kind: "volume", t: 0 }, wanted: { kind: "volume", t: 1 } }]);
+    state.epochs.view++;
+    noteSceneWrite();
+    const { views } = store.getView();
+    expect(views.map((view) => [view.id, view.rect[0], view.active])).toEqual([[0, 0, false], [2, 0.5, true]]);
+    expect(views[0].withheld[0]).toMatchObject({ dataset_id: "a", holder: 2 });
+
+    state.epochs.view++;
+    noteSceneWrite();
+    expect(store.getView().views).toBe(views);
   });
 
   it("keeps the view's identity when only the camera moved", () => {

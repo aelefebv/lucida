@@ -531,6 +531,18 @@ impl WasmScene {
         })
     }
 
+    /// `view`'s camera: `"slice"`, `"arcball"` or `"fly"`, or empty for an
+    /// unknown view.
+    pub fn view_camera_mode(&self, view: u32) -> String {
+        match self.camera_in(view) {
+            Some(Camera::Slice(_)) => "slice",
+            Some(Camera::Arcball(_)) => "arcball",
+            Some(Camera::Fly(_)) => "fly",
+            None => "",
+        }
+        .to_string()
+    }
+
     /// How the canvas divides among the views: `"single"`, `"columns"` or
     /// `"rows"`.
     pub fn view_layout(&self) -> String {

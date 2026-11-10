@@ -4,14 +4,14 @@
  * overlays. The view mode and selectors come from the scene store; the engine
  * supplies the scene, client, canvas, loop, and session.
  */
-import { lazy, Suspense, useCallback, useRef, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useRef, useState, type RefObject } from "react";
 import { AnnotationDraftOverlay } from "../components/AnnotationDraftOverlay.tsx";
 import { AnnotationOverlay } from "../components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "../components/AnnotationOverlay3D.tsx";
 import type { AnnotationOverlayHandle } from "../components/annotationDocument.ts";
 import type { AnnotationDraft } from "../components/annotationDraft.ts";
 import type { Tool } from "../components/annotationTool.ts";
-import type { ClientPoint } from "../components/cameraProjection.ts";
+import type { ClientPoint, ViewSurface } from "../components/cameraProjection.ts";
 import type { MentionCandidate } from "../components/annotationMentions.ts";
 import { PeerCursorLayer } from "../components/PeerCursorLayer.tsx";
 import { PixelReadout, type PixelReadoutHandle } from "../components/PixelReadout.tsx";
@@ -25,6 +25,11 @@ import { requestRender } from "../invalidation.ts";
 import type { CanvasSize } from "../shell/CanvasStage.tsx";
 import type { DatasetState } from "../types.ts";
 import { useEngineParts } from "./engineParts.ts";
+import { useViewerLoop } from "./useViewerLoop.ts";
+import { ViewPanes } from "./ViewPanes.tsx";
+import { WithheldNotice } from "./WithheldNotice.tsx";
+import type { ViewPane } from "../sceneStore.ts";
+import type { ViewLayoutActions } from "../viewLayout.ts";
 
 // Code-split: mounted only when an overlay is on or a radius preview is being
 // dragged.
@@ -56,6 +61,8 @@ interface Props {
   onGoToAuthorView: (pinId: string) => void;
   canvasSize: CanvasSize;
   showDebugOverlays: boolean;
+  /** What a press in a view calls to make it the active view. */
+  viewLayout: ViewLayoutActions;
 }
 
 export function CanvasLayers({
@@ -79,10 +86,11 @@ export function CanvasLayers({
   onGoToAuthorView,
   canvasSize,
   showDebugOverlays,
+  viewLayout,
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
-  const { viewMode, cameraMode, z, t, layers } = useSceneView(engine.store);
+  const { viewMode, z, t, layers, views } = useSceneView(engine.store);
 
   // A finger's long press stands for both a right-click and a hover.
   const readoutRef = useRef<PixelReadoutHandle>(null);
@@ -106,8 +114,16 @@ export function CanvasLayers({
   const viewers = hasDatasets && wasmScene && client && session && canvas
     ? { scene: wasmScene, client, session, canvas }
     : null;
+  // The one loop draws every view; a change of mode or layout keeps it.
+  useViewerLoop(
+    viewers && { session: viewers.session, datasets, client: viewers.client, canvas: viewers.canvas },
+    render.loopRef,
+    render.setActiveLoop,
+    remoteDocumentVersion,
+  );
+  const [panesRoot, setPanesRoot] = useState<HTMLDivElement | null>(null);
   const overlays = hasDatasets && selectedDatasetId && wasmScene && canvas
-    ? { datasetId: selectedDatasetId, canvas }
+    ? { datasetId: selectedDatasetId }
     : null;
   // The overlays draw the selected layer's pins, so its shown channels decide
   // which pins are in context.
@@ -116,38 +132,64 @@ export function CanvasLayers({
     t,
     channels: shownChannels(selectedDatasetId ? layers.get(selectedDatasetId) : undefined),
   };
-  return (
-    <>
-      {viewers && viewMode === "2d" && (
-        <SliceViewer
-          session={viewers.session}
-          scene={viewers.scene}
-          datasets={datasets}
-          client={viewers.client}
-          canvas={viewers.canvas}
-          remoteDocumentVersion={remoteDocumentVersion}
-          emitPresence={emitPresence}
-          breakFollow={breakFollow}
-          sendCursor={sendCursor}
-          loopRef={render.loopRef}
-          onLoopChange={render.setActiveLoop}
-          annotationDatasetId={selectedDatasetId}
-          tool={tool}
-          myId={annotationAuthor}
-          sendCommand={sendCommand}
-          onDocumentChanged={onDocumentChanged}
-          annotationDraftRef={annotationDraftRef}
-          onLongPress={openContextMenu2d}
-        />
-      )}
-      {overlays && viewMode === "2d" && (
-        <>
+  const nameOf = (datasetId: string) => datasets.get(datasetId)?.name ?? datasetId;
+
+  // What a view's pane holds: its viewer, in its own mode, and in the active
+  // view the annotations and peer cursors drawn over it.
+  const paneContent = (pane: ViewPane, surface: ViewSurface) => {
+    const slice = pane.cameraMode === "slice";
+    return (
+      <>
+        {viewers && slice && (
+          <SliceViewer
+            key="slice"
+            scene={viewers.scene}
+            surface={surface}
+            canvas={viewers.canvas}
+            active={pane.active}
+            emitPresence={emitPresence}
+            breakFollow={breakFollow}
+            sendCursor={sendCursor}
+            loopRef={render.loopRef}
+            annotationDatasetId={selectedDatasetId}
+            tool={tool}
+            myId={annotationAuthor}
+            sendCommand={sendCommand}
+            onDocumentChanged={onDocumentChanged}
+            annotationDraftRef={annotationDraftRef}
+            onLongPress={openContextMenu2d}
+          />
+        )}
+        {viewers && !slice && (
+          <VolumeViewer
+            key="volume"
+            scene={viewers.scene}
+            surface={surface}
+            canvas={viewers.canvas}
+            active={pane.active}
+            emitPresence={emitPresence}
+            breakFollow={breakFollow}
+            sendCursor={sendCursor}
+            cameraMode={pane.cameraMode}
+            loopRef={render.loopRef}
+            annotationDatasetId={selectedDatasetId}
+            tool={tool}
+            myId={annotationAuthor}
+            sendCommand={sendCommand}
+            onDocumentChanged={onDocumentChanged}
+            annotationDraftRef={annotationDraftRef}
+            onLongPress={openContextMenu3d}
+          />
+        )}
+        {overlays && pane.active && (
           <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
+        )}
+        {overlays && pane.active && slice && (
           <AnnotationOverlay
             ref={overlay2dRef}
             datasetId={overlays.datasetId}
             wasmSceneRef={scene.wasmSceneRef}
-            canvas={overlays.canvas}
+            surface={surface}
             version={remoteDocumentVersion}
             viewContext={viewContext}
             myId={annotationAuthor}
@@ -159,39 +201,13 @@ export function CanvasLayers({
             mentionCandidates={mentionCandidates}
             onGoToAuthorView={onGoToAuthorView}
           />
-        </>
-      )}
-      {viewers && viewMode === "3d" && (
-        <VolumeViewer
-          session={viewers.session}
-          scene={viewers.scene}
-          datasets={datasets}
-          client={viewers.client}
-          canvas={viewers.canvas}
-          remoteDocumentVersion={remoteDocumentVersion}
-          emitPresence={emitPresence}
-          breakFollow={breakFollow}
-          sendCursor={sendCursor}
-          cameraMode={cameraMode}
-          loopRef={render.loopRef}
-          onLoopChange={render.setActiveLoop}
-          annotationDatasetId={selectedDatasetId}
-          tool={tool}
-          myId={annotationAuthor}
-          sendCommand={sendCommand}
-          onDocumentChanged={onDocumentChanged}
-          annotationDraftRef={annotationDraftRef}
-          onLongPress={openContextMenu3d}
-        />
-      )}
-      {overlays && viewMode === "3d" && (
-        <>
-          <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
+        )}
+        {overlays && pane.active && !slice && (
           <AnnotationOverlay3D
             ref={overlay3dRef}
             datasetId={overlays.datasetId}
             wasmSceneRef={scene.wasmSceneRef}
-            canvas={overlays.canvas}
+            surface={surface}
             version={remoteDocumentVersion}
             viewContext={viewContext}
             myId={annotationAuthor}
@@ -203,28 +219,40 @@ export function CanvasLayers({
             mentionCandidates={mentionCandidates}
             onGoToAuthorView={onGoToAuthorView}
           />
-        </>
-      )}
-      {viewers && (
+        )}
+        {pane.active && (
+          <PeerCursorLayer
+            peerStore={peerStore}
+            viewMode={slice ? "2d" : "3d"}
+            z={z}
+            t={t}
+            wasmSceneRef={scene.wasmSceneRef}
+            clientReady={render.clientReady}
+            wasmReady={scene.wasmReady}
+            canvasSize={canvasSize}
+            surface={surface}
+          />
+        )}
+        <WithheldNotice withheld={pane.withheld} views={views} nameOf={nameOf} />
+      </>
+    );
+  };
+  return (
+    <>
+      <ViewPanes views={views} activate={viewLayout.activate} rootRef={setPanesRoot}>
+        {paneContent}
+      </ViewPanes>
+      {viewers && panesRoot && (
         <PixelReadout
           ref={readoutRef}
           canvas={viewers.canvas}
+          eventRoot={panesRoot}
           client={viewers.client}
           scene={viewers.scene}
           datasets={datasets}
           layers={layers}
         />
       )}
-      <PeerCursorLayer
-        peerStore={peerStore}
-        viewMode={viewMode}
-        z={z}
-        t={t}
-        wasmSceneRef={scene.wasmSceneRef}
-        clientReady={render.clientReady}
-        wasmReady={scene.wasmReady}
-        canvasSize={canvasSize}
-      />
       {showDebugOverlays && (
         <Suspense fallback={null}>
           <DebugOverlays

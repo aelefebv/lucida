@@ -137,6 +137,11 @@ vi.mock("lucida-core", () => {
     }
     camera_mode() { return this.mode; }
     active_view() { return 0; }
+    view_ids() { return [0]; }
+    view_rect() { return [0, 0, 1, 1]; }
+    view_camera_mode() { return this.mode; }
+    view_mode() { return this.mode === "slice" ? "slice" : "volume"; }
+    withheld() { return "[]"; }
     slice_plane() { return "xy"; }
     cut_index() { return this.view.z; }
     zoom() { return 1; }
@@ -1063,14 +1068,14 @@ describe("App wiring: peer messages", () => {
     identity: { display_name: "Ada Lovelace" },
   };
 
-  it("leave the canvas listeners and the frame clock alone, and never render App", async () => {
+  it("leave the view's listeners and the frame clock alone, and never render App", async () => {
     gpu.ready = true;
-    const canvasBinds = vi.spyOn(HTMLCanvasElement.prototype, "addEventListener");
+    const paneBinds = vi.spyOn(HTMLDivElement.prototype, "addEventListener");
     const clockSubscribes = vi.spyOn(frameClock, "subscribe");
     const { bridge, scene } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
     // The 2D viewer is up and has bound its listeners.
-    expect(canvasBinds.mock.calls.some(([type]) => type === "wheel")).toBe(true);
-    canvasBinds.mockClear();
+    expect(paneBinds.mock.calls.some(([type]) => type === "wheel")).toBe(true);
+    paneBinds.mockClear();
     clockSubscribes.mockClear();
     const cursorPlacements = vi.spyOn(scene, "compute_peer_cursors");
     appRenders.count = 0;
@@ -1105,10 +1110,10 @@ describe("App wiring: peer messages", () => {
     });
     expect(screen.queryByRole("button", { name: /Grace Hopper/ })).toBeNull();
 
-    expect(canvasBinds).not.toHaveBeenCalled();
+    expect(paneBinds).not.toHaveBeenCalled();
     expect(clockSubscribes).not.toHaveBeenCalled();
     expect(appRenders.count).toBe(0);
-    canvasBinds.mockRestore();
+    paneBinds.mockRestore();
     clockSubscribes.mockRestore();
   });
 
@@ -1122,15 +1127,15 @@ describe("App wiring: peer messages", () => {
       if (stubbedAnimations) delete elementProto.getAnimations;
     });
     const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
-    const canvasBinds = vi.spyOn(HTMLCanvasElement.prototype, "addEventListener");
+    const paneBinds = vi.spyOn(HTMLDivElement.prototype, "addEventListener");
     const clockSubscribes = vi.spyOn(frameClock, "subscribe");
     await act(async () => {
       fireEvent.keyDown(window, { key: "m", code: "KeyM" });
     });
-    // The 3D viewer is up, bound to the canvas and subscribed to the clock.
-    expect(canvasBinds.mock.calls.some(([type]) => type === "wheel")).toBe(true);
+    // The 3D viewer is up, bound to its view's pane and subscribed to the clock.
+    expect(paneBinds.mock.calls.some(([type]) => type === "wheel")).toBe(true);
     expect(clockSubscribes).toHaveBeenCalled();
-    canvasBinds.mockClear();
+    paneBinds.mockClear();
     clockSubscribes.mockClear();
 
     for (let i = 0; i < 5; i++) {
@@ -1139,9 +1144,9 @@ describe("App wiring: peer messages", () => {
       });
     }
 
-    expect(canvasBinds).not.toHaveBeenCalled();
+    expect(paneBinds).not.toHaveBeenCalled();
     expect(clockSubscribes).not.toHaveBeenCalled();
-    canvasBinds.mockRestore();
+    paneBinds.mockRestore();
     clockSubscribes.mockRestore();
   });
 });

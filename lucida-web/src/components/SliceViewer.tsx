@@ -2,15 +2,13 @@
 import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { SLICE_ZOOM_IN_PER_NOTCH, SLICE_ZOOM_OUT_PER_NOTCH } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
-import { RenderClient } from "../renderer/renderClient.ts";
-import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
-import type { Session } from "../session.ts";
+import type { RenderLoop } from "../renderLoop.ts";
 import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
-import { eventToWorld as sceneEventToWorld, type ClientPoint } from "./cameraProjection.ts";
+import { eventToWorld as sceneEventToWorld, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
@@ -34,17 +32,17 @@ const PAN_DIRECTIONS: Readonly<Record<string, readonly [number, number]>> = {
 const ARROW_KEY_CONTROLS = 'input[type="range"], input[type="radio"], [role="slider"]';
 
 interface Props {
-  session: Session;
   scene: WasmScene;
-  datasets: Map<string, DatasetEntry>;
-  client: RenderClient;
+  /** The view this takes input for, and the element over its rectangle. */
+  surface: ViewSurface;
+  /** The canvas every view divides, which a fit sizes the scene to. */
   canvas: HTMLCanvasElement;
-  remoteDocumentVersion: number;
+  /** Whether it is the active view, the one keyboard shortcuts steer. */
+  active: boolean;
   emitPresence: () => void;
   breakFollow: () => void;
   sendCursor: (position: [number, number] | null) => void;
   loopRef: RefObject<RenderLoop | null>;
-  onLoopChange: (loop: RenderLoop | null) => void;
   /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
   annotationDatasetId: string | null;
   /** The canvas tool: pan, or the annotation shape a press draws. */
@@ -65,8 +63,9 @@ interface Props {
   onLongPress?: (at: ClientPoint) => void;
 }
 
-function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
-  const loopRef = useRef<RenderLoop | null>(null);
+function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFollow, sendCursor, loopRef, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+  // The view's own element: its pixels, its pointer events, its cursor.
+  const { element } = surface;
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
   // The press in progress. `kind` is what it draws (null when it pans), fixed
@@ -83,7 +82,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
   } | null>(null);
 
   // Mirror placement props into refs so the pointer handlers, which depend on
-  // `canvas` only, read the latest values without re-binding on every doc
+  // the element only, read the latest values without re-binding on every doc
   // change.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
   const toolRef = useRef(tool);
@@ -102,32 +101,11 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
     onLongPressRef.current = onLongPress;
   });
 
-  // Create/start render loop. Deliberately omits `datasets` (live mutable
-  // Map shared with the parent — RenderLoop reads it each frame),
-  // `onLoopChange` (stable parent callback), and `parentLoopRef` (a ref).
-  // Re-creating the loop on those would tear down GPU state every frame.
-  useEffect(() => {
-    const loop = new RenderLoop({ session, datasets, client, canvas, mode: "slice" });
-    loopRef.current = loop;
-    parentLoopRef.current = loop;
-    loop.start();
-    onLoopChange(loop);
-    return () => {
-      loop.stop();
-      parentLoopRef.current = null;
-      onLoopChange(null);
-    };
-  }, [session, client, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    loopRef.current?.markInteractiveDirty();
-  }, [remoteDocumentVersion]);
-
   /** Convert a pointer event to 2D world coords via the shared inverse camera
    * projection. */
   const eventToWorld = useCallback(
-    (e: ClientPoint): [number, number] => sceneEventToWorld(scene, canvas, e),
-    [canvas, scene],
+    (e: ClientPoint): [number, number] => sceneEventToWorld(scene, surface, e),
+    [surface, scene],
   );
 
   // Escape mid-press abandons it: no annotation lands on release.
@@ -161,18 +139,18 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
 
   const onPointerDown = useCallback(
     (e: PointerEvent) => {
-      // The right button opens the canvas menu instead.
+      // The right button opens the view's menu instead.
       if (e.pointerType === "touch" || e.button === 2) return;
       beginPress(e, e.shiftKey);
-      canvas.setPointerCapture(e.pointerId);
+      element.setPointerCapture(e.pointerId);
     },
-    [canvas, beginPress],
+    [element, beginPress],
   );
 
   const movePress = useCallback(
     (e: ClientPoint, atMs?: number) => {
       const dpr = devicePixelRatio;
-      const rect = canvas.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
       sendCursor(eventToWorld(e));
 
       const press = pressStart.current;
@@ -206,7 +184,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
       emitPresence();
       loopRef.current?.markInput("pan", atMs);
     },
-    [scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
+    [loopRef, scene, element, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
   );
 
   const onPointerMove = useCallback(
@@ -273,7 +251,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
       );
       onDocumentChangedRef.current();
     },
-    [eventToWorld, scene, annotationDraftRef],
+    [loopRef, eventToWorld, scene, annotationDraftRef],
   );
 
   const onPointerUp = useCallback(
@@ -305,14 +283,14 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
       e.preventDefault();
 
       const dpr = devicePixelRatio;
-      const rect = canvas.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
       const cursorX = (e.clientX - rect.left) * dpr;
       const cursorY = (e.clientY - rect.top) * dpr;
-      const canvasW = canvas.clientWidth * dpr;
-      const canvasH = canvas.clientHeight * dpr;
+      const canvasW = element.clientWidth * dpr;
+      const canvasH = element.clientHeight * dpr;
 
       // The zoom anchor, read before the zoom changes the camera.
-      const [worldX, worldY] = sceneEventToWorld(scene, canvas, e);
+      const [worldX, worldY] = sceneEventToWorld(scene, surface, e);
 
       const factor = e.deltaY > 0 ? SLICE_ZOOM_OUT_PER_NOTCH : SLICE_ZOOM_IN_PER_NOTCH;
       breakFollow();
@@ -325,7 +303,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
       emitPresence();
       loopRef.current?.markInput("zoom", e.timeStamp);
     },
-    [scene, canvas, emitPresence, breakFollow],
+    [loopRef, scene, surface, element, emitPresence, breakFollow],
   );
 
   // The keyboard moves the view about its center, as the toolbar would.
@@ -340,17 +318,17 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
    * anchoring, with room for the fingers to travel while they pinch. */
   const zoomBetween = (from: ClientPoint, to: ClientPoint, factor: number) => {
     const dpr = devicePixelRatio;
-    const rect = canvas.getBoundingClientRect();
-    const [worldX, worldY] = sceneEventToWorld(scene, canvas, from);
+    const rect = element.getBoundingClientRect();
+    const [worldX, worldY] = sceneEventToWorld(scene, surface, from);
     applyViewportCommand(scene, { type: "zoom_by", factor });
     const zoom = scene.zoom(scene.active_view());
-    const offsetX = (to.clientX - rect.left) * dpr - (canvas.clientWidth * dpr) / 2;
-    const offsetY = (to.clientY - rect.top) * dpr - (canvas.clientHeight * dpr) / 2;
+    const offsetX = (to.clientX - rect.left) * dpr - (element.clientWidth * dpr) / 2;
+    const offsetY = (to.clientY - rect.top) * dpr - (element.clientHeight * dpr) / 2;
     applyViewportCommand(scene, { type: "set_center", x: worldX - offsetX / zoom, y: worldY - offsetY / zoom });
   };
 
   // One finger pans, or draws with a tool; two pinch and pan in one move.
-  useTouchGestures(canvas, true, {
+  useTouchGestures(element, true, {
     claimsPress: () => toolRef.current !== "pan",
     onGesture: (g) => {
       switch (g.type) {
@@ -397,16 +375,19 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
     label: "Pan",
     group: "View",
     repeat: true,
+    // The keys steer the active view alone.
+    enabled: active,
     // A focused native slider or radio moves on its own arrow keys.
     when: () => !document.activeElement?.matches(ARROW_KEY_CONTROLS),
     onTrigger: (event) => {
-      const step = KEY_PAN_FRACTION * Math.min(canvas.clientWidth, canvas.clientHeight) * devicePixelRatio;
+      const step = KEY_PAN_FRACTION * Math.min(element.clientWidth, element.clientHeight) * devicePixelRatio;
       const [dx, dy] = PAN_DIRECTIONS[comboFromEvent(event) ?? ""] ?? [0, 0];
       moveView(() => applyViewportCommand(scene, { type: "pan", dx: dx * step, dy: dy * step }), "pan");
     },
   });
   useCommand({
     id: "view.zoomIn",
+    enabled: active,
     label: "Zoom in",
     group: "View",
     keys: ["+", "="],
@@ -415,6 +396,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
   });
   useCommand({
     id: "view.zoomOut",
+    enabled: active,
     label: "Zoom out",
     group: "View",
     keys: ["-"],
@@ -423,6 +405,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
   });
   useCommand({
     id: "view.fit",
+    enabled: active,
     label: "Fit to view",
     group: "View",
     keys: ["0"],
@@ -431,27 +414,27 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
   });
 
   useEffect(() => {
-    canvas.addEventListener("pointerdown", onPointerDown);
-    canvas.addEventListener("pointermove", onPointerMove);
-    canvas.addEventListener("pointerup", onPointerUp);
-    canvas.addEventListener("pointercancel", onPointerCancel);
-    canvas.addEventListener("pointerleave", onPointerLeave);
-    canvas.addEventListener("wheel", onWheel, { passive: false });
-    // Mutating canvas.style.cursor is the lightweight pattern for
+    element.addEventListener("pointerdown", onPointerDown);
+    element.addEventListener("pointermove", onPointerMove);
+    element.addEventListener("pointerup", onPointerUp);
+    element.addEventListener("pointercancel", onPointerCancel);
+    element.addEventListener("pointerleave", onPointerLeave);
+    element.addEventListener("wheel", onWheel, { passive: false });
+    // Mutating element.style.cursor is the lightweight pattern for
     // grab/grabbing feedback during pointer drag — promoting cursor
     // state to the parent + a CSS class would re-render the whole
     // viewport tree on every drag transition.
     // eslint-disable-next-line react-hooks/immutability
-    canvas.style.cursor = dragging ? "grabbing" : tool === "pan" ? "grab" : "crosshair";
+    element.style.cursor = dragging ? "grabbing" : tool === "pan" ? "grab" : "crosshair";
     return () => {
-      canvas.removeEventListener("pointerdown", onPointerDown);
-      canvas.removeEventListener("pointermove", onPointerMove);
-      canvas.removeEventListener("pointerup", onPointerUp);
-      canvas.removeEventListener("pointercancel", onPointerCancel);
-      canvas.removeEventListener("pointerleave", onPointerLeave);
-      canvas.removeEventListener("wheel", onWheel);
+      element.removeEventListener("pointerdown", onPointerDown);
+      element.removeEventListener("pointermove", onPointerMove);
+      element.removeEventListener("pointerup", onPointerUp);
+      element.removeEventListener("pointercancel", onPointerCancel);
+      element.removeEventListener("pointerleave", onPointerLeave);
+      element.removeEventListener("wheel", onWheel);
     };
-  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging, tool]);
+  }, [element, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging, tool]);
 
   return null;
 }
