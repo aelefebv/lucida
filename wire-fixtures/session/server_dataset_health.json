@@ -4,9 +4,9 @@
   "datasets": [
     {
       "workspace_dataset_id": "wds-0f3a",
-      "name": "kidney-multiplex.zarr",
+      "name": "multichannel-volume.zarr",
       "status": "degraded",
-      "source_url": "gs://lucida-fixtures/kidney-multiplex.zarr",
+      "source_url": "gs://lucida-fixtures/multichannel-volume.zarr",
       "backend": "gcs",
       "binding": {
         "status": "healthy",
