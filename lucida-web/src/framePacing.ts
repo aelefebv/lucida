@@ -27,7 +27,7 @@ export const MAX_INTERACTIVE_FRAMES_IN_FLIGHT = 2;
  * back, so input that arrives while one draws waits for all of it, and on
  * a slow enough GPU the browser stops delivering input until it lands.
  */
-export const BANDED_FRAME_MS = 150;
+export const BANDED_FRAME_MS = 200;
 
 /** What each band of a banded frame aims to take. */
 export const BAND_TARGET_MS = 50;

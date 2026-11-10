@@ -138,6 +138,11 @@ export class RenderLoop implements TraceEnvironment {
   private inputSinceFrame = false;
   /** The last frame dispatched at full quality: what it takes is what a settled frame costs. */
   private fullQualitySeq = 0;
+  /**
+   * A full-quality frame has finished. The first waits for the renderer's
+   * pipelines to compile, so what it takes says nothing about the next.
+   */
+  private fullQualityFrameSeen = false;
   /** A frame drawn in bands that has not finished, which the next input gives up. */
   private bandedSeq: number | null = null;
   /** The last frame given up: it stopped early, so what it took says nothing. */
@@ -595,7 +600,8 @@ export class RenderLoop implements TraceEnvironment {
       this.resolution.noteFrame(frame.frameSeq, frame.ms, this.client.lastFrameSeq());
       this.framePacer.noteFrameDone(frame.ms, performance.now());
       if (frame.frameSeq === this.fullQualitySeq && frame.frameSeq !== this.abandonedSeq) {
-        this.resolution.noteFullQualityFrame(frame.ms);
+        if (this.fullQualityFrameSeen) this.resolution.noteFullQualityFrame(frame.ms);
+        this.fullQualityFrameSeen = true;
       }
     }
     const wait = this.resolution.msUntilRestore();

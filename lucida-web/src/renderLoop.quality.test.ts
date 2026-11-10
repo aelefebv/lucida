@@ -40,7 +40,10 @@ import { MAX_BANDS } from "./framePacing.ts";
 import { MAX_MARCH_COARSENING, MIN_ADAPTIVE_SCALE, RESTORE_AFTER_MS } from "./renderResolution.ts";
 import { INTERACTION_MARCH_STEP_SCALE } from "./volumePath.ts";
 
-/** A stand-in GPU whose frames finish when the test says. */
+/**
+ * A stand-in GPU whose frames finish when the test says. The loop's first
+ * frame, which waits for the pipelines to compile, is drawn and finished.
+ */
 function makeLoop() {
   const source = { fetch: () => new Promise(() => {}), handleBinary: () => {} } as unknown as ContentSource;
   const cpuCache = new CpuCache(source, { size: 1, decode: () => new Promise(() => {}) } as unknown as DecodePool);
@@ -80,6 +83,10 @@ function makeLoop() {
     latency = { frameSeq, ms };
     client.onFrameDone?.(frameSeq, performance.now());
   };
+  tick();
+  finish(1, 600);
+  loop.markInteractiveDirty("test");
+  drawn.length = 0;
   return { loop, client, finish, lastSeq: () => seq };
 }
 
@@ -112,7 +119,7 @@ describe("volume frames on a GPU too slow for full quality", () => {
     const { loop, finish } = makeLoop();
     tick();
     expect(drawn.at(-1)).toMatchObject({ renderScale: 1, resolutionScale: 1, marchStepScale: 1 });
-    finish(1, 2_000);
+    finish(2, 2_000);
 
     loop.setRenderScale(0.5);
     loop.markInput("orbit");
@@ -128,7 +135,7 @@ describe("volume frames on a GPU too slow for full quality", () => {
   it("leaves a gesture's start alone where the last full-quality frame kept up", () => {
     const { loop, finish } = makeLoop();
     tick();
-    finish(1, 30);
+    finish(2, 30);
 
     loop.setRenderScale(0.5);
     loop.markInput("orbit");
@@ -139,7 +146,7 @@ describe("volume frames on a GPU too slow for full quality", () => {
   it("draws a full-quality frame in bands once one ran long, and gives it up for the next input", () => {
     const { loop, client, finish } = makeLoop();
     tick();
-    finish(1, 2_000);
+    finish(2, 2_000);
 
     loop.markInteractiveDirty("test");
     tick();
@@ -147,19 +154,25 @@ describe("volume frames on a GPU too slow for full quality", () => {
 
     loop.setRenderScale(0.5);
     loop.markInput("orbit");
-    expect(client.abandonFrame).toHaveBeenCalledWith(2);
+    expect(client.abandonFrame).toHaveBeenCalledWith(3);
     // Given up once.
     loop.markInput("orbit");
     expect(client.abandonFrame).toHaveBeenCalledOnce();
   });
 
+  it("learns nothing from the first full-quality frame, which waited for the pipelines", () => {
+    makeLoop();
+    tick();
+    expect(drawn.at(-1)).toMatchObject({ renderScale: 1, bands: 1 });
+  });
+
   it("gives up no banded frame that has finished", () => {
     const { loop, client, finish } = makeLoop();
     tick();
-    finish(1, 2_000);
+    finish(2, 2_000);
     loop.markInteractiveDirty("test");
     tick();
-    finish(2, 2_000);
+    finish(3, 2_000);
 
     loop.markInput("orbit");
     expect(client.abandonFrame).not.toHaveBeenCalled();
@@ -168,7 +181,7 @@ describe("volume frames on a GPU too slow for full quality", () => {
   it("shows input at the gesture's quality when the quality came back while its frame waited, then restores", () => {
     const { loop, finish } = makeLoop();
     tick();
-    finish(1, 30);
+    finish(2, 30);
 
     loop.setRenderScale(0.5);
     loop.markInput("orbit");
@@ -187,12 +200,12 @@ describe("volume frames on a GPU too slow for full quality", () => {
     tick();
     expect(drawn).toHaveLength(2);
 
-    finish(2, 400);
+    finish(3, 400);
     tick();
     expect(drawn).toHaveLength(3);
     expect(drawn[2].renderScale).toBe(0.5);
 
-    finish(3, 400);
+    finish(4, 400);
     tick();
     expect(drawn).toHaveLength(4);
     expect(drawn[3]).toMatchObject({ renderScale: 1, resolutionScale: 1 });
