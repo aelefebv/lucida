@@ -158,7 +158,7 @@ function renderLabelLayer(
   const encoder = ctx.device.createCommandEncoder();
   renderer.renderTo(target.createView(), encoder, ctx.passTimer);
   ctx.device.queue.submit([encoder.finish()]);
-  return { view: target.createView(), blendMode: layer.blendMode };
+  return { view: target.createView(), blendMode: layer.blendMode, clip: layer.clip };
 }
 
 /** An atlas as the renderer binds it. */
@@ -343,7 +343,7 @@ export async function handleSliceRenderMultiPass(
     const encoder = ctx.device.createCommandEncoder();
     renderer.renderLayerGroup(target.createView(), encoder, draw, timing);
     ctx.device.queue.submit([encoder.finish()]);
-    renderedLayers.push({ view: target.createView(), blendMode: first.blendMode });
+    renderedLayers.push({ view: target.createView(), blendMode: first.blendMode, clip: first.clip });
   }
   trimOffscreenPool(renderedLayers.length);
 

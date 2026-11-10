@@ -6604,6 +6604,8 @@ mod tests {
             "add",
             "remove",
             "minimap",
+            "swipe",
+            "blink",
         ];
 
         let command = Cli::command();

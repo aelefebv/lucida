@@ -59,6 +59,14 @@
     "sparse": {
       "description": "3D volume with a checkerboard of chunks unwritten",
       "generate": "--size 128,512,512 --levels 3 --chunk 64 --sparse"
+    },
+    "physical-volume": {
+      "description": "3D volume over 128x512x512 micrometers",
+      "generate": "--size 64,512,512 --levels 3 --chunk 64 --scale 2,1,1 --unit micrometer"
+    },
+    "physical-volume-coarse": {
+      "description": "another picture over the same 128x512x512 micrometers in samples twice as long, to compare with physical-volume",
+      "generate": "--size 32,256,256 --levels 2 --chunk 64 --scale 4,2,2 --unit micrometer --seed 7"
     }
   }
 }

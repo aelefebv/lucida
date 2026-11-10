@@ -289,6 +289,12 @@ frame places it, at its physical spacing, and cuts Y or X at a place in the
 scene frame, so datasets over one region cut the same plane.
 _Avoid_: orientation, section (unqualified)
 
+**Comparison**:
+Two datasets that line up shown against each other in one view: split by a
+divider dragged across it (swipe), or shown in turn (blink). Two datasets line
+up when each declares length units and their extents in the scene frame
+overlap. Both stay in the wanted set however they are shown.
+
 ## Surfaces
 
 **Monitor**:

@@ -46,6 +46,7 @@ interface MockScene {
   cut_index: () => number;
   camera_mode: () => string;
   resolved_layers: () => string;
+  comparison: () => string;
   importedViews: { c?: number; multi_channel?: boolean }[];
   apply_command: (json: string) => void;
   dataset_ids: () => string;
@@ -76,6 +77,7 @@ function makeMockScene(): MockScene {
     cut_index: () => m.zVal,
     camera_mode: () => m.cameraModeVal,
     resolved_layers: () => "[]",
+    comparison: () => "null",
     apply_command(json: string) {
       try {
         const cmd = JSON.parse(json);

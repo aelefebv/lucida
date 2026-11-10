@@ -9,7 +9,8 @@ function fakeScene() {
     t: 0,
     layers: [] as unknown[],
     mode: "slice",
-    epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0 },
+    comparison: null as unknown,
+    epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0, comparison: 0 },
   };
   const scene = {
     z: () => state.z,
@@ -18,6 +19,7 @@ function fakeScene() {
     cut_index: () => state.z,
     resolved_layers: () => JSON.stringify(state.layers),
     camera_mode: () => state.mode,
+    comparison: () => JSON.stringify(state.comparison),
     epochs: () => JSON.stringify(state.epochs),
   } as unknown as WasmScene;
   return { scene, state };
@@ -58,6 +60,25 @@ describe("SceneStore", () => {
     expect(listener).toHaveBeenCalledTimes(1);
     expect(store.getEpochs()).not.toBe(epochsBefore);
     expect(store.getView()).toBe(before);
+  });
+
+  it("reads the comparison apart from the view, so a divider drag keeps the view's identity", () => {
+    const { scene, state } = fakeScene();
+    const store = new SceneStore(() => scene);
+    store.subscribe(() => {});
+    const view = store.getView();
+    expect(store.getComparison()).toBeNull();
+
+    state.comparison = { a: "a", b: "b", mode: "swipe", divider: 0.4, showing: "a" };
+    state.epochs.comparison++;
+    noteSceneWrite();
+
+    expect(store.getComparison()).toMatchObject({ divider: 0.4 });
+    expect(store.getView()).toBe(view);
+    const comparison = store.getComparison();
+    state.epochs.view++;
+    noteSceneWrite();
+    expect(store.getComparison()).toBe(comparison);
   });
 
   it("stays quiet when a write moved no epoch", () => {

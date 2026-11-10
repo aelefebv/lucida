@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
 use crate::placement::Affine;
+use crate::scene::Comparison;
 use crate::slice_plane::SlicePlane;
 use lucida_content::{DatasetId, SpatialAxis};
 
@@ -75,6 +76,10 @@ pub struct View {
     pub axes: AxisPositions,
     pub datasets: ViewDatasets,
     pub rect: ViewRect,
+    /// Two datasets the view shows against each other. Client-local: nothing
+    /// shares or saves it yet.
+    #[serde(skip)]
+    pub comparison: Option<Comparison>,
 }
 
 impl View {
@@ -88,6 +93,7 @@ impl View {
             axes: AxisPositions::new(),
             datasets: ViewDatasets::All,
             rect: ViewRect::WHOLE,
+            comparison: None,
         }
     }
 

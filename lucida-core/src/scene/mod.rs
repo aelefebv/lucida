@@ -1,7 +1,9 @@
+mod comparison;
 mod layers;
 mod placement;
 mod types;
 
+pub use comparison::{CompareMode, Comparison, Side};
 pub(crate) use layers::LayerExtent;
 pub use layers::{ResolvedLayer, ShownChannel, in_channel_context};
 pub use types::{
@@ -461,6 +463,7 @@ impl Scene {
         if carried || changed {
             self.epochs.view += 1;
         }
+        self.keep_comparison_lined_up();
     }
 
     pub fn remove_dataset(&mut self, id: &DatasetId) {
