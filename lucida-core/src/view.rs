@@ -2,6 +2,9 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
+use crate::slice_plane::SlicePlane;
+use lucida_content::SpatialAxis;
+
 /// Selected indices for non-displayed dimensions. Which channels show is per
 /// layer, in [`crate::scene::DatasetDisplaySettings::solo`] and each channel's
 /// `visible` flag.
@@ -10,6 +13,13 @@ pub struct ViewState {
     /// Z slab range. A single slice is a range of length 1 (e.g. 42..43).
     pub z_range: Range<u32>,
     pub t: u32,
+    /// The plane an XZ view cuts along Y, and the one a YZ view cuts along
+    /// X. Absent until a view of that plane first opens, which picks the
+    /// middle of the data; absent reads as plane 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<u32>,
     /// The scene-wide channel of a view recorded before solo was per layer.
     /// Decoding only, see [`Self::legacy_channels`]; nothing writes it now.
     #[serde(rename = "c", default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +48,8 @@ impl ViewState {
         Self {
             z_range: 0..1,
             t: 0,
+            y: None,
+            x: None,
             legacy_c: None,
             legacy_multi_channel: None,
         }
@@ -53,9 +65,24 @@ impl ViewState {
         self.z_range = range;
     }
 
+    /// The plane a slice view of `plane` cuts, before any layer clamps it.
+    pub fn cut(&self, plane: SlicePlane) -> Range<u32> {
+        let single = |index: Option<u32>| {
+            let index = index.unwrap_or(0);
+            index..index.saturating_add(1)
+        };
+        match plane.cut() {
+            SpatialAxis::Z => self.z_range.clone(),
+            SpatialAxis::Y => single(self.y),
+            SpatialAxis::X => single(self.x),
+        }
+    }
+
     pub fn set_slice(&mut self, axis: &str, index: u32) -> Result<(), String> {
         match axis {
             "z" => self.set_z(index),
+            "y" => self.y = Some(index),
+            "x" => self.x = Some(index),
             "t" => self.t = index,
             "c" => {
                 return Err(
@@ -114,6 +141,21 @@ mod tests {
         v.set_slice("z", 42).unwrap();
         assert_eq!(v.z_range, 42..43);
         assert_eq!(v.t, 0);
+    }
+
+    #[test]
+    fn each_plane_cuts_at_its_own_axis_position() {
+        let mut v = ViewState::new();
+        v.set_z_range(4..6);
+        assert_eq!(v.cut(SlicePlane::Xy), 4..6);
+        assert_eq!(v.cut(SlicePlane::Xz), 0..1);
+        v.set_slice("y", 9).unwrap();
+        v.set_slice("x", 3).unwrap();
+        assert_eq!(v.cut(SlicePlane::Xz), 9..10);
+        assert_eq!(v.cut(SlicePlane::Yz), 3..4);
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"z_range":{"start":4,"end":6},"t":0,"y":9,"x":3}"#);
+        assert_eq!(serde_json::from_str::<ViewState>(&json).unwrap(), v);
     }
 
     #[test]

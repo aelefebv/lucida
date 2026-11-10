@@ -22,6 +22,7 @@ import { labelCellKey } from "../slice/atlas.ts";
 import type { SampleFormat } from "../dataTypeUtil.ts";
 import { memberIdForColdEntry, resolveMemberPools } from "../descriptorBuffer.ts";
 import { selectEntitySources } from "../entitySources.ts";
+import { fromPlaneFrame } from "../slicePlane.ts";
 import {
   betweenCubes,
   clipPlaneHit,
@@ -208,8 +209,14 @@ function probeMember(
   const dims = levelZeroDims(member.entry);
   if (!sources || !dims) return;
   const location = locateSample(sources.levels, sources.coarse, pos, mode);
-  const position = levelZeroPosition(pos, dims, mode);
-  if (mode === "slice") position[2] = member.cold.currentZ;
+  let position = levelZeroPosition(pos, dims, mode);
+  if (mode === "slice") {
+    position[2] = member.cold.currentZ;
+    // A side view's worker frame is across, down and the cut; the readout
+    // names the image's own X, Y and Z.
+    const axis = member.cold.sliceAxis;
+    if (axis) position = fromPlaneFrame(position, axis);
+  }
   const sample: ProbeSample = {
     datasetId: member.datasetId,
     entityId: member.entry.entityId,

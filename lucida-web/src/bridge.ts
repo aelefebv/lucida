@@ -14,6 +14,7 @@ import { traceRecorder } from "./trace/recorder.ts";
 import { classifyClientMessage, utf8ByteLength } from "./trace/sendAccounting.ts";
 import type { ServerTimingBatch } from "./trace/serverRowTable.ts";
 import type { SocketClose } from "./trace/types.ts";
+import type { SpatialAxis } from "./renderer/slicePlane.ts";
 import type {
   GeneratedChunkStatus,
   WireGeneratedAvailabilityByDataset,
@@ -300,6 +301,13 @@ const ENCODED_FRAME_FLAG = 0x8000;
  */
 const PLANES_FRAME_FLAG = 0x4000;
 
+/**
+ * Bit 13 of a chunk frame's key length marks a plane frame whose planes lie
+ * along X or Y, named by `[axis: u8]` after the range: 0 for X, 1 for Y.
+ * Mirror of `lucida_protocol::codec::PLANE_AXIS_FRAME_FLAG`.
+ */
+const PLANE_AXIS_FRAME_FLAG = 0x2000;
+
 /** Membership key of a document command, for the datasets-present mirror:
  *  `dataset_opened` adds `manifest.dataset_id`, `remove_dataset` removes
  *  `id`; every other command leaves membership untouched. */
@@ -391,18 +399,19 @@ export interface BridgeHandlers {
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number) => void;
   /**
-   * Binary frame, forwarded as (key, payload, codecs, planes) after the
-   * bridge parses the envelope (client_id, keyLen, key, payload). `codecs` is
-   * an encoded frame's codec list, null for decoded bytes. `planes` is a
-   * plane frame's `[first, end)` along the chunk's Z, null for the whole
-   * chunk. Routing by key and decoding live in the fetch pipeline, so the
-   * bridge stays a generic binary transport.
+   * Binary frame, forwarded as (key, payload, codecs, planes, planeAxis)
+   * after the bridge parses the envelope (client_id, keyLen, key, payload).
+   * `codecs` is an encoded frame's codec list, null for decoded bytes.
+   * `planes` is a plane frame's `[first, end)` along the chunk's
+   * `planeAxis`, null for the whole chunk. Routing by key and decoding live
+   * in the fetch pipeline, so the bridge stays a generic binary transport.
    */
   onBinary?: (
     key: string,
     payload: ArrayBuffer,
     codecs: Uint8Array | null,
     planes: readonly [number, number] | null,
+    planeAxis: SpatialAxis,
   ) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
@@ -879,16 +888,24 @@ export class Bridge {
     const view = new DataView(buffer);
     // Skip client_id (4 bytes); this client is the target.
     const keyField = view.getUint16(4, true);
-    const keyLen = keyField & ~(ENCODED_FRAME_FLAG | PLANES_FRAME_FLAG);
+    const keyLen = keyField & ~(ENCODED_FRAME_FLAG | PLANES_FRAME_FLAG | PLANE_AXIS_FRAME_FLAG);
     let at = 6 + keyLen;
     if (buffer.byteLength < at) return;
     const keyBytes = new Uint8Array(buffer, 6, keyLen);
     const key = new TextDecoder().decode(keyBytes);
     let planes: readonly [number, number] | null = null;
+    let planeAxis: SpatialAxis = "z";
     if (keyField & PLANES_FRAME_FLAG) {
       if (buffer.byteLength < at + 8) return;
       planes = [view.getUint32(at, true), view.getUint32(at + 4, true)];
       at += 8;
+      if (keyField & PLANE_AXIS_FRAME_FLAG) {
+        if (buffer.byteLength < at + 1) return;
+        const axis = view.getUint8(at);
+        if (axis > 1) return;
+        planeAxis = axis === 0 ? "x" : "y";
+        at += 1;
+      }
     }
     let codecs: Uint8Array | null = null;
     if (keyField & ENCODED_FRAME_FLAG) {
@@ -900,7 +917,7 @@ export class Bridge {
       at += codecsLen;
     }
     const payload = buffer.slice(at);
-    this.handlers.onBinary?.(key, payload, codecs, planes);
+    this.handlers.onBinary?.(key, payload, codecs, planes, planeAxis);
   }
 
   /**

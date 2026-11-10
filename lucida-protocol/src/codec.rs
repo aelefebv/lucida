@@ -6,6 +6,7 @@
 //! carries decoded bytes, so a client that declares nothing reads the frames
 //! it always has.
 
+use lucida_content::SpatialAxis;
 use serde::{Deserialize, Serialize};
 
 /// A bytes-to-bytes codec.
@@ -160,21 +161,52 @@ pub struct ChunkRelayReport {
 }
 
 /// Bit 15 of a chunk frame's key length marks an encoded frame. A key never
-/// comes near 16 KiB, so this bit and [`PLANES_FRAME_FLAG`] are free, and a
-/// frame with neither is laid out as every client has always read it.
+/// comes near 8 KiB, so this bit, [`PLANES_FRAME_FLAG`] and
+/// [`PLANE_AXIS_FRAME_FLAG`] are free, and a frame with none of them is laid
+/// out as every client has always read it.
 pub const ENCODED_FRAME_FLAG: u16 = 0x8000;
 
 /// Bit 14 of a chunk frame's key length marks a plane frame: the payload is
 /// some planes of the chunk, not all of it.
 pub const PLANES_FRAME_FLAG: u16 = 0x4000;
 
+/// Bit 13 of a chunk frame's key length marks a plane frame whose planes lie
+/// along X or Y. A plane frame without it holds planes along Z.
+pub const PLANE_AXIS_FRAME_FLAG: u16 = 0x2000;
+
+const FRAME_FLAGS: u16 = ENCODED_FRAME_FLAG | PLANES_FRAME_FLAG | PLANE_AXIS_FRAME_FLAG;
+
+/// Some planes of a chunk: half-open along one of its spatial axes, in the
+/// chunk's own samples, so planes `[3, 5]` along Y are its fourth and fifth
+/// rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkPlanes {
+    pub axis: SpatialAxis,
+    pub range: [u32; 2],
+}
+
+impl ChunkPlanes {
+    /// Planes along Z, the axis a slice view of XY cuts.
+    pub fn z(range: [u32; 2]) -> Self {
+        Self {
+            axis: SpatialAxis::Z,
+            range,
+        }
+    }
+}
+
+const AXIS_X: u8 = 0;
+const AXIS_Y: u8 = 1;
+
 /// A binary chunk frame: `[client_id: u32 LE][key_len: u16 LE][key][payload]`,
 /// the key being `{dataset_id}/{image_id}/{chunk_key}`.
 ///
 /// A plane frame sets [`PLANES_FRAME_FLAG`] in `key_len` and puts the planes
 /// its payload holds right after the key: `[first: u32 LE][end: u32 LE]`,
-/// half-open along the chunk's own Z, as the client asked for them. A frame
-/// without it holds the whole chunk.
+/// half-open along the chunk's own Z, as the client asked for them. Planes
+/// along X or Y also set [`PLANE_AXIS_FRAME_FLAG`] and follow the range with
+/// `[axis: u8]`, 0 for X and 1 for Y. A frame without either holds the whole
+/// chunk.
 ///
 /// An encoded frame sets [`ENCODED_FRAME_FLAG`] in `key_len` and puts the
 /// codecs its payload is encoded in before the payload, after the planes when
@@ -184,29 +216,41 @@ pub const PLANES_FRAME_FLAG: u16 = 0x4000;
 pub fn encode_chunk_frame(
     client_id: u32,
     composite_key: &str,
-    planes: Option<[u32; 2]>,
+    planes: Option<ChunkPlanes>,
     codecs: &[BytesCodec],
     payload: &[u8],
 ) -> Vec<u8> {
     let key = composite_key.as_bytes();
     let key_len = u16::try_from(key.len())
         .ok()
-        .filter(|len| len & (ENCODED_FRAME_FLAG | PLANES_FRAME_FLAG) == 0)
-        .expect("a composite chunk key is shorter than 16 KiB");
+        .filter(|len| len & FRAME_FLAGS == 0)
+        .expect("a composite chunk key is shorter than 8 KiB");
     let mut flags = 0;
-    if planes.is_some() {
+    if let Some(planes) = planes {
         flags |= PLANES_FRAME_FLAG;
+        if !planes.axis.is_z() {
+            flags |= PLANE_AXIS_FRAME_FLAG;
+        }
     }
     if !codecs.is_empty() {
         flags |= ENCODED_FRAME_FLAG;
     }
-    let mut buf = Vec::with_capacity(4 + 2 + key.len() + 8 + 1 + 4 * codecs.len() + payload.len());
+    let mut buf = Vec::with_capacity(4 + 2 + key.len() + 9 + 1 + 4 * codecs.len() + payload.len());
     buf.extend_from_slice(&client_id.to_le_bytes());
     buf.extend_from_slice(&(key_len | flags).to_le_bytes());
     buf.extend_from_slice(key);
-    if let Some([first, end]) = planes {
+    if let Some(ChunkPlanes {
+        axis,
+        range: [first, end],
+    }) = planes
+    {
         buf.extend_from_slice(&first.to_le_bytes());
         buf.extend_from_slice(&end.to_le_bytes());
+        match axis {
+            SpatialAxis::X => buf.push(AXIS_X),
+            SpatialAxis::Y => buf.push(AXIS_Y),
+            SpatialAxis::Z => {}
+        }
     }
     if !codecs.is_empty() {
         let mut list = Vec::with_capacity(4 * codecs.len());
@@ -224,7 +268,7 @@ pub struct ChunkFrame<'a> {
     pub client_id: u32,
     pub composite_key: &'a str,
     /// The planes the payload holds, `None` for the whole chunk.
-    pub planes: Option<[u32; 2]>,
+    pub planes: Option<ChunkPlanes>,
     /// The codecs the payload is encoded in, empty for decoded bytes.
     pub codecs: Vec<BytesCodec>,
     pub payload: &'a [u8],
@@ -237,9 +281,7 @@ pub fn parse_chunk_frame(frame: &[u8]) -> Result<ChunkFrame<'_>, CodecListError>
     let (key_len, rest) = rest.split_first_chunk::<2>().ok_or_else(short)?;
     let key_len = u16::from_le_bytes(*key_len);
     let (key, rest) = rest
-        .split_at_checked(usize::from(
-            key_len & !(ENCODED_FRAME_FLAG | PLANES_FRAME_FLAG),
-        ))
+        .split_at_checked(usize::from(key_len & !FRAME_FLAGS))
         .ok_or_else(short)?;
     let composite_key = std::str::from_utf8(key).map_err(|_| CodecListError::Key)?;
     let (planes, rest) = if key_len & PLANES_FRAME_FLAG == 0 {
@@ -247,10 +289,19 @@ pub fn parse_chunk_frame(frame: &[u8]) -> Result<ChunkFrame<'_>, CodecListError>
     } else {
         let (first, rest) = rest.split_first_chunk::<4>().ok_or_else(short)?;
         let (end, rest) = rest.split_first_chunk::<4>().ok_or_else(short)?;
-        (
-            Some([u32::from_le_bytes(*first), u32::from_le_bytes(*end)]),
-            rest,
-        )
+        let (axis, rest) = if key_len & PLANE_AXIS_FRAME_FLAG == 0 {
+            (SpatialAxis::Z, rest)
+        } else {
+            let (&axis, rest) = rest.split_first().ok_or_else(short)?;
+            let axis = match axis {
+                AXIS_X => SpatialAxis::X,
+                AXIS_Y => SpatialAxis::Y,
+                other => return Err(CodecListError::PlaneAxis(other)),
+            };
+            (axis, rest)
+        };
+        let range = [u32::from_le_bytes(*first), u32::from_le_bytes(*end)];
+        (Some(ChunkPlanes { axis, range }), rest)
     };
     let (codecs, payload) = if key_len & ENCODED_FRAME_FLAG == 0 {
         (Vec::new(), rest)
@@ -315,6 +366,8 @@ pub enum CodecListError {
     UnknownCodec(u8),
     #[error("unknown blosc {what} {value} in the chunk frame")]
     UnknownBlosc { what: &'static str, value: u8 },
+    #[error("unknown plane axis {0} in the chunk frame")]
+    PlaneAxis(u8),
 }
 
 /// The codecs [`write_codecs`] wrote.
@@ -438,10 +491,19 @@ mod tests {
 
     #[test]
     fn a_plane_frame_names_its_planes_after_the_key_and_before_any_codecs() {
-        let frame = encode_chunk_frame(9, "ds/img/0/0/0/1/0/0", Some([3, 5]), &[], &[7, 8]);
+        let frame = encode_chunk_frame(
+            9,
+            "ds/img/0/0/0/1/0/0",
+            Some(ChunkPlanes::z([3, 5])),
+            &[],
+            &[7, 8],
+        );
         assert_eq!(&frame[4..6], &(18u16 | PLANES_FRAME_FLAG).to_le_bytes());
         assert_eq!(&frame[24..], &[3, 0, 0, 0, 5, 0, 0, 0, 7, 8]);
-        assert_eq!(parse_chunk_frame(&frame).unwrap().planes, Some([3, 5]));
+        assert_eq!(
+            parse_chunk_frame(&frame).unwrap().planes,
+            Some(ChunkPlanes::z([3, 5]))
+        );
         assert_eq!(
             parse_chunk_frame(&frame[..27]),
             Err(CodecListError::Truncated)
@@ -450,7 +512,7 @@ mod tests {
         let encoded = encode_chunk_frame(
             9,
             "ds/img/0/0/0/1/0/0",
-            Some([0, 1]),
+            Some(ChunkPlanes::z([0, 1])),
             &[BytesCodec::Lz4],
             &[7, 8],
         );
@@ -464,10 +526,40 @@ mod tests {
             ChunkFrame {
                 client_id: 9,
                 composite_key: "ds/img/0/0/0/1/0/0",
-                planes: Some([0, 1]),
+                planes: Some(ChunkPlanes::z([0, 1])),
                 codecs: vec![BytesCodec::Lz4],
                 payload: &[7, 8],
             }
+        );
+    }
+
+    #[test]
+    fn a_plane_frame_along_x_or_y_names_its_axis_after_its_planes() {
+        let y = ChunkPlanes {
+            axis: SpatialAxis::Y,
+            range: [3, 5],
+        };
+        let frame = encode_chunk_frame(9, "ds/img/0/0/0/1/0/0", Some(y), &[BytesCodec::Lz4], &[7]);
+        assert_eq!(
+            &frame[4..6],
+            &(18u16 | PLANES_FRAME_FLAG | PLANE_AXIS_FRAME_FLAG | ENCODED_FRAME_FLAG).to_le_bytes()
+        );
+        assert_eq!(&frame[24..], &[3, 0, 0, 0, 5, 0, 0, 0, AXIS_Y, 1, LZ4, 7]);
+        let parsed = parse_chunk_frame(&frame).unwrap();
+        assert_eq!((parsed.planes, parsed.payload), (Some(y), &[7][..]));
+
+        let x = ChunkPlanes {
+            axis: SpatialAxis::X,
+            range: [0, 1],
+        };
+        let frame = encode_chunk_frame(9, "k", Some(x), &[], &[]);
+        assert_eq!(parse_chunk_frame(&frame).unwrap().planes, Some(x));
+        let mut bad = frame.clone();
+        *bad.last_mut().unwrap() = 2;
+        assert_eq!(parse_chunk_frame(&bad), Err(CodecListError::PlaneAxis(2)));
+        assert_eq!(
+            parse_chunk_frame(&frame[..frame.len() - 1]),
+            Err(CodecListError::Truncated)
         );
     }
 

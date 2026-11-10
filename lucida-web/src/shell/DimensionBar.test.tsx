@@ -6,6 +6,7 @@ import { useState } from "react";
 import { __resetKeyboardSeenForTesting } from "../input/fineInput.ts";
 import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
 import { DimensionBar, PLAYBACK_INTERVAL_MS } from "./DimensionBar.tsx";
+import type { SlicePlane } from "../renderer/slicePlane.ts";
 
 // The segmented control's selection indicator animates through the Web
 // Animations API, which happy-dom lacks.
@@ -23,25 +24,33 @@ interface Shape {
   mode?: "2d" | "3d";
   dimZ?: number;
   dimT?: number;
+  /** Planes along Y, which an XZ view cuts. */
+  dimY?: number;
   z?: number;
   t?: number;
 }
 
 /** The bar wired to its own state, the way App wires it to `useDimensions`. */
-function Harness({ mode = "2d", dimZ = 1, dimT = 1, z: z0 = 0, t: t0 = 0 }: Shape) {
+function Harness({ mode = "2d", dimZ = 1, dimT = 1, dimY = 1, z: z0 = 0, t: t0 = 0 }: Shape) {
   const [viewMode, setViewMode] = useState(mode);
   const [z, setZ] = useState(z0);
   const [t, setT] = useState(t0);
+  const [y, setY] = useState(0);
+  const [plane, setPlane] = useState<SlicePlane>("xy");
   const [cameraMode, setCameraMode] = useState<"arcball" | "fly">("arcball");
+  const side = plane !== "xy";
   return (
     <>
-      <output data-testid="state">{`${viewMode} z=${z} t=${t} ${cameraMode}`}</output>
+      <output data-testid="state">{`${viewMode} z=${z} t=${t} ${plane} y=${y} ${cameraMode}`}</output>
       <DimensionBar
         viewMode={viewMode}
         onViewModeToggle={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
-        z={z}
+        slicePlane={plane}
+        onSlicePlaneChange={setPlane}
         dimZ={dimZ}
-        onZChange={setZ}
+        cut={side ? y : z}
+        dimCut={side ? dimY : dimZ}
+        onCutChange={side ? setY : setZ}
         t={t}
         dimT={dimT}
         onTChange={setT}
@@ -99,9 +108,12 @@ describe("DimensionBar", () => {
       <DimensionBar
         viewMode="3d"
         onViewModeToggle={() => {}}
-        z={0}
+        slicePlane="xy"
+        onSlicePlaneChange={() => {}}
         dimZ={8}
-        onZChange={() => {}}
+        cut={0}
+        dimCut={8}
+        onCutChange={() => {}}
         t={0}
         dimT={1}
         onTChange={() => {}}
@@ -238,6 +250,33 @@ describe("DimensionBar", () => {
     act(() => vi.advanceTimersByTime(PLAYBACK_INTERVAL_MS * 2));
     expect(state()).toContain("t=0");
     expect(screen.getByRole("button", { name: "Play" })).toBeTruthy();
+  });
+
+  it("cuts another plane from its toggle or Shift+M, and then scrubs the axis that plane cuts", () => {
+    render(<Harness dimZ={10} dimY={40} z={4} />);
+    expect(screen.getByRole("slider", { name: /Z plane/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "XZ" }));
+    expect(state()).toContain("xz");
+    expect(screen.queryByRole("slider", { name: /Z plane/ })).toBeNull();
+    expect(screen.getByRole("slider", { name: /Y plane/ })).toBeTruthy();
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "PageDown" });
+    });
+    expect(state()).toContain("y=1");
+    expect(state()).toContain("z=4");
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "M", shiftKey: true });
+    });
+    expect(state()).toContain("yz");
+  });
+
+  it("offers no plane to cut where the data has one Z plane, nor in 3D", () => {
+    render(<Harness dimZ={1} dimY={40} />);
+    expect(screen.queryByRole("radiogroup", { name: "Slice plane" })).toBeNull();
+    cleanup();
+    __resetShortcutsForTesting();
+    render(<Harness mode="3d" dimZ={10} />);
+    expect(screen.queryByRole("radiogroup", { name: "Slice plane" })).toBeNull();
   });
 
   it("leaves channels to the layer panel", () => {

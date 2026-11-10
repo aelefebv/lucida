@@ -797,7 +797,8 @@ export function tickMinimap(
   if (state.overlayCallback && cache && (rebuilt || cameraChanged || overlayChanged)) {
     // Slice view bounds in scene XY.
     let sliceViewports: MinimapOverlayData["sliceViewports"] = [];
-    if (mode === "slice") {
+    // The overlay outlines an XY cut at its Z; a side view's cut is not drawn.
+    if (mode === "slice" && scene.slice_plane() === "xy") {
       const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
       const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
       const z = scene.zoom();

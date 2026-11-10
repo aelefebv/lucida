@@ -45,13 +45,15 @@ function dataset(id: string, channels: number): DatasetState {
 }
 
 function renderDimensions(datasets: DatasetState[] = []) {
-  const state = { z: 0, t: 0, selection: 0, layers: [] as unknown[] };
+  const state = { z: 0, t: 0, y: 0, plane: "xy", selection: 0, layers: [] as unknown[] };
   const commands: Array<Record<string, unknown>> = [];
   const scene = {
     apply_command: vi.fn((json: string) => {
       const cmd = JSON.parse(json);
       commands.push(cmd);
       if (cmd.type === "set_z") state.z = cmd.z;
+      if (cmd.type === "set_y") state.y = cmd.y;
+      if (cmd.type === "set_slice_plane") state.plane = cmd.plane;
       if (cmd.type === "set_t") state.t = cmd.t;
       state.selection++;
     }),
@@ -59,6 +61,8 @@ function renderDimensions(datasets: DatasetState[] = []) {
     resolved_layers: () => JSON.stringify(state.layers),
     z: () => state.z,
     t: () => state.t,
+    slice_plane: () => state.plane,
+    cut_index: () => (state.plane === "xy" ? state.z : state.y),
     camera_mode: () => "slice",
   } as unknown as WasmScene;
   const loop = {
@@ -93,7 +97,7 @@ describe("useDimensions as an input source", () => {
   it("reports a selector change as a scrub, at the control", () => {
     const { result, loop } = renderDimensions();
 
-    act(() => result.current.handleZChange(3));
+    act(() => result.current.handleCutChange(3));
     act(() => result.current.handleTChange(2));
 
     expect(loop.markInput.mock.calls).toEqual([["scrub"], ["scrub"]]);
@@ -103,9 +107,9 @@ describe("useDimensions as an input source", () => {
     const { result, commands } = renderDimensions();
 
     act(() => {
-      result.current.handleZChange(stepIndex(1, 3));
-      result.current.handleZChange(stepIndex(1, 3));
-      result.current.handleZChange(stepIndex(1, 3));
+      result.current.handleCutChange(stepIndex(1, 3));
+      result.current.handleCutChange(stepIndex(1, 3));
+      result.current.handleCutChange(stepIndex(1, 3));
       result.current.handleTChange(stepIndex(1, 4));
     });
 

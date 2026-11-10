@@ -15,16 +15,18 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::*;
 
-use crate::camera::{Camera, Framing};
+use crate::camera::{Camera, Framing, SliceCut};
 use crate::chunk::{self, ChunkCoord, ChunkQuery, ChunkView, CullCounts};
 use crate::epoch::SceneEpochs;
 use crate::framing::{FitBounds, VoxBox, WorldBox};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
+use crate::slice_plane::{SliceFrame, SlicePlane};
 use crate::target_level::{
-    self, IN_PLANE_AXES, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios,
+    self, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios, weighted_level_shape_ratios,
 };
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
+use lucida_content::SpatialAxis;
 
 /// Per-dataset derived state for fast hot-path lookups.
 /// Rebuilt on register/remove. Not serialized.
@@ -311,6 +313,61 @@ impl Scene {
         let sy = t.model[5] as f64 * correction;
         let sz = t.model[10] as f64 * correction;
         (sx * sx + sy * sy + sz * sz).sqrt()
+    }
+
+    /// The plane the slice camera cuts, whether it is active or parked. A
+    /// scene that never had one cuts XY.
+    pub fn slice_plane(&self) -> SlicePlane {
+        match (&self.camera, &self.parked_camera) {
+            (Camera::Slice(s), _) | (_, Some(Camera::Slice(s))) => s.plane,
+            _ => SlicePlane::Xy,
+        }
+    }
+
+    /// How `member` lies in the slice camera's world.
+    pub fn slice_frame(&self, member: &MemberState) -> SliceFrame {
+        match member.levels.first() {
+            Some(level0) => SliceFrame::of(self.slice_plane(), level0),
+            None => SliceFrame {
+                plane: self.slice_plane(),
+                scales: [1.0, 1.0],
+            },
+        }
+    }
+
+    /// What a slice view cuts of `member`, an image of `dataset_id`.
+    pub fn slice_cut(&self, dataset_id: &DatasetId, member: &MemberState) -> SliceCut {
+        SliceCut {
+            planes: self.layer_cut(dataset_id, self.slice_plane()),
+            scales: self.slice_frame(member).scales,
+        }
+    }
+
+    /// Cut `plane` with the active slice camera and fit it to the data again,
+    /// since its center and zoom are in the world of the plane it cut. The
+    /// first view of an X or Y cut stands in the middle of what is visible.
+    /// A volume camera ignores it.
+    pub fn set_slice_plane(&mut self, plane: SlicePlane) {
+        let Camera::Slice(slice) = &mut self.camera else {
+            return;
+        };
+        if slice.plane == plane {
+            return;
+        }
+        slice.plane = plane;
+        slice.framing = Framing::Framed;
+        let cut = plane.cut();
+        let middle = self.visible_extent(cut) / 2;
+        match cut {
+            SpatialAxis::Y => {
+                self.view.y.get_or_insert(middle);
+            }
+            SpatialAxis::X => {
+                self.view.x.get_or_insert(middle);
+            }
+            SpatialAxis::Z => {}
+        }
+        self.reframe();
     }
 
     /// Switch to the slice camera: the one this scene last had, or a new one
@@ -619,14 +676,15 @@ impl Scene {
         }
     }
 
-    /// Bounds of a single dataset's members in voxel space, the space the
-    /// [`Camera::Slice`] camera works in: the voxel twin of
-    /// [`Self::dataset_world_bounds`].
+    /// Bounds of a single dataset's members in the space the
+    /// [`Camera::Slice`] camera works in, as `[across, down, cut]` corners:
+    /// the twin of [`Self::dataset_world_bounds`]. For an XY cut that is
+    /// voxel space.
     ///
-    /// Each member with a level 0 contributes
-    /// `[position[0], position[1], 0] .. [position[0] + X, position[1] + Y, Z]`
-    /// from its level-0 shape, the voxel convention the slice-mode ray pick
-    /// and chunk culling use. Returns `None` when no member has levels.
+    /// Each member with a level 0 contributes the box
+    /// [`SliceFrame::image_box`] gives its layout position and level-0
+    /// shape, the convention the slice-mode ray pick and chunk culling use.
+    /// Returns `None` when no member has levels.
     pub fn dataset_voxel_bounds(&self, dataset_id: &str) -> Option<VoxBox> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
@@ -634,16 +692,9 @@ impl Scene {
             .members
             .iter()
             .filter_map(|member| {
-                let level0 = member.levels.first()?;
-                let [x0, y0] = member.position;
-                Some(VoxBox::new(
-                    [x0, y0, 0.0],
-                    [
-                        x0 + level0.shape[4] as f64,
-                        y0 + level0.shape[3] as f64,
-                        level0.shape[2] as f64,
-                    ],
-                ))
+                let shape = level0_xyz(member)?;
+                let (min, max) = self.slice_frame(member).image_box(member.position, shape);
+                Some(VoxBox::new(min, max))
             })
             .reduce(VoxBox::union)
     }
@@ -848,8 +899,8 @@ impl Scene {
     /// through a level boundary.
     ///
     /// For multi-member datasets (collections), each member's AABB is checked
-    /// against the visible region, and chunk planning is done in
-    /// member-local coordinates.
+    /// against the visible region, and its chunks are enumerated at its
+    /// layout position.
     pub fn chunk_plan_for(&self, dataset_id: &DatasetId) -> Option<Vec<MemberChunkPlan>> {
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
@@ -877,14 +928,20 @@ impl Scene {
                 level0.shape[4] as u32,
             ];
             let region = self.camera.visible_region(
-                &layer.z_range,
+                &SliceCut {
+                    planes: layer.cut(self.slice_plane()),
+                    scales: self.slice_frame(member).scales,
+                },
                 Some(&member.volume_transform),
                 Some(&vol_shape),
             );
 
-            // AABB culling (same logic as current but using member.position)
-            let pos_x = member.position[0];
-            let pos_y = member.position[1];
+            // AABB culling (same logic as current but using member.position).
+            // A slice view's cut is in the member's own samples.
+            let cut = (!self.camera.is_volume()).then_some(region.cut_axis);
+            let placed = |axis: SpatialAxis, at: f64| if cut == Some(axis) { 0.0 } else { at };
+            let pos_x = placed(SpatialAxis::X, member.position[0]);
+            let pos_y = placed(SpatialAxis::Y, member.position[1]);
             let member_max_x = pos_x + tile_w;
             let member_max_y = pos_y + tile_h;
 
@@ -899,25 +956,6 @@ impl Scene {
                 continue; // member is fully outside the visible region
             }
 
-            // Offset visible region by member position
-            let local_region = crate::camera::VisibleRegion {
-                xy_bounds: [
-                    vis_min_x - pos_x,
-                    vis_min_y - pos_y,
-                    vis_max_x - pos_x,
-                    vis_max_y - pos_y,
-                ],
-                z_range: region.z_range.clone(),
-                effective_zoom: region.effective_zoom,
-                radius_basis_vox: region.radius_basis_vox,
-                sort_center: region
-                    .sort_center
-                    .map(|[cx, cy, cz]| [cx - pos_x, cy - pos_y, cz]),
-                frustum_planes: region
-                    .frustum_planes
-                    .map(|planes| planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])),
-            };
-
             let (level, _) = self.member_target_level(
                 member,
                 multiscale_by_image[&member.image_id],
@@ -927,11 +965,16 @@ impl Scene {
             );
             let level_geo = &member.levels[level as usize];
 
-            let query =
-                ChunkQuery::new(level_geo, level0, [0.0, 0.0], chunk::RENDER_RADIUS_DISABLED);
+            // The query places the member, as the browser's planner does.
+            let query = ChunkQuery::new(
+                level_geo,
+                level0,
+                member.position,
+                chunk::RENDER_RADIUS_DISABLED,
+            );
             let mut cells = Vec::new();
             chunk::enumerate_chunks(
-                &ChunkView::new(&local_region, 0.0),
+                &ChunkView::new(&region, 0.0),
                 &query,
                 &mut CullCounts::default(),
                 &mut cells,
@@ -1134,16 +1177,19 @@ impl Scene {
             };
 
             let hit_result = if is_2d {
-                // Slice mode: ray and member positions are both in voxel space.
-                let pos_x = member.position[0];
-                let pos_y = member.position[1];
-                let tile_w = level0.shape[4] as f64;
-                let tile_h = level0.shape[3] as f64;
+                // Slice mode: ray and member box are both in the slice
+                // camera's space.
+                let shape = [
+                    level0.shape[4] as f64,
+                    level0.shape[3] as f64,
+                    level0.shape[2] as f64,
+                ];
+                let (min, max) = self.slice_frame(member).image_box(member.position, shape);
 
                 let rx = world_ray.origin[0];
                 let ry = world_ray.origin[1];
 
-                if rx >= pos_x && rx <= pos_x + tile_w && ry >= pos_y && ry <= pos_y + tile_h {
+                if rx >= min[0] && rx <= max[0] && ry >= min[1] && ry <= max[1] {
                     Some(([rx, ry, 0.0], 0.0))
                 } else {
                     None
@@ -1252,8 +1298,13 @@ impl Scene {
         y: f64,
         z: f64,
     ) -> Option<[f64; 2]> {
-        if matches!(self.camera, Camera::Slice(_)) {
-            // 2D: keep the long-standing in-plane behavior verbatim.
+        if let Camera::Slice(slice) = &self.camera {
+            // 2D: keep the long-standing in-plane behavior verbatim. A pin's
+            // place is an XY point at a Z, which a side view has no place to
+            // draw, so it hides there.
+            if !slice.plane.is_xy() {
+                return None;
+            }
             return self.camera.project_to_screen([x, y, z]);
         }
         let (member, shape) = self.annotation_member(dataset_id)?;
@@ -1607,11 +1658,20 @@ impl Scene {
             .and_then(|entries| entries.get(&member.image_id))
             .filter(|entry| entry.visible)
             .map(|entry| entry.target_level);
-        let axes: &[usize] = match self.camera {
-            Camera::Slice(_) => &IN_PLANE_AXES,
-            _ => &VOLUME_AXES,
+        let ratios = match &self.camera {
+            // A slice view resolves the two axes on screen. One drawn at more
+            // than a sample per world unit spreads its samples further apart,
+            // so it counts that much coarser.
+            Camera::Slice(slice) => {
+                let [across, down, _] = slice.plane.axes();
+                weighted_level_shape_ratios(
+                    &member.levels,
+                    &[across.tczyx(), down.tczyx()],
+                    &self.slice_frame(member).scales,
+                )
+            }
+            _ => level_shape_ratios(&member.levels, &VOLUME_AXES),
         };
-        let ratios = level_shape_ratios(&member.levels, axes);
         target_level::target_level(
             pixels_per_sample * self.render_ratio_scale(),
             &ratios,
@@ -1735,16 +1795,15 @@ impl Scene {
             let centroid;
 
             let pixels_per_sample = if is_2d {
-                let level0 = member.levels.first();
-                let (fw, fh, fd) = level0
-                    .map(|l| (l.shape[4] as f64, l.shape[3] as f64, l.shape[2] as f64))
-                    .unwrap_or((1.0, 1.0, 1.0));
-                centroid = [pos[0] + fw / 2.0, pos[1] + fh / 2.0, fd / 2.0];
+                // Corners and centroid in the slice camera's space.
+                let shape = level0_xyz(member).unwrap_or([1.0, 1.0, 1.0]);
+                let (min, max) = self.slice_frame(member).image_box(pos, shape);
+                centroid = std::array::from_fn(|a| (min[a] + max[a]) / 2.0);
                 let corners = [
-                    [pos[0], pos[1], 0.0],
-                    [pos[0] + fw, pos[1], 0.0],
-                    [pos[0], pos[1] + fh, 0.0],
-                    [pos[0] + fw, pos[1] + fh, 0.0],
+                    [min[0], min[1], 0.0],
+                    [max[0], min[1], 0.0],
+                    [min[0], max[1], 0.0],
+                    [max[0], max[1], 0.0],
                 ];
                 for corner in &corners {
                     if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
@@ -1955,6 +2014,15 @@ fn level0_shape(member: &MemberState) -> [u32; 3] {
     member.levels.first().map_or([1, 1, 1], |l| {
         [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32]
     })
+}
+
+/// The member's level-0 extent in samples as `[x, y, z]`, or `None` without
+/// levels.
+fn level0_xyz(member: &MemberState) -> Option<[f64; 3]> {
+    member
+        .levels
+        .first()
+        .map(|l| [l.shape[4] as f64, l.shape[3] as f64, l.shape[2] as f64])
 }
 
 /// Classify the current query against the prior snapshot into the delta
@@ -4927,6 +4995,62 @@ mod tests {
     }
 
     #[test]
+    fn a_side_view_fits_its_plane_at_physical_aspect_and_cuts_the_middle() {
+        use crate::command::ViewportCommand::*;
+        let ds = DatasetId("vol".into());
+        let mut scene = opened_volume([800, 600]);
+        for member in &mut scene.derived.get_mut(&ds).unwrap().members {
+            member.levels[0].scale[2] = 4.0;
+        }
+        let epochs = scene.epochs.clone();
+        apply_vp(
+            &mut scene,
+            SetSlicePlane {
+                plane: SlicePlane::Xz,
+            },
+        );
+        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
+        assert_eq!(scene.view.y, Some(256));
+        assert!(scene.epochs.view > epochs.view);
+        assert!(scene.epochs.selection > epochs.selection);
+        assert_eq!(scene.camera.framing(), Framing::Framed);
+        // 128 planes four times as deep as a sample is wide draw as tall as
+        // the 512 samples across.
+        let bounds = scene.dataset_voxel_bounds("vol").unwrap();
+        assert_eq!((bounds.min, bounds.max), ([0.0; 3], [512.0, 512.0, 512.0]));
+        let Camera::Slice(slice) = &scene.camera else {
+            panic!("a slice camera");
+        };
+        assert_eq!(slice.center, [256.0, 256.0]);
+
+        // The plan cuts chunk row 2 along Y, through both chunks along Z.
+        let plans = scene.chunk_plan_for(&ds).unwrap();
+        let needed = &plans[0].needed;
+        assert!(!needed.is_empty());
+        assert!(needed.iter().all(|c| c.y == 2), "{needed:?}");
+        let zs: std::collections::BTreeSet<u32> = needed.iter().map(|c| c.z).collect();
+        assert_eq!(zs.into_iter().collect::<Vec<_>>(), [0, 1]);
+
+        // Scrubbing moves the cut along Y; the plane survives a trip to 3D.
+        apply_vp(&mut scene, SetY { y: 400 });
+        assert_eq!(scene.layer_cut(&ds, SlicePlane::Xz), 400..401);
+        apply_vp(&mut scene, SetMode3D);
+        apply_vp(&mut scene, SetMode2D);
+        assert_eq!(scene.slice_plane(), SlicePlane::Xz);
+        apply_vp(
+            &mut scene,
+            SetSlicePlane {
+                plane: SlicePlane::Xy,
+            },
+        );
+        assert_eq!(
+            scene.dataset_voxel_bounds("vol").unwrap().max,
+            [512.0, 512.0, 128.0]
+        );
+        assert_eq!(scene.view.y, Some(400));
+    }
+
+    #[test]
     fn opening_a_dataset_frames_a_new_scene() {
         let scene = opened_volume([800, 600]);
         assert_eq!(scene.camera.framing(), Framing::Framed);
@@ -5217,6 +5341,7 @@ mod tests {
             zoom: 2.0,
             viewport: [1920, 1080],
             framing: Framing::Placed,
+            plane: SlicePlane::Xy,
         });
         let mut remote_view = ViewState::new();
         remote_view.t = 3;
@@ -5266,6 +5391,7 @@ mod tests {
             zoom: 0.0,
             viewport: [64, 64],
             framing: Framing::Placed,
+            plane: SlicePlane::Xy,
         });
         scene.import_presence(zero_zoom.clone(), ViewState::new(), DisplayState::default());
         match &scene.camera {

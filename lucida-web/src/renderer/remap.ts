@@ -7,7 +7,8 @@
  */
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
-import { parseChunkKey, parseCompositeKey } from "./chunkKeys.ts";
+import { parseChunkKey, parseCompositeKey, parsePlaneChunkKey } from "./chunkKeys.ts";
+import type { SpatialAxis } from "./slicePlane.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import { chunkWithinRenderRadius } from "../pipeline/renderRadius.ts";
 
@@ -66,6 +67,11 @@ export interface RemapParams {
    * reads {@link INDIRECTION_FAILED} unless a resident slot holds it.
    */
   failed?: ReadonlyMap<string, ReadonlySet<string>>;
+  /**
+   * The axis a slice pool's slots are cut along. Chunk keys then read in that
+   * plane's frame (`parsePlaneChunkKey`). Absent: Z.
+   */
+  sliceAxis?: SpatialAxis;
 }
 
 /**
@@ -85,7 +91,7 @@ export function remapSharedIndirection(params: RemapParams): void {
     const parsedComp = parseCompositeKey(compositeKey);
     if (!parsedComp) continue;
 
-    const chunk = parseChunkKey(parsedComp.chunkKey);
+    const chunk = parsePlaneChunkKey(parsedComp.chunkKey, params.sliceAxis);
     if (!chunk) continue;
     const meta = currentSection(params, parsedComp.memberId, chunk);
     if (!meta) continue;
@@ -119,7 +125,7 @@ export function remapSharedIndirection(params: RemapParams): void {
   if (!params.failed) return;
   for (const [memberId, chunkKeys] of params.failed) {
     for (const chunkKey of chunkKeys) {
-      const chunk = parseChunkKey(chunkKey);
+      const chunk = parsePlaneChunkKey(chunkKey, params.sliceAxis);
       if (!chunk) continue;
       const meta = currentSection(params, memberId, chunk);
       if (!meta) continue;

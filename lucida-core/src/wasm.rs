@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use lucida_content::DatasetId;
 
-use crate::camera::{Arcball, Camera, ClipMode, Framing};
+use crate::camera::{Arcball, Camera, ClipMode, Framing, SliceCut};
 use crate::command::{Command, ViewportCommand};
 use crate::framing::VoxBox;
 use crate::saved_view::SavedView;
@@ -333,6 +333,37 @@ impl WasmScene {
         self.inner.view.t
     }
 
+    /// The plane the slice camera cuts: `xy`, `xz` or `yz`.
+    pub fn slice_plane(&self) -> String {
+        self.inner.slice_plane().to_string()
+    }
+
+    /// The scene's axis position along the slice plane's cut axis, before
+    /// any layer clamps it.
+    pub fn cut_index(&self) -> u32 {
+        self.inner.view.cut(self.inner.slice_plane()).start
+    }
+
+    /// The most planes any visible layer has along the slice plane's cut
+    /// axis.
+    pub fn cut_extent(&self) -> u32 {
+        self.inner.visible_extent(self.inner.slice_plane().cut())
+    }
+
+    /// World units one level-0 sample of `dataset_id`'s first image spans
+    /// across the screen and down it in the slice view, `[1, 1]` for a
+    /// dataset the scene lacks. The slice renderer sizes images by it.
+    pub fn slice_scales(&self, dataset_id: &str) -> Vec<f64> {
+        let id = DatasetId(dataset_id.into());
+        self.inner
+            .derived
+            .get(&id)
+            .and_then(|d| d.members.first())
+            .map_or(vec![1.0, 1.0], |m| {
+                self.inner.slice_frame(m).scales.to_vec()
+            })
+    }
+
     pub fn zoom(&self) -> f64 {
         self.inner.camera.effective_zoom()
     }
@@ -363,7 +394,7 @@ impl WasmScene {
                 let vol_shape = self.inner.volume_shape();
                 let vol_transform = self.inner.volume_transform();
                 let region = self.inner.camera.visible_region(
-                    &self.inner.view.z_range,
+                    &SliceCut::planes(self.inner.view.z_range.clone()),
                     vol_transform,
                     vol_shape.as_ref(),
                 );
@@ -427,7 +458,7 @@ impl WasmScene {
         ];
         // A layer shallower than the scene's slab plans its nearest plane.
         let region = self.inner.camera.visible_region(
-            &self.inner.layer_z_range(&ds_id),
+            &self.inner.slice_cut(&ds_id, member),
             Some(&member.volume_transform),
             Some(&vol_shape),
         );

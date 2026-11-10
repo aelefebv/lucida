@@ -31,7 +31,7 @@ use lucida_content::{
     EntityId, EntityKind, EntityLabels, EntityPlacement, GeneratedLevelInfo,
     GeneratedLevelProvenance, GeneratedLevelRole, ImageId, ImageSpec, LabelColor, LabelName,
     LabelSpec, LayoutId, LayoutSpec, LevelGeometry, MultiscaleInfo, PinnedAxis, PositioningMode,
-    TransformEdge, VoxelTransform,
+    SpatialAxis, TransformEdge, VoxelTransform,
 };
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
@@ -317,8 +317,13 @@ fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
     match msg {
         ChunkMessage::ChunkRequest { planes: None, .. } => &["session/chunk_request.json"],
         ChunkMessage::ChunkRequest {
-            planes: Some(_), ..
+            planes: Some(_),
+            plane_axis: SpatialAxis::Z,
+            ..
         } => &["session/chunk_request_planes.json"],
+        ChunkMessage::ChunkRequest {
+            planes: Some(_), ..
+        } => &["session/chunk_request_rows.json"],
         // Excluded: currently unproduced wire vocabulary. Nothing in the
         // repo sends ChunkFetch — it exists as a type (with a round-trip
         // unit test), and the server's handler accepts and ignores it if a
@@ -845,6 +850,7 @@ fn slice_camera() -> Camera {
         zoom: 1.5,
         viewport: [1920, 1080],
         framing: lucida_core::camera::Framing::Placed,
+        plane: lucida_core::slice_plane::SlicePlane::Xy,
     })
 }
 
@@ -2351,6 +2357,7 @@ const GENERATED_FILES: &[&str] = &[
 const REQUEST_FILES: &[&str] = &[
     "session/chunk_request.json",
     "session/chunk_request_planes.json",
+    "session/chunk_request_rows.json",
     "session/chunk_cancel.json",
     "session/chunk_codecs.json",
 ];
@@ -2368,6 +2375,7 @@ fn chunk_request_golden() -> ChunkMessage {
         image_id: ImageId(SINGLE_IMAGE_ID.into()),
         key: "1/2/1/12/3/4".into(),
         planes: None,
+        plane_axis: SpatialAxis::Z,
     }
 }
 
@@ -2380,6 +2388,20 @@ fn chunk_request_planes_golden() -> ChunkMessage {
         image_id: ImageId(SINGLE_IMAGE_ID.into()),
         key: "1/2/1/12/3/4".into(),
         planes: Some([3, 6]),
+        plane_axis: SpatialAxis::Z,
+    }
+}
+
+/// What a slice view of XZ asks for: some rows of the chunk along Y. The
+/// page's third request on the connection, so its label is `2`.
+fn chunk_request_rows_golden() -> ChunkMessage {
+    ChunkMessage::ChunkRequest {
+        rid: 2,
+        dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
+        image_id: ImageId(SINGLE_IMAGE_ID.into()),
+        key: "1/2/1/12/3/4".into(),
+        planes: Some([5, 6]),
+        plane_axis: SpatialAxis::Y,
     }
 }
 
@@ -2434,6 +2456,15 @@ fn request_envelopes_match_goldens() {
     check(
         "session/chunk_request_planes.json",
         &planes,
+        &req("", &["/type", "/rid", "/dataset_id", "/image_id", "/key"]),
+        &mut failures,
+    );
+
+    let rows = chunk_request_rows_golden();
+    assert!(chunk_message_fixture_paths(&rows).contains(&"session/chunk_request_rows.json"));
+    check(
+        "session/chunk_request_rows.json",
+        &rows,
         &req("", &["/type", "/rid", "/dataset_id", "/image_id", "/key"]),
         &mut failures,
     );

@@ -6,7 +6,8 @@
  * snapshot/telemetry API.
  */
 
-import type { ChunkFailureKind, ContentSource, FetchResult } from "./contentSource.ts";
+import { planesKeySuffix, type ChunkFailureKind, type ContentSource, type FetchResult } from "./contentSource.ts";
+import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 import type { DecodePool } from "./decodePool.ts";
 import type {
   RequestPlan,
@@ -583,7 +584,7 @@ export class CpuCache {
         // plane, and any fetch of planes that holds the one it draws.
         unwantedInFlightKeys.delete(key);
         for (const fetch of inFlight.get(key) ?? []) {
-          if (holdsPlane(fetch.request.planes, req.plane)) unwantedInFlightKeys.delete(fetch.key);
+          if (holdsPlane(fetch.request, req)) unwantedInFlightKeys.delete(fetch.key);
         }
       }
       if (tier === "detail") {
@@ -1669,6 +1670,7 @@ export class CpuCache {
           imageId: req.imageId,
           chunkKey: req.chunkKey,
           ...(req.planes ? { planes: req.planes } : {}),
+          ...(req.planes && req.planeAxis ? { planeAxis: req.planeAxis } : {}),
         },
         controller.signal,
         // The transport's label for this chunk. When this fetch coalesced onto
@@ -1850,6 +1852,7 @@ export class CpuCache {
       traceRow,
     };
     if (result.planes) cacheEntry.planes = result.planes;
+    if (result.planes && result.planeAxis) cacheEntry.planeAxis = result.planeAxis;
 
     // Coarse-tier lanes share the overview store.
     const store = lane === "overview" || lane === "minimap" || lane === "coarse"
@@ -2219,6 +2222,7 @@ export class CpuCache {
       traceRow: entry.traceRow,
     };
     if (entry.planes) delivery.planes = entry.planes;
+    if (entry.planes && entry.planeAxis) delivery.planeAxis = entry.planeAxis;
     return delivery;
   }
 
@@ -2232,7 +2236,7 @@ export class CpuCache {
       req.lane === "overview" || req.lane === "minimap" || req.lane === "coarse";
     const store = usesOverviewCache ? this.overviewStore : this.chunkStore;
     const entry = store.get(req.entityId, req.chunkKey);
-    return entry && holdsPlane(entry.planes, req.plane) ? entry : undefined;
+    return entry && holdsPlane(entry, req) ? entry : undefined;
   }
 
   /**
@@ -2339,8 +2343,7 @@ export class CpuCache {
    * the whole chunk can be in flight together.
    */
   private inFlightKey(req: ChunkRequest): string {
-    const key = chunkSchedulerKey(req, req.tier);
-    return req.planes ? `${key}#${req.planes[0]}:${req.planes[1]}` : key;
+    return chunkSchedulerKey(req, req.tier) + planesKeySuffix(req.planes, req.planeAxis);
   }
 }
 
@@ -2359,14 +2362,23 @@ interface InFlightFetch {
   request: ChunkRequest;
 }
 
+/** Planes of a chunk along an axis, Z when it names none. */
+interface HeldPlanes {
+  planes?: readonly [number, number];
+  planeAxis?: SpatialAxis;
+}
+
 /**
- * Whether bytes holding `held` planes, or the whole chunk when absent, hold
- * what a request drawing `plane` needs: every plane when it draws the whole
- * chunk.
+ * Whether bytes holding `held` planes, or the whole chunk when it names
+ * none, hold what `want`, a request drawing its `plane`, needs: every plane
+ * when it draws the whole chunk, and planes along the axis it cuts.
  */
-function holdsPlane(held: readonly [number, number] | undefined, plane: number | undefined): boolean {
-  if (held === undefined) return true;
-  return plane !== undefined && held[0] <= plane && plane < held[1];
+function holdsPlane(held: HeldPlanes, want: { plane?: number; planeAxis?: SpatialAxis }): boolean {
+  const range = held.planes;
+  if (range === undefined) return true;
+  const { plane } = want;
+  if (plane === undefined || (held.planeAxis ?? "z") !== (want.planeAxis ?? "z")) return false;
+  return range[0] <= plane && plane < range[1];
 }
 
 /**
@@ -2377,7 +2389,7 @@ function holdsPlane(held: readonly [number, number] | undefined, plane: number |
  */
 function coveringFetch(fetches: readonly InFlightFetch[] | undefined, req: ChunkRequest): string | null {
   for (const fetch of fetches ?? []) {
-    if (!holdsPlane(fetch.request.planes, req.plane)) continue;
+    if (!holdsPlane(fetch.request, req)) continue;
     if (!fetch.request.planes && req.plane !== undefined && fetch.request.lane === "prefetch") continue;
     return fetch.key;
   }

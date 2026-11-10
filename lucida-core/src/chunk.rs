@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use lucida_content::LevelGeometry;
 
 use crate::camera::VisibleRegion;
+use crate::slice_plane::slice_level_plane;
+use lucida_content::SpatialAxis;
 
 /// A chunk coordinate in the multiscale grid.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,19 +45,6 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     format!("{level}/{t}/{c}/{z}/{y}/{x}")
 }
 
-/// The plane at a level `level_depth` planes deep that holds the center of the
-/// full-resolution plane `full_res_z`, the plane nearest-sample filtering
-/// reads. The render worker maps a plane with the same arithmetic
-/// (`lucida-web/src/renderer/slicePlane.ts`): a slice delivery lands only in
-/// the chunk the worker maps its plane to.
-pub fn slice_level_z(full_res_z: u64, full_res_depth: u64, level_depth: u64) -> u64 {
-    let last = level_depth.saturating_sub(1);
-    if level_depth == full_res_depth || full_res_depth == 0 {
-        return full_res_z.min(last);
-    }
-    ((2 * full_res_z + 1) * level_depth / (2 * full_res_depth)).min(last)
-}
-
 /// A render radius at or past this keeps every chunk: the planner's radius
 /// knobs switch the filter off at their top.
 pub const RENDER_RADIUS_DISABLED: f64 = 2.0;
@@ -67,8 +56,11 @@ pub struct ChunkView {
     xy_bounds: [f64; 4],
     z_range: [f64; 2],
     /// A 3-D view culls chunks against its frustum. A 2-D view has none, and
-    /// samples the one chunk along Z that holds each of its planes.
+    /// samples the one chunk along its cut axis that holds each of its planes.
     frustum_planes: Option<Vec<[f64; 4]>>,
+    /// The axis a 2-D view cuts. Its range is in each image's own samples,
+    /// so a layout's offset never applies along it.
+    cut: SpatialAxis,
     /// The region's sort center, else its middle: where the render radius is
     /// measured from.
     center: [f64; 3],
@@ -90,6 +82,8 @@ struct RegionInput {
     sort_center: Option<[f64; 3]>,
     #[serde(default)]
     frustum_planes: Option<Vec<[f64; 4]>>,
+    #[serde(default)]
+    cut_axis: SpatialAxis,
 }
 
 impl ChunkView {
@@ -103,6 +97,7 @@ impl ChunkView {
                 radius_basis_vox: Some(region.radius_basis_vox),
                 sort_center: region.sort_center,
                 frustum_planes: region.frustum_planes.map(Vec::from),
+                cut_axis: region.cut_axis,
             },
             depth_bias,
         )
@@ -142,6 +137,7 @@ impl ChunkView {
             xy_bounds: region.xy_bounds,
             z_range: region.z_range,
             frustum_planes: region.frustum_planes,
+            cut: region.cut_axis,
             center,
             radius_basis,
             focus: [center[0], center[1], focus_z],
@@ -218,8 +214,8 @@ pub struct CullCounts {
 ///
 /// A chunk is kept when its cell overlaps the region's XY bounds and Z
 /// range, is not wholly outside a 3-D view's frustum, and lies within the
-/// query's render radius of the view's center. A 2-D view keeps, along Z,
-/// only the chunk each of its planes maps to at this level.
+/// query's render radius of the view's center. A 2-D view keeps, along its
+/// cut axis, only the chunk each of its planes maps to at this level.
 pub fn enumerate_chunks(
     view: &ChunkView,
     query: &ChunkQuery,
@@ -230,20 +226,36 @@ pub fn enumerate_chunks(
     counts.considered += grid_x as u64 * grid_y as u64 * grid_z as u64;
 
     let [px, py] = query.position;
+    let slice_cut = view.frustum_planes.is_none().then_some(view.cut);
+    // A layout places an image along X and Y, but a 2-D view's cut is in the
+    // image's own samples.
+    let offset = |axis: SpatialAxis, position: f64| {
+        if slice_cut == Some(axis) {
+            0.0
+        } else {
+            position
+        }
+    };
+    let (ox, oy) = (offset(SpatialAxis::X, px), offset(SpatialAxis::Y, py));
     let [min_x, min_y, max_x, max_y] = view.xy_bounds;
-    let (min_x, min_y, max_x, max_y) = (min_x - px, min_y - py, max_x - px, max_y - py);
+    let (min_x, min_y, max_x, max_y) = (min_x - ox, min_y - oy, max_x - ox, max_y - oy);
     if max_x <= 0.0 || max_y <= 0.0 || min_x >= query.full[0] || min_y >= query.full[1] {
         return;
     }
 
     let world = query.chunk_world();
-    let (col_start, col_end) = cell_range(min_x, max_x, world[0], grid_x);
-    let (row_start, row_end) = cell_range(min_y, max_y, world[1], grid_y);
-    let (z_start, z_end) = if view.frustum_planes.is_some() {
-        cell_range(view.z_range[0], view.z_range[1], world[2], grid_z)
-    } else {
-        slice_cell_range(view.z_range, query, grid_z)
+    let bounds = [[min_x, max_x], [min_y, max_y], view.z_range];
+    let range = |axis: SpatialAxis| {
+        let a = axis.xyz();
+        if slice_cut == Some(axis) {
+            slice_cell_range(bounds[a], query, a)
+        } else {
+            cell_range(bounds[a][0], bounds[a][1], world[a], query.grid[a])
+        }
     };
+    let (col_start, col_end) = range(SpatialAxis::X);
+    let (row_start, row_end) = range(SpatialAxis::Y);
+    let (z_start, z_end) = range(SpatialAxis::Z);
     let cols = col_end.saturating_sub(col_start) as u64;
     let rows = row_end.saturating_sub(row_start) as u64;
     counts.after_xy_bounds += cols * rows * grid_z as u64;
@@ -253,7 +265,7 @@ pub fn enumerate_chunks(
         && query.radius_view >= 0.0
         && query.radius_view < RENDER_RADIUS_DISABLED)
         .then_some(view.radius_basis * query.radius_view);
-    let local = |p: [f64; 3]| [p[0] - px, p[1] - py, p[2]];
+    let local = |p: [f64; 3]| [p[0] - ox, p[1] - oy, p[2]];
     let (center, focus) = (local(view.center), local(view.focus));
 
     for z in z_start..z_end {
@@ -263,7 +275,7 @@ pub fn enumerate_chunks(
                 let lo: [f64; 3] = std::array::from_fn(|a| cell[a] * world[a]);
                 let hi: [f64; 3] = std::array::from_fn(|a| (cell[a] + 1.0) * world[a]);
                 if let Some(planes) = &view.frustum_planes {
-                    let placed = |p: [f64; 3]| [p[0] + px, p[1] + py, p[2]];
+                    let placed = |p: [f64; 3]| [p[0] + ox, p[1] + oy, p[2]];
                     if chunk_outside_frustum(&placed(lo), &placed(hi), planes) {
                         continue;
                     }
@@ -297,26 +309,26 @@ fn cell_range(min: f64, max: f64, size: f64, count: u32) -> (u32, u32) {
     (clamp((min / size).floor()), clamp((max / size).ceil()))
 }
 
-/// The half-open run of chunks along Z that a 2-D view of the planes
-/// `[start, end)` samples: from the chunk holding the first plane's mapped
-/// level plane to the one holding the last's.
-fn slice_cell_range(z_range: [f64; 2], query: &ChunkQuery, grid_z: u32) -> (u32, u32) {
-    let first = z_range[0].floor();
-    let last = z_range[1].ceil() - 1.0;
+/// The half-open run of chunks along axis `a` (`0` is X) that a 2-D view
+/// cutting the planes `[start, end)` along it samples: from the chunk holding
+/// the first plane's mapped level plane to the one holding the last's.
+fn slice_cell_range(range: [f64; 2], query: &ChunkQuery, a: usize) -> (u32, u32) {
+    let first = range[0].floor();
+    let last = range[1].ceil() - 1.0;
     if last < first {
         return (0, 0);
     }
     let chunk_of = |plane: f64| {
-        let level_plane = slice_level_z(
+        let level_plane = slice_level_plane(
             plane.max(0.0) as u64,
-            query.full[2] as u64,
-            query.shape[2] as u64,
+            query.full[a] as u64,
+            query.shape[a] as u64,
         );
-        level_plane / (query.chunk[2] as u64).max(1)
+        level_plane / (query.chunk[a] as u64).max(1)
     };
     let end = u32::try_from(chunk_of(last) + 1)
         .unwrap_or(u32::MAX)
-        .min(grid_z);
+        .min(query.grid[a]);
     (
         u32::try_from(chunk_of(first)).unwrap_or(u32::MAX).min(end),
         end,
@@ -416,7 +428,7 @@ pub fn enumerate_batch(view: &ChunkView, queries: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::Camera;
+    use crate::camera::{Camera, SliceCut};
 
     /// A level from `[Z, Y, X]` shapes, one timepoint and one channel.
     fn geo(level: u32, shape_zyx: [u64; 3], chunk_zyx: [u64; 3]) -> LevelGeometry {
@@ -459,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_slice_view_at_the_origin_samples_one_chunk() {
-        let region = Camera::new_2d([512, 512]).visible_region(&(0..1), None, None);
+        let region = Camera::new_2d([512, 512]).visible_region(&SliceCut::planes(0..1), None, None);
         let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
         let (found, _) = enumerate(&ChunkView::new(&region, 0.0), &whole(&g));
         assert_eq!(cells(&found), [(0, 0, 0)]);
@@ -471,7 +483,7 @@ mod tests {
         if let Camera::Slice(ref mut v) = cam {
             v.center = [512.0, 512.0];
         }
-        let region = cam.visible_region(&(0..1), None, None);
+        let region = cam.visible_region(&SliceCut::planes(0..1), None, None);
         let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
         let (found, _) = enumerate(&ChunkView::new(&region, 0.0), &whole(&g));
         assert_eq!(found.len(), 4);
@@ -588,16 +600,6 @@ mod tests {
     }
 
     #[test]
-    fn slice_level_z_takes_the_level_plane_under_the_plane_center() {
-        assert_eq!(slice_level_z(16, 100, 50), 8);
-        assert_eq!(slice_level_z(17, 100, 50), 8);
-        assert_eq!(slice_level_z(99, 100, 50), 49);
-        assert_eq!(slice_level_z(2, 10, 4), 1);
-        assert_eq!(slice_level_z(15, 23, 23), 15);
-        assert_eq!(slice_level_z(40, 32, 16), 15);
-    }
-
-    #[test]
     fn a_slice_view_samples_the_chunk_its_plane_maps_to() {
         // 100 planes halved to 50, in chunks 8 deep: plane 16 is the first of
         // level 1's chunk 1, where a proportional mapping lands one short.
@@ -610,15 +612,47 @@ mod tests {
                 z + 1
             ));
             let zs: Vec<u32> = enumerate(&v, &query).0.iter().map(|c| c.z).collect();
-            assert_eq!(zs, [(slice_level_z(z, 100, 50) / 8) as u32], "plane {z}");
+            assert_eq!(
+                zs,
+                [(slice_level_plane(z, 100, 50) / 8) as u32],
+                "plane {z}"
+            );
         }
+    }
+
+    #[test]
+    fn a_side_view_samples_the_chunk_its_plane_maps_to_along_its_cut_axis() {
+        // An XZ cut at Y plane 16 of 100, halved to 50 in chunks 8 tall:
+        // level plane 8, the first of chunk row 1, whatever Z the view spans.
+        let full = geo(0, [64, 100, 256], [64, 8, 256]);
+        let half = geo(1, [32, 50, 128], [8, 8, 128]);
+        let query = ChunkQuery::new(&half, &full, [0.0, 0.0], RENDER_RADIUS_DISABLED);
+        let v = view(r#"{"xy_bounds":[0,16,256,17],"z_range":[0,64],"cut_axis":"y"}"#);
+        let found = enumerate(&v, &query).0;
+        assert!(found.iter().all(|c| c.y == 1));
+        let zs: std::collections::BTreeSet<u32> = found.iter().map(|c| c.z).collect();
+        assert_eq!(zs.into_iter().collect::<Vec<_>>(), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_side_view_cuts_every_image_at_its_own_plane() {
+        // An image placed at Y 1000 is still cut at its own plane 16.
+        let full = geo(0, [64, 100, 256], [64, 8, 256]);
+        let query = ChunkQuery::new(&full, &full, [0.0, 1000.0], RENDER_RADIUS_DISABLED);
+        let v = view(r#"{"xy_bounds":[0,16,256,17],"z_range":[0,64],"cut_axis":"y"}"#);
+        let found = enumerate(&v, &query).0;
+        assert!(!found.is_empty());
+        assert!(found.iter().all(|c| c.y == 2));
+        // Along X, where the view is on screen, the layout still places it.
+        let shifted = ChunkQuery::new(&full, &full, [1000.0, 0.0], RENDER_RADIUS_DISABLED);
+        assert!(enumerate(&v, &shifted).0.is_empty());
     }
 
     #[test]
     fn a_slice_view_samples_one_chunk_where_its_plane_spans_two_level_planes() {
         // Plane 2 of 10 spans level planes 0 and 1 of 4. Its center is in
         // plane 1, so only the chunk holding plane 1 is wanted.
-        let region = Camera::new_2d([512, 512]).visible_region(&(2..3), None, None);
+        let region = Camera::new_2d([512, 512]).visible_region(&SliceCut::planes(2..3), None, None);
         let full = geo(0, [10, 512, 512], [1, 512, 512]);
         let level1 = geo(1, [4, 256, 256], [1, 256, 256]);
         let query = ChunkQuery::new(&level1, &full, [0.0, 0.0], RENDER_RADIUS_DISABLED);
@@ -728,7 +762,7 @@ mod tests {
         if let Camera::Slice(ref mut v) = cam {
             v.center = [300.0, 200.0];
         }
-        let region = cam.visible_region(&(3..4), None, None);
+        let region = cam.visible_region(&SliceCut::planes(3..4), None, None);
         let json = serde_json::to_string(&region).unwrap();
         let (read, held) = (
             ChunkView::from_json(&json, 0.25).unwrap(),

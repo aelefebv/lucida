@@ -7,7 +7,8 @@
 
 import type { WasmScene } from "lucida-core";
 import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
-import { shownChannels, type ResolvedLayer } from "../../resolvedLayers.ts";
+import { layerCut, shownChannels, type ResolvedLayer } from "../../resolvedLayers.ts";
+import { cutAxis, type SliceCut, type SlicePlane, type SpatialAxis } from "../../renderer/slicePlane.ts";
 import type {
   EntitySnapshot,
   MinimapChunkCoord,
@@ -40,6 +41,7 @@ interface VisibleRegionJson {
   radius_basis_vox?: number;
   sort_center: [number, number, number] | null;
   frustum_planes: [number, number, number, number][] | null;
+  cut_axis?: SpatialAxis;
 }
 
 /**
@@ -116,6 +118,18 @@ export interface BuildPlanningSnapshotResult {
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
   selection: SelectionState;
+}
+
+/**
+ * Where the slice view cuts `layer`: along the scene's slice plane at the
+ * layer's clamped axis position, or the scene's own for a layer it lacks.
+ */
+export function sliceCut(
+  scene: Pick<WasmScene, "slice_plane" | "cut_index">,
+  layer: ResolvedLayer | undefined,
+): SliceCut {
+  const plane = scene.slice_plane() as SlicePlane;
+  return layer ? layerCut(layer, plane) : { axis: cutAxis(plane), index: scene.cut_index() };
 }
 
 /**
@@ -207,6 +221,7 @@ export function buildPlanningSnapshot(
         ...(vr.radius_basis_vox !== undefined ? { radiusBasisVox: vr.radius_basis_vox } : {}),
         sortCenterVox: vr.sort_center,
         frustumPlanes: vr.frustum_planes,
+        ...(vr.cut_axis !== undefined ? { cutAxis: vr.cut_axis } : {}),
       }
     : DEFAULT_VISIBLE_REGION;
 
@@ -215,6 +230,7 @@ export function buildPlanningSnapshot(
   const selection: SelectionState = {
     t: layer?.t ?? scene.t(),
     z: layer?.z_range.start ?? scene.z(),
+    cut: sliceCut(scene, layer),
     visibleChannels: shownChannels(layer),
     renderMode: mode,
     interactionState: "idle",

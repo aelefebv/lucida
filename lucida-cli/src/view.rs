@@ -2165,10 +2165,17 @@ pub fn format_diagnostic_source(source: &DiagnosticViewSource) -> String {
 
 fn format_camera(camera: &Camera) -> String {
     match camera {
-        Camera::Slice(slice) => format!(
-            "slice viewport={}x{} center=({:.3}, {:.3}) zoom={:.3}",
-            slice.viewport[0], slice.viewport[1], slice.center[0], slice.center[1], slice.zoom
-        ),
+        Camera::Slice(slice) => {
+            let plane = if slice.plane.is_xy() {
+                String::new()
+            } else {
+                format!(" plane={}", slice.plane)
+            };
+            format!(
+                "slice{plane} viewport={}x{} center=({:.3}, {:.3}) zoom={:.3}",
+                slice.viewport[0], slice.viewport[1], slice.center[0], slice.center[1], slice.zoom
+            )
+        }
         Camera::Arcball(arcball) => format!(
             "arcball viewport={}x{} target=({:.3}, {:.3}, {:.3}) theta={:.3} phi={:.3} distance={:.3}",
             arcball.viewport[0],
@@ -2188,7 +2195,13 @@ fn format_camera(camera: &Camera) -> String {
 }
 
 fn format_view(view: &ViewState) -> String {
-    format!("T{} Z{}..{}", view.t, view.z_range.start, view.z_range.end)
+    let mut text = format!("T{} Z{}..{}", view.t, view.z_range.start, view.z_range.end);
+    for (axis, index) in [("Y", view.y), ("X", view.x)] {
+        if let Some(index) = index {
+            text.push_str(&format!(" {axis}{index}"));
+        }
+    }
+    text
 }
 
 fn format_peer_summary(peer: &PeerSummary) -> String {
@@ -2259,6 +2272,9 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::SetZ { .. } => "view slice z",
         ViewportCommand::SetZRange { .. } => "view z-range",
         ViewportCommand::SetT { .. } => "view slice t",
+        ViewportCommand::SetY { .. } => "view slice y",
+        ViewportCommand::SetX { .. } => "view slice x",
+        ViewportCommand::SetSlicePlane { .. } => "view plane",
         ViewportCommand::SetContrast { .. } => "view contrast",
         ViewportCommand::SetGamma { .. } => "view gamma",
         ViewportCommand::SetDatasetOrder { .. } => "layer order",
@@ -2310,6 +2326,7 @@ mod tests {
                 zoom: 1.0,
                 viewport: [800, 600],
                 framing: lucida_core::camera::Framing::Placed,
+                plane: lucida_core::slice_plane::SlicePlane::Xy,
             })),
             view: Some(ViewState::new()),
             display: Some(DisplayState::default()),
@@ -2517,6 +2534,7 @@ mod tests {
                     zoom: 1.0,
                     viewport: [800, 600],
                     framing: lucida_core::camera::Framing::Placed,
+                    plane: lucida_core::slice_plane::SlicePlane::Xy,
                 }),
                 view: ViewState::new(),
                 display: DisplayState::default(),

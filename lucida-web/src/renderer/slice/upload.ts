@@ -21,7 +21,7 @@ import { asUint32Slice, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.
 import { makeCompositeKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
 import { mayEvict } from "../eviction.ts";
-import { sliceLevelZ } from "../slicePlane.ts";
+import { sliceLevelPlane } from "../slicePlane.ts";
 import { wantedChunksFor } from "../wantedChunks.ts";
 import { cameraUVForMember, chunkDistSq2D, findEvictionSlot2D } from "./eviction.ts";
 import {
@@ -146,7 +146,7 @@ export function handleSliceChunkData(
     zInfoByLevel.set(level, { chunkZ, fullResDepth, levelDepth });
   }
 
-  const levelZ = sliceLevelZ(fullResZ, fullResDepth, levelDepth);
+  const levelZ = sliceLevelPlane(fullResZ, fullResDepth, levelDepth);
   const targetChunkZ = Math.floor(levelZ / chunkZ);
   const wanted = wantedChunksFor(ctx.state, memberId, tier);
 

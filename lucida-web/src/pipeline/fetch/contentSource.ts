@@ -5,6 +5,7 @@ import { extractDataType, type MultiscaleInfo, type WireFormat } from "../../man
 import type { GeneratedChunkStatus } from "../generatedAvailability.ts";
 import { FetchError } from "./retry.ts";
 import type { WireLabel } from "../../trace/types.ts";
+import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 
 /**
  * Failure statuses the server unicasts for a source chunk request it answers
@@ -72,12 +73,25 @@ export function sourceChunkFailure(
   });
 }
 
-/** Planes of a chunk, half-open along the chunk's own Z: `[3, 5]` is its fourth and fifth. */
+/**
+ * Planes of a chunk, half-open along one of the chunk's own axes, Z unless
+ * a `planeAxis` beside it says otherwise: `[3, 5]` is its fourth and fifth.
+ */
 export type PlaneRange = readonly [number, number];
 
 /** Whether `outer` holds every plane of `inner`. */
 export function holdsPlanes(outer: PlaneRange, inner: PlaneRange): boolean {
   return outer[0] <= inner[0] && inner[1] <= outer[1];
+}
+
+/**
+ * What a fetch of some planes adds to its chunk's key, so fetches of
+ * different planes, or of the whole chunk, are told apart: `#3:5` along Z,
+ * `#y3:5` along Y.
+ */
+export function planesKeySuffix(planes: PlaneRange | undefined, axis: SpatialAxis = "z"): string {
+  if (!planes) return "";
+  return `#${axis === "z" ? "" : axis}${planes[0]}:${planes[1]}`;
 }
 
 export interface FetchRequest {
@@ -86,6 +100,8 @@ export interface FetchRequest {
   chunkKey: string;       // canonical "level/t/c/z/y/x"
   /** Planes to fetch in place of the whole chunk. */
   planes?: PlaneRange;
+  /** The axis {@link planes} lie along. Absent: Z. */
+  planeAxis?: SpatialAxis;
 }
 
 export interface FetchResult {
@@ -107,6 +123,8 @@ export interface FetchResult {
    * the server may send for any request.
    */
   planes?: PlaneRange;
+  /** The axis {@link planes} lie along. Absent: Z. */
+  planeAxis?: SpatialAxis;
 }
 
 export interface ContentSource {
@@ -121,6 +139,7 @@ export interface ContentSource {
     data: ArrayBuffer,
     codecs?: Uint8Array | null,
     planes?: PlaneRange | null,
+    planeAxis?: SpatialAxis,
   ): void;
 }
 
@@ -151,10 +170,10 @@ function storedBytesPerSample(dataType: string): number {
   }
 }
 
-/** What one wire chunk of a level decodes to, and the planes it holds along Z. */
+/** What one wire chunk of a level decodes to, and the planes it holds along X, Y and Z. */
 export interface LevelChunkSize {
   bytes: number;
-  planes: number;
+  planes: Record<SpatialAxis, number>;
 }
 
 /**
@@ -167,7 +186,10 @@ export function levelChunkSizes(multiscale: MultiscaleInfo): LevelChunkSize[] {
   const sizes: LevelChunkSize[] = [];
   for (const level of multiscale.levels) {
     const [, , z, y, x] = level.chunk_shape;
-    sizes[level.level_index] = { bytes: z * y * x * sample, planes: Math.max(z, 1) };
+    sizes[level.level_index] = {
+      bytes: z * y * x * sample,
+      planes: { x: Math.max(x, 1), y: Math.max(y, 1), z: Math.max(z, 1) },
+    };
   }
   return sizes;
 }
@@ -201,7 +223,12 @@ interface PendingGroup {
 }
 
 interface PendingRequest {
-  resolve: (data: ArrayBuffer, codecs: Uint8Array | null, planes: PlaneRange | null) => void;
+  resolve: (
+    data: ArrayBuffer,
+    codecs: Uint8Array | null,
+    planes: PlaneRange | null,
+    planeAxis: SpatialAxis,
+  ) => void;
   // Accepts `FetchError` (rejectDataset/rejectAll) and
   // `DOMException("AbortError")` (signal abort). Both pass through
   // `classifyFetchError` in the cache.
@@ -214,8 +241,20 @@ interface PendingRequest {
  * chunk, and that key with its planes for some planes, so a request for the
  * whole chunk and one for its planes are two wire requests.
  */
-function pendingKey(compositeKey: string, planes: PlaneRange | undefined): string {
-  return planes ? `${compositeKey}#${planes[0]}:${planes[1]}` : compositeKey;
+function pendingKey(compositeKey: string, planes: PlaneRange | undefined, axis?: SpatialAxis): string {
+  return compositeKey + planesKeySuffix(planes, axis);
+}
+
+/** The planes and their axis a {@link pendingKey} names. */
+function planesOfKey(key: string): { planes: PlaneRange; axis: SpatialAxis } {
+  let suffix = key.slice(key.lastIndexOf("#") + 1);
+  let axis: SpatialAxis = "z";
+  if (suffix.startsWith("x") || suffix.startsWith("y")) {
+    axis = suffix[0] as SpatialAxis;
+    suffix = suffix.slice(1);
+  }
+  const [first, end] = suffix.split(":").map(Number);
+  return { planes: [first, end], axis };
 }
 
 export class ProxiedContentSource implements ContentSource {
@@ -290,15 +329,16 @@ export class ProxiedContentSource implements ContentSource {
     data: ArrayBuffer,
     codecs: Uint8Array | null = null,
     planes: PlaneRange | null = null,
+    planeAxis: SpatialAxis = "z",
   ): void {
     // Whole bytes answer every request for the chunk, and planes the
-    // requests for planes they hold.
+    // requests for planes along the same axis they hold.
     const entries = planes
-      ? this.takePlanes(key, (wanted) => holdsPlanes(planes, wanted))
+      ? this.takePlanes(key, (wanted, axis) => axis === planeAxis && holdsPlanes(planes, wanted))
       : this.takeChunk(key);
     entries.forEach((entry, idx) => {
       clearTimeout(entry.timeoutId);
-      entry.resolve(idx === 0 ? data : data.slice(0), codecs, planes);
+      entry.resolve(idx === 0 ? data : data.slice(0), codecs, planes, planeAxis);
     });
   }
 
@@ -372,9 +412,9 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult> {
-    const { datasetId, imageId, chunkKey, planes } = request;
+    const { datasetId, imageId, chunkKey, planes, planeAxis } = request;
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
-    const key = pendingKey(compositeKey, planes);
+    const key = pendingKey(compositeKey, planes, planeAxis);
     const wireFormat = this.imageWireFormats.get(imageId);
     if (!wireFormat) {
       // Setup bug — retrying won't recover.
@@ -389,14 +429,17 @@ export class ProxiedContentSource implements ContentSource {
 
     return new Promise<FetchResult>((resolve, reject) => {
       const pendingEntry: PendingRequest = {
-        resolve: (bytes, codecs, arrived) => {
+        resolve: (bytes, codecs, arrived, arrivedAxis) => {
           clearTimeout(pendingEntry.timeoutId);
           const result: FetchResult = { bytes, wireFormat, dataType };
           if (codecs) result.codecs = codecs;
-          if (arrived) result.planes = arrived;
+          if (arrived) {
+            result.planes = arrived;
+            if (arrivedAxis !== "z") result.planeAxis = arrivedAxis;
+          }
           if (size !== undefined) {
             result.decodedBytes = arrived
-              ? (size.bytes / size.planes) * (arrived[1] - arrived[0])
+              ? (size.bytes / size.planes[arrivedAxis]) * (arrived[1] - arrived[0])
               : size.bytes;
           }
           resolve(result);
@@ -419,6 +462,7 @@ export class ProxiedContentSource implements ContentSource {
           image_id: imageId,
           key: chunkKey,
           ...(planes ? { planes: [planes[0], planes[1]] } : {}),
+          ...(planes && planeAxis && planeAxis !== "z" ? { plane_axis: planeAxis } : {}),
         }));
       }
 
@@ -490,13 +534,16 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   /** The chunk's plane requests whose planes `wanted` accepts. */
-  private takePlanes(compositeKey: string, wanted: (planes: PlaneRange) => boolean): PendingRequest[] {
+  private takePlanes(
+    compositeKey: string,
+    wanted: (planes: PlaneRange, axis: SpatialAxis) => boolean,
+  ): PendingRequest[] {
     const keys = this.planeKeys.get(compositeKey);
     if (!keys) return [];
     const entries: PendingRequest[] = [];
     for (const key of keys) {
-      const [first, end] = key.slice(key.lastIndexOf("#") + 1).split(":").map(Number);
-      if (!wanted([first, end])) continue;
+      const { planes, axis } = planesOfKey(key);
+      if (!wanted(planes, axis)) continue;
       entries.push(...(this.pending.get(key)?.entries ?? []));
       this.pending.delete(key);
       keys.delete(key);

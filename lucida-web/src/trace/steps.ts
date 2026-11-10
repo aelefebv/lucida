@@ -12,10 +12,14 @@
  */
 
 import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";
+import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 
-/** The selectors a scrub moves. */
-export type ScrubAxis = "z" | "t" | "c";
-export const SCRUB_AXES: readonly ScrubAxis[] = ["z", "t", "c"];
+/** The selectors a scrub moves. `y` and `x` are the cuts of an XZ and a YZ view. */
+export type ScrubAxis = "z" | "y" | "x" | "t" | "c";
+export const SCRUB_AXES: readonly ScrubAxis[] = ["z", "y", "x", "t", "c"];
+
+/** The planes a slice view cuts. */
+export const SLICE_PLANES: readonly SlicePlane[] = ["xy", "xz", "yz"];
 
 /**
  * What a select shows or hides: a channel of the dataset in hand, a layer by
@@ -36,6 +40,8 @@ export interface ScriptControls {
   view(): SavedView | null;
   /** Move a selector by `count` positions through the handler the dimension control calls. */
   scrub(axis: ScrubAxis, count: number): StepOutcome;
+  /** Cut `plane` with the slice view through the handler the plane toggle calls. */
+  plane(plane: SlicePlane): StepOutcome;
   /** Show or hide a channel, a layer or a label through the handler the layer panel calls. */
   select(target: SelectTarget, visible: boolean): StepOutcome;
   /** Set a channel's contrast window through the handler the layer panel's limits call. */
@@ -134,6 +140,11 @@ export interface SelectorState {
   dimZ: number;
   dimT: number;
   viewMode: "2d" | "3d";
+  /** The plane the slice view cuts, whose cut axis the one spatial selector moves along. */
+  slicePlane: SlicePlane;
+  /** The axis position along that cut, and the positions there are. */
+  cutIndex: number;
+  dimCut: number;
 }
 
 /**
@@ -145,17 +156,23 @@ export interface SelectorState {
  */
 export function scrubIndex(
   state: SelectorState,
-  axis: "z" | "t",
+  axis: "z" | "y" | "x" | "t",
   count: number,
 ): { index: number } | { refused: string } {
   const invalid = invalidCount(count);
   if (invalid) return { refused: invalid };
-  if (axis === "z" && state.viewMode === "3d") {
-    return { refused: "the Z selector is disabled in volume mode" };
+  if (axis !== "t" && state.viewMode === "3d") {
+    return { refused: `the ${axis.toUpperCase()} selector is disabled in volume mode` };
   }
-  const { current, extent } = axis === "z"
-    ? { current: state.z, extent: state.dimZ }
-    : { current: state.t, extent: state.dimT };
+  const cut = cutAxis(state.slicePlane);
+  if (axis !== "t" && axis !== cut) {
+    return {
+      refused: `the ${state.slicePlane.toUpperCase()} view cuts ${cut.toUpperCase()}, so there is no ${axis.toUpperCase()} selector`,
+    };
+  }
+  const { current, extent } = axis === "t"
+    ? { current: state.t, extent: state.dimT }
+    : { current: state.cutIndex, extent: state.dimCut };
   if (extent <= 1) return { refused: `${axis} has one position, so there is no selector to move` };
   const index = Math.min(extent - 1, Math.max(0, current + count));
   if (index === current) {

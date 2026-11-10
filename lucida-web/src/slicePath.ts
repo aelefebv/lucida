@@ -1,6 +1,6 @@
 /** Slice render path: upload chunks + render multi-pass. */
 import { assertCanvasSize } from "./applyAndSend.ts";
-import { Axis } from "./axes.ts";
+import { planeAxes, tczyx, toPlaneFrame, type SlicePlane } from "./renderer/slicePlane.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
 import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
@@ -10,6 +10,7 @@ import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { ResolvedLayers } from "./resolvedLayers.ts";
+import { sliceCut } from "./pipeline/planning/snapshot.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
@@ -292,7 +293,6 @@ interface SlicePlanResult {
 function uploadAndRenderSlice(
   ctx: TickContext,
   uploader: Uploader,
-  sliceZ: number,
   planResult: SlicePlanResult,
   shouldRender: boolean = true,
 ): boolean {
@@ -308,10 +308,11 @@ function uploadAndRenderSlice(
   const canvasW = Math.max(1, Math.round(fullW * backingScale));
   const canvasH = Math.max(1, Math.round(fullH * backingScale));
 
+  const plane = scene.slice_plane() as SlicePlane;
   const budgetExhausted = uploader.deliverToWorker(
     ctx,
     MAIN_VIEW_UPLOAD_BUDGET_BYTES,
-    (datasetId) => resolvedLayers.get(datasetId)?.z_range.start ?? sliceZ,
+    (datasetId) => sliceCut(scene, resolvedLayers.get(datasetId)),
   );
 
   if (!shouldRender) return budgetExhausted;
@@ -330,12 +331,21 @@ function uploadAndRenderSlice(
     const resolved = resolvedLayers.get(dsId);
     if (!dsSettings || !resolved || !resolved.visible) continue;
 
+    // Each image's extent across the screen and down it, in the slice
+    // camera's world, which draws Z at its physical aspect (`slice_scales`).
     const dsShapeL = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
-    const fullResWidth = dsShapeL[Axis.X];
-    const fullResHeight = dsShapeL[Axis.Y];
+    const [across, down, cut] = planeAxes(plane);
+    const [scaleAcross, scaleDown] = scene.slice_scales(dsId);
+    const fullResWidth = dsShapeL[tczyx(across)] * scaleAcross;
+    const fullResHeight = dsShapeL[tczyx(down)] * scaleDown;
 
-    const members = memberRoster.get(dsId)
+    const roster = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
+    // A layout places images along X and Y; along Z every image starts at 0.
+    const members = plane === "xy" ? roster : roster.map((m) => ({
+      ...m,
+      position: toPlaneFrame([m.position[0], m.position[1], 0], cut).slice(0, 2) as [number, number],
+    }));
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
     // The member-pass budget applies per channel. A layer past the scene's z
@@ -351,6 +361,9 @@ function uploadAndRenderSlice(
         zoom: currentZoom,
       });
     }
+    // A label overlay is drawn on an XY cut only, and its planner fetches
+    // nothing in a side view.
+    if (plane !== "xy") continue;
     // Placement fallback for label sources missing from the roster.
     let labelMemberPositions: Record<string, [number, number]> | undefined;
     if (ds.manifest.labels && ds.manifest.labels.length > 0) {
@@ -389,9 +402,6 @@ export function tickSlice(
 ): boolean {
   const { scene, canvas } = ctx;
 
-  // The scene owns the selectors, as it does for the volume path, so this
-  // reads them and never writes them back.
-  const sliceZ = scene.z();
   const dpr = devicePixelRatio;
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
@@ -411,7 +421,7 @@ export function tickSlice(
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
-  const result = uploadAndRenderSlice(ctx, uploader, sliceZ, planResult, shouldRender);
+  const result = uploadAndRenderSlice(ctx, uploader, planResult, shouldRender);
   return result;
 }
 

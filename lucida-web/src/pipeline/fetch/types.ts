@@ -8,6 +8,7 @@
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { InteractionMode } from "./interactionMode.ts";
+import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 
 export interface CpuCacheConfig {
   mainBudgetBytes: number;
@@ -96,10 +97,12 @@ export interface ReadyChunkDelivery {
    */
   traceRow?: number;
   /**
-   * The planes `data` holds, half-open along the chunk's Z. Absent when it
-   * holds the whole chunk.
+   * The planes `data` holds, half-open along the chunk's {@link planeAxis}.
+   * Absent when it holds the whole chunk.
    */
   planes?: readonly [number, number];
+  /** The axis {@link planes} lie along. Absent: Z. */
+  planeAxis?: SpatialAxis;
 }
 
 /**
@@ -155,11 +158,14 @@ export interface CacheEntry {
    */
   wantedAtMs?: number;
   /**
-   * The planes `data` holds, half-open along the chunk's Z: what a request
-   * for some planes fetched. Absent when it holds the whole chunk. One entry
-   * per chunk either way, so a whole chunk that arrives replaces its planes.
+   * The planes `data` holds, half-open along the chunk's {@link planeAxis}:
+   * what a request for some planes fetched. Absent when it holds the whole
+   * chunk. One entry per chunk either way, so a whole chunk that arrives
+   * replaces its planes.
    */
   planes?: readonly [number, number];
+  /** The axis {@link planes} lie along. Absent: Z. */
+  planeAxis?: SpatialAxis;
 }
 
 export interface TierResidencyEntry {

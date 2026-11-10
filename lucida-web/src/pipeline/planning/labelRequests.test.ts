@@ -766,7 +766,7 @@ describe("computeLabelChunkRequests — the slice view's planes", () => {
 
   it("after a step along Z, also prefetch each chunk whole, behind the band", () => {
     expect(at(40).some((req) => req.lane === "prefetch")).toBe(false);
-    const stepped = at(41, { zStep: true, config: { sliceBandPlanes: 2, prefetchLaneOffset: 1500 } });
+    const stepped = at(41, { cutStep: true, config: { sliceBandPlanes: 2, prefetchLaneOffset: 1500 } });
     const band = stepped.filter((req) => req.lane === "detail");
     const prefetch = stepped.filter((req) => req.lane === "prefetch");
     expect(band).toHaveLength(4);
@@ -779,7 +779,7 @@ describe("computeLabelChunkRequests — the slice view's planes", () => {
     expect(new Set(prefetch.map((req) => req.chunkKey))).toEqual(new Set(band.map((req) => req.chunkKey)));
     // A chunk already fetched whole has no band to follow up.
     const flat = computeLabelChunkRequests({
-      datasetId: "ds-0", manifest: deepManifest(1), t: 0, z: 41, labelSettings: allOn(1), zStep: true,
+      datasetId: "ds-0", manifest: deepManifest(1), t: 0, z: 41, labelSettings: allOn(1), cutStep: true,
     });
     expect(flat.some((req) => req.lane === "prefetch")).toBe(false);
   });

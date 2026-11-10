@@ -89,6 +89,7 @@ export function createSyntheticSnapshot(
     selection: {
       t: 0,
       z: 0,
+      cut: { axis: "z", index: 0 },
       visibleChannels: [0],
       renderMode: "slice",
       interactionState: "idle",

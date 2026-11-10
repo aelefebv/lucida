@@ -207,6 +207,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         ctx, group.poolKey, msg.datasetId, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
         msg.sampleFormat,
       );
+      atlas.axis = msg.sliceAxis ?? "z";
       const inputs: RemapInputs = { t: msg.currentT, z: msg.currentZ, viewDependent };
       const holds = remapHolds(state, atlas, newEntityMetas, offset, inputs);
       atlas.entityMetas = newEntityMetas;
@@ -231,9 +232,10 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   postFreedPools(ctx, msg.datasetId, referenced);
   removeVolumeAtlasesForDataset(ctx, msg.datasetId, referenced);
   removeSliceAtlasesForDataset(ctx, msg.datasetId, referenced);
-  // Label pools live as long as the view mode that draws them. Their chunks
-  // are reported lost, so switching back sends them again.
-  if (mode === "volume") removeLabelSlicePoolsForDataset(ctx, msg.datasetId, "freed");
+  // Label pools live as long as the view mode that draws them, and a side
+  // view draws none. Their chunks are reported lost, so switching back sends
+  // them again.
+  if (mode === "volume" || msg.sliceAxis) removeLabelSlicePoolsForDataset(ctx, msg.datasetId, "freed");
   else removeLabelVolumePoolsForDataset(ctx, msg.datasetId, "freed");
 
   state.currentSourcesByDataset.set(msg.datasetId, currentSources);

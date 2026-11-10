@@ -14,6 +14,7 @@ pub mod query;
 pub mod ray;
 pub mod saved_view;
 pub mod scene;
+pub mod slice_plane;
 pub mod target_level;
 pub mod transform;
 pub mod view;

@@ -1025,6 +1025,7 @@ mod tests {
                 zoom: 2.0,
                 viewport: [800, 600],
                 framing: lucida_core::camera::Framing::Placed,
+                plane: lucida_core::slice_plane::SlicePlane::Xy,
             })),
             view: Some(ViewState::new()),
             display: Some(DisplayState::default()),

@@ -570,9 +570,11 @@ function Viewer({
       z: dims.z, t: dims.t,
       dimZ: dims.dimZ, dimT: dims.dimT,
       viewMode: dims.viewMode,
+      slicePlane: dims.slicePlane, cutIndex: dims.cutIndex, dimCut: dims.dimCut,
     },
     resolvedLayers: dims.layers,
-    setZ: dims.handleZChange,
+    setCut: dims.handleCutChange,
+    setSlicePlane: dims.handleSlicePlaneChange,
     setT: dims.handleTChange,
     setSolo: layers.handleChannelSetSolo,
     setChannelVisible: layers.handleChannelSetVisible,
@@ -912,9 +914,12 @@ function Viewer({
     <DimensionBar
       viewMode={dims.viewMode}
       onViewModeToggle={dims.handleViewModeToggle}
-      z={dims.z}
+      slicePlane={dims.slicePlane}
+      onSlicePlaneChange={dims.handleSlicePlaneChange}
       dimZ={dims.dimZ}
-      onZChange={dims.handleZChange}
+      cut={dims.cutIndex}
+      dimCut={dims.dimCut}
+      onCutChange={dims.handleCutChange}
       t={dims.t}
       dimT={dims.dimT}
       onTChange={dims.handleTChange}

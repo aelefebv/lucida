@@ -41,6 +41,13 @@ Options:
                          always chunked at 1. Repeat the flag to give each
                          level its own chunk shape; the last one repeats for
                          the remaining levels. Default 64.
+    --spacing F | Y,X | Z,Y,X
+                         The physical size of a level 0 sample along each
+                         spatial axis, one value or per axis. Default 1. The
+                         picture is drawn across the dataset's extent in
+                         samples, so with spacing that makes the physical
+                         extent a cube, its bright spot is a ball in physical
+                         space.
     --clip-chunks        Clip each level's chunk shape to that level's shape,
                          as writers do that never declare a chunk larger than
                          its array. With tiles of different sizes, a coarse
@@ -178,6 +185,7 @@ class Options:
     factors: tuple[tuple[int, ...], ...] = ((DEFAULT_FACTOR, DEFAULT_FACTOR),)
     chunks: tuple[tuple[int, ...], ...] = ((DEFAULT_CHUNK, DEFAULT_CHUNK),)
     clip_chunks: bool = False
+    spacing: tuple[float, ...] | None = None
     shard: tuple[int, ...] | None = None
     sparse: bool = False
     unwritten_levels: tuple[int, ...] = ()
@@ -268,6 +276,13 @@ def _positive_ints(text: str) -> tuple[int, ...]:
     return values
 
 
+def _positive_floats(text: str) -> tuple[float, ...]:
+    values = tuple(float(part) for part in text.split(","))
+    if not all(math.isfinite(v) and v > 0 for v in values):
+        raise ValueError("every value must be a positive finite number")
+    return values
+
+
 def _value_range(text: str) -> tuple[float, float]:
     parts = tuple(float(part) for part in text.split(","))
     if len(parts) != 2 or not all(math.isfinite(v) for v in parts) or parts[0] >= parts[1]:
@@ -297,6 +312,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--levels", type=int, default=DEFAULT_LEVELS, metavar="N", help="pyramid levels (default 3)")
     parser.add_argument("--factor", type=_positive_ints, action="append", metavar="F|F,F[,F]", help="scale factor to the next level, one value or per axis; repeat for per-level factors (default 2)")
     parser.add_argument("--chunk", type=_positive_ints, action="append", metavar="S|S,S[,S]", help="chunk shape in samples, one value or per axis; repeat for per-level chunk shapes (default 64)")
+    parser.add_argument("--spacing", type=_positive_floats, metavar="F|F,F[,F]", help="physical size of a level 0 sample, one value or per axis (default 1)")
     parser.add_argument("--clip-chunks", action="store_true", help="clip each level's chunk shape to the level's shape")
     parser.add_argument("--shard", type=_positive_ints, metavar="S|S,S[,S]", help="shard shape in samples, a multiple of --chunk; presence means sharded")
     parser.add_argument("--sparse", action="store_true", help="leave a checkerboard of chunks unwritten")
@@ -333,6 +349,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
 
     factors = tuple(_per_axis(f, ndim, "--factor", parser) for f in (args.factor or [(DEFAULT_FACTOR,)]))
     chunks = tuple(_per_axis(c, ndim, "--chunk", parser) for c in (args.chunk or [(DEFAULT_CHUNK,)]))
+    spacing = None if args.spacing is None else _per_axis(args.spacing, ndim, "--spacing", parser)
     shard = None
     if args.shard is not None and args.clip_chunks:
         parser.error("--clip-chunks cannot be combined with --shard, which must be a multiple of every chunk")
@@ -366,6 +383,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         factors=factors,
         chunks=chunks,
         clip_chunks=args.clip_chunks,
+        spacing=spacing,
         shard=shard,
         sparse=args.sparse,
         unwritten_levels=unwritten,
@@ -410,10 +428,13 @@ def multiscale_block(opts: Options, levels: list[Level], name: str, axis_names: 
     """One multiscale over arrays with these axes, the leading ones unscaled."""
     axes = [{"name": axis, "type": AXIS_TYPES[axis]} for axis in axis_names]
     leading_scale = [1.0] * (len(axis_names) - opts.ndim)
+    spacing = opts.spacing or (1.0,) * opts.ndim
     datasets = [
         {
             "path": f"{opts.level_prefix}{level.index}",
-            "coordinateTransformations": [{"type": "scale", "scale": leading_scale + [float(s) for s in level.scale]}],
+            "coordinateTransformations": [
+                {"type": "scale", "scale": leading_scale + [float(d * s) for d, s in zip(spacing, level.scale)]}
+            ],
         }
         for level in levels
     ]

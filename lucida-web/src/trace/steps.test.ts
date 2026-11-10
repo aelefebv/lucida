@@ -21,13 +21,25 @@ import {
   type SelectorState,
 } from "./steps.ts";
 
-const selectors: SelectorState = { z: 5, t: 0, dimZ: 10, dimT: 4, viewMode: "2d" };
+const selectors: SelectorState = {
+  z: 5, t: 0, dimZ: 10, dimT: 4, viewMode: "2d", slicePlane: "xy", cutIndex: 5, dimCut: 10,
+};
 
 describe("where a scrub lands", () => {
   it("moves the selector by the count, clamped to the axis", () => {
     expect(scrubIndex(selectors, "z", 2)).toEqual({ index: 7 });
     expect(scrubIndex(selectors, "z", -9)).toEqual({ index: 0 });
     expect(scrubIndex(selectors, "t", 40)).toEqual({ index: 3 });
+  });
+
+  it("moves a side view along the axis it cuts, and refuses the others", () => {
+    const xz: SelectorState = { ...selectors, slicePlane: "xz", cutIndex: 30, dimCut: 64 };
+    expect(scrubIndex(xz, "y", 70)).toEqual({ index: 63 });
+    expect(scrubIndex(xz, "z", 1)).toEqual({ refused: "the XZ view cuts Y, so there is no Z selector" });
+    expect(scrubIndex(selectors, "x", 1)).toEqual({ refused: "the XY view cuts Z, so there is no X selector" });
+    expect(scrubIndex({ ...xz, viewMode: "3d" }, "y", 1)).toEqual({
+      refused: "the Y selector is disabled in volume mode",
+    });
   });
 
   it("moves a c scrub through the composite and then each channel alone", () => {
@@ -187,6 +199,7 @@ describe("the registration", () => {
     const controls = {
       view: () => null,
       scrub: () => ({ applied: true, reason: null }),
+      plane: () => ({ applied: true, reason: null }),
       select: () => ({ applied: true, reason: null }),
       contrast: () => ({ applied: true, reason: null }),
       addDataset: () => Promise.resolve({ applied: true, reason: null }),

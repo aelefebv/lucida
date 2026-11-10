@@ -6,6 +6,7 @@
  */
 import type { WasmScene } from "lucida-core";
 import type { BlendMode } from "./renderer/layerCompositor.ts";
+import { cutAxis, type SliceCut, type SlicePlane } from "./renderer/slicePlane.ts";
 
 /** Mirrors `lucida_core::scene::ShownChannel`. */
 export interface ResolvedChannel {
@@ -33,6 +34,16 @@ export interface ResolvedLayer {
   t: number;
   z_clamped: boolean;
   t_clamped: boolean;
+  /** The planes an XZ view cuts along Y and a YZ view along X, clamped into this layer. */
+  y: number;
+  x: number;
+}
+
+/** Where a slice view of `plane` cuts `layer`. */
+export function layerCut(layer: ResolvedLayer, plane: SlicePlane): SliceCut {
+  const axis = cutAxis(plane);
+  const index = axis === "x" ? layer.x : axis === "y" ? layer.y : layer.z_range.start;
+  return { axis, index };
 }
 
 export type ResolvedLayers = ReadonlyMap<string, ResolvedLayer>;

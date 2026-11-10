@@ -367,6 +367,9 @@ function makeSeamHarness(opts: {
     set_viewport: vi.fn(),
     zoom: () => opts.zoom,
     center: () => new Float32Array([512, 512]),
+    slice_plane: () => "xy",
+    cut_index: () => 0,
+    slice_scales: () => [1, 1],
     epochs: () => JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),
   };
   const manifest = {

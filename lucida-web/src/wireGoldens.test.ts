@@ -1828,6 +1828,22 @@ describe("wire goldens: content-source request envelopes", () => {
     expect(JSON.parse(sent[1])).toStrictEqual(chunkRequestPlanes.json());
   });
 
+  const chunkRequestRows = claimFixture("session/chunk_request_rows.json");
+  it("a fetch for rows along Y names their axis in the request", () => {
+    const sent: string[] = [];
+    const source = new ProxiedContentSource((json) => sent.push(json));
+    source.registerImage("multiscale-0", { Zstd: { data_type: "Uint16" } });
+    const request = { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "1/2/1/12/3/4" };
+    void source.fetch(request, new AbortController().signal).catch(() => {});
+    void source.fetch({ ...request, planes: [3, 6] }, new AbortController().signal).catch(() => {});
+    void source.fetch(
+      { ...request, planes: [5, 6], planeAxis: "y" },
+      new AbortController().signal,
+    ).catch(() => {});
+    expect(sent).toHaveLength(3);
+    expect(JSON.parse(sent[2])).toStrictEqual(chunkRequestRows.json());
+  });
+
   const chunkCodecs = claimFixture("session/chunk_codecs.json");
   it("a new connection declares every codec the decode workers undo", () => {
     const sent: string[] = [];

@@ -118,6 +118,9 @@ vi.mock("lucida-core", () => {
       })));
     }
     camera_mode() { return this.mode; }
+    slice_plane() { return "xy"; }
+    cut_index() { return this.view.z; }
+    slice_scales(_id: string) { return [1, 1]; }
     zoom() { return 1; }
     view_proj() { return new Float32Array(16); }
     center() { return new Float64Array([0, 0]); }

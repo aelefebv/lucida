@@ -7,9 +7,8 @@ import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
-import { Axis } from "../../../axes.ts";
 import { labelLevelZ } from "../../../renderer/labelLayout.ts";
-import { sliceLevelZ } from "../../../renderer/slicePlane.ts";
+import { sliceLevelPlane, tczyx, toPlaneFrame, type SliceCut, type SpatialAxis } from "../../../renderer/slicePlane.ts";
 import { decodedSampleBytes } from "../../../renderer/dataTypeUtil.ts";
 
 /**
@@ -50,9 +49,10 @@ export interface Dispatched {
 
 /**
  * Why a dispatch posted nothing. `other-plane`: the slice view's plane is in
- * another chunk along Z, which the plan has moved on to. `no-meta`: the
- * geometry to place the chunk is missing, or the chunk is shorter than it
- * says, which should not happen.
+ * another chunk along its cut, which the plan has moved on to, or the chunk
+ * holds planes along another axis. `no-meta`: the geometry to place the
+ * chunk is missing, or the chunk is shorter than it says, which should not
+ * happen.
  */
 export type DispatchSkip = "other-plane" | "no-meta";
 
@@ -77,19 +77,66 @@ function cutPlane(
 }
 
 /**
+ * One plane along X or Y of a decoded chunk of `dims` samples along Z, Y
+ * and X, copied out row by row, as the slice worker's frame lays it out:
+ * a row along the screen's across axis for each Z. `firstPlane` is the
+ * chunk's first plane along `axis` the buffer holds, whose extent along
+ * `axis` is then the planes it holds rather than the chunk's. `null` when
+ * the buffer does not hold the plane.
+ */
+function cutSidePlane(
+  data: ArrayBuffer,
+  dataType: string,
+  axis: Exclude<SpatialAxis, "z">,
+  local: number,
+  dims: readonly [number, number, number],
+  held: readonly [number, number] | undefined,
+): ArrayBuffer | null {
+  const sample = decodedSampleBytes(dataType);
+  const [dz, dy, dx] = dims;
+  const first = held?.[0] ?? 0;
+  const span = held ? held[1] - held[0] : axis === "y" ? dy : dx;
+  const at = local - first;
+  // Samples of each Z of the buffer, and of each row across a plane.
+  const ny = axis === "y" ? span : dy;
+  const nx = axis === "x" ? span : dx;
+  if (at < 0 || at >= span || dz * ny * nx * sample > data.byteLength) return null;
+  const from = new Uint8Array(data);
+  if (axis === "y") {
+    const row = nx * sample;
+    const out = new Uint8Array(dz * row);
+    for (let z = 0; z < dz; z++) {
+      const start = (z * ny + at) * row;
+      out.set(from.subarray(start, start + row), z * row);
+    }
+    return out.buffer;
+  }
+  const out = new Uint8Array(dz * ny * sample);
+  let o = 0;
+  for (let z = 0; z < dz; z++) {
+    for (let y = 0; y < ny; y++) {
+      const start = ((z * ny + y) * nx + at) * sample;
+      for (let b = 0; b < sample; b++) out[o++] = from[start + b];
+    }
+  }
+  return out.buffer;
+}
+
+/**
  * Post one chunk to the worker. The slice view draws one plane of a chunk,
- * so it is sent only the plane `sliceZ` maps to, a chunk-depth fraction of
- * the bytes, and a Z move to another plane of the same chunk sends that
- * plane. Posts nothing, and says why, when it cannot place the chunk or the
- * chunk does not hold the plane. A delivery of some planes of a chunk that
- * lacks the plane is `other-plane`: the plan asks for the plane again.
+ * so it is sent only the plane `cut` maps to, a chunk-depth fraction of the
+ * bytes, and a move to another plane of the same chunk sends that plane. It
+ * goes in the worker's frame for the plane drawn (`SliceChunkDataMessage`).
+ * Posts nothing, and says why, when it cannot place the chunk or the chunk
+ * does not hold the plane. A delivery of some planes of a chunk that lacks
+ * the plane is `other-plane`: the plan asks for the plane again.
  */
 export function dispatchChunkDelivery(
   client: UploadClient,
   delivery: ReadyChunkDelivery,
   meta: ManifestEntry,
   viewMode: "slice" | "volume",
-  sliceZ: number | null,
+  cut: SliceCut | null,
   epochs: SceneEpochs,
 ): Dispatched | DispatchSkip {
   const levelMeta = meta.levels[delivery.level];
@@ -128,32 +175,41 @@ export function dispatchChunkDelivery(
     return { memberId, bytes: delivery.data.byteLength };
   }
 
-  if (sliceZ === null) return "no-meta";
-  const fullResDepth = meta.image.multiscale.levels[0].shape[Axis.Z];
-  const levelZ = sliceLevelZ(sliceZ, fullResDepth, levelDepth);
-  const cz = Math.max(chunkZ, 1);
-  if (delivery.z !== Math.floor(levelZ / cz)) return "other-plane";
-  const localZ = levelZ - delivery.z * cz;
+  if (cut === null) return "no-meta";
+  const { axis, index } = cut;
+  const fullShape = meta.image.multiscale.levels[0].shape;
+  // The chunk's place and shape across the screen, down it, and along the cut.
+  const [cu, cv, cw] = toPlaneFrame([delivery.x, delivery.y, delivery.z], axis);
+  const [levelU, levelV, levelW] = toPlaneFrame([levelWidth, levelHeight, levelDepth], axis);
+  const [chunkU, chunkV, chunkW] = toPlaneFrame([chunkX, chunkY, chunkZ], axis);
+  const fullResW = fullShape[tczyx(axis)];
+  const levelPlane = sliceLevelPlane(index, fullResW, levelW);
+  const depth = Math.max(chunkW, 1);
+  if (cw !== Math.floor(levelPlane / depth)) return "other-plane";
+  const local = levelPlane - cw * depth;
   const held = delivery.planes;
-  if (held && (localZ < held[0] || localZ >= held[1])) return "other-plane";
-  const plane = cutPlane(delivery.data, delivery.dataType, localZ, chunkY * chunkX, held?.[0]);
+  if (held && (delivery.planeAxis ?? "z") !== axis) return "other-plane";
+  if (held && (local < held[0] || local >= held[1])) return "other-plane";
+  const plane = axis === "z"
+    ? cutPlane(delivery.data, delivery.dataType, local, chunkY * chunkX, held?.[0])
+    : cutSidePlane(delivery.data, delivery.dataType, axis, local, [chunkZ, chunkY, chunkX], held);
   if (!plane) return "no-meta";
   const bytes = plane.byteLength;
   client.sliceChunkData(
     memberId,
-    [{ ...chunk, data: plane }],
+    [{ ...chunk, data: plane, x: cu, y: cv, z: cw }],
     delivery.level,
-    sliceZ,
+    index,
     delivery.t,
     delivery.c,
-    levelWidth,
-    levelHeight,
-    chunkX,
-    chunkY,
-    chunkZ,
-    fullResDepth,
-    levelDepth,
-    sliceZ,
+    levelU,
+    levelV,
+    chunkU,
+    chunkV,
+    chunkW,
+    fullResW,
+    levelW,
+    index,
     epochs,
     delivery.residencyTier,
   );
@@ -175,9 +231,12 @@ export function dispatchLabelChunkDelivery(
   client: UploadClient,
   delivery: ReadyChunkDelivery,
   meta: ManifestEntry,
-  sliceZ: number | null,
+  cut: SliceCut | null,
   epochs: SceneEpochs,
 ): Dispatched | DispatchSkip {
+  // A label overlay draws only on an XY cut.
+  if (cut !== null && cut.axis !== "z") return "other-plane";
+  const sliceZ = cut?.index ?? null;
   const levelMeta = meta.levels[delivery.level];
   if (!levelMeta || sliceZ === null || !meta.labelLevel0 || !meta.labelSourceLevel0) {
     return "no-meta";

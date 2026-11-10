@@ -83,6 +83,8 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
       config.visibleRegion === null ? "null" : JSON.stringify(config.visibleRegion),
     t: () => config.t,
     z: () => config.z,
+    slice_plane: () => "xy",
+    cut_index: () => config.z,
     epochs: () =>
       JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),
   };

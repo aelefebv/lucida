@@ -10,7 +10,9 @@ use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
     unproject,
 };
+use crate::slice_plane::{SliceFrame, SlicePlane};
 use crate::transform::VolumeTransform;
+use lucida_content::SpatialAxis;
 
 /// Fit factors for "fit the data to the view", re-exported from [`crate::framing`]
 /// so callers can reach them as `camera::FIT_*` while there is one definition:
@@ -47,6 +49,31 @@ pub struct VisibleRegion {
     /// Optional frustum planes in full-resolution voxel coordinates for per-chunk culling.
     /// Each plane is [a, b, c, d] where ax + by + cz + d >= 0 means inside.
     pub frustum_planes: Option<[[f64; 4]; 6]>,
+    /// The axis a slice view cuts. Its extent here is the planes the view
+    /// cuts, in each image's own samples; the other two are what the screen
+    /// shows. A volume view leaves it at Z and ignores it.
+    #[serde(default, skip_serializing_if = "SpatialAxis::is_z")]
+    pub cut_axis: SpatialAxis,
+}
+
+/// What a slice view of one image reads off the screen: the planes it cuts
+/// along the camera's cut axis, and the world units one of the image's
+/// level-0 samples spans across the screen and down it
+/// ([`crate::slice_plane::SliceFrame`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliceCut {
+    pub planes: Range<u32>,
+    pub scales: [f64; 2],
+}
+
+impl SliceCut {
+    /// A cut of `planes` of an image drawn in samples on both screen axes.
+    pub fn planes(planes: Range<u32>) -> Self {
+        Self {
+            planes,
+            scales: [1.0, 1.0],
+        }
+    }
 }
 
 fn serialize_range_as_array<S: serde::Serializer>(
@@ -60,10 +87,9 @@ fn serialize_range_as_array<S: serde::Serializer>(
     tup.end()
 }
 
-fn visible_radius_basis_from_bounds(bounds: [f64; 4], z_range: &Range<u32>) -> f64 {
-    let half_x = ((bounds[2] - bounds[0]) / 2.0).max(0.0);
-    let half_y = ((bounds[3] - bounds[1]) / 2.0).max(0.0);
-    let half_z = ((z_range.end.saturating_sub(z_range.start)) as f64 / 2.0).max(0.0);
+fn visible_radius_basis_from_box(min: [f64; 3], max: [f64; 3]) -> f64 {
+    let half = |a: usize| ((max[a] - min[a]) / 2.0).max(0.0);
+    let (half_x, half_y, half_z) = (half(0), half(1), half(2));
     (half_x * half_x + half_y * half_y + half_z * half_z)
         .sqrt()
         .max(1.0)
@@ -141,6 +167,11 @@ pub struct Slice {
     pub viewport: [u32; 2],
     #[serde(default, skip_serializing_if = "Framing::is_placed")]
     pub framing: Framing,
+    /// The plane the view cuts. The center is in that plane's world, so a
+    /// view of another plane is another camera. Absent reads as XY, which
+    /// every view written before the field existed was.
+    #[serde(default, skip_serializing_if = "SlicePlane::is_xy")]
+    pub plane: SlicePlane,
 }
 
 /// 3D arcball camera for volume rendering.
@@ -508,27 +539,17 @@ impl Camera {
 
     /// Compute the visible region in voxel coordinates for chunk planning.
     ///
-    /// - `view_z_range`: z range from ViewState (used in 2D mode)
+    /// - `slice`: what a slice view of the image cuts (ignored in 3D mode)
     /// - `volume_transform`: maps voxel [0,1]^3 to world space (used in 3D mode)
     /// - `volume_shape`: [Z, Y, X] voxel dimensions (used in 3D mode)
     pub fn visible_region(
         &self,
-        view_z_range: &Range<u32>,
+        slice: &SliceCut,
         volume_transform: Option<&VolumeTransform>,
         volume_shape: Option<&[u32; 3]>,
     ) -> VisibleRegion {
         match self {
-            Camera::Slice(v) => {
-                let bounds = v.world_bounds();
-                VisibleRegion {
-                    xy_bounds: bounds,
-                    z_range: view_z_range.clone(),
-                    effective_zoom: v.zoom,
-                    radius_basis_vox: visible_radius_basis_from_bounds(bounds, view_z_range),
-                    sort_center: None,
-                    frustum_planes: None,
-                }
-            }
+            Camera::Slice(v) => v.visible_region(slice),
             Camera::Arcball(v) => v.frustum_visible_region(volume_transform, volume_shape),
             Camera::Fly(v) => v.frustum_visible_region(volume_transform, volume_shape),
         }
@@ -665,6 +686,35 @@ impl Slice {
             zoom: 1.0,
             viewport,
             framing: Framing::Unframed,
+            plane: SlicePlane::Xy,
+        }
+    }
+
+    /// The samples this view reads of an image it cuts as `cut` says: the
+    /// screen's world bounds in the image's samples, and the cut's planes.
+    pub fn visible_region(&self, cut: &SliceCut) -> VisibleRegion {
+        let frame = SliceFrame {
+            plane: self.plane,
+            scales: cut.scales,
+        };
+        let (min, max) = frame.sample_box(self.world_bounds(), &cut.planes);
+        // A cut along Z names its planes. A view that draws Z covers every
+        // plane its world bounds touch.
+        let z_range = if self.plane.cut().is_z() {
+            cut.planes.clone()
+        } else {
+            let plane = |z: f64| z.max(0.0).min(u32::MAX as f64) as u32;
+            let start = plane(min[2].floor());
+            start..plane(max[2].ceil()).max(start)
+        };
+        VisibleRegion {
+            xy_bounds: [min[0], min[1], max[0], max[1]],
+            z_range,
+            effective_zoom: self.zoom,
+            radius_basis_vox: visible_radius_basis_from_box(min, max),
+            sort_center: None,
+            frustum_planes: None,
+            cut_axis: self.plane.cut(),
         }
     }
 
@@ -1234,6 +1284,7 @@ impl Arcball {
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
+            cut_axis: SpatialAxis::Z,
         }
     }
 }
@@ -1646,6 +1697,7 @@ impl Fly {
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
+            cut_axis: SpatialAxis::Z,
         }
     }
 }
@@ -2253,7 +2305,7 @@ mod tests {
     #[test]
     fn visible_region_2d_uses_view_z_range() {
         let cam = Camera::new_2d([512, 512]);
-        let region = cam.visible_region(&(10..20), None, None);
+        let region = cam.visible_region(&SliceCut::planes(10..20), None, None);
         assert_eq!(region.z_range, 10..20);
         assert!(
             (region.radius_basis_vox - (256.0_f64 * 256.0 * 2.0 + 5.0 * 5.0).sqrt()).abs() < 1e-10
@@ -2277,7 +2329,46 @@ mod tests {
             zoom,
             viewport,
             framing: Framing::Placed,
+            plane: SlicePlane::Xy,
         }
+    }
+
+    #[test]
+    fn a_side_view_region_spans_its_cut_plane_and_the_z_the_screen_shows() {
+        // An XZ view 200 world units tall over Z drawn at twice its samples.
+        let mut cam = slice([100.0, 50.0], 1.0, [200, 200]);
+        cam.plane = SlicePlane::Xz;
+        let region = cam.visible_region(&SliceCut {
+            planes: 7..8,
+            scales: [1.0, 2.0],
+        });
+        assert_eq!(region.cut_axis, SpatialAxis::Y);
+        assert_eq!(region.xy_bounds, [0.0, 7.0, 200.0, 8.0]);
+        // World -50..150 is Z -25..75, of which 0..75 is real.
+        assert_eq!(region.z_range, 0..75);
+        let json = serde_json::to_string(&region).unwrap();
+        assert!(json.contains(r#""cut_axis":"y""#), "{json}");
+        let xy = slice([100.0, 50.0], 1.0, [200, 200]).visible_region(&SliceCut::planes(3..4));
+        assert!(!serde_json::to_string(&xy).unwrap().contains("cut_axis"));
+    }
+
+    #[test]
+    fn a_slice_camera_reads_without_a_plane_as_xy_and_writes_xy_without_one() {
+        let json = r#"{"mode":"slice","center":[1.0,2.0],"zoom":3.0,"viewport":[4,5]}"#;
+        let camera: Camera = serde_json::from_str(json).unwrap();
+        let Camera::Slice(ref s) = camera else {
+            panic!("a slice camera");
+        };
+        assert_eq!(s.plane, SlicePlane::Xy);
+        assert_eq!(serde_json::to_string(&camera).unwrap(), json);
+        let mut side = s.clone();
+        side.plane = SlicePlane::Yz;
+        let written = serde_json::to_string(&Camera::Slice(side.clone())).unwrap();
+        assert!(written.contains(r#""plane":"yz""#), "{written}");
+        assert_eq!(
+            serde_json::from_str::<Camera>(&written).unwrap(),
+            Camera::Slice(side)
+        );
     }
 
     #[test]
@@ -3646,6 +3737,7 @@ mod tests {
             zoom: 1.0,
             viewport: [64, 64],
             framing: Framing::Placed,
+            plane: SlicePlane::Xy,
         });
         cam.sanitize();
         match &cam {
@@ -3712,13 +3804,21 @@ mod tests {
         let t = crate::transform::compute_volume_transform([256, 1024, 1024], [1.0, 1.0, 1.0]);
         let shape = [256u32, 1024, 1024];
         let arc = Arcball::new([800, 600]);
-        let region = Camera::Arcball(arc.clone()).visible_region(&(0..256), Some(&t), Some(&shape));
+        let region = Camera::Arcball(arc.clone()).visible_region(
+            &SliceCut::planes(0..256),
+            Some(&t),
+            Some(&shape),
+        );
         assert_eq!(
             region.effective_zoom,
             arc.pixels_per_sample_at_hit(Some(&t), shape)
         );
         let fly = Fly::new([800, 600]);
-        let region = Camera::Fly(fly.clone()).visible_region(&(0..256), Some(&t), Some(&shape));
+        let region = Camera::Fly(fly.clone()).visible_region(
+            &SliceCut::planes(0..256),
+            Some(&t),
+            Some(&shape),
+        );
         assert_eq!(
             region.effective_zoom,
             fly.pixels_per_sample_at_hit(Some(&t), shape)
