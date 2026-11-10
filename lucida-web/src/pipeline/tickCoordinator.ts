@@ -9,7 +9,13 @@ import type { TickContext } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { getSceneSettings } from "../tickCommon.ts";
-import { readResolvedLayers, shownChannels, type ResolvedLayer } from "../resolvedLayers.ts";
+import {
+  outsideCut,
+  readResolvedLayers,
+  shownChannels,
+  type ResolvedLayer,
+  type ResolvedLayers,
+} from "../resolvedLayers.ts";
 import { buildDisplayStateByChannel } from "./upload/coldState/displayState.ts";
 import type { ColdStateDisplayState, GpuCapacityReport } from "../renderer/workerProtocol.ts";
 import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
@@ -238,6 +244,31 @@ function withCutRange(region: VisibleRegion, range: [number, number]): VisibleRe
   return { ...region, xyBoundsVox };
 }
 
+/** The plane the view cuts: the slice plane, or null in the volume view, which cuts none. */
+function viewCutPlane(ctx: TickContext): SlicePlane | null {
+  return ctx.mode === "slice" ? (ctx.scene.slice_plane() as SlicePlane) : null;
+}
+
+/**
+ * The datasets the view draws and plans: each one shown whose layer the cut
+ * passes through. A change to this set changes the roster.
+ */
+function drawnDatasetIds(
+  settings: SceneSettings,
+  layers: ResolvedLayers,
+  plane: SlicePlane | null,
+): Set<string> {
+  const drawn = new Set<string>();
+  for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
+    if (dsSettings.visible && !outsideCut(layers.get(dsId), plane)) drawn.add(dsId);
+  }
+  return drawn;
+}
+
+function sameIds(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  return a.size === b.size && [...a].every((id) => b.has(id));
+}
+
 function sameCut(a: RegionCut, b: RegionCut): boolean {
   return a.axis === b.axis && a.range[0] === b.range[0] && a.range[1] === b.range[1];
 }
@@ -461,8 +492,8 @@ export class TickCoordinator {
   } | null = null;
   /** Layer participation + order (JSON) at the last full rebuild. */
   private lastLayerOrderKey = "";
-  /** Settings-visible dataset ids at the last full rebuild. */
-  private lastVisibleDatasetIds = new Set<string>();
+  /** {@link drawnDatasetIds} at the last full rebuild. */
+  private lastDrawnDatasetIds = new Set<string>();
   /** Per-planned-dataset carry-forward for the display-only fast path. */
   private readonly lastRebuildByDataset = new Map<string, DatasetRebuildSignature>();
   /**
@@ -762,10 +793,13 @@ export class TickCoordinator {
     const plannedDatasets: PlannedDataset[] = [];
     const view = ctx.scene.active_view();
 
+    const cutPlane = viewCutPlane(ctx);
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
       const layer = layers.get(dsId);
+      // A layer the cut misses draws nothing, so nothing of it is planned.
+      if (outsideCut(layer, cutPlane)) continue;
 
       // See `snapshotInputCacheByDataset` for why both keys are checked.
       const snapshotInputEpochKey = `${currentEpochs.content}|${currentEpochs.layout}`;
@@ -1043,7 +1077,7 @@ export class TickCoordinator {
     );
     this.plannedMinimap = new Map(minimapPendingFetch);
 
-    // Capture the scene scalars, layer order, and visible-dataset set this
+    // Capture the scene scalars, layer order, and drawn-dataset set this
     // rebuild planned against, so the display-only fast path has a baseline
     // to prove against. `lastRebuildByDataset` was repopulated per dataset
     // above (each carries its own z-range).
@@ -1052,10 +1086,7 @@ export class TickCoordinator {
       mode: ctx.mode as "slice" | "volume",
     };
     this.lastLayerOrderKey = JSON.stringify(settings.layerOrder);
-    this.lastVisibleDatasetIds = new Set<string>();
-    for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
-      if (dsSettings.visible) this.lastVisibleDatasetIds.add(dsId);
-    }
+    this.lastDrawnDatasetIds = drawnDatasetIds(settings, layers, cutPlane);
 
     // Stamped at completion; see `lastRebuildAt`.
     const rebuildEnd = performance.now();
@@ -1185,13 +1216,9 @@ export class TickCoordinator {
     // A visibility toggle bumps the selection epoch but changes the roster.
     // This also catches a dataset turning visible, which the per-dataset
     // loop below would never see.
-    let visibleCount = 0;
-    for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
-      if (!dsSettings.visible) continue;
-      visibleCount++;
-      if (!this.lastVisibleDatasetIds.has(dsId)) return false;
+    if (!sameIds(drawnDatasetIds(settings, layers, viewCutPlane(ctx)), this.lastDrawnDatasetIds)) {
+      return false;
     }
-    if (visibleCount !== this.lastVisibleDatasetIds.size) return false;
 
     // Precheck with no side effects. Each planned dataset must still be
     // visible with an unchanged non-display fingerprint, z-range, and
@@ -1271,18 +1298,14 @@ export class TickCoordinator {
     const mode = ctx.mode as "slice" | "volume";
     if (mode !== "slice" || scalars.mode !== "slice") return false;
 
-    // Layer order and the visible-dataset set each change the roster, and the
+    // Layer order and the drawn-dataset set each change the roster, and the
     // shown channels the member shape, proven per dataset below. T is the
-    // scrub axis; Z is proven per dataset via the z-range.
+    // scrub axis; Z is proven per dataset via the z-range. A scrub that takes
+    // the cut past a layer, or back into one, changes the drawn set.
     if (JSON.stringify(settings.layerOrder) !== this.lastLayerOrderKey) return false;
-
-    let visibleCount = 0;
-    for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
-      if (!dsSettings.visible) continue;
-      visibleCount++;
-      if (!this.lastVisibleDatasetIds.has(dsId)) return false;
+    if (!sameIds(drawnDatasetIds(settings, layers, viewCutPlane(ctx)), this.lastDrawnDatasetIds)) {
+      return false;
     }
-    if (visibleCount !== this.lastVisibleDatasetIds.size) return false;
 
     const newT = ctx.scene.t();
     let anyScrub = newT !== scalars.t;
@@ -1584,7 +1607,7 @@ export class TickCoordinator {
     // Drop the fast-path signature so a fast path can never reuse a removed
     // dataset's roster.
     this.lastRebuildByDataset.delete(workerMemberId);
-    this.lastVisibleDatasetIds.delete(workerMemberId);
+    this.lastDrawnDatasetIds.delete(workerMemberId);
     // Drop the cached tile matrices, the cached snapshot inputs, and the
     // delta-sync flag so a re-added dataset re-derives placement and re-syncs
     // with a full cold state before any view-move delta can reference it.

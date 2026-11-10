@@ -56,7 +56,8 @@ import {
   isLastShownChannel,
 } from "./channels.ts";
 import { positionLabel } from "../axes.ts";
-import type { ResolvedLayer, ResolvedLayers } from "../resolvedLayers.ts";
+import { layerReach, type ResolvedLayer, type ResolvedLayers } from "../resolvedLayers.ts";
+import type { SlicePlane } from "../renderer/slicePlane.ts";
 import "./LayerPanel.css";
 
 export interface LayerChannel {
@@ -133,9 +134,11 @@ interface Props {
   layers: LayerInfo[];
   selectedLayerId: string | null;
   expandedLayerId: string | null;
-  /** What each layer shows, from the scene: its solo, and whether the scene's
-   *  z or t reaches past it. */
+  /** What each layer shows, from the scene: its solo, whether the scene's z
+   *  or t reaches past it, and whether the cut passes through it. */
   resolvedLayers: ResolvedLayers;
+  /** The plane the slice view cuts, or null in 3D, which cuts nothing. */
+  slicePlane: SlicePlane | null;
   /** Each dataset's import warnings, by layer id. Those that say the data is
    *  shown wrong count toward the layer's problem button, which spells them
    *  out under the row. */
@@ -297,7 +300,7 @@ function LayerRow(props: LayerRowProps) {
   const isExpanded = layer.id === props.expandedLayerId;
   const bodyId = useId();
   const multichannel = layer.channels.length > 1;
-  const clamped = resolved ? clampedNote(resolved) : null;
+  const note = resolved ? cutNote(resolved, props.slicePlane) : null;
   const failedChunks = useFailedChunks(layer.id);
   const problems = (props.importWarnings?.get(layer.id) ?? [])
     .filter((warning) => warning.degrades)
@@ -442,9 +445,9 @@ function LayerRow(props: LayerRowProps) {
           ))}
         </ul>
       )}
-      {clamped && layer.visible && (
-        <p className="lc-layer-note" data-testid={`layer-clamped-${layer.id}`}>
-          {clamped}
+      {note && layer.visible && (
+        <p className="lc-layer-note" data-testid={`layer-note-${layer.id}`}>
+          {note}
         </p>
       )}
       {isExpanded && (
@@ -459,15 +462,23 @@ function LayerRow(props: LayerRowProps) {
 }
 
 /**
- * What a layer shows in place of a z or t it does not have, or `null` when it
- * has both. The scene's selectors reach past a smaller layer, which then shows
- * its nearest plane and timepoint rather than nothing.
+ * What a layer shows of where the view stands, or `null` when that is what the
+ * view says. A cut that passes outside the layer draws none of it. A layer one
+ * plane deep under a Z cut draws that plane at every Z. Past its last
+ * timepoint, or with a Z slab reaching past its last plane, it shows its last.
  */
-function clampedNote(layer: ResolvedLayer): string | null {
-  const parts: string[] = [];
-  if (layer.z_clamped) parts.push(positionLabel("Z", layer.z_range.start));
-  if (layer.t_clamped) parts.push(positionLabel("T", layer.t));
-  return parts.length > 0 ? `Past this layer's extent; showing ${parts.join(" · ")}.` : null;
+function cutNote(layer: ResolvedLayer, plane: SlicePlane | null): string | null {
+  const reach = plane === null ? "through" : layerReach(layer, plane);
+  if (reach === "outside") return "Outside this cut, so nothing is drawn.";
+  const past: string[] = [];
+  if (plane === "xy" && reach === "through" && layer.z_clamped) {
+    past.push(positionLabel("Z", layer.z_range.start));
+  }
+  if (layer.t_clamped) past.push(positionLabel("T", layer.t));
+  const notes: string[] = [];
+  if (reach === "every") notes.push("One plane, shown at every Z position.");
+  if (past.length > 0) notes.push(`Past this layer's extent; showing ${past.join(" · ")}.`);
+  return notes.length > 0 ? notes.join(" ") : null;
 }
 
 /** The colormap and contrast of an image with one channel. */

@@ -879,6 +879,7 @@ function Viewer({
       selectedLayerId={selectedDatasetId}
       expandedLayerId={layers.expandedLayerId}
       resolvedLayers={dims.layers}
+      slicePlane={dims.viewMode === "2d" ? dims.slicePlane : null}
       importWarnings={bridge.datasetImportWarnings}
       onSelectLayer={layers.handleLayerSelect}
       onToggleExpand={layers.handleLayerToggleExpand}

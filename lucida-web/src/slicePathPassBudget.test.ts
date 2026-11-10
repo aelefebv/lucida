@@ -15,6 +15,7 @@ import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { compositeKey } from "./tickCommon.ts";
 import { IDENTITY_PLACEMENT } from "./placement.ts";
 import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
+import type { ResolvedLayer } from "./resolvedLayers.ts";
 
 // pushMemberLayers: the per-(dataset, channel) member-pass budget
 
@@ -376,6 +377,7 @@ function makeSeamHarness(opts: {
   zoom: number;
   clientWidth?: number;
   clientHeight?: number;
+  layer?: Partial<ResolvedLayer>;
 }): SeamHarness {
   const members = rosterGrid(opts.memberCount, 100, 1024);
   const orchResult: TickCoordinatorResult = {
@@ -395,7 +397,7 @@ function makeSeamHarness(opts: {
         },
       },
     },
-    layers: resolvedLayers(resolvedLayer("ds1", [shownChannel(0, { blend_mode: "alpha" })])),
+    layers: resolvedLayers(resolvedLayer("ds1", [shownChannel(0, { blend_mode: "alpha" })], opts.layer)),
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     entityIndexByDataset: new Map([["ds1", indexFor(members, 0)]]),
   };
@@ -477,6 +479,19 @@ afterEach(() => {
 });
 
 describe("tickSlice render-message seam", () => {
+  it("draws nothing of a layer the cut passes outside, so no probe can read it", () => {
+    const missed = makeSeamHarness({ memberCount: 6, zoom: 1, layer: { z_reach: "outside" } });
+    tickSlice(missed.ctx, missed.tickCoordinator, missed.uploader, new Map());
+    expect(missed.posted().layers).toHaveLength(0);
+
+    // An XY view cuts along Z alone; a single plane draws at every Z.
+    for (const layer of [{ y_reach: "outside" }, { z_reach: "every" }] as const) {
+      const h = makeSeamHarness({ memberCount: 6, zoom: 1, layer });
+      tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
+      expect(h.posted().layers).toHaveLength(6);
+    }
+  });
+
   it("posts a bounded layer count at overview zoom on a wide synthetic collection", () => {
     const h = makeSeamHarness({ memberCount: 5000, zoom: 0.0005 });
     tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());

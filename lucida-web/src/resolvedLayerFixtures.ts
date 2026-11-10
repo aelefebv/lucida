@@ -35,6 +35,9 @@ export function resolvedLayer(
     t_clamped: false,
     y: 0,
     x: 0,
+    z_reach: "through",
+    y_reach: "through",
+    x_reach: "through",
     ...over,
   };
 }
