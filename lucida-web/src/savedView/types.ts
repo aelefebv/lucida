@@ -56,6 +56,19 @@ export interface FlyCamera {
 
 export type Camera = SliceCamera | ArcballCamera | FlyCamera;
 
+/** The spaces a camera's numbers are in, as the scene reports them
+ *  (`WasmScene.camera_space`). The web only carries it from a capture to a
+ *  restore; the scene reads it. See `CameraSpace` in
+ *  `lucida-core/src/placement.rs`. */
+export interface CameraSpace {
+  frame: {
+    spacing: [number, number, number];
+    origin: [number, number, number];
+    meters?: [number, number, number];
+  };
+  world: { extent: number; top: number };
+}
+
 /** Whether a client may persist `view`. A stand-in camera, one nothing has
  *  fitted or placed yet, would restore as a pose nobody chose. */
 export function isPersistable(view: SavedView): boolean {
@@ -171,4 +184,11 @@ export interface SavedView {
    *  recipient's intensity batcher doesn't overwrite manual contrast. Omitted
    *  entries mean true. */
   auto_contrast?: Record<DatasetId, boolean>;
+  /** The spaces `camera` was saved in. A restore hands it to the scene with
+   *  the camera, which carries the camera into its own spaces, so the view
+   *  shows its region whichever dataset the document holds first. Absent on
+   *  views saved before it existed, whose cameras read in the restoring
+   *  scene's spaces. Last, as in Rust, so a pin's view rebroadcasts byte for
+   *  byte. */
+  camera_space?: CameraSpace;
 }

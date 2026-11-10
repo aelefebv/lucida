@@ -126,6 +126,7 @@ pub fn home_view(scene: &Scene, dataset_id: &DatasetId, viewport: [u32; 2]) -> O
 
     let mut view = SavedView::empty(viewport);
     view.camera = camera;
+    view.camera_space = scene.camera_space();
     view.dataset_order = vec![dataset_id.clone()];
     // Make the dataset visible: a default display-settings entry (an absent
     // entry would otherwise reset the colormap) plus auto-contrast on.
@@ -160,7 +161,16 @@ pub fn explore(
 ) -> Option<ExplorationSidecar> {
     let extent = ViewExtent::of(scene, dataset_id)?;
     let current = match view {
-        Some(view) => view.clone(),
+        // The moves measure the camera against the extent, which is in this
+        // scene's spaces, so a view saved in others is carried into them.
+        Some(view) => match &view.camera_space {
+            Some(_) => SavedView {
+                camera: view.camera_in(scene),
+                camera_space: scene.camera_space(),
+                ..view.clone()
+            },
+            None => view.clone(),
+        },
         None => home_view(scene, dataset_id, viewport)?,
     };
     Some(ExplorationSidecar::build(

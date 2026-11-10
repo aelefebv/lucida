@@ -12,6 +12,7 @@ import type { DocumentCommand, ViewportCommand } from "../commands.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import type {
   Camera,
+  CameraSpace,
   DatasetDisplaySettings,
   DatasetId,
   DatasetReferenceMode,
@@ -379,7 +380,7 @@ export class SavedViewApplier {
 
       // Camera last, with an older view's scene-wide channel mode, which the
       // scene decodes into each layer's solo over the settings set above.
-      importCameraView(sceneAfter, view.camera, legacyChannelMode(view));
+      importCameraView(sceneAfter, view, legacyChannelMode(view));
 
       this.emitApplyResult(sceneAfter, view);
 
@@ -540,22 +541,26 @@ export function legacyChannelMode(view: SavedView): LegacyChannelMode | null {
 }
 
 /**
- * Import `camera` through `import_presence`, which sets camera, view, and
- * display atomically and keeps the local viewport. View and display were
- * already applied, so the live ones go back through unchanged, plus an older
- * view's channel mode: the scene owns decoding it into each layer's solo.
+ * Import the view's camera through `import_presence`, which sets camera,
+ * view, and display atomically and keeps the local viewport. The camera goes
+ * with the spaces it was saved in, which the scene carries it out of. View
+ * and display were already applied, so the live ones go back through
+ * unchanged, plus an older view's channel mode: the scene owns decoding it
+ * into each layer's solo.
  */
 export function importCameraView(
   scene: WasmScene,
-  camera: Camera,
+  { camera, camera_space }: Pick<SavedView, "camera" | "camera_space">,
   legacy: LegacyChannelMode | null,
 ): void {
   const presence = JSON.parse(scene.export_presence()) as {
     camera: Camera;
     view: ViewState;
     display: unknown;
+    camera_space?: CameraSpace;
   };
   presence.camera = camera;
+  presence.camera_space = camera_space;
   if (legacy) presence.view = { ...presence.view, ...legacy };
   guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
 }

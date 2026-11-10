@@ -6,6 +6,7 @@ import type { WasmScene } from "lucida-core";
 import { is_local_dataset_url } from "lucida-core";
 import type {
   Camera,
+  CameraSpace,
   DatasetId,
   DatasetDisplaySettings,
   DisplayState,
@@ -120,6 +121,10 @@ export function buildCapture({
     }
   }
 
+  // The camera's numbers are in the spaces this scene's datasets fix, which
+  // the restoring scene's may not be.
+  const cameraSpace = JSON.parse(scene.camera_space()) as CameraSpace | null;
+
   return {
     v: SAVED_VIEW_VERSION,
     datasets: orderedUrls,
@@ -130,6 +135,7 @@ export function buildCapture({
     dataset_order: datasetPresence.dataset_order,
     dataset_settings: datasetPresence.dataset_settings,
     auto_contrast: Object.keys(autoContrast).length > 0 ? autoContrast : undefined,
+    camera_space: cameraSpace ?? undefined,
   };
 }
 

@@ -20,7 +20,7 @@ use crate::camera::{Camera, Framing};
 use crate::chunk::{self, ChunkCoord, ChunkQuery, ChunkView, CullCounts};
 use crate::epoch::SceneEpochs;
 use crate::framing::{FitBounds, PlaneBox, WorldBox};
-use crate::placement::{Affine, DeclaredFrame};
+use crate::placement::{Affine, CameraSpace, DeclaredFrame};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::target_level::{
     self, IN_PLANE_AXES, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios,
@@ -397,11 +397,14 @@ impl Scene {
         self.camera != before
     }
 
-    /// Follow a change to the document's datasets. A scene with none left has
-    /// nothing its cameras frame, so the active one becomes a stand-in and
-    /// the parked one is dropped; otherwise the camera reframes. Bumps
-    /// `epochs.view` when the camera changed.
-    pub(crate) fn content_changed(&mut self) {
+    /// Follow a change to the document's datasets, from `before`, the
+    /// scene's camera spaces ahead of it. The datasets fix those spaces, so a
+    /// placed camera is carried into the new ones and keeps its region. A
+    /// scene with no datasets left has nothing its cameras frame, so the
+    /// active one becomes a stand-in and the parked one is dropped; otherwise
+    /// the camera reframes. Bumps `epochs.view` when the camera changed.
+    pub(crate) fn content_changed(&mut self, before: Option<CameraSpace>) {
+        let carried = before.is_some_and(|from| self.carry_placed_cameras(&from));
         let changed = if self.document.manifests.is_empty() {
             self.parked_camera = None;
             let stand_in = self.camera.framing() != Framing::Unframed;
@@ -410,18 +413,19 @@ impl Scene {
         } else {
             self.reframe()
         };
-        if changed {
+        if carried || changed {
             self.epochs.view += 1;
         }
     }
 
     pub fn remove_dataset(&mut self, id: &DatasetId) {
+        let before = self.camera_space();
         self.document.remove_dataset(id);
         self.dataset_order.retain(|s| s != id);
         self.dataset_settings.remove(id);
         self.derived.remove(id);
         self.view_query_cursors.remove(id);
-        self.content_changed();
+        self.content_changed(before);
     }
 
     /// The per-member **world placement matrix** (`[f32; 16]`, column-major):
@@ -993,10 +997,12 @@ impl Scene {
     ///
     /// It bumps every document-scoped epoch (`content`, `layout`,
     /// `annotation`) plus `selection`. `view` bumps only when the camera
-    /// reframed: a placed camera is untouched, and a framed or unframed one
-    /// fits the loaded content, so a page that joins an open dataset shows it
-    /// fitted.
+    /// moved: a placed camera keeps its region, carried into the new
+    /// document's spaces should its first dataset differ, and a framed or
+    /// unframed one fits the loaded content, so a page that joins an open
+    /// dataset shows it fitted.
     pub fn load_document(&mut self, doc: DocumentState) {
+        let before = self.camera_space();
         self.document = doc;
         self.rebuild_derived();
 
@@ -1050,7 +1056,7 @@ impl Scene {
         self.epochs.layout += 1;
         self.epochs.annotation += 1;
         self.epochs.selection += 1;
-        self.content_changed();
+        self.content_changed(before);
     }
 
     /// Adopt another client's camera + view + display: follow, and every

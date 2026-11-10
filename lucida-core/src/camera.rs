@@ -10,7 +10,7 @@ use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
     unproject,
 };
-use crate::placement::Affine;
+use crate::placement::{Affine, SpaceMap};
 use crate::transform::VolumeTransform;
 
 /// Fit factors for "fit the data to the view", re-exported from [`crate::framing`]
@@ -313,6 +313,45 @@ impl Camera {
             }
         }
         self.set_viewport(viewport[0], viewport[1]);
+    }
+
+    /// Carry this camera's pose into other spaces by `map`, so it shows the
+    /// same region of the data there. The slice camera moves by the map
+    /// between scene frames and the volume cameras by the one between world
+    /// spaces. Each map scales every axis alike, so a volume camera keeps its
+    /// orientation and its lengths (orbit distance, depth range, near clip,
+    /// fly speed) scale with the map.
+    pub fn change_space(&mut self, map: &SpaceMap) {
+        let place = |affine: &Affine, point: [f64; 3]| {
+            affine
+                .apply(point)
+                .map(|v| v.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX))
+        };
+        match self {
+            Camera::Slice(s) => {
+                let [x, y, _] = place(&map.scene, [s.center[0], s.center[1], 0.0]);
+                s.set_center(x, y);
+                s.set_zoom(s.zoom / map.scene.length_scale());
+            }
+            Camera::Arcball(a) => {
+                let k = map.world.length_scale();
+                a.target = place(&map.world, a.target);
+                a.distance *= k;
+                a.near *= k;
+                a.far *= k;
+                a.clip_distance *= k;
+            }
+            Camera::Fly(f) => {
+                let k = map.world.length_scale();
+                f.position = place(&map.world, f.position);
+                f.near *= k;
+                f.far *= k;
+                f.clip_distance *= k;
+                f.base_speed *= k;
+            }
+        }
+        // Back into the ranges the mutators keep, should a scale overshoot.
+        self.sanitize();
     }
 
     /// Clamp an externally sourced camera (a peer's presence, a saved view)

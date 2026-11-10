@@ -7,8 +7,13 @@
 //! and units, so datasets over the same physical region overlay. The slice
 //! camera views the scene frame directly, and the volume cameras view it as
 //! world space ([`WorldSpace`]), so both modes place datasets alike.
+//!
+//! A camera's numbers are in those two spaces ([`CameraSpace`]). They follow
+//! the datasets the scene holds, so when they change, a camera someone placed
+//! moves into the new ones ([`CameraSpace::map_to`]) to keep its region.
 
 use lucida_content::{DatasetManifest, LevelGeometry};
+use serde::{Deserialize, Serialize};
 
 use crate::transform::VolumeTransform;
 
@@ -63,6 +68,13 @@ impl Affine {
         self.scale[0].abs().min(self.scale[1].abs())
     }
 
+    /// How long a length of one along X is once mapped. A map between two
+    /// scene frames, or two world spaces, stretches every axis alike, since
+    /// each of those spaces measures all three axes in one length.
+    pub fn length_scale(&self) -> f64 {
+        self.scale[0].abs()
+    }
+
     /// The box `[min, max]` maps to, sorted per axis since a scale can flip it.
     pub fn apply_box(&self, min: [f64; 3], max: [f64; 3]) -> ([f64; 3], [f64; 3]) {
         let a = self.apply(min);
@@ -93,13 +105,14 @@ fn matrix(a: &Affine) -> [f32; 16] {
 
 /// What a dataset's source declares about its frame, independent of every
 /// other dataset: everything its placement needs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeclaredFrame {
     /// One sample's extent, `[x, y, z]`, in the declared numbers.
     spacing: [f64; 3],
     /// The physical point at the frame's origin, in the declared numbers.
     origin: [f64; 3],
     /// Meters per declared number, when X and Y name length units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     meters: Option<[f64; 3]>,
 }
 
@@ -145,7 +158,11 @@ fn finite_or_zero(v: f64) -> f64 {
 /// The reference is the first dataset the document holds, so a scene with
 /// one dataset has that dataset's frame as its scene frame, and a view of it
 /// reads as it always has: the slice camera's numbers are its samples.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// It is recorded as its reference's declared frame, so a record still
+/// places datasets once the reference itself has gone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SceneFrame {
     reference: DeclaredFrame,
 }
@@ -176,12 +193,22 @@ impl SceneFrame {
             }),
         }
     }
+
+    /// The map from this scene frame into `to`. A point keeps its place on
+    /// this frame's reference: the same physical point when both references
+    /// declare length units, and the same declared numbers otherwise, as
+    /// [`Self::place`] compares them.
+    pub fn map_to(&self, to: &SceneFrame) -> Affine {
+        self.place(&self.reference)
+            .inverse()
+            .then(&to.place(&self.reference))
+    }
 }
 
 /// How the volume cameras see the scene frame, as world space: Y flipped to
 /// point up about `top`, and every length divided by `extent`, so the largest
 /// member measures one and the cameras' depth and speed ranges suit any data.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct WorldSpace {
     extent: f64,
     top: f64,
@@ -209,6 +236,41 @@ impl WorldSpace {
             offset: [0.0, self.top * inv, 0.0],
         }
     }
+}
+
+/// The spaces a camera's numbers are in: the scene frame, where the slice
+/// camera looks, and world space, where the volume cameras look. Both follow
+/// the datasets the scene holds, so a saved view records the ones it was
+/// saved in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CameraSpace {
+    pub frame: SceneFrame,
+    pub world: WorldSpace,
+}
+
+impl CameraSpace {
+    /// How numbers in these spaces read in `to`'s, which carries a camera's
+    /// pose over so it shows the same region.
+    pub fn map_to(&self, to: &CameraSpace) -> SpaceMap {
+        let scene = self.frame.map_to(&to.frame);
+        SpaceMap {
+            scene,
+            world: self
+                .world
+                .from_scene()
+                .inverse()
+                .then(&scene)
+                .then(&to.world.from_scene()),
+        }
+    }
+}
+
+/// The maps from one [`CameraSpace`] into another: `scene` for the slice
+/// camera's numbers, `world` for the volume cameras'.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpaceMap {
+    pub scene: Affine,
+    pub world: Affine,
 }
 
 /// The map from a member's unit cube to its box in the dataset's frame. The
@@ -297,6 +359,65 @@ mod tests {
         assert!(close(space.apply([4.0, 0.0, 2.0]), [1.0, 0.5, 0.5]));
         assert!(close(space.apply([0.0, 2.0, 0.0]), [0.0, 0.0, 0.0]));
         assert_eq!(WorldSpace::new(0.0, 0.0), WorldSpace::new(1.0, 0.0));
+    }
+
+    #[test]
+    fn a_scene_frame_maps_into_another_by_the_physical_point() {
+        let a = frame([1.0; 3], [0.0; 3], Some(1e-6));
+        let b = frame([250.0; 3], [5_000.0, 2_000.0, 0.0], Some(1e-9));
+        let (from, to) = (SceneFrame::new(a), SceneFrame::new(b.clone()));
+        let map = from.map_to(&to);
+        // B's sample (8, 4) is 2 by 1 micrometers past its origin at (5, 2),
+        // so (7, 3) micrometers: A's sample (7, 3).
+        let in_a = from.place(&b).apply([8.0, 4.0, 0.0]);
+        assert!(close(in_a, [7.0, 3.0, 0.0]));
+        assert!(close(map.apply(in_a), [8.0, 4.0, 0.0]));
+        assert!((map.length_scale() - 4.0).abs() < 1e-9);
+        assert!(close(to.map_to(&from).apply([8.0, 4.0, 0.0]), in_a));
+    }
+
+    #[test]
+    fn a_camera_space_maps_world_through_the_scene_frames() {
+        let a = frame([1.0; 3], [0.0; 3], Some(1e-6));
+        let b = frame([2.0; 3], [10.0, 0.0, 0.0], Some(1e-6));
+        let from = CameraSpace {
+            frame: SceneFrame::new(a.clone()),
+            world: WorldSpace::new(40.0, 20.0),
+        };
+        let to = CameraSpace {
+            frame: SceneFrame::new(b),
+            world: WorldSpace::new(8.0, 8.0),
+        };
+        let map = from.map_to(&to);
+        // One sample of A, through each space's own placement of it.
+        let world = |space: &CameraSpace| {
+            space
+                .frame
+                .place(&a)
+                .then(&space.world.from_scene())
+                .apply([14.0, 6.0, 2.0])
+        };
+        assert!(close(map.world.apply(world(&from)), world(&to)));
+        // Both world spaces point Y up, so the map stretches every axis alike.
+        let k = map.world.length_scale();
+        assert!(map.world.scale.iter().all(|s| (s - k).abs() < 1e-12));
+        let same = from.map_to(&from);
+        assert!(close(same.world.apply([1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn a_scene_frame_records_as_its_references_declared_frame() {
+        let physical = SceneFrame::new(frame([0.5, 0.5, 2.0], [1.0, 2.0, 3.0], Some(1e-6)));
+        let json = serde_json::to_string(&physical).unwrap();
+        assert_eq!(
+            json,
+            r#"{"spacing":[0.5,0.5,2.0],"origin":[1.0,2.0,3.0],"meters":[1e-6,1e-6,1e-6]}"#
+        );
+        assert_eq!(serde_json::from_str::<SceneFrame>(&json).unwrap(), physical);
+        let bare = SceneFrame::new(frame([1.0; 3], [0.0; 3], None));
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("meters"), "{json}");
+        assert_eq!(serde_json::from_str::<SceneFrame>(&json).unwrap(), bare);
     }
 
     #[test]

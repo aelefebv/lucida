@@ -275,7 +275,9 @@ _Avoid_: auto-fit (fitting follows the camera's state, not an event such as an o
 The one frame every dataset in a scene is placed in, by its declared scale,
 origin and length units, so datasets over one physical region overlay. The
 first dataset in the document fixes its unit and origin. The slice camera
-views it directly, and the volume cameras view it as world space.
+views it directly, and the volume cameras view it as world space. When either
+changes, a placed camera moves into the new one and keeps its region, and a
+saved view records the one its camera was saved in.
 _Avoid_: world (unqualified; world space is the volume cameras' view of it)
 
 ## Surfaces

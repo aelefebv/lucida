@@ -5,6 +5,7 @@ use lucida_content::DatasetId;
 use crate::camera::{Arcball, Camera, ClipMode, Framing};
 use crate::command::{Command, ViewportCommand};
 use crate::framing::PlaneBox;
+use crate::placement::CameraSpace;
 use crate::saved_view::SavedView;
 use crate::scene::{
     DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene, member_transform,
@@ -151,17 +152,33 @@ impl WasmScene {
         serde_json::to_string(&p).unwrap()
     }
 
+    /// The spaces the camera's numbers are in, as JSON, for a saved view to
+    /// record ([`SavedView::camera_space`]). `null` until a dataset with an
+    /// image fixes them.
+    pub fn camera_space(&self) -> String {
+        serde_json::to_string(&self.inner.camera_space()).unwrap()
+    }
+
     /// Import another client's camera + view + display (for follow mode).
     /// The local viewport size is preserved; see [`Scene::import_presence`].
+    /// A stored view's camera comes with the `camera_space` it was saved in,
+    /// and is carried from it into this scene's spaces first. A follow
+    /// target's camera needs none: the two scenes share one document.
     pub fn import_presence(&mut self, json: &str) -> Result<(), JsError> {
         #[derive(serde::Deserialize)]
         struct Presence {
             camera: Camera,
             view: ViewState,
             display: DisplayState,
+            #[serde(default)]
+            camera_space: Option<CameraSpace>,
         }
         let p: Presence = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        self.inner.import_presence(p.camera, p.view, p.display);
+        let mut camera = p.camera;
+        if let Some(from) = &p.camera_space {
+            self.inner.carry_camera(&mut camera, from);
+        }
+        self.inner.import_presence(camera, p.view, p.display);
         Ok(())
     }
 

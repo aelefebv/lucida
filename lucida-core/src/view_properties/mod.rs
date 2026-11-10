@@ -119,17 +119,19 @@ pub fn capture(scene: &Scene) -> SavedView {
     view.camera = scene.camera.clone();
     view.view = scene.view.clone();
     view.display = scene.display.clone();
+    view.camera_space = scene.camera_space();
     view
 }
 
 /// A page at `vp` and `dpr` showing `view`. Saved views, the last view, pins,
 /// follow, and explore and montage links all reach the scene through
-/// `import_presence`.
+/// `import_presence`, a stored view's camera carried into the page's spaces.
 pub fn restore(view: &SavedView, f: &Fixture, vp: Viewport, dpr: u32) -> Shown {
     let mut shown = join(f, vp, dpr);
+    let camera = view.camera_in(&shown.scene);
     shown
         .scene
-        .import_presence(view.camera.clone(), view.view.clone(), view.display.clone());
+        .import_presence(camera, view.view.clone(), view.display.clone());
     shown
 }
 

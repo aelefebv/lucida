@@ -129,6 +129,7 @@ describe("buildCapture workspace dataset references", () => {
       }),
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+      camera_space: () => "null",
     };
 
     const view = buildCapture({
@@ -169,6 +170,7 @@ describe("buildCapture workspace dataset references", () => {
       }),
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+      camera_space: () => "null",
     };
 
     const view = buildCapture({
@@ -203,6 +205,7 @@ describe("buildCapture workspace dataset references", () => {
       }),
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
+      camera_space: () => "null",
     };
 
     const view = buildCapture({
@@ -213,5 +216,41 @@ describe("buildCapture workspace dataset references", () => {
     });
 
     expect(view.dataset_settings["wds-a"].label_names).toBeUndefined();
+  });
+});
+
+describe("buildCapture camera space", () => {
+  const space = {
+    frame: { spacing: [0.5, 0.5, 2], origin: [0, 0, 0], meters: [1e-6, 1e-6, 1e-6] },
+    world: { extent: 512, top: 256 },
+  };
+
+  function sceneWithSpace(json: string) {
+    return {
+      export_presence: () => JSON.stringify({
+        camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
+        view: { z_range: { start: 0, end: 1 }, t: 0 },
+        display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
+      }),
+      export_dataset_presence: () => JSON.stringify({ dataset_order: [], dataset_settings: {} }),
+      dataset_ids: () => "[]",
+      available_layouts: () => "[]",
+      camera_space: () => json,
+    };
+  }
+
+  it("records the spaces the camera is in, last, as the Rust view serializes", () => {
+    const view = buildCapture({
+      scene: sceneWithSpace(JSON.stringify(space)) as never,
+      urlByDatasetId: new Map(),
+    });
+    expect(view.camera_space).toEqual(space);
+    const keys = Object.keys(JSON.parse(JSON.stringify(view)) as object);
+    expect(keys[keys.length - 1]).toBe("camera_space");
+  });
+
+  it("leaves it out while no dataset fixes them", () => {
+    const view = buildCapture({ scene: sceneWithSpace("null") as never, urlByDatasetId: new Map() });
+    expect(JSON.stringify(view)).not.toContain("camera_space");
   });
 });
