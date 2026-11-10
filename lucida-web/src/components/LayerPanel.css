@@ -112,6 +112,11 @@
   overflow-wrap: anywhere;
 }
 
+/* The flex display above would otherwise beat the attribute. */
+.lc-layer-problems[hidden] {
+  display: none;
+}
+
 .lc-layer-body {
   display: flex;
   flex-direction: column;
