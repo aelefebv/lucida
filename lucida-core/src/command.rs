@@ -400,10 +400,10 @@ impl From<ViewportCommand> for Command {
 /// settings map, the one snapshot with real cost at scale. Classification is
 /// exhaustive, so an unclassified new variant is a compile error.
 enum ViewportScope {
-    /// Mutates `Scene::camera` only. A change bumps `epochs.view`.
+    /// Mutates the active view's camera only. A change bumps `epochs.view`.
     Camera,
-    /// Mutates `Scene::view` (the slice and timepoint selectors) only. A
-    /// change bumps `epochs.selection`.
+    /// Mutates the active view's axis positions (the slice and timepoint
+    /// selectors) only. A change bumps `epochs.selection`.
     ViewSelectors,
     /// Mutates `Scene::display` (global contrast/gamma) only. A change bumps
     /// `epochs.selection`.
@@ -693,7 +693,7 @@ impl Scene {
                         self.dataset_order.retain(|s| s != id);
                         self.dataset_settings.remove(id);
                         self.derived.remove(id);
-                        self.view_query_cursors.remove(id);
+                        self.forget_dataset_in_views(id);
 
                         self.epochs.content += 1;
                         self.epochs.layout += 1;
@@ -758,27 +758,30 @@ impl Scene {
         match cmd.scope() {
             ViewportScope::Camera => {
                 let steers = cmd.steers();
-                let before = self.camera.clone();
+                let before = self.active_view().camera.clone();
                 // A plane switch also places the axis position it cuts at.
-                let view_before = self.view.clone();
+                let axes_before = self.active_view().axes.clone();
                 self.mutate_viewport(cmd);
-                if self.view != view_before {
+                let view = self.active_view_mut();
+                let axes_changed = view.axes != axes_before;
+                let moved = view.camera != before;
+                // Steering a fit makes it a choice, which a new canvas
+                // keeps. A stand-in stays one: moving an empty canvas
+                // must not stop the data from being fitted once it opens.
+                if moved && steers && view.camera.framing() == Framing::Framed {
+                    view.camera.set_framing(Framing::Placed);
+                }
+                if axes_changed {
                     self.epochs.selection += 1;
                 }
-                if self.camera != before {
-                    // Steering a fit makes it a choice, which a new canvas
-                    // keeps. A stand-in stays one: moving an empty canvas
-                    // must not stop the data from being fitted once it opens.
-                    if steers && self.camera.framing() == Framing::Framed {
-                        self.camera.set_framing(Framing::Placed);
-                    }
+                if moved {
                     self.epochs.view += 1;
                 }
             }
             ViewportScope::ViewSelectors => {
-                let before = self.view.clone();
+                let before = self.active_view().axes.clone();
                 self.mutate_viewport(cmd);
-                if self.view != before {
+                if self.active_view().axes != before {
                     self.epochs.selection += 1;
                 }
             }
@@ -827,37 +830,37 @@ impl Scene {
                 self.inner_set_viewport(width, height, pixel_ratio);
             }
             ViewportCommand::Pan { dx, dy } => {
-                if let Camera::Slice(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.active_view_mut().camera {
                     v.pan(dx, dy);
                 }
             }
             ViewportCommand::ZoomBy { factor } => {
-                if let Camera::Slice(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.active_view_mut().camera {
                     v.zoom_by(factor);
                 }
             }
             ViewportCommand::SetCenter { x, y } => {
-                if let Camera::Slice(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.active_view_mut().camera {
                     v.set_center(x, y);
                 }
             }
             ViewportCommand::SetZoom { value } => {
-                if let Camera::Slice(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.active_view_mut().camera {
                     v.set_zoom(value);
                 }
             }
             ViewportCommand::Rotate3D { d_theta, d_phi } => {
-                if let Camera::Arcball(ref mut v) = self.camera {
+                if let Camera::Arcball(ref mut v) = self.active_view_mut().camera {
                     v.rotate(d_theta, d_phi);
                 }
             }
             ViewportCommand::Zoom3D { delta } => {
-                if let Camera::Arcball(ref mut v) = self.camera {
+                if let Camera::Arcball(ref mut v) = self.active_view_mut().camera {
                     v.zoom(delta);
                 }
             }
             ViewportCommand::Pan3D { dx, dy } => {
-                if let Camera::Arcball(ref mut v) = self.camera {
+                if let Camera::Arcball(ref mut v) = self.active_view_mut().camera {
                     v.pan(dx, dy);
                 }
             }
@@ -873,7 +876,7 @@ impl Scene {
                 if let Some(world) =
                     self.annotation_world_point_for(&DatasetId(dataset_id), [x, y, z])
                     && world.iter().all(|c| c.is_finite())
-                    && let Camera::Arcball(ref mut v) = self.camera
+                    && let Camera::Arcball(ref mut v) = self.active_view_mut().camera
                 {
                     // Absolute positional write: same component bound as the
                     // pan path.
@@ -892,8 +895,10 @@ impl Scene {
                 pitch,
                 roll,
             } => {
-                let shown = self.visible_bounds().map(|bounds| bounds.world);
-                if let Camera::Fly(ref mut v) = self.camera {
+                let shown = self
+                    .visible_bounds(self.active_view().id())
+                    .map(|bounds| bounds.world);
+                if let Camera::Fly(ref mut v) = self.active_view_mut().camera {
                     v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
                     if let Some(world) = shown {
                         v.bracket_depth(world);
@@ -901,7 +906,7 @@ impl Scene {
                 }
             }
             ViewportCommand::FlySetBaseSpeed { speed } => {
-                if let Camera::Fly(ref mut v) = self.camera {
+                if let Camera::Fly(ref mut v) = self.active_view_mut().camera {
                     v.base_speed = speed.clamp(
                         crate::camera::FLY_BASE_SPEED_MIN,
                         crate::camera::FLY_BASE_SPEED_MAX,
@@ -909,7 +914,7 @@ impl Scene {
                 }
             }
             ViewportCommand::FlyAdjustSpeed { factor } => {
-                if let Camera::Fly(ref mut v) = self.camera {
+                if let Camera::Fly(ref mut v) = self.active_view_mut().camera {
                     v.speed_multiplier = (v.speed_multiplier * factor).clamp(
                         crate::camera::FLY_SPEED_MULTIPLIER_MIN,
                         crate::camera::FLY_SPEED_MULTIPLIER_MAX,
@@ -921,7 +926,7 @@ impl Scene {
                 // stack to Inf, which serializes as `null` and breaks every
                 // peer's presence parse.
                 use crate::camera::CLIP_DISTANCE_MAX;
-                match &mut self.camera {
+                match &mut self.active_view_mut().camera {
                     Camera::Arcball(v) => {
                         v.clip_distance = (v.clip_distance + delta).clamp(0.0, CLIP_DISTANCE_MAX);
                     }
@@ -932,19 +937,19 @@ impl Scene {
                 }
             }
             ViewportCommand::SetZ { z } => {
-                self.view.set_z(z);
+                self.active_view_mut().axes.set_z(z);
             }
             ViewportCommand::SetZRange { start, end } => {
-                self.view.set_z_range(start..end);
+                self.active_view_mut().axes.set_z_range(start..end);
             }
             ViewportCommand::SetT { t } => {
-                self.view.t = t;
+                self.active_view_mut().axes.t = t;
             }
             ViewportCommand::SetY { y } => {
-                self.view.y = Some(y);
+                self.active_view_mut().axes.y = Some(y);
             }
             ViewportCommand::SetX { x } => {
-                self.view.x = Some(x);
+                self.active_view_mut().axes.x = Some(x);
             }
             ViewportCommand::SetSlicePlane { plane } => {
                 self.set_slice_plane(plane);
@@ -1316,7 +1321,7 @@ mod tests {
     fn apply_pan_updates_center() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::Pan { dx: 100.0, dy: 0.0 }.into());
-        if let Camera::Slice(ref v) = scene.camera {
+        if let Camera::Slice(ref v) = scene.active_view().camera {
             assert_eq!(v.center, [100.0, 0.0]);
         } else {
             panic!("expected Slice");
@@ -1327,14 +1332,14 @@ mod tests {
     fn apply_set_z_updates_view() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetZ { z: 42 }.into());
-        assert_eq!(scene.view.z_range, 42..43);
+        assert_eq!(scene.active_view().axes.z_range, 42..43);
     }
 
     #[test]
     fn apply_set_mode_3d_switches_camera() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetMode3D.into());
-        assert!(matches!(scene.camera, Camera::Arcball(_)));
+        assert!(matches!(scene.active_view().camera, Camera::Arcball(_)));
     }
 
     #[test]
@@ -2562,12 +2567,12 @@ mod tests {
     fn dataset_opened_leaves_a_placed_camera_alone() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetCenter { x: 5.0, y: 5.0 }.into());
-        scene.camera.set_framing(Framing::Placed);
-        let camera = scene.camera.clone();
+        scene.active_view_mut().camera.set_framing(Framing::Placed);
+        let camera = scene.active_view().camera.clone();
         let view = scene.epochs.view;
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert_eq!(scene.camera, camera);
+        assert_eq!(scene.active_view().camera, camera);
         assert_eq!(scene.epochs.view, view);
     }
 
@@ -2675,7 +2680,7 @@ mod tests {
             }
             .into()
         };
-        let slice = |scene: &Scene| match &scene.camera {
+        let slice = |scene: &Scene| match &scene.active_view().camera {
             Camera::Slice(s) => s.clone(),
             other => panic!("expected a slice camera, got {other:?}"),
         };
@@ -2745,7 +2750,7 @@ mod tests {
     fn non_finite_fly_and_clip_inputs_are_dropped_without_poisoning_epochs() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetModeFly.into());
-        let camera_before = scene.camera.clone();
+        let camera_before = scene.active_view().camera.clone();
         let view_epoch = scene.epochs.view;
 
         scene.apply(ViewportCommand::FlyAdjustSpeed { factor: f64::NAN }.into());
@@ -2769,7 +2774,7 @@ mod tests {
         );
         scene.apply(ViewportCommand::AdjustClipDistance { delta: f64::NAN }.into());
 
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Fly(v) => {
                 assert_eq!(v.speed_multiplier, 1.0, "NaN factor must be dropped");
                 assert!(v.base_speed.is_finite(), "Inf speed must be dropped");
@@ -2777,7 +2782,11 @@ mod tests {
             }
             other => panic!("expected Fly camera, got {other:?}"),
         }
-        assert_eq!(scene.camera, camera_before, "state must be untouched");
+        assert_eq!(
+            scene.active_view().camera,
+            camera_before,
+            "state must be untouched"
+        );
         assert_eq!(scene.epochs.view, view_epoch, "dropped commands are silent");
 
         // No poisoning: repeated no-op commands stay epoch-silent.
@@ -2803,7 +2812,7 @@ mod tests {
     #[test]
     fn non_finite_2d_camera_inputs_are_dropped() {
         let mut scene = Scene::new([800, 600]);
-        let camera_before = scene.camera.clone();
+        let camera_before = scene.active_view().camera.clone();
 
         scene.apply(
             ViewportCommand::Pan {
@@ -2832,7 +2841,7 @@ mod tests {
             .into(),
         );
 
-        assert_eq!(scene.camera, camera_before);
+        assert_eq!(scene.active_view().camera, camera_before);
         assert_eq!(scene.epochs.view, 0);
 
         scene.apply(
@@ -2850,7 +2859,7 @@ mod tests {
     fn non_finite_3d_camera_inputs_are_dropped() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetMode3D.into());
-        let camera_before = scene.camera.clone();
+        let camera_before = scene.active_view().camera.clone();
         let view_epoch = scene.epochs.view;
 
         scene.apply(
@@ -2878,7 +2887,7 @@ mod tests {
             .into(),
         );
 
-        assert_eq!(scene.camera, camera_before);
+        assert_eq!(scene.active_view().camera, camera_before);
         assert_eq!(scene.epochs.view, view_epoch);
     }
 
@@ -3015,7 +3024,7 @@ mod tests {
         scene.apply(ViewportCommand::SetModeFly.into());
         scene.apply(ViewportCommand::FlySetBaseSpeed { speed: 3.0 }.into());
         scene.apply(ViewportCommand::FlyAdjustSpeed { factor: 2.0 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Fly(v) => {
                 assert_eq!(v.base_speed, 3.0);
                 assert_eq!(v.speed_multiplier, 2.0);
@@ -3025,7 +3034,7 @@ mod tests {
 
         // The multiplier clamps to FLY_SPEED_MULTIPLIER_MIN..=MAX.
         scene.apply(ViewportCommand::FlyAdjustSpeed { factor: 1e9 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Fly(v) => {
                 assert_eq!(v.speed_multiplier, crate::camera::FLY_SPEED_MULTIPLIER_MAX)
             }
@@ -3036,7 +3045,7 @@ mod tests {
         let mut scene2 = Scene::new([800, 600]);
         scene2.apply(ViewportCommand::FlySetBaseSpeed { speed: 3.0 }.into());
         scene2.apply(ViewportCommand::FlyAdjustSpeed { factor: 2.0 }.into());
-        assert!(matches!(scene2.camera, Camera::Slice(_)));
+        assert!(matches!(scene2.active_view().camera, Camera::Slice(_)));
         assert_eq!(scene2.epochs.view, 0);
         assert_eq!(scene2.epochs.selection, 0);
     }
@@ -3060,7 +3069,7 @@ mod tests {
         let view_before = scene.epochs.view;
 
         scene.apply(ViewportCommand::AdjustClipDistance { delta: 0.25 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => assert_eq!(v.clip_distance, 0.25),
             other => panic!("expected Arcball camera, got {other:?}"),
         }
@@ -3070,7 +3079,7 @@ mod tests {
 
         // Clamped at 0: a big negative nudge lands on 0 (a change from 0.25).
         scene.apply(ViewportCommand::AdjustClipDistance { delta: -10.0 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => assert_eq!(v.clip_distance, 0.0),
             other => panic!("expected Arcball camera, got {other:?}"),
         }
@@ -3085,7 +3094,7 @@ mod tests {
     fn adjust_clip_distance_is_noop_in_slice_mode() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::AdjustClipDistance { delta: 0.25 }.into());
-        assert!(matches!(scene.camera, Camera::Slice(_)));
+        assert!(matches!(scene.active_view().camera, Camera::Slice(_)));
         assert_eq!(scene.epochs.view, 0);
         assert_eq!(scene.epochs.selection, 0);
     }
@@ -3096,7 +3105,7 @@ mod tests {
         scene.apply(ViewportCommand::SetModeFly.into());
         scene.apply(ViewportCommand::AdjustClipDistance { delta: 0.5 }.into());
         scene.apply(ViewportCommand::AdjustClipDistance { delta: 0.25 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Fly(v) => assert_eq!(v.clip_distance, 0.75),
             other => panic!("expected Fly camera, got {other:?}"),
         }
@@ -3111,13 +3120,13 @@ mod tests {
         use crate::camera::SLICE_ZOOM_MIN;
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetZoom { value: 0.0 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(v) => assert_eq!(v.zoom, SLICE_ZOOM_MIN, "zero must saturate, never 0"),
             other => panic!("expected Slice camera, got {other:?}"),
         }
 
         scene.apply(ViewportCommand::Pan { dx: 3.0, dy: 4.0 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(v) => {
                 assert!(
                     v.center[0].is_finite() && v.center[1].is_finite(),
@@ -3156,7 +3165,7 @@ mod tests {
         for _ in 0..50 {
             scene.apply(ViewportCommand::ZoomBy { factor: 0.9 }.into());
         }
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(v) => assert_eq!(v.zoom, SLICE_ZOOM_MIN),
             other => panic!("expected Slice camera, got {other:?}"),
         }
@@ -3169,7 +3178,7 @@ mod tests {
         for _ in 0..60 {
             scene.apply(ViewportCommand::ZoomBy { factor: 10.0 }.into());
         }
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(v) => assert_eq!(v.zoom, SLICE_ZOOM_MAX),
             other => panic!("expected Slice camera, got {other:?}"),
         }
@@ -3183,17 +3192,17 @@ mod tests {
         for _ in 0..5 {
             scene.apply(ViewportCommand::Zoom3D { delta: 1e12 }.into());
         }
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => assert_eq!(v.distance, ARCBALL_DISTANCE_MAX),
             other => panic!("expected Arcball camera, got {other:?}"),
         }
 
         // With a finite distance, a zero-delta pan is exactly a no-op; with an
         // Inf distance it would compute 0 × Inf = NaN into the target.
-        let camera_before = scene.camera.clone();
+        let camera_before = scene.active_view().camera.clone();
         let epochs = scene.epochs.clone();
         scene.apply(ViewportCommand::Pan3D { dx: 0.0, dy: 0.0 }.into());
-        assert_eq!(scene.camera, camera_before);
+        assert_eq!(scene.active_view().camera, camera_before);
         assert_eq!(scene.epochs, epochs);
     }
 
@@ -3201,7 +3210,7 @@ mod tests {
     fn negative_fly_dt_is_ignored() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetModeFly.into());
-        let camera_before = scene.camera.clone();
+        let camera_before = scene.active_view().camera.clone();
         let epochs = scene.epochs.clone();
         // A bad clock delta must not integrate a huge backward displacement.
         scene.apply(
@@ -3216,7 +3225,7 @@ mod tests {
             }
             .into(),
         );
-        assert_eq!(scene.camera, camera_before);
+        assert_eq!(scene.active_view().camera, camera_before);
         assert_eq!(scene.epochs, epochs);
     }
 
@@ -3227,14 +3236,14 @@ mod tests {
         scene.apply(ViewportCommand::SetMode3D.into());
         // Saturate distance at the ceiling so the pan scale is large...
         scene.apply(ViewportCommand::Zoom3D { delta: 1e12 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => assert_eq!(v.distance, ARCBALL_DISTANCE_MAX),
             other => panic!("expected Arcball camera, got {other:?}"),
         }
         // ...then pan by an extreme finite delta. The target must saturate at
         // the positional bound, never store Inf.
         scene.apply(ViewportCommand::Pan3D { dx: 1e303, dy: 0.0 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => {
                 for c in v.target {
                     assert!(
@@ -3248,7 +3257,7 @@ mod tests {
         // A follow-up unit pan runs normalize3(target − eye) — with an Inf
         // target that computed Inf − Inf = NaN and poisoned every component.
         scene.apply(ViewportCommand::Pan3D { dx: 1.0, dy: 0.0 }.into());
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => {
                 for c in v.target {
                     assert!(c.is_finite(), "target went non-finite: {c}");
@@ -3286,7 +3295,7 @@ mod tests {
             }
             .into(),
         );
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(v) => {
                 assert_eq!(v.center, [CAMERA_POSITION_MAX, -CAMERA_POSITION_MAX]);
             }
@@ -3322,7 +3331,7 @@ mod tests {
             }
             .into(),
         );
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Fly(v) => {
                 for c in v.position {
                     assert!(c.is_finite());
@@ -3364,17 +3373,17 @@ mod tests {
             );
             scene.apply(ViewportCommand::AdjustClipDistance { delta: 1.7e308 }.into());
             scene.apply(ViewportCommand::AdjustClipDistance { delta: 1.7e308 }.into());
-            let clip = match &scene.camera {
+            let clip = match &scene.active_view().camera {
                 Camera::Arcball(v) => v.clip_distance,
                 Camera::Fly(v) => v.clip_distance,
                 other => panic!("expected 3D camera, got {other:?}"),
             };
             assert_eq!(clip, CLIP_DISTANCE_MAX, "fly={fly}");
-            assert_no_null(&serde_json::to_value(&scene.camera).unwrap());
+            assert_no_null(&serde_json::to_value(&scene.active_view().camera).unwrap());
 
             // A huge negative delta is not sticky: the clip comes back to 0.
             scene.apply(ViewportCommand::AdjustClipDistance { delta: -1.7e308 }.into());
-            let clip = match &scene.camera {
+            let clip = match &scene.active_view().camera {
                 Camera::Arcball(v) => v.clip_distance,
                 Camera::Fly(v) => v.clip_distance,
                 other => panic!("expected 3D camera, got {other:?}"),
@@ -3396,7 +3405,7 @@ mod tests {
                 .into(),
             );
         }
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => {
                 assert!(v.theta.is_finite() && v.phi.is_finite());
                 // eye_position takes sin/cos of these — sin(Inf) is NaN.
@@ -3406,7 +3415,7 @@ mod tests {
             }
             other => panic!("expected Arcball camera, got {other:?}"),
         }
-        assert_no_null(&serde_json::to_value(&scene.camera).unwrap());
+        assert_no_null(&serde_json::to_value(&scene.active_view().camera).unwrap());
 
         // Ordinary rotation is a bit-identical accumulate (the wrap guard is
         // far outside the interactive range).
@@ -3419,7 +3428,7 @@ mod tests {
             }
             .into(),
         );
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => {
                 assert_eq!(v.theta, 0.5 + 0.25);
                 assert_eq!(v.phi, 0.8 + 0.1);
@@ -3443,7 +3452,7 @@ mod tests {
             }
             .into(),
         );
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Slice(v) => {
                 assert_eq!(v.center, [CAMERA_POSITION_MAX, -CAMERA_POSITION_MAX]);
             }
@@ -3466,7 +3475,7 @@ mod tests {
             }
             .into(),
         );
-        match &scene.camera {
+        match &scene.active_view().camera {
             Camera::Arcball(v) => {
                 for c in v.target {
                     assert!(
@@ -3477,7 +3486,7 @@ mod tests {
             }
             other => panic!("expected Arcball camera, got {other:?}"),
         }
-        assert_no_null(&serde_json::to_value(&scene.camera).unwrap());
+        assert_no_null(&serde_json::to_value(&scene.active_view().camera).unwrap());
     }
 
     #[test]

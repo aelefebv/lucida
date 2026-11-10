@@ -11,7 +11,7 @@ use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
 use lucida_core::saved_view::{self, SavedView};
 use lucida_core::scene::{DisplayState, DocumentState, Scene};
-use lucida_core::view::ViewState;
+use lucida_core::view::AxisPositions;
 use lucida_core::view_transform;
 use lucida_core::viewer_profile::ProfileScene;
 
@@ -99,7 +99,7 @@ impl PyScene {
     }
 
     fn camera_mode(&self) -> String {
-        match &self.inner.camera {
+        match &self.inner.active_view().camera {
             Camera::Slice(_) => "slice".to_string(),
             Camera::Arcball(_) => "arcball".to_string(),
             Camera::Fly(_) => "fly".to_string(),
@@ -113,11 +113,11 @@ impl PyScene {
     }
 
     fn zoom(&self) -> f64 {
-        self.inner.camera.effective_zoom()
+        self.inner.active_view().camera.effective_zoom()
     }
 
     fn center(&self) -> (f64, f64) {
-        if let Camera::Slice(ref v) = self.inner.camera {
+        if let Camera::Slice(ref v) = self.inner.active_view().camera {
             (v.center[0], v.center[1])
         } else {
             (0.0, 0.0)
@@ -125,24 +125,24 @@ impl PyScene {
     }
 
     fn z(&self) -> u32 {
-        self.inner.view.z_range.start
+        self.inner.active_view().axes.z_range.start
     }
 
     fn t(&self) -> u32 {
-        self.inner.view.t
+        self.inner.active_view().axes.t
     }
 
     /// What every layer shows, as JSON: which channels, through which
     /// colormap and window, at which z and t.
     fn resolved_layers(&self) -> String {
-        serde_json::to_string(&self.inner.resolved_layers()).unwrap()
+        serde_json::to_string(&self.inner.resolved_layers(self.inner.active_view().id())).unwrap()
     }
 
     fn import_presence(&mut self, json: &str) -> PyResult<()> {
         #[derive(serde::Deserialize)]
         struct Presence {
             camera: Camera,
-            view: ViewState,
+            view: AxisPositions,
             display: DisplayState,
         }
         let p: Presence = serde_json::from_str(json)
@@ -152,13 +152,13 @@ impl PyScene {
     }
 
     fn camera_json(&self) -> String {
-        serde_json::to_string(&self.inner.camera).unwrap()
+        serde_json::to_string(&self.inner.active_view().camera).unwrap()
     }
 
     fn presence_json(&self) -> String {
         let msg = ClientMessage::Presence {
-            camera: self.inner.camera.clone(),
-            view: self.inner.view.clone(),
+            camera: self.inner.active_view().camera.clone(),
+            view: self.inner.active_view().axes.clone(),
             display: self.inner.display.clone(),
         };
         serde_json::to_string(&msg).unwrap()
@@ -239,8 +239,13 @@ impl PyProfileScene {
     /// What every layer shows, as JSON: which channels, through which
     /// colormap and window, at which z and t.
     fn resolved_layers(&self) -> PyResult<String> {
-        serde_json::to_string(&self.inner.scene.resolved_layers())
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        serde_json::to_string(
+            &self
+                .inner
+                .scene
+                .resolved_layers(self.inner.scene.active_view().id()),
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 }
 

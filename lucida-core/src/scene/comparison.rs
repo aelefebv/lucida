@@ -68,13 +68,14 @@ impl Comparison {
 }
 
 impl Scene {
-    /// The comparison this view shows, if any.
+    /// The comparison the active view shows, if any.
     pub fn comparison(&self) -> Option<&Comparison> {
-        self.comparison.as_ref()
+        self.active_view().comparison.as_ref()
     }
 
-    /// Compare `a` with `b` in `mode`, the divider in the middle and a blink
-    /// showing `a`. Refused with the verdict unless the two line up.
+    /// Compare `a` with `b` in the active view in `mode`, the divider in the
+    /// middle and a blink showing `a`. Refused with the verdict unless the
+    /// two line up.
     pub fn compare(&mut self, a: DatasetId, b: DatasetId, mode: CompareMode) -> Result<(), LineUp> {
         match self.line_up(&a, &b) {
             LineUp::Yes => {}
@@ -120,32 +121,40 @@ impl Scene {
     }
 
     fn edit_comparison(&mut self, edit: impl FnOnce(&mut Comparison)) {
-        let Some(mut next) = self.comparison.clone() else {
+        let Some(mut next) = self.comparison().cloned() else {
             return;
         };
         edit(&mut next);
         self.set_comparison(Some(next));
     }
 
-    /// The one write, so `epochs.comparison` moves exactly when the
-    /// comparison does. Planning reads no epoch it bumps: what is wanted is
-    /// the same however the pair is shown.
+    /// The one write to the active view's comparison, so `epochs.comparison`
+    /// moves exactly when it does. Planning reads no epoch it bumps: what is
+    /// wanted is the same however the pair is shown.
     fn set_comparison(&mut self, next: Option<Comparison>) {
-        if self.comparison != next {
-            self.comparison = next;
+        let comparison = &mut self.active_view_mut().comparison;
+        if *comparison != next {
+            *comparison = next;
             self.epochs.comparison += 1;
         }
     }
 
-    /// End a comparison whose datasets no longer line up, as when one is
+    /// End every comparison whose datasets no longer line up, as when one is
     /// removed or a layout moves it away.
     pub(crate) fn keep_comparison_lined_up(&mut self) {
-        let lined_up = self
-            .comparison
-            .as_ref()
-            .is_none_or(|c| self.line_up(&c.a, &c.b) == LineUp::Yes);
-        if !lined_up {
-            self.end_comparison();
+        let apart: Vec<usize> = (0..self.views.len())
+            .filter(|&i| {
+                self.views[i]
+                    .comparison
+                    .as_ref()
+                    .is_some_and(|c| self.line_up(&c.a, &c.b) != LineUp::Yes)
+            })
+            .collect();
+        for i in &apart {
+            self.views[*i].comparison = None;
+        }
+        if !apart.is_empty() {
+            self.epochs.comparison += 1;
         }
     }
 }
@@ -276,5 +285,20 @@ mod tests {
         scene.apply(DocumentCommand::RemoveDataset { id: b }.into());
         assert_eq!(scene.comparison(), None);
         assert!(scene.epochs.comparison > epoch);
+    }
+
+    #[test]
+    fn a_comparison_belongs_to_the_view_it_was_made_in() {
+        let mut scene = lined_up();
+        let second = crate::view::ViewId(1);
+        scene.views.push(crate::view::View::new(second, [400, 600]));
+        let [a, b] = ids();
+        scene.compare(a.clone(), b, CompareMode::Swipe).unwrap();
+        assert_eq!(scene.view(second).unwrap().comparison, None);
+
+        // A dataset going away ends every view's comparison of it.
+        scene.views[1].comparison = scene.comparison().cloned();
+        scene.apply(DocumentCommand::RemoveDataset { id: a }.into());
+        assert!(scene.views().iter().all(|view| view.comparison.is_none()));
     }
 }

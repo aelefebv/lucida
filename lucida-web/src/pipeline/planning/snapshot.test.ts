@@ -76,10 +76,10 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
   };
 
   const stub = {
-    view_query: (_dsId: string) =>
+    view_query: (_view: number, _dsId: string) =>
       JSON.stringify({ visible_entities: config.visibleEntities }),
     member_positions: (_dsId: string) => JSON.stringify(config.positions),
-    visible_region: (_dsId: string) =>
+    visible_region: (_view: number, _dsId: string) =>
       config.visibleRegion === null ? "null" : JSON.stringify(config.visibleRegion),
     t: () => config.t,
     z: () => config.z,
@@ -157,6 +157,7 @@ interface MakeArgsOverrides {
 function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
   return {
     scene: overrides?.scene ?? makeStubScene(),
+    view: 0,
     datasetId: "ds1",
     dataset: overrides?.dataset ?? makeDataset(),
     layer: overrides && "layer" in overrides ? overrides.layer : resolvedLayer("ds1"),

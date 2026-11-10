@@ -14,7 +14,7 @@ use lucida_protocol::{
 use crate::camera::{Camera, Framing, Slice};
 use crate::command::DocumentCommand;
 use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
-use crate::view::ViewState;
+use crate::view::AxisPositions;
 
 pub type ClientId = u64;
 
@@ -84,7 +84,7 @@ pub struct PresenceState {
     /// Camera, view and display arrive together in [`ClientMessage::Presence`],
     /// so they are all `Some` or all `None`.
     pub camera: Option<Camera>,
-    pub view: Option<ViewState>,
+    pub view: Option<AxisPositions>,
     pub display: Option<DisplayState>,
     /// Who this client is following (`None` = independent).
     pub following: Option<ClientId>,
@@ -126,7 +126,7 @@ impl PresenceState {
 struct PresenceStateWire {
     client_id: ClientId,
     camera: Camera,
-    view: ViewState,
+    view: AxisPositions,
     display: DisplayState,
     #[serde(default = "reported", skip_serializing_if = "is_reported")]
     camera_reported: bool,
@@ -181,7 +181,7 @@ impl From<PresenceState> for PresenceStateWire {
                         framing: Framing::Placed,
                         ..Slice::new([800, 600])
                     }),
-                    ViewState::new(),
+                    AxisPositions::new(),
                     DisplayState::default(),
                     false,
                 ),
@@ -210,7 +210,7 @@ pub enum ClientMessage {
     /// Viewport presence update (ephemeral, latest-wins).
     Presence {
         camera: Camera,
-        view: ViewState,
+        view: AxisPositions,
         display: DisplayState,
     },
     /// Cursor position update (null = cursor left the canvas).
@@ -565,7 +565,7 @@ pub enum ServerMessage {
     PresenceUpdate {
         client_id: ClientId,
         camera: Camera,
-        view: ViewState,
+        view: AxisPositions,
         display: DisplayState,
     },
     /// A peer's cursor moved (null = cursor left the canvas).
@@ -1487,7 +1487,7 @@ mod tests {
     fn client_message_presence_round_trips() {
         let msg = ClientMessage::Presence {
             camera: Camera::new_2d([800, 600]),
-            view: ViewState::new(),
+            view: AxisPositions::new(),
             display: DisplayState::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -1525,7 +1525,7 @@ mod tests {
         let ps = PresenceState {
             client_id: 1,
             camera: Some(Camera::new_2d([800, 600])),
-            view: Some(ViewState::new()),
+            view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
             following: None,
             cursor: Some([100.0, 200.0]),
@@ -1548,7 +1548,7 @@ mod tests {
         let ps = PresenceState {
             client_id: 9,
             camera: Some(Camera::new_2d([800, 600])),
-            view: Some(ViewState::new()),
+            view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
             following: None,
             cursor: Some([1.0, 2.0]),
@@ -1644,7 +1644,7 @@ mod tests {
     fn reported_presence_carries_no_reported_flag() {
         let mut presence = PresenceState::joined(5, None);
         presence.camera = Some(Camera::new_2d([1024, 768]));
-        presence.view = Some(ViewState::new());
+        presence.view = Some(AxisPositions::new());
         presence.display = Some(DisplayState::default());
         presence.dataset_order = Some(vec![]);
         presence.dataset_settings = Some(HashMap::new());
@@ -1665,7 +1665,7 @@ mod tests {
         struct OlderPresence {
             client_id: ClientId,
             camera: Camera,
-            view: ViewState,
+            view: AxisPositions,
             display: DisplayState,
             following: Option<ClientId>,
             cursor: Option<[f64; 2]>,
@@ -1725,7 +1725,7 @@ mod tests {
         let ps = PresenceState {
             client_id: 7,
             camera: Some(Camera::Fly(fly)),
-            view: Some(ViewState::new()),
+            view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
             following: Some(3),
             cursor: Some([0.5, 0.5]),
@@ -1761,7 +1761,7 @@ mod tests {
         let msg = ServerMessage::PresenceUpdate {
             client_id: 5,
             camera: Camera::Fly(fly),
-            view: ViewState::new(),
+            view: AxisPositions::new(),
             display: DisplayState::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -2089,7 +2089,7 @@ mod tests {
         let fly = Fly::new([800, 600]);
         let msg = ClientMessage::Presence {
             camera: Camera::Fly(fly),
-            view: ViewState::new(),
+            view: AxisPositions::new(),
             display: DisplayState::default(),
         };
         let json = serde_json::to_string(&msg).unwrap();

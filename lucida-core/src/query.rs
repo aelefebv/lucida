@@ -98,7 +98,9 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let result = scene.view_query(&DatasetId::from("ds1")).unwrap();
+        let result = scene
+            .view_query(scene.active_view().id(), &DatasetId::from("ds1"))
+            .unwrap();
         assert_eq!(result.visible_entities.len(), 1);
         assert!(result.visible_entities[0].visible);
         assert!(result.visible_entities[0].projected_diagonal_px > 0.0);
@@ -108,7 +110,11 @@ mod tests {
     #[test]
     fn view_query_nonexistent_dataset_returns_none() {
         let scene = Scene::new([800, 600]);
-        assert!(scene.view_query(&DatasetId::from("nope")).is_none());
+        assert!(
+            scene
+                .view_query(scene.active_view().id(), &DatasetId::from("nope"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -116,7 +122,9 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let result = scene.view_query(&DatasetId::from("ds1")).unwrap();
+        let result = scene
+            .view_query(scene.active_view().id(), &DatasetId::from("ds1"))
+            .unwrap();
         assert_eq!(result.epochs, scene.epochs);
     }
 
@@ -125,7 +133,9 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let result = scene.view_query(&DatasetId::from("ds1")).unwrap();
+        let result = scene
+            .view_query(scene.active_view().id(), &DatasetId::from("ds1"))
+            .unwrap();
         let json = serde_json::to_string(&result).unwrap();
         let parsed: ViewQueryResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.visible_entities.len(), result.visible_entities.len());
@@ -198,7 +208,7 @@ mod tests {
     }
 
     fn set_center(scene: &mut Scene, x: f64, y: f64) {
-        if let Camera::Slice(s) = &mut scene.camera {
+        if let Camera::Slice(s) = &mut scene.active_view_mut().camera {
             s.set_center(x, y);
         }
     }
@@ -208,12 +218,16 @@ mod tests {
         let mut scene = spread_collection();
         let ds = DatasetId::from("coll");
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
         // A re-query at the same camera is a (here, empty) delta, not a full.
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Delta { .. }
         ));
     }
@@ -221,7 +235,11 @@ mod tests {
     #[test]
     fn nonexistent_dataset_delta_is_none() {
         let mut scene = Scene::new([800, 600]);
-        assert!(scene.view_query_delta(&DatasetId::from("nope")).is_none());
+        assert!(
+            scene
+                .view_query_delta(scene.active_view().id(), &DatasetId::from("nope"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -241,11 +259,16 @@ mod tests {
         let ds = DatasetId::from("ds1");
 
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
         set_center(&mut scene, 0.25, 0.0);
-        match scene.view_query_delta(&ds).unwrap() {
+        match scene
+            .view_query_delta(scene.active_view().id(), &ds)
+            .unwrap()
+        {
             ViewQueryDelta::Delta {
                 entered,
                 left,
@@ -266,13 +289,18 @@ mod tests {
         let ds = DatasetId::from("coll");
         // Seed at origin: m0 visible, the far members are not.
         set_center(&mut scene, 128.0, 128.0);
-        let _ = scene.view_query_delta(&ds).unwrap();
+        let _ = scene
+            .view_query_delta(scene.active_view().id(), &ds)
+            .unwrap();
 
         // Pan to m2's neighbourhood. m0 leaves the screen (visible flip), m2
         // enters it (visible flip). Both surface as `changed` — never as
         // entered/left, since membership is unchanged.
         set_center(&mut scene, 1328.0, 128.0);
-        match scene.view_query_delta(&ds).unwrap() {
+        match scene
+            .view_query_delta(scene.active_view().id(), &ds)
+            .unwrap()
+        {
             ViewQueryDelta::Delta {
                 entered,
                 left,
@@ -294,24 +322,32 @@ mod tests {
         let mut scene = spread_collection();
         let ds = DatasetId::from("coll");
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
         // A camera-only 2D move stays a delta.
         set_center(&mut scene, 600.0, 0.0);
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Delta { .. }
         ));
         // Switching geometry family resyncs.
         scene.set_mode_3d();
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
         // And settles back into deltas within the new family.
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Delta { .. }
         ));
     }
@@ -321,11 +357,15 @@ mod tests {
         let mut scene = spread_collection();
         let ds = DatasetId::from("coll");
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Delta { .. }
         ));
         // Opening another dataset moves the structural (content/layout) epochs,
@@ -333,7 +373,9 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("other", "other", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
     }
@@ -357,17 +399,23 @@ mod tests {
 
         // Seed only dataset `a`. Dataset `b` has never been queried.
         assert!(matches!(
-            scene.view_query_delta(&a).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &a)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
         // `a`'s next query is a delta; `b`'s first query is still a full — the
         // cursors are keyed per dataset.
         assert!(matches!(
-            scene.view_query_delta(&a).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &a)
+                .unwrap(),
             ViewQueryDelta::Delta { .. }
         ));
         assert!(matches!(
-            scene.view_query_delta(&b).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &b)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
     }
@@ -394,16 +442,18 @@ mod tests {
         let mut saw_nonempty_delta = false;
 
         for (x, y, zoom) in moves {
-            if let Camera::Slice(s) = &mut scene.camera {
+            if let Camera::Slice(s) = &mut scene.active_view_mut().camera {
                 s.set_center(x, y);
                 s.set_zoom(zoom);
             }
 
             // Expected state from a full query at this camera.
-            let expected = map_from_full(&scene.view_query(&ds).unwrap());
+            let expected = map_from_full(&scene.view_query(scene.active_view().id(), &ds).unwrap());
 
             // Same camera, incremental form.
-            let delta = scene.view_query_delta(&ds).unwrap();
+            let delta = scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap();
             if let ViewQueryDelta::Delta {
                 entered,
                 left,
@@ -435,8 +485,10 @@ mod tests {
         let mut reconstructed: QuantizedMap = HashMap::new();
 
         let check = |scene: &mut Scene, reconstructed: &mut QuantizedMap| {
-            let expected = map_from_full(&scene.view_query(&ds).unwrap());
-            let delta = scene.view_query_delta(&ds).unwrap();
+            let expected = map_from_full(&scene.view_query(scene.active_view().id(), &ds).unwrap());
+            let delta = scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap();
             replay(reconstructed, &delta);
             assert_eq!(*reconstructed, expected);
         };
@@ -472,7 +524,7 @@ mod tests {
         let ds = DatasetId::from("dup");
 
         // Two distinct records share one entity id.
-        let full = scene.view_query(&ds).unwrap();
+        let full = scene.view_query(scene.active_view().id(), &ds).unwrap();
         assert_eq!(full.visible_entities.len(), 2);
         assert!(full.visible_entities.iter().all(|e| e.entity_id.0 == "dup"));
 
@@ -486,19 +538,21 @@ mod tests {
         let mut saw_distinct_lod = false;
 
         for zoom in zooms {
-            if let Camera::Slice(s) = &mut scene.camera {
+            if let Camera::Slice(s) = &mut scene.active_view_mut().camera {
                 s.set_center(128.0, 128.0);
                 s.set_zoom(zoom);
             }
 
-            let expected = map_from_full(&scene.view_query(&ds).unwrap());
+            let expected = map_from_full(&scene.view_query(scene.active_view().id(), &ds).unwrap());
             // Both records survive as distinct keys in the full map.
             assert!(expected.contains_key(&a) && expected.contains_key(&b));
             if expected[&a].1 != expected[&b].1 {
                 saw_distinct_lod = true;
             }
 
-            let delta = scene.view_query_delta(&ds).unwrap();
+            let delta = scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap();
             replay(&mut reconstructed, &delta);
 
             assert_eq!(
@@ -533,13 +587,13 @@ mod tests {
     }
 
     fn set_zoom(scene: &mut Scene, zoom: f64) {
-        if let Camera::Slice(s) = &mut scene.camera {
+        if let Camera::Slice(s) = &mut scene.active_view_mut().camera {
             s.set_zoom(zoom);
         }
     }
 
     fn full_target(scene: &Scene, ds: &DatasetId) -> u32 {
-        let result = scene.view_query(ds).unwrap();
+        let result = scene.view_query(scene.active_view().id(), ds).unwrap();
         assert_eq!(result.visible_entities.len(), 1);
         assert!(
             result.visible_entities[0].visible,
@@ -552,7 +606,10 @@ mod tests {
     /// delta was empty. Panics on a `Full`, because these tests expect the
     /// cursor to hold across camera moves.
     fn delta_level(scene: &mut Scene, ds: &DatasetId) -> Option<u32> {
-        match scene.view_query_delta(ds).unwrap() {
+        match scene
+            .view_query_delta(scene.active_view().id(), ds)
+            .unwrap()
+        {
             ViewQueryDelta::Delta {
                 entered,
                 left,
@@ -608,7 +665,9 @@ mod tests {
         let (mut scene, ds) = slice_scene([512, 512], 4);
         set_zoom(&mut scene, 1.0);
         assert!(matches!(
-            scene.view_query_delta(&ds).unwrap(),
+            scene
+                .view_query_delta(scene.active_view().id(), &ds)
+                .unwrap(),
             ViewQueryDelta::Full(_)
         ));
         set_zoom(&mut scene, 0.3);
@@ -623,7 +682,9 @@ mod tests {
         // Where the delta holds, a full query must report the held level too.
         let boundary = 0.5;
         set_zoom(&mut scene, 1.0);
-        let _ = scene.view_query_delta(&ds).unwrap();
+        let _ = scene
+            .view_query_delta(scene.active_view().id(), &ds)
+            .unwrap();
 
         set_zoom(&mut scene, boundary / band * 1.02);
         assert_eq!(delta_level(&mut scene, &ds), None);
@@ -657,7 +718,9 @@ mod tests {
         for (css_zoom, dpr1_level) in [(0.5, 1), (0.25, 2), (0.12, 3)] {
             set_zoom(&mut dpr1, css_zoom);
             set_zoom(&mut dpr2, css_zoom * 2.0);
-            let (Camera::Slice(a), Camera::Slice(b)) = (&dpr1.camera, &dpr2.camera) else {
+            let (Camera::Slice(a), Camera::Slice(b)) =
+                (&dpr1.active_view().camera, &dpr2.active_view().camera)
+            else {
                 unreachable!()
             };
             for (lo, hi) in a.world_bounds().iter().zip(b.world_bounds()) {
@@ -686,7 +749,7 @@ mod tests {
             );
         }
         // The camera itself is unchanged: the zoom still counts device pixels.
-        let Camera::Slice(s) = &dpr3.camera else {
+        let Camera::Slice(s) = &dpr3.active_view().camera else {
             unreachable!()
         };
         assert!((s.zoom - 0.06 * 3.0).abs() < 1e-12);
@@ -707,7 +770,7 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         scene.set_mode_3d();
         assert!(scene.fit_camera_to_dataset("vol"));
-        let Camera::Arcball(a) = &scene.camera else {
+        let Camera::Arcball(a) = &scene.active_view().camera else {
             unreachable!()
         };
         let fitted = a.distance;
@@ -715,7 +778,7 @@ mod tests {
     }
 
     fn set_distance(scene: &mut Scene, distance: f64) {
-        if let Camera::Arcball(a) = &mut scene.camera {
+        if let Camera::Arcball(a) = &mut scene.active_view_mut().camera {
             a.distance = distance;
         }
     }

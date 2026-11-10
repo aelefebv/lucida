@@ -236,7 +236,10 @@ fn nudged(f: &Fixture, vp: Viewport, dpr: u32, mode: Mode) -> Shown {
         Mode::Arcball => ViewportCommand::Pan3D { dx: 1.0, dy: 0.0 },
     };
     shown.scene.apply(nudge.into());
-    assert_eq!(shown.scene.camera.framing(), crate::camera::Framing::Placed);
+    assert_eq!(
+        shown.scene.active_view().camera.framing(),
+        crate::camera::Framing::Placed
+    );
     shown
 }
 
@@ -447,8 +450,12 @@ fn fly_flown(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
         .map(|multiple: f64| {
             let mut shown = open(f, vp, dpr, Mode::Arcball);
             shown.scene.apply(ViewportCommand::SetModeFly.into());
-            let world = shown.scene.visible_bounds().unwrap().world;
-            let Camera::Fly(fly) = &shown.scene.camera else {
+            let world = shown
+                .scene
+                .visible_bounds(shown.scene.active_view().id())
+                .unwrap()
+                .world;
+            let Camera::Fly(fly) = &shown.scene.active_view().camera else {
                 panic!("the scene is not in fly mode");
             };
             let fitted = (0..3)

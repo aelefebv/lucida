@@ -15,7 +15,7 @@ use crate::camera::{Camera, Framing};
 use crate::framing::{FitBounds, PlaneBox, WorldBox};
 use crate::saved_view::SavedView;
 use crate::scene::{DatasetDisplaySettings, RenderMode, Scene};
-use crate::view::ViewState;
+use crate::view::AxisPositions;
 use lucida_content::DatasetId;
 
 /// The spatial + dimensional extent of the dataset a view is exploring,
@@ -61,12 +61,13 @@ impl ViewExtent {
         }
     }
 
-    /// The extent of `dataset_id` in `scene`: its whole box, every member of
-    /// a collection included, and the axis counts of its first image at
-    /// level 0. `None` when the scene doesn't hold the dataset or it has no
-    /// bounds.
+    /// The extent of `dataset_id` in `scene`'s active view: its whole box,
+    /// every member of a collection included, and the axis counts of its
+    /// first image at level 0. `None` when the scene doesn't hold the dataset
+    /// or it has no bounds.
     pub fn of(scene: &Scene, dataset_id: &DatasetId) -> Option<Self> {
-        let bounds = scene.dataset_bounds(&dataset_id.0)?;
+        let view = scene.active_view().id();
+        let bounds = scene.dataset_bounds(view, &dataset_id.0)?;
         let [t, c, z, _, _] = scene
             .document
             .manifests
@@ -77,7 +78,7 @@ impl ViewExtent {
             .levels
             .first()?
             .shape;
-        let mut visible = scene.visible_dataset_ids();
+        let mut visible = scene.shown_dataset_ids(view);
         let alone = visible.next() == Some(dataset_id) && visible.next().is_none();
         Some(ViewExtent {
             plane: bounds.plane,
@@ -137,9 +138,9 @@ pub fn home_view(scene: &Scene, dataset_id: &DatasetId, viewport: [u32; 2]) -> O
     // Start on a single mid-stack slice (so a StepZ in either direction is in
     // range on a volume); a flat dataset collapses to z 0..1 anyway.
     let z0 = extent.z_count / 2;
-    view.view = ViewState {
+    view.view = AxisPositions {
         z_range: z0..z0 + 1,
-        ..ViewState::new()
+        ..AxisPositions::new()
     };
     Some(view)
 }
@@ -1774,7 +1775,7 @@ mod tests {
         let mut scene = scene_of("ds", dims);
         scene.set_mode_3d();
         let home = home_view(&scene, &DatasetId("ds".into()), [800, 600]).unwrap();
-        assert_eq!(home.camera, scene.camera);
+        assert_eq!(home.camera, scene.active_view().camera);
         assert_eq!(home.camera.framing(), Framing::Framed);
     }
 

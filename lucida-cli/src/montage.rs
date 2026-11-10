@@ -15,7 +15,7 @@ use lucida_content::{ChannelInfo, DatasetId};
 use lucida_core::camera::Camera;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{ChannelSettings, Colormap, DatasetDisplaySettings};
-use lucida_core::view::ViewState;
+use lucida_core::view::AxisPositions;
 
 /// Which dataset axis the montage sweeps. Picked from the dataset's shape: a
 /// multi-tile collection samples tiles; otherwise a depth stack samples Z, a
@@ -177,10 +177,10 @@ pub fn build_cell_view(
 ) -> SavedView {
     let mut view = SavedView::empty(viewport);
     view.camera = Camera::new_2d(viewport);
-    view.view = ViewState {
+    view.view = AxisPositions {
         z_range: cell.z..cell.z + 1,
         t: cell.t,
-        ..ViewState::new()
+        ..AxisPositions::new()
     };
     let id = DatasetId(ds_id.to_string());
     view.dataset_order = vec![id.clone()];

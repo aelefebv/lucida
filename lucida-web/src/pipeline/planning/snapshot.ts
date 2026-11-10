@@ -67,6 +67,8 @@ export interface SnapshotDatasetEntry {
 /** Inputs to {@link buildPlanningSnapshot}. */
 export interface BuildPlanningSnapshotArgs {
   scene: WasmScene;
+  /** The view whose camera and axis positions the snapshot reads. */
+  view: number;
   datasetId: string;
   /** Manifest entry for `datasetId`; supplies image specs and parent edges. */
   dataset: SnapshotDatasetEntry;
@@ -141,6 +143,7 @@ export function buildPlanningSnapshot(
 ): BuildPlanningSnapshotResult | null {
   const {
     scene,
+    view,
     datasetId,
     dataset,
     layer,
@@ -160,7 +163,7 @@ export function buildPlanningSnapshot(
   // 1. view_query: null or empty before the dataset is registered.
   let vq: ViewQueryJson | null = null;
   if (!entitiesOverride) {
-    const vqJson = scene.view_query(datasetId);
+    const vqJson = scene.view_query(view, datasetId);
     vq = JSON.parse(vqJson) as ViewQueryJson | null;
     if (!vq || !vq.visible_entities) return null;
   }
@@ -209,7 +212,7 @@ export function buildPlanningSnapshot(
   }
 
   // 5. visible_region: null until WASM has one for this dataset.
-  const vrJson = scene.visible_region(datasetId);
+  const vrJson = scene.visible_region(view, datasetId);
   const vr = vrJson && vrJson !== "null"
     ? (JSON.parse(vrJson) as VisibleRegionJson | null)
     : null;

@@ -250,7 +250,7 @@ export function formatTierCoverageTitle(
 function parseVisibleRegion(ws: WasmScene, dsId: string): VisibleRegion | null {
   let raw: string | null = null;
   try {
-    raw = ws.visible_region(dsId);
+    raw = ws.visible_region(ws.active_view(), dsId);
   } catch {
     return null;
   }
