@@ -80,6 +80,8 @@ NETWORKS = {
 }
 # The settings a network replaces, and the runner otherwise passes through.
 THROTTLE_SETTINGS = ("LUCIDA_SOURCE_THROTTLE", "LUCIDA_LINK_THROTTLE")
+# Which browser the CLI drives, and the flags it adds to the browser's own.
+BROWSER_SETTINGS = ("LUCIDA_BROWSER", "LUCIDA_BROWSER_ARGS")
 # How an add or remove step names a catalog dataset, whose location only the
 # runner knows.
 DATASET_REF = "dataset:"
@@ -829,12 +831,13 @@ def stop_everything() -> None:
 def _scrubbed_env(**overrides: str) -> dict[str, str]:
     """The caller's environment without its lucida settings, so a run never
     reaches the caller's own server, config, token or database. The browser
-    choice is kept, since it says which Chrome this machine has, and so are
-    the source and link throttles, conditions every run file records."""
+    choice and its flags are kept, since they say which Chrome this machine
+    has and what it renders with, and so are the source and link throttles,
+    conditions every run file records."""
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith("LUCIDA_") or k == "LUCIDA_BROWSER" or k.startswith(THROTTLE_SETTINGS)
+        if not k.startswith("LUCIDA_") or k in BROWSER_SETTINGS or k.startswith(THROTTLE_SETTINGS)
     }
     env.update(overrides)
     return env
@@ -1069,10 +1072,12 @@ def _metric(signals: list[dict[str, Any]] | None, name: str) -> Any:
 
 
 def _lag(lag: Any) -> dict[str, Any]:
-    """Input to frame at p95, the longest main-thread task and the frames
-    dropped, from a lag reading; each None when the run took no input."""
+    """Input to frame for the first input and at p95, the longest main-thread
+    task and the frames dropped, from a lag reading; each None when the run
+    took no input."""
     lag = lag or {}
     return {
+        "firstInputMs": lag.get("firstInputMs"),
         "inputToFrameP95Ms": (lag.get("inputToFrame") or {}).get("p95Ms"),
         "longestTaskMs": (lag.get("longTasks") or {}).get("longestMs"),
         "droppedFrames": (lag.get("frames") or {}).get("dropped"),
@@ -1176,6 +1181,7 @@ COLUMNS = [
     "evicted",
     "short",
     "top limiter",
+    "first input to frame",
     "input to frame p95",
     "longest task",
     "dropped",
@@ -1225,6 +1231,7 @@ def step_outcome(step: dict[str, Any]) -> str:
 READINGS = {
     "prefetch": ("prefetchMs", _ms),
     "wire": ("bytesWire", _bytes),
+    "first input to frame": ("firstInputMs", _ms),
     "input to frame p95": ("inputToFrameP95Ms", _ms),
     "longest task": ("longestTaskMs", _ms),
     "dropped": ("droppedFrames", _count),

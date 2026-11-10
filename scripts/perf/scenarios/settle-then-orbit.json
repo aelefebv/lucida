@@ -1,0 +1,11 @@
+{
+  "description": "zoom the volume view in by 4 about its center, orbit it once it settles, leave it alone for 2 s, then orbit it back: the first input of a gesture after a settle waits for whatever the GPU still holds",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "steps": [
+    { "kind": "zoom", "factor": 4, "durationMs": 1000 },
+    { "kind": "orbit", "theta": 40, "phi": 10, "durationMs": 1500 },
+    { "kind": "hold", "ms": 2000 },
+    { "kind": "orbit", "theta": -40, "phi": -10, "durationMs": 1500 }
+  ]
+}

@@ -24,6 +24,12 @@ other flags.
 Speed numbers need a GPU. CI renders with SwiftShader, which shows whether a view settles
 but not how fast. The table's first line names the adapter.
 
+SwiftShader also stands in for a GPU far weaker than a desktop's, such as a phone's.
+`LUCIDA_BROWSER_ARGS` adds flags to the browser the CLI starts, so
+`LUCIDA_BROWSER_ARGS=--use-webgpu-adapter=swiftshader uv run scripts/perf.py --suite phone`
+runs the phone suite on it on any machine. Its runs keep a baseline of their own, under that
+adapter.
+
 `--network local,remote` starts a server under each network in turn. A network sets two
 server throttles: the source throttle on the server's reads, so a local dataset loads the way
 a remote one does, and the link throttle on the session socket, so the page waits for its
@@ -69,7 +75,7 @@ the N runs, followed by half their range when they differ.
 | evicted | the `evictions` entry of `coverage.notHealthSignals` |
 | short | `load.coverageLossChunks`: wanted chunks not resident at the close |
 | top limiter | `attribution.cause` and `.confidence` |
-| input to frame p95, longest task, dropped | `lag.inputToFrame.p95Ms`, `lag.longTasks.longestMs`, `lag.frames.dropped` |
+| first input to frame, input to frame p95, longest task, dropped | `lag.firstInputMs`, `lag.inputToFrame.p95Ms`, `lag.longTasks.longestMs`, `lag.frames.dropped` |
 | errors | the `header.errors` the allow list does not name, repeats counted |
 | verdict | `verdict.kind` |
 
@@ -130,7 +136,7 @@ optional `width` and `height`. `"mobile": true` drives the page as a phone, with
 layout, touch input and a mobile user agent (`lucida trace --mobile`). `"fullUi": true` loads
 the full viewer page instead of the chrome-free capture surface (`lucida trace --full-ui`), so
 the run also checks that the top bar and a phone's bottom sheet sit wholly on screen. The
-`phone` suite runs `phone-cold-open` and `phone-full-ui` at ratio 3. The runner hands the file
+`phone` suite runs `phone-cold-open`, `phone-full-ui` and `phone-settle-then-orbit` at ratio 3. The runner hands the file
 to `lucida trace --script` unchanged, except that an add or remove step's
 `"url": "dataset:<name>"` becomes that catalog dataset's location. A scenario never runs on the dataset it adds.
 

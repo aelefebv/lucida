@@ -702,8 +702,9 @@ function lagOf(document: DiagnosticDocument, p: PrintNumber): string | null {
     lag.unanswered > 0
       ? `n=${p("lag.inputToFrame.samples", answered)} of ${p("lag.inputs", lag.inputs)} inputs`
       : `n=${p("lag.inputs", lag.inputs)}`;
+  const first = lag.firstInputMs === null ? "" : `first ${p("lag.firstInputMs", lag.firstInputMs)} ms · `;
   const toFrame = timing
-    ? `input-to-frame p50 ${p("lag.inputToFrame.p50Ms", timing.p50Ms)} ms · ` +
+    ? `input-to-frame ${first}p50 ${p("lag.inputToFrame.p50Ms", timing.p50Ms)} ms · ` +
       `p95 ${p("lag.inputToFrame.p95Ms", timing.p95Ms)} ms · max ${p("lag.inputToFrame.maxMs", timing.maxMs)} ms (${inputs})`
     : `no input reached a frame before the run closed (${inputs})`;
   const tasks = lag.longTasks;

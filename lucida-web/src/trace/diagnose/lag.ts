@@ -36,7 +36,11 @@ export function deriveLag(run: TraceRun, window: RunWindow): LagReading | null {
   let unanswered = 0;
   let motionStartUs = Number.POSITIVE_INFINITY;
   let motionEndUs = Number.NEGATIVE_INFINITY;
+  let firstInputMs: number | null = null;
   for (const input of inputs) {
+    if (input.atUs < motionStartUs) {
+      firstInputMs = input.presentedUs === null ? null : usToMs(input.presentedUs - input.atUs);
+    }
     motionStartUs = Math.min(motionStartUs, input.atUs);
     if (input.presentedUs === null) {
       unanswered++;
@@ -81,6 +85,7 @@ export function deriveLag(run: TraceRun, window: RunWindow): LagReading | null {
   return {
     inputs: inputs.length,
     inputToFrame: summariseTiming(latencies),
+    firstInputMs,
     unanswered,
     longTasks: { count, longestMs: usToMs(longestUs), totalMs: usToMs(totalUs) },
     frames: { presented, dropped, displayIntervalMs },
