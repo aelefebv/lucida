@@ -11,6 +11,7 @@
  * run rather than a silence.
  */
 
+import type { ViewLayoutName } from "../commands.ts";
 import type { Comparison } from "../comparison.ts";
 import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";
 import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
@@ -66,6 +67,12 @@ export interface ScriptControls {
   swipe(at: number | null, withUrl: string | null): Promise<StepOutcome>;
   /** Show the comparison as a blink and flip it to the other dataset, starting one as `swipe` does. */
   blink(withUrl: string | null): Promise<StepOutcome>;
+  /**
+   * Divide the canvas as `layout` does, then show in each view, in order,
+   * the open datasets whose source URLs `show` lists for it. A view `show`
+   * leaves out keeps what it shows.
+   */
+  views(layout: ViewLayoutName, show: readonly (readonly string[])[]): Promise<StepOutcome>;
 }
 
 /**

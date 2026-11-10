@@ -6,8 +6,9 @@ import { RESIDENCY_RENDER_INTERVAL_MS, viewRectInPixels } from "./renderLoopType
 import { TickWake } from "./invalidation.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import { debugLog } from "./debug/logging.ts";
-import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
-import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState, marchStepScaleFor } from "./volumePath.ts";
+import { type SliceState, createSliceState, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
+import { type VolumeState, createVolumeState, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState, marchStepScaleFor } from "./volumePath.ts";
+import { tickViews, ViewRedraws } from "./viewTick.ts";
 import { TickCoordinator } from "./pipeline/tickCoordinator.ts";
 import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
@@ -122,6 +123,7 @@ export class RenderLoop implements TraceEnvironment {
    */
   private uploader = new Uploader();
   private tickCoordinator = new TickCoordinator(this.uploader);
+  private redraws = new ViewRedraws();
   private readonly autoContrast = new AutoContrastFitter();
   private autoContrastListener: AutoContrastListener | null = null;
   private cpuCacheUnsub: () => void;
@@ -803,15 +805,18 @@ export class RenderLoop implements TraceEnvironment {
 
   /**
    * The views the loop draws: every view of the scene, the active one first,
-   * each in its rectangle of the canvas. The loop draws them all in the mode
-   * its viewer runs.
+   * each in its own mode and its rectangle of the canvas.
    */
   private drawnViews(scene: WasmScene): TickView[] {
     const canvasW = Math.round(this.canvas.clientWidth * devicePixelRatio);
     const canvasH = Math.round(this.canvas.clientHeight * devicePixelRatio);
     const active = scene.active_view();
     const ids = [active, ...Array.from(scene.view_ids()).filter((id) => id !== active)];
-    return ids.map((id) => ({ id, mode: this.mode, rect: viewRectInPixels(scene.view_rect(id), canvasW, canvasH) }));
+    return ids.map((id) => ({
+      id,
+      mode: scene.view_mode(id) === "volume" ? "volume" : "slice",
+      rect: viewRectInPixels(scene.view_rect(id), canvasW, canvasH),
+    }));
   }
 
   private buildContext(quality?: FrameQuality): TickContext {
@@ -855,6 +860,8 @@ export class RenderLoop implements TraceEnvironment {
     const now = performance.now();
     let shouldRender = false;
     const framesInFlight = this.client.framesAwaitingDone();
+    // Before either flag clears: whether chunks landed since the last frame.
+    const newChunks = this.residencyDirty;
 
     if (this.interactiveDirty) {
       // View changed: render as soon as the GPU can take the frame. Until
@@ -910,12 +917,12 @@ export class RenderLoop implements TraceEnvironment {
     if (failed) failedChunkReport.publish(summarizeFailedChunks(failed));
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
-    if (this.mode === "slice") {
-      this.deliveryBacklogged = tickSlice(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender);
-      if (this.deliveryBacklogged) this.setDirty("residency", "tick_slice_continuation");
-    } else {
-      this.deliveryBacklogged = tickVolume(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender);
-      if (this.deliveryBacklogged) this.setDirty("residency", "tick_volume_continuation");
+    this.deliveryBacklogged = tickViews(
+      ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, this.redraws,
+      { render: shouldRender, newChunks },
+    );
+    if (this.deliveryBacklogged) {
+      this.setDirty("residency", this.mode === "slice" ? "tick_slice_continuation" : "tick_volume_continuation");
     }
 
     this.scheduleTrailingRebuild();

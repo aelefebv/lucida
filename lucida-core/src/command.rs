@@ -10,6 +10,7 @@ use lucida_protocol::DatasetOpened;
 use crate::camera::{Camera, Framing};
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 use crate::slice_plane::SlicePlane;
+use crate::view::{ViewDatasets, ViewId, ViewLayout};
 
 /// Commands that mutate shared document state (datasets).
 /// These are sequenced, persisted, and broadcast to all clients.
@@ -169,6 +170,20 @@ pub enum ViewportCommand {
         height: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pixel_ratio: Option<f64>,
+    },
+    // Views
+    /// Divide the canvas among views as `layout` does.
+    SetViewLayout {
+        layout: ViewLayout,
+    },
+    /// Make `view` the one every other viewport command steers.
+    SetActiveView {
+        view: ViewId,
+    },
+    /// Show `datasets` in `view`.
+    SetViewDatasets {
+        view: ViewId,
+        datasets: ViewDatasets,
     },
     // 2D camera
     Pan {
@@ -411,6 +426,10 @@ enum ViewportScope {
     /// Mutates `Scene::dataset_order` / `Scene::dataset_settings` only. A
     /// change bumps `epochs.selection`.
     DatasetDisplay,
+    /// Mutates the views themselves: how many there are, their rectangles,
+    /// which is active and what each shows. A change bumps `epochs.view` and
+    /// `epochs.selection`, since every view's camera and layers may follow.
+    Views,
 }
 
 impl ViewportCommand {
@@ -460,6 +479,9 @@ impl ViewportCommand {
             | ViewportCommand::SetChannelBlendMode { .. }
             | ViewportCommand::SetLabelVisible { .. }
             | ViewportCommand::SetLabelOpacity { .. } => ViewportScope::DatasetDisplay,
+            ViewportCommand::SetViewLayout { .. }
+            | ViewportCommand::SetActiveView { .. }
+            | ViewportCommand::SetViewDatasets { .. } => ViewportScope::Views,
         }
     }
 
@@ -514,7 +536,10 @@ impl ViewportCommand {
             | ViewportCommand::SetChannelName { .. }
             | ViewportCommand::SetChannelBlendMode { .. }
             | ViewportCommand::SetLabelVisible { .. }
-            | ViewportCommand::SetLabelOpacity { .. } => true,
+            | ViewportCommand::SetLabelOpacity { .. }
+            | ViewportCommand::SetViewLayout { .. }
+            | ViewportCommand::SetActiveView { .. }
+            | ViewportCommand::SetViewDatasets { .. } => true,
             ViewportCommand::Pan { dx, dy } | ViewportCommand::Pan3D { dx, dy } => {
                 dx.is_finite() && dy.is_finite()
             }
@@ -565,6 +590,14 @@ impl ViewportCommand {
 
 impl Scene {
     pub fn apply(&mut self, cmd: Command) {
+        self.apply_command(cmd);
+        // With one view, its holding is all there is and draws nothing new.
+        if self.refresh_holders() && self.views().len() > 1 {
+            self.epochs.selection += 1;
+        }
+    }
+
+    fn apply_command(&mut self, cmd: Command) {
         match cmd {
             Command::Document(doc_cmd) => {
                 // The datasets fix the camera spaces, so a change to them
@@ -759,6 +792,8 @@ impl Scene {
             ViewportScope::Camera => {
                 let steers = cmd.steers();
                 let before = self.active_view().camera.clone();
+                // A resize moves every view's camera, not only the active one's.
+                let others_before = self.other_cameras();
                 // A plane switch also places the axis position it cuts at.
                 let axes_before = self.active_view().axes.clone();
                 self.mutate_viewport(cmd);
@@ -774,7 +809,7 @@ impl Scene {
                 if axes_changed {
                     self.epochs.selection += 1;
                 }
-                if moved {
+                if moved || self.other_cameras() != others_before {
                     self.epochs.view += 1;
                 }
             }
@@ -789,6 +824,17 @@ impl Scene {
                 let before = self.display.clone();
                 self.mutate_viewport(cmd);
                 if self.display != before {
+                    self.epochs.selection += 1;
+                }
+            }
+            ViewportScope::Views => {
+                let views_before = self.views().to_vec();
+                let active_before = self.active_view().id();
+                self.mutate_viewport(cmd);
+                if self.views() != views_before.as_slice()
+                    || self.active_view().id() != active_before
+                {
+                    self.epochs.view += 1;
                     self.epochs.selection += 1;
                 }
             }
@@ -815,6 +861,15 @@ impl Scene {
         match cmd {
             ViewportCommand::SetMode2D => {
                 self.set_mode_2d();
+            }
+            ViewportCommand::SetViewLayout { layout } => {
+                self.set_view_layout(layout);
+            }
+            ViewportCommand::SetActiveView { view } => {
+                self.set_active_view(view);
+            }
+            ViewportCommand::SetViewDatasets { view, datasets } => {
+                self.set_view_datasets(view, datasets);
             }
             ViewportCommand::SetMode3D => {
                 self.set_mode_3d();

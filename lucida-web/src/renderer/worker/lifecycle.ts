@@ -3,6 +3,7 @@
  * GPU resource when the device is lost, and everything on `destroy`.
  */
 
+import { releaseAllViewResources } from "./viewResources.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
 import { destroyAllSliceResources, removeSliceResources } from "../slice/index.ts";
@@ -91,8 +92,7 @@ export function releaseDeviceResources(ctx: WorkerCtx): void {
   state.descriptorBuffersByDataset.clear();
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
-  for (const target of state.viewTargets.values()) target.destroy();
-  state.viewTargets.clear();
+  releaseAllViewResources(ctx);
   releaseMinimapDeviceResources(state.minimap);
   // The page uploads every overview again to a replacement device.
   state.overviewsRefused.clear();

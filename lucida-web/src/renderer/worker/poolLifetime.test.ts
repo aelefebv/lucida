@@ -81,6 +81,7 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
     getVolumeRenderer: () => ({} as never),
     getCompositor: () => ({} as never),
     getCursorRenderer: () => ({} as never),
+    getViewLander: () => ({} as never),
     ensureOffscreenPool: () => [],
     getOrCreateLUT: () => ({} as GPUTexture),
     post: (msg) => { posts.push(msg); },

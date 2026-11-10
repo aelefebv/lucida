@@ -222,6 +222,18 @@ export interface VolumeLayerParams {
 /** `[x, y, width, height]` in pixels from the canvas's top-left corner. */
 export type ViewRect = readonly [number, number, number, number];
 
+/**
+ * Land every view's last frame on its rectangle of a `canvasW` x `canvasH`
+ * canvas, when the views divide it. Each rectangle is in the canvas's
+ * backing pixels; a view drawn at another scale is filtered to fit.
+ */
+export interface PresentViewsMessage {
+  type: "presentViews";
+  canvasW: number;
+  canvasH: number;
+  views: { view: number; rect: ViewRect }[];
+}
+
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
   epochs: SceneEpochs;
@@ -751,6 +763,7 @@ export interface ProbeMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
+  | PresentViewsMessage
   | CanvasColorsMessage
   | SliceChunkDataMessage
   | LabelSliceChunkDataMessage

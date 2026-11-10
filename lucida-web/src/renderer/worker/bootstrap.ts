@@ -18,7 +18,9 @@ import { LayerCompositor } from "../layerCompositor.ts";
 import { CursorRenderer } from "../cursorRenderer.ts";
 import { computeWantedSet } from "../wantedSet.ts";
 import { createInitialState, type RendererState } from "./state.ts";
-import { ensureOffscreenPool, getOrCreateLUT } from "./resources.ts";
+import { getOrCreateLUT } from "./resources.ts";
+import { viewLayerTargets } from "./viewResources.ts";
+import { ViewLander } from "../viewLander.ts";
 import { createFrameTiming, type FrameTiming } from "../passTiming.ts";
 import { watchDevice } from "./deviceLoss.ts";
 import { sourceKey } from "../poolKeys.ts";
@@ -30,6 +32,7 @@ interface DeviceRenderers {
   compositor: LayerCompositor;
   cursor: CursorRenderer;
   volume: VolumeRenderer | null;
+  lander: ViewLander | null;
   passTimer: FrameTiming;
 }
 
@@ -47,6 +50,7 @@ function createRenderers(
     compositor: new LayerCompositor(device, format),
     cursor: new CursorRenderer(device, format),
     volume: null,
+    lander: null,
     passTimer: createFrameTiming(device, (gpuPassUs) => post({ type: "gpuPassTime", gpuPassUs })),
   };
 }
@@ -93,7 +97,12 @@ export async function bootstrapWorker(
     getCursorRenderer() {
       return renderers.cursor;
     },
-    ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(ctx, count, w, h),
+    getViewLander() {
+      // Built on first need: one view across the canvas never lands any.
+      if (!renderers.lander) renderers.lander = new ViewLander(ctx.device, ctx.format);
+      return renderers.lander;
+    },
+    ensureOffscreenPool: (view, count, w, h) => viewLayerTargets(ctx, view, count, w, h),
     getOrCreateLUT: (name) => getOrCreateLUT(ctx.device, name),
     post,
     postWantedSet,

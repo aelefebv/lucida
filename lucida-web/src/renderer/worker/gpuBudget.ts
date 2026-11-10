@@ -113,7 +113,7 @@ export function measureGpuMemory(state: RendererState): GpuMemoryReport {
     atlases++;
   }
 
-  const targetBytes = gpuLedgerLine("viewportTargets") + gpuLedgerLine("depth");
+  const targetBytes = gpuLedgerLine("viewportTargets") + gpuLedgerLine("depth") + gpuLedgerLine("viewFrames");
   const minimapBytes = gpuLedgerLine("minimapTextures") + gpuLedgerLine("minimapTargets");
   return {
     budgetBytes: state.gpuTotalBytes,

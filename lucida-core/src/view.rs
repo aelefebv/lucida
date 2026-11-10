@@ -9,7 +9,9 @@ use crate::slice_plane::SlicePlane;
 use lucida_content::{DatasetId, SpatialAxis};
 
 /// A view's identity within its scene, kept while the scene holds the view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct ViewId(pub u32);
 
@@ -37,6 +39,35 @@ impl ViewRect {
     pub fn size_on(&self, canvas: [u32; 2]) -> [u32; 2] {
         let along = |fraction: f64, length: u32| (fraction * f64::from(length)).round() as u32;
         [along(self.width, canvas[0]), along(self.height, canvas[1])]
+    }
+}
+
+/// How the canvas divides among the views: one view across it, two side by
+/// side, or two stacked, the form a narrow screen takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewLayout {
+    #[default]
+    Single,
+    Columns,
+    Rows,
+}
+
+impl ViewLayout {
+    /// The rectangle of each view in order. Adjacent views meet at the same
+    /// fraction, so their pixels tile the canvas.
+    pub fn rects(self) -> Vec<ViewRect> {
+        let half = |x, y, width, height| ViewRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        match self {
+            ViewLayout::Single => vec![ViewRect::WHOLE],
+            ViewLayout::Columns => vec![half(0.0, 0.0, 0.5, 1.0), half(0.5, 0.0, 0.5, 1.0)],
+            ViewLayout::Rows => vec![half(0.0, 0.0, 1.0, 0.5), half(0.0, 0.5, 1.0, 0.5)],
+        }
     }
 }
 
@@ -94,6 +125,17 @@ impl View {
             datasets: ViewDatasets::All,
             rect: ViewRect::WHOLE,
             comparison: None,
+        }
+    }
+
+    /// A view of no dataset yet at `rect`, through a slice camera sized to
+    /// its part of a canvas of `canvas` device pixels.
+    pub fn empty(id: ViewId, rect: ViewRect, canvas: [u32; 2]) -> Self {
+        Self {
+            camera: Camera::new_2d(rect.size_on(canvas)),
+            datasets: ViewDatasets::Only(Vec::new()),
+            rect,
+            ..Self::new(id, canvas)
         }
     }
 

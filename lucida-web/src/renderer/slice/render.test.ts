@@ -191,7 +191,7 @@ function makeCtx(opts: {
       compiled: opts.compositorCompiled ?? Promise.resolve(),
     }),
     getCursorRenderer: () => ({ hasData: () => false, compiled: opts.cursorCompiled ?? Promise.resolve() }),
-    ensureOffscreenPool: (n: number) =>
+    ensureOffscreenPool: (_view: number, n: number) =>
       Array.from({ length: n }, () => ({ createView: () => ({}) })),
     getOrCreateLUT: () => ({}),
     lookupEntityDescriptor: () => opts.descIndex,
@@ -626,7 +626,7 @@ describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () 
       )),
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
-    const targets = vi.fn((n: number) => Array.from({ length: n }, () => ({ createView: () => ({}) })));
+    const targets = vi.fn((_view: number, n: number) => Array.from({ length: n }, () => ({ createView: () => ({}) })));
     ctx.ensureOffscreenPool = targets as unknown as WorkerCtx["ensureOffscreenPool"];
     return { ctx, renderer, composite, targets };
   }
@@ -640,7 +640,7 @@ describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () 
     expect(groupOf(renderer, 0).members).toHaveLength(12);
     expect(groupOf(renderer, 1).members).toHaveLength(12);
     expect(groupOf(renderer, 1).blendMode).toBe("additive");
-    expect(Math.max(...targets.mock.calls.map(([n]) => n))).toBe(2);
+    expect(Math.max(...targets.mock.calls.map(([, n]) => n))).toBe(2);
     expect(composite.mock.calls[0][1]).toHaveLength(2);
   });
 

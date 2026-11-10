@@ -6,9 +6,12 @@ import {
   MEMBER_AGGREGATE_MAX_DIAG_PX,
   pushMemberLayers,
   sliceBackingScale,
-  tickSlice,
 } from "./slicePath.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
+import { tickViews, ViewRedraws } from "./viewTick.ts";
+
+/** A tick that draws, as the first frame after chunks land does. */
+const RENDER = { render: true, newChunks: true };
 import type { MemberRosterEntry, TickCoordinator, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
@@ -357,7 +360,7 @@ describe("sliceBackingScale", () => {
   });
 });
 
-// tickSlice to the posted sliceRenderMultiPass (the render-message seam)
+// tickViews to the posted sliceRenderMultiPass (the render-message seam)
 
 interface SeamHarness {
   ctx: TickContext;
@@ -479,23 +482,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("tickSlice render-message seam", () => {
+describe("tickViews render-message seam", () => {
   it("draws nothing of a layer the cut passes outside, so no probe can read it", () => {
     const missed = makeSeamHarness({ memberCount: 6, zoom: 1, layer: { z_reach: "outside" } });
-    tickSlice(missed.ctx, missed.tickCoordinator, missed.uploader, new Map());
+    tickViews(missed.ctx, missed.tickCoordinator, missed.uploader, new Map(), new ViewRedraws(), RENDER);
     expect(missed.posted().layers).toHaveLength(0);
 
     // An XY view cuts along Z alone; a single plane draws at every Z.
     for (const layer of [{ y_reach: "outside" }, { z_reach: "every" }] as const) {
       const h = makeSeamHarness({ memberCount: 6, zoom: 1, layer });
-      tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
+      tickViews(h.ctx, h.tickCoordinator, h.uploader, new Map(), new ViewRedraws(), RENDER);
       expect(h.posted().layers).toHaveLength(6);
     }
   });
 
   it("posts a bounded layer count at overview zoom on a wide synthetic collection", () => {
     const h = makeSeamHarness({ memberCount: 5000, zoom: 0.0005 });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
+    tickViews(h.ctx, h.tickCoordinator, h.uploader, new Map(), new ViewRedraws(), RENDER);
     const { layers } = h.posted();
     expect(layers.length).toBeLessThanOrEqual(MAX_INDIVIDUAL_MEMBER_PASSES + 1);
     // Aggregate coverage: the single aggregate layer carries every member.
@@ -506,7 +509,7 @@ describe("tickSlice render-message seam", () => {
 
   it("posts per-member layers for a small collection at close-up zoom", () => {
     const h = makeSeamHarness({ memberCount: 6, zoom: 1 });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
+    tickViews(h.ctx, h.tickCoordinator, h.uploader, new Map(), new ViewRedraws(), RENDER);
     const { layers } = h.posted();
     expect(layers).toHaveLength(6);
     for (const layer of layers) expect(layer.aggregate).toBeUndefined();
@@ -520,7 +523,7 @@ describe("tickSlice render-message seam", () => {
       clientWidth: 3000,
       clientHeight: 2000,
     });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
+    tickViews(h.ctx, h.tickCoordinator, h.uploader, new Map(), new ViewRedraws(), RENDER);
     const { zoom, canvasW, canvasH } = h.posted();
     expect(canvasW * canvasH).toBeLessThanOrEqual(MAX_SLICE_BACKING_PIXELS * 1.01);
     // Field of view preserved: world width per screen = canvasW / zoom.
@@ -535,7 +538,7 @@ describe("tickSlice render-message seam", () => {
   it("keeps full backing at DPR 2 for the fixed-size canvas (no needless degrade)", () => {
     vi.stubGlobal("devicePixelRatio", 2);
     const h = makeSeamHarness({ memberCount: 6, zoom: 1 });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
+    tickViews(h.ctx, h.tickCoordinator, h.uploader, new Map(), new ViewRedraws(), RENDER);
     const { canvasW, canvasH, zoom } = h.posted();
     expect(canvasW).toBe(1600);
     expect(canvasH).toBe(1200);

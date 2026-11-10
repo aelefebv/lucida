@@ -58,6 +58,7 @@ import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useComparison } from "./hooks/useComparison.ts";
+import { viewLayoutActions } from "./viewLayout.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import {
@@ -563,6 +564,7 @@ function Viewer({
   }, [liveBridge, render.canvasRef, render.clientRef, render.loopRef]);
 
   const comparison = useComparison(engine, layers.layerInfos);
+  const viewLayout = useMemo(() => viewLayoutActions(engine.scene, engine.loop), [engine]);
 
   const requestDatasetHealth = useCallback(
     () => liveBridge
@@ -591,6 +593,7 @@ function Viewer({
     datasetHealth: requestDatasetHealth,
     captureView: savedViewSync.captureBuilder,
     comparison: comparison.actions,
+    viewLayout,
     selectedDatasetId,
     datasetsRef,
   });

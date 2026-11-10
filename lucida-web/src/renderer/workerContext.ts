@@ -1,6 +1,7 @@
 import type { SliceRenderer } from "./sliceRenderer.ts";
 import type { VolumeRenderer } from "./volumeRenderer.ts";
 import type { LayerCompositor } from "./layerCompositor.ts";
+import type { ViewLander } from "./viewLander.ts";
 import type { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerToMainMessage } from "./workerProtocol.ts";
 import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
@@ -24,7 +25,9 @@ export interface WorkerCtx {
   getVolumeRenderer(): VolumeRenderer;
   getCompositor(): LayerCompositor;
   getCursorRenderer(): CursorRenderer;
-  ensureOffscreenPool(count: number, w: number, h: number): GPUTexture[];
+  getViewLander(): ViewLander;
+  /** At least `count` layer targets of `w`×`h` for `view` (`worker/viewResources.ts`). */
+  ensureOffscreenPool(view: number, count: number, w: number, h: number): GPUTexture[];
   getOrCreateLUT(name: string): GPUTexture;
   /** Post a message to the main thread. `transfer` moves transferables instead of cloning them. */
   post(msg: WorkerToMainMessage, transfer?: Transferable[]): void;

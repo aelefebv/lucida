@@ -17,6 +17,7 @@ import { Axis } from "../axes.ts";
 import { lineUpReason, type CompareMode, type ComparisonActions } from "../comparison.ts";
 import type { ResolvedLayers } from "../resolvedLayers.ts";
 import type { SavedView } from "../savedView/types.ts";
+import type { ViewLayoutActions } from "../viewLayout.ts";
 import {
   awaitDatasetOpen,
   comparisonPair,
@@ -60,6 +61,8 @@ export interface ScriptControlInputs {
   captureView(): SavedView | null;
   /** What the comparison controls call. */
   comparison: ComparisonActions;
+  /** What the layout controls call. */
+  viewLayout: ViewLayoutActions;
   /** The dataset a channel step is about when several are open. */
   selectedDatasetId: string | null;
   /** The open datasets, read when a step lands rather than when it is registered. */
@@ -83,6 +86,7 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     datasetHealth,
     captureView,
     comparison,
+    viewLayout,
     selectedDatasetId,
     datasetsRef,
   } = inputs;
@@ -241,12 +245,34 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         comparison.flip();
         return { applied: true, reason: null };
       },
+      views: async (layout, show) => {
+        const open = new Set(datasetsRef.current?.keys() ?? []);
+        let shown: string[][];
+        try {
+          const health = await datasetHealth();
+          shown = show.map((urls) => urls.map((url) => {
+            const canonical = normalize_dataset_url(url.trim());
+            const id = datasetIdForSource(canonical, health, normalize_dataset_url);
+            if (id === null || !open.has(id)) throw new Error(`no dataset opened from ${canonical} is open`);
+            return id;
+          }));
+        } catch (error) {
+          return { applied: false, reason: error instanceof Error ? error.message : String(error) };
+        }
+        viewLayout.setLayout(layout);
+        const views = viewLayout.views();
+        if (shown.length > views.length) {
+          return { applied: false, reason: `a ${layout} layout has ${views.length} view(s), not ${shown.length}` };
+        }
+        shown.forEach((ids, at) => viewLayout.show(views[at], ids));
+        return { applied: true, reason: null };
+      },
     });
     return () => setScriptControls(null);
   }, [
     z, t, dimZ, dimT, viewMode, slicePlane, cutIndex, dimCut, resolvedLayers,
     setCut, setT, setSlicePlane, setSolo, setChannelVisible, setLayerVisible, setLabelVisible,
     setChannelContrast, openDataset, removeDataset, datasetHealth,
-    captureView, comparison, selectedDatasetId, datasetsRef,
+    captureView, comparison, viewLayout, selectedDatasetId, datasetsRef,
   ]);
 }

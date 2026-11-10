@@ -223,6 +223,7 @@ describe("the registration", () => {
       removeDataset: () => Promise.resolve({ applied: true, reason: null }),
       swipe: () => Promise.resolve({ applied: true, reason: null }),
       blink: () => Promise.resolve({ applied: true, reason: null }),
+      views: () => Promise.resolve({ applied: true, reason: null }),
     };
     expect(scriptControls()).toBeNull();
     setScriptControls(controls);

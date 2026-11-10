@@ -14,7 +14,7 @@ import { atlasTexels, atlasTextureFormat, bytesPerTexel, type SampleFormat } fro
 import { allocateWatched } from "./worker/gpuErrors.ts";
 import { handleGpuOutOfMemory, reserveGpuBytes } from "./worker/gpuBudget.ts";
 import { setGpuLedgerLine } from "./worker/gpuLedger.ts";
-import { OFFSCREEN_BYTES_PER_TEXEL } from "./worker/resources.ts";
+import { OFFSCREEN_BYTES_PER_TEXEL } from "./worker/viewResources.ts";
 import {
   applyFailedMarks,
   cellIndex,

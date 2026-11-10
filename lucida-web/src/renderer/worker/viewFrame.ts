@@ -1,24 +1,24 @@
 /**
  * Where a view's frame is drawn. A view draws in its own pixels, as if its
  * rectangle were the whole target, so every pass and shader stays the same
- * whatever the rectangle. A view that covers the canvas draws straight onto
- * it. One that covers part draws into a target its size, which lands on its
- * rectangle of the canvas once the frame is drawn.
+ * whatever the rectangle.
  *
- * A frame draws one view: the canvas starts each frame clear, so the rest of
- * it stays clear.
+ * A view that covers the canvas draws straight onto it: it is the only view.
+ * One that covers part draws into a frame of its own, which it keeps. The
+ * canvas starts every frame clear, so each present lands every view's kept
+ * frame on its rectangle, and a view that did not move need not draw again.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { ViewRect } from "../workerProtocol.ts";
+import type { PresentViewsMessage, ViewRect } from "../workerProtocol.ts";
+import { captureRenderedFrame } from "./captureFrame.ts";
+import { dropViewFrame, heldViewFrame, releaseViewsBut, viewFrameTarget } from "./viewResources.ts";
 
 export interface ViewFrame {
   /** What the view's passes draw into. */
   texture: GPUTexture;
-  /** The canvas texture of this frame, which `land` fills. */
-  canvasTexture: GPUTexture;
-  /** Put the drawn view on its rectangle of the canvas. A no-op for a view that covers it. */
-  land(): void;
+  /** The canvas texture when the view draws straight onto the canvas, else null. */
+  canvasTexture: GPUTexture | null;
 }
 
 /** Whether `rect` is the whole of a `canvasW` x `canvasH` canvas. */
@@ -26,10 +26,18 @@ export function coversCanvas(rect: ViewRect, canvasW: number, canvasH: number): 
   return rect[0] === 0 && rect[1] === 0 && rect[2] === canvasW && rect[3] === canvasH;
 }
 
+function canvasTextureAt(ctx: WorkerCtx, canvasW: number, canvasH: number): GPUTexture {
+  const canvas = ctx.context.canvas as OffscreenCanvas;
+  canvas.width = canvasW;
+  canvas.height = canvasH;
+  return ctx.context.getCurrentTexture();
+}
+
 /**
- * Size the canvas to `canvasW` x `canvasH` and take this frame's target for
- * a view drawn at `rect`. Call it after any wait the frame makes, since the
- * canvas presents the texture it hands out once the handler yields.
+ * This frame's target for `view`, drawn at `rect` of a `canvasW` x `canvasH`
+ * canvas. A view that covers the canvas sizes it and draws onto it, so call
+ * this after any wait the frame makes: the canvas presents the texture it
+ * hands out once the handler yields.
  */
 export function beginViewFrame(
   ctx: WorkerCtx,
@@ -38,40 +46,36 @@ export function beginViewFrame(
   canvasH: number,
   rect: ViewRect,
 ): ViewFrame {
-  const canvas = ctx.context.canvas as OffscreenCanvas;
-  canvas.width = canvasW;
-  canvas.height = canvasH;
-  const canvasTexture = ctx.context.getCurrentTexture();
   if (coversCanvas(rect, canvasW, canvasH)) {
-    return { texture: canvasTexture, canvasTexture, land: () => {} };
+    // The only view: every other view's resources, and its own kept frame,
+    // have gone with the layout that needed them.
+    releaseViewsBut(ctx, new Set([view]));
+    dropViewFrame(ctx, view);
+    const canvasTexture = canvasTextureAt(ctx, canvasW, canvasH);
+    return { texture: canvasTexture, canvasTexture };
   }
-  const texture = viewTarget(ctx, view, rect[2], rect[3], canvasTexture.format);
-  return {
-    texture,
-    canvasTexture,
-    land: () => {
-      const encoder = ctx.device.createCommandEncoder();
-      encoder.copyTextureToTexture(
-        { texture },
-        { texture: canvasTexture, origin: { x: rect[0], y: rect[1] } },
-        { width: rect[2], height: rect[3] },
-      );
-      ctx.device.queue.submit([encoder.finish()]);
-    },
-  };
+  return { texture: viewFrameTarget(ctx, view, rect[2], rect[3]), canvasTexture: null };
 }
 
-/** The view's own target, kept while its size and format hold. */
-function viewTarget(ctx: WorkerCtx, view: number, w: number, h: number, format: GPUTextureFormat): GPUTexture {
-  const targets = ctx.state.viewTargets;
-  const held = targets.get(view);
-  if (held && held.width === w && held.height === h && held.format === format) return held;
-  held?.destroy();
-  const texture = ctx.device.createTexture({
-    size: [w, h],
-    format,
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
+/**
+ * Land every view's kept frame on its rectangle of the canvas. A view the
+ * page no longer has lets its resources go, and one that has not drawn yet
+ * leaves its rectangle clear.
+ */
+export async function handlePresentViews(ctx: WorkerCtx, msg: PresentViewsMessage): Promise<void> {
+  releaseViewsBut(ctx, new Set(msg.views.map(({ view }) => view)));
+  const lander = ctx.getViewLander();
+  // The wait holds every message behind this one (`worker/inOrder.ts`).
+  await lander.compiled;
+  const landed = msg.views.flatMap(({ view, rect }) => {
+    const frame = heldViewFrame(ctx, view);
+    return frame ? [{ frame, rect }] : [];
   });
-  targets.set(view, texture);
-  return texture;
+  const canvasTexture = canvasTextureAt(ctx, msg.canvasW, msg.canvasH);
+  const encoder = ctx.device.createCommandEncoder();
+  lander.land(canvasTexture.createView(), landed, encoder);
+  ctx.device.queue.submit([encoder.finish()]);
+  // The frame can be read only here, before the texture expires with this
+  // handler.
+  captureRenderedFrame(ctx, canvasTexture);
 }

@@ -1,6 +1,7 @@
 /** Main-thread API wrapping the GPU render worker. */
 import type {
   ViewRect,
+  PresentViewsMessage,
   AbandonFrameMessage,
   CanvasColors,
   Chunk,
@@ -411,6 +412,12 @@ export class RenderClient implements UploadClient {
 
   resize(width: number, height: number) {
     this.worker.postMessage({ type: "resize", width, height });
+  }
+
+  /** Land every view's last frame on its rectangle of the canvas, when the views divide it. */
+  presentViews(canvasW: number, canvasH: number, views: { view: number; rect: ViewRect }[]): void {
+    if (this.destroyed) return;
+    this.worker.postMessage({ type: "presentViews", canvasW, canvasH, views } satisfies PresentViewsMessage);
   }
 
   /** Takes effect from the next frame drawn. */

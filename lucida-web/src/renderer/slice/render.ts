@@ -34,7 +34,7 @@ import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
-import { trimOffscreenPool } from "../worker/resources.ts";
+import { trimViewLayerTargets } from "../worker/viewResources.ts";
 import { beginViewFrame } from "../worker/viewFrame.ts";
 
 const IDENTITY_4X4 = new Float32Array([
@@ -311,7 +311,7 @@ export async function handleSliceRenderMultiPass(
   // follows the channel count and not the member count. Grown per drawn
   // group, so a group with nothing resident costs no target.
   const targetFor = (idx: number): GPUTexture =>
-    ctx.ensureOffscreenPool(idx + 1, msg.canvasW, msg.canvasH)[idx];
+    ctx.ensureOffscreenPool(msg.view, idx + 1, msg.canvasW, msg.canvasH)[idx];
 
   const timing = ctx.passTimer;
   timing.beginFrame();
@@ -346,7 +346,7 @@ export async function handleSliceRenderMultiPass(
     ctx.device.queue.submit([encoder.finish()]);
     renderedLayers.push({ view: target.createView(), blendMode: first.blendMode, clip: first.clip });
   }
-  trimOffscreenPool(renderedLayers.length);
+  trimViewLayerTargets(ctx, msg.view, renderedLayers.length);
 
   const canvasView = target.texture.createView();
   const compEncoder = ctx.device.createCommandEncoder();
@@ -360,11 +360,11 @@ export async function handleSliceRenderMultiPass(
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
 
-  target.land();
   timing.endFrame();
   // The frame can be read only here, after its last pass and before the
-  // texture expires with this handler.
-  captureRenderedFrame(ctx, target.canvasTexture);
+  // texture expires with this handler. A view that covers part of the canvas
+  // reaches it, and is read, when the views are presented.
+  if (target.canvasTexture) captureRenderedFrame(ctx, target.canvasTexture);
 }
 
 /**

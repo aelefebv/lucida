@@ -204,6 +204,9 @@ const documentCases: {
 const viewportCases: {
   [K in ViewportCommand["type"]]: Extract<ViewportCommand, { type: K }>;
 } = {
+  set_view_layout: { type: "set_view_layout", layout: "columns" },
+  set_active_view: { type: "set_active_view", view: 1 },
+  set_view_datasets: { type: "set_view_datasets", view: 1, datasets: { only: [DS] } },
   set_mode_slice: { type: "set_mode_slice" },
   set_mode_arcball: { type: "set_mode_arcball" },
   set_mode_fly: { type: "set_mode_fly" },
