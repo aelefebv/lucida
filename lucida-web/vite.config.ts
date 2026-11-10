@@ -55,6 +55,10 @@ export default defineConfig({
           name: 'perf',
           include: ['src/**/*.perf.test.ts'],
           sequence: { groupOrder: 1 },
+          // A perf test times dozens of samples and judges them against its own
+          // budget, so vitest's 5 s wall clock measures only how slow the
+          // runner is. A hung test still fails, after 60 s.
+          testTimeout: 60_000,
           fileParallelism: false,
         },
       },
