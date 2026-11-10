@@ -9,6 +9,8 @@ export type BlendMode = "alpha" | "additive" | "max";
 export interface CompositeLayer {
   view: GPUTextureView;
   blendMode: BlendMode;
+  /** The canvas pixels the layer may cover, `[x, y, width, height]`; the whole canvas when absent. */
+  clip?: readonly [number, number, number, number];
 }
 
 const TRANSPARENT: GPUColor = { r: 0, g: 0, b: 0, a: 0 };
@@ -158,6 +160,7 @@ export class LayerCompositor {
 
       pass.setPipeline(pipelines[layer.blendMode]);
       pass.setBindGroup(0, bg);
+      if (layer.clip) pass.setScissorRect(layer.clip[0], layer.clip[1], layer.clip[2], layer.clip[3]);
       pass.draw(3);
       pass.end();
     }

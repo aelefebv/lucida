@@ -180,11 +180,14 @@ export interface RunCause {
  * frames, and plane cuts another plane with the slice camera, so they bump
  * the `view` epoch. Scrub moves a selector along an
  * axis; select shows or hides a channel, a dataset, or a label; contrast
- * sets a channel's window; and remove takes a dataset away. They change
- * what is drawn rather than where the camera is, so they bump the
- * `selection` epoch.
+ * sets a channel's window; remove takes a dataset away; and compare moves a
+ * comparison's divider, flips its blink, or starts or ends one. They change
+ * what is drawn rather than where the camera is, so the run they open
+ * carries the `selection` epoch.
  */
-export const INPUT_KINDS = ["pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove", "plane"] as const;
+export const INPUT_KINDS = [
+  "pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove", "plane", "compare",
+] as const;
 export type InputKind = (typeof INPUT_KINDS)[number];
 
 const VIEW_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "resize", "plane"];

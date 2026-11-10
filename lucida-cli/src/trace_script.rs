@@ -2,7 +2,7 @@
 //! the driver performs on the page once the open has settled, so an agent
 //! can reproduce what a person does headlessly: pan, zoom, orbit, scrub,
 //! select, switch mode, fit, resize, set contrast, add or remove a
-//! dataset, and click or drag on the minimap.
+//! dataset, click or drag on the minimap, and swipe or blink a comparison.
 //!
 //! Steps go through the page's own input handling. Pan, zoom, and orbit are
 //! synthesized as the pointer and wheel events a mouse would raise, over the
@@ -239,6 +239,37 @@ pub enum ScriptStep {
         )]
         duration_ms: Option<u64>,
     },
+    /// Show the view's comparison as a swipe with its divider at `at`, a
+    /// fraction of the view's width from its left edge. With no comparison
+    /// one starts between the two open datasets, or between the dataset in
+    /// hand and the one opened from `with`. With `durationMs` the divider is
+    /// dragged there at a person's pace by its handle, which is on the full
+    /// viewer page.
+    Swipe {
+        at: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with: Option<String>,
+        #[serde(
+            rename = "durationMs",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<u64>,
+    },
+    /// Show the comparison as a blink and flip it to the other dataset
+    /// `count` times, one after another or one every `intervalMs`. Starts a
+    /// comparison as a swipe does.
+    Blink {
+        count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with: Option<String>,
+        #[serde(
+            rename = "intervalMs",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        interval_ms: Option<u64>,
+    },
 }
 
 fn visible_by_default() -> bool {
@@ -264,6 +295,8 @@ impl ScriptStep {
             Self::Add { .. } => "add",
             Self::Remove { .. } => "remove",
             Self::Minimap { .. } => "minimap",
+            Self::Swipe { .. } => "swipe",
+            Self::Blink { .. } => "blink",
         }
     }
 
@@ -397,6 +430,28 @@ impl ScriptStep {
                     }
                 }
             }
+            Self::Swipe {
+                at,
+                with,
+                duration_ms,
+            } => {
+                if !(at.is_finite() && (0.0..=1.0).contains(at)) {
+                    return Err(format!(
+                        "a divider is a fraction of the view's width from 0 to 1, not {at}"
+                    ));
+                }
+                validate_with(with.as_deref())?;
+                validate_duration("a swipe", *duration_ms)
+            }
+            Self::Blink { count: 0, .. } => Err("a blink of 0 flips shows nothing".to_string()),
+            Self::Blink {
+                interval_ms: Some(0),
+                ..
+            } => Err(
+                "a blink interval of 0 ms flips at once; leave the interval out for that"
+                    .to_string(),
+            ),
+            Self::Blink { with, .. } => validate_with(with.as_deref()),
         }
     }
 
@@ -406,9 +461,19 @@ impl ScriptStep {
             Self::Pan { duration_ms, .. }
             | Self::Zoom { duration_ms, .. }
             | Self::Orbit { duration_ms, .. }
-            | Self::Minimap { duration_ms, .. } => duration_ms.map(Duration::from_millis),
+            | Self::Minimap { duration_ms, .. }
+            | Self::Swipe { duration_ms, .. } => duration_ms.map(Duration::from_millis),
             _ => None,
         }
+    }
+}
+
+fn validate_with(with: Option<&str>) -> Result<(), String> {
+    match with {
+        Some(url) if url.trim().is_empty() => {
+            Err("a comparison names the dataset to compare with by its source URL".to_string())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -486,8 +551,33 @@ impl std::fmt::Display for ScriptStep {
                 }
                 f.write_str(&pace_suffix(*duration_ms))
             }
+            Self::Swipe {
+                at,
+                with,
+                duration_ms,
+            } => write!(
+                f,
+                "swipe {at}{}{}",
+                pace_suffix(*duration_ms),
+                with_suffix(with.as_deref())
+            ),
+            Self::Blink {
+                count,
+                with,
+                interval_ms,
+            } => write!(
+                f,
+                "blink {count}{}{}",
+                pace_suffix(*interval_ms),
+                with_suffix(with.as_deref())
+            ),
         }
     }
+}
+
+/// The dataset a comparison step names, which only a script file can.
+fn with_suffix(with: Option<&str>) -> String {
+    with.map(|url| format!(" with {url}")).unwrap_or_default()
 }
 
 fn off_suffix(visible: bool) -> &'static str {
@@ -522,7 +612,8 @@ impl Script {
         let steps: Vec<ScriptStep> = serde_json::from_value(steps).map_err(|error| {
             format!(
                 "a step could not be read: {error}; the kinds are wait, hold, pan, zoom, orbit, \
-                 scrub, select, mode, plane, fit, resize, contrast, add, remove, and minimap"
+                 scrub, select, mode, plane, fit, resize, contrast, add, remove, minimap, \
+                 swipe, and blink"
             )
         })?;
         let script = Self { steps };
@@ -557,6 +648,7 @@ impl Script {
     pub fn dataset_urls_mut(&mut self) -> impl Iterator<Item = &mut String> {
         self.steps.iter_mut().filter_map(|step| match step {
             ScriptStep::Add { url } | ScriptStep::Remove { url } => Some(url),
+            ScriptStep::Swipe { with, .. } | ScriptStep::Blink { with, .. } => with.as_mut(),
             _ => None,
         })
     }
@@ -641,7 +733,7 @@ pub struct ScriptArgs {
 
 /// The flag ids, in the order their help prints. `wait`, `hold`, and `fit`
 /// carry no text to parse; the rest go through `step_from_flag`.
-const STEP_FLAGS: [&str; 15] = [
+const STEP_FLAGS: [&str; 17] = [
     "wait",
     "hold",
     "pan",
@@ -657,6 +749,8 @@ const STEP_FLAGS: [&str; 15] = [
     "add",
     "remove",
     "minimap",
+    "swipe",
+    "blink",
 ];
 
 /// The flags that carry no value, each occurrence one step.
@@ -827,6 +921,29 @@ impl clap::Args for ScriptArgs {
                         "Click on the minimap at a point in CSS pixels from its top-left corner, \
                          or drag from X,Y to X2,Y2. Add /MS to spread a drag over that many \
                          milliseconds. The minimap is on the full viewer page (--full-ui)",
+                    ),
+            )
+            .arg(
+                Arg::new("swipe")
+                    .long("swipe")
+                    .value_name("AT[/MS]")
+                    .action(ArgAction::Append)
+                    .help(
+                        "Show the comparison as a swipe with its divider at AT, a fraction of the \
+                         view's width from 0 to 1, starting one between the two open datasets if \
+                         none is shown. Add /MS to drag the divider there by its handle over that \
+                         many milliseconds; the handle is on the full viewer page (--full-ui)",
+                    ),
+            )
+            .arg(
+                Arg::new("blink")
+                    .long("blink")
+                    .value_name("COUNT[/MS]")
+                    .action(ArgAction::Append)
+                    .help(
+                        "Show the comparison as a blink and flip it to the other dataset COUNT \
+                         times, starting one as --swipe does. Add /MS to flip once every MS \
+                         milliseconds",
                     ),
             )
             .next_help_heading(None)
@@ -1031,6 +1148,26 @@ pub fn step_from_flag(id: &str, text: &str) -> Result<ScriptStep, String> {
                 at: [at.0, at.1],
                 to: to.map(|(x, y)| [x, y]),
                 duration_ms,
+            })
+        }
+        "swipe" => {
+            let (text, duration_ms) = split_pace(text)?;
+            Ok(ScriptStep::Swipe {
+                at: parse_number(text)?,
+                with: None,
+                duration_ms,
+            })
+        }
+        "blink" => {
+            let (text, interval_ms) = split_pace(text)?;
+            let count: u32 = text
+                .trim()
+                .parse()
+                .map_err(|_| format!("a blink count is a whole number, not {text}"))?;
+            Ok(ScriptStep::Blink {
+                count,
+                with: None,
+                interval_ms,
             })
         }
         "select" => {
@@ -1463,6 +1600,16 @@ const MINIMAP_RECT_PROBE: &str = r#"(() => {
   return JSON.stringify({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
 })()"#;
 
+/// The swipe divider's handle, or null when the page shows none: the
+/// capture surface lays it out at no size.
+const SWIPE_DIVIDER_PROBE: &str = r#"(() => {
+  const divider = document.querySelector('.lc-swipe-divider');
+  if (!divider) return null;
+  const rect = divider.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return null;
+  return JSON.stringify({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
+})()"#;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StepState {
@@ -1701,6 +1848,30 @@ async fn run_step(
         ScriptStep::Remove { url } => {
             let expression = seam_call("removeDataset", &json_string(url));
             input = Some(control_outcome(page, &expression, wait).await?);
+        }
+        ScriptStep::Swipe {
+            at,
+            with,
+            duration_ms: None,
+        } => {
+            let args = format!("{at}, {}", with_arg(with.as_deref()));
+            input = Some(control_outcome(page, &seam_call("swipe", &args), wait).await?);
+        }
+        ScriptStep::Swipe {
+            at,
+            with,
+            duration_ms: Some(_),
+        } => {
+            input = Some(drag_divider(page, *at, with.as_deref(), pace, wait).await?);
+        }
+        ScriptStep::Blink {
+            count,
+            with,
+            interval_ms,
+        } => {
+            let expression = seam_call("blink", &with_arg(with.as_deref()));
+            let interval = Duration::from_millis(interval_ms.unwrap_or(0));
+            input = Some(repeat_control(page, &expression, *count, interval, "flips", wait).await?);
         }
         // The minimap steers the slice view and the orbit camera; the fly
         // camera ignores it.
@@ -1985,20 +2156,34 @@ async fn paced_scrub(
     interval: Duration,
     wait: Duration,
 ) -> Result<SentInput, CliError> {
-    let positions = count.unsigned_abs() as u32;
     let expression = format!(
         "JSON.stringify(window.lucidaTrace.scrub({}, {}))",
         json_string(&axis.to_string()),
         count.signum()
     );
+    let positions = count.unsigned_abs() as u32;
+    repeat_control(page, &expression, positions, interval, "positions", wait).await
+}
+
+/// A seam call made `times` times, one every `interval`, the first at once.
+/// It stops at the first call the page refuses and says how many of what,
+/// `unit`, landed before it.
+async fn repeat_control(
+    page: &mut Page,
+    expression: &str,
+    times: u32,
+    interval: Duration,
+    unit: &str,
+    wait: Duration,
+) -> Result<SentInput, CliError> {
     let start = tokio::time::Instant::now();
     let mut moves = 0;
     let mut refusal = None;
     let mut span_ms = 0.0;
-    for n in 0..positions {
+    for n in 0..times {
         tokio::time::sleep_until(start + interval * n).await;
         span_ms = elapsed_ms(start);
-        let outcome = control_outcome(page, &expression, wait).await?;
+        let outcome = control_outcome(page, expression, wait).await?;
         if let SentInput::Control {
             applied: false,
             reason,
@@ -2016,7 +2201,7 @@ async fn paced_scrub(
             if moves == 0 {
                 reason
             } else {
-                format!("after {moves} of {positions} positions: {reason}")
+                format!("after {moves} of {times} {unit}: {reason}")
             }
         }),
         moves: Some(moves),
@@ -2044,6 +2229,53 @@ async fn press_key(page: &mut Page, key: &KeyPress, wait: Duration) -> Result<Se
     Ok(SentInput::Key {
         key: key.combo.to_string(),
     })
+}
+
+/// A comparison step's dataset as the seam takes it: a JSON string, or null.
+fn with_arg(with: Option<&str>) -> String {
+    with.map_or_else(|| "null".to_string(), json_string)
+}
+
+/// Drag the swipe divider's handle to `at` across the canvas at `pace`,
+/// after showing the comparison as a swipe through the seam, which starts
+/// one if none is shown. Nothing is dragged when the page refuses the swipe
+/// or shows no handle.
+async fn drag_divider(
+    page: &mut Page,
+    at: f64,
+    with: Option<&str>,
+    pace: Option<Duration>,
+    wait: Duration,
+) -> Result<SentInput, CliError> {
+    let shown = control_outcome(
+        page,
+        &seam_call("swipe", &format!("null, {}", with_arg(with))),
+        wait,
+    )
+    .await?;
+    if matches!(shown, SentInput::Control { applied: false, .. }) {
+        return Ok(shown);
+    }
+    // The handle mounts with the render that follows the swipe.
+    let deadline = tokio::time::Instant::now() + RUN_OPEN_GRACE.min(wait);
+    let handle = loop {
+        if let Some(handle) = rect_probe(page, SWIPE_DIVIDER_PROBE, "a swipe divider", wait).await?
+        {
+            break handle;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(SentInput::Withheld {
+                reason:
+                    "the page shows no swipe divider; it is on the full viewer page (--full-ui)"
+                        .to_string(),
+            });
+        }
+        tokio::time::sleep(POLL).await;
+    };
+    let canvas = canvas_rect(page, wait).await?;
+    let from = handle.center();
+    let to_x = canvas.x + at * canvas.width;
+    drag_from(page, from, (to_x - from.0, 0.0), false, pace, wait).await
 }
 
 /// A click at `at` or a drag from `at` to `to` on the minimap, or nothing
@@ -2149,14 +2381,25 @@ async fn control_outcome(
 
 /// The minimap's input surface in page CSS pixels, or None when the page shows none.
 async fn minimap_rect(page: &mut Page, wait: Duration) -> Result<Option<CanvasRect>, CliError> {
-    let value = page.evaluate(MINIMAP_RECT_PROBE, wait).await?;
+    rect_probe(page, MINIMAP_RECT_PROBE, "a minimap", wait).await
+}
+
+/// The rect a probe answers with in page CSS pixels, or None when it answers
+/// null. `what` names the element for an answer this CLI cannot read.
+async fn rect_probe(
+    page: &mut Page,
+    probe: &str,
+    what: &str,
+    wait: Duration,
+) -> Result<Option<CanvasRect>, CliError> {
+    let value = page.evaluate(probe, wait).await?;
     let Some(json) = value.as_str() else {
         return Ok(None);
     };
     serde_json::from_str(json).map(Some).map_err(|error| {
         CliError::new(
             ErrorKind::Protocol,
-            format!("the page returned a minimap this CLI cannot read: {error}"),
+            format!("the page returned {what} this CLI cannot read: {error}"),
         )
     })
 }
@@ -2482,7 +2725,7 @@ mod tests {
         assert!(
             unknown.contains(
                 "wait, hold, pan, zoom, orbit, scrub, select, mode, plane, fit, resize, contrast, \
-                 add, remove, and minimap"
+                 add, remove, minimap, swipe, and blink"
             ),
             "{unknown}"
         );
@@ -3748,6 +3991,64 @@ mod tests {
         assert_eq!(
             refused(r#"[{"kind": "minimap", "action": "click", "at": [-1, 2]}]"#),
             "step 1 (minimap): a minimap point is two finite numbers from its top-left corner"
+        );
+    }
+
+    #[test]
+    fn a_comparison_step_reads_from_a_file_and_a_flag_and_prints_as_typed() {
+        let mut script = Script::from_json(
+            r#"[
+                {"kind": "swipe", "at": 0.25},
+                {"kind": "swipe", "at": 0.8, "with": "b.zarr", "durationMs": 1500},
+                {"kind": "blink", "count": 6, "intervalMs": 250}
+            ]"#,
+        )
+        .unwrap();
+        let swipe = ScriptStep::Swipe {
+            at: 0.25,
+            with: None,
+            duration_ms: None,
+        };
+        let drag = ScriptStep::Swipe {
+            at: 0.8,
+            with: Some("b.zarr".to_string()),
+            duration_ms: Some(1500),
+        };
+        let blink = ScriptStep::Blink {
+            count: 6,
+            with: None,
+            interval_ms: Some(250),
+        };
+        assert_eq!(
+            script.steps,
+            vec![swipe.clone(), drag.clone(), blink.clone()]
+        );
+        assert_eq!(step_from_flag("swipe", "0.25").unwrap(), swipe);
+        assert_eq!(step_from_flag("blink", "6/250").unwrap(), blink);
+        assert_eq!(swipe.to_string(), "swipe 0.25");
+        assert_eq!(drag.to_string(), "swipe 0.8/1500 with b.zarr");
+        assert_eq!(blink.to_string(), "blink 6/250");
+        // A drag is paced input; a blink's interval paces seam calls, as a scrub's does.
+        assert_eq!(drag.pace(), Some(Duration::from_millis(1500)));
+        assert_eq!(blink.pace(), None);
+        // The dataset a comparison names resolves as an add's does.
+        let urls: Vec<&mut String> = script.dataset_urls_mut().collect();
+        assert_eq!(urls, vec!["b.zarr"]);
+        let args = parse_flags(&["--swipe", "0.5", "--blink", "2", "ds.zarr"]).unwrap();
+        assert_eq!(args.steps.len(), 2);
+
+        let refused = |json: &str| Script::from_json(json).unwrap_err();
+        assert_eq!(
+            refused(r#"[{"kind": "swipe", "at": 1.5}]"#),
+            "step 1 (swipe): a divider is a fraction of the view's width from 0 to 1, not 1.5"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "blink", "count": 0}]"#),
+            "step 1 (blink): a blink of 0 flips shows nothing"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "blink", "count": 2, "with": " "}]"#),
+            "step 1 (blink): a comparison names the dataset to compare with by its source URL"
         );
     }
 

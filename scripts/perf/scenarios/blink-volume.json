@@ -1,0 +1,19 @@
+{
+  "description": "blink in the volume view: add a dataset over the same physical region, then blink between the two eleven times, one every 250 ms, ending on the added one",
+  "requires": [
+    "physical",
+    "volume"
+  ],
+  "camera": "arcball",
+  "steps": [
+    {
+      "kind": "add",
+      "url": "dataset:physical-volume-coarse"
+    },
+    {
+      "kind": "blink",
+      "count": 11,
+      "intervalMs": 250
+    }
+  ]
+}

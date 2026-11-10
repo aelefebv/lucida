@@ -6,6 +6,7 @@ import {
   InfoIcon,
 } from "@phosphor-icons/react";
 import { LayerPanel } from "./components/LayerPanel.tsx";
+import { ComparisonBar, SwipeDivider } from "./components/Comparison.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { sceneClipDepth } from "./components/clipDepth.ts";
@@ -56,6 +57,7 @@ import { useAutoContrast } from "./hooks/useAutoContrast.ts";
 import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
+import { useComparison } from "./hooks/useComparison.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import {
@@ -560,6 +562,8 @@ function Viewer({
     };
   }, [liveBridge, render.canvasRef, render.clientRef, render.loopRef]);
 
+  const comparison = useComparison(engine, layers.layerInfos);
+
   const requestDatasetHealth = useCallback(
     () => liveBridge
       ? liveBridge.requestDatasetHealth()
@@ -586,6 +590,7 @@ function Viewer({
     removeDataset: layers.removeLayer,
     datasetHealth: requestDatasetHealth,
     captureView: savedViewSync.captureBuilder,
+    comparison: comparison.actions,
     selectedDatasetId,
     datasetsRef,
   });
@@ -899,6 +904,8 @@ function Viewer({
       onLabelSetVisible={layers.handleLabelSetVisible}
       onLabelSetOpacity={layers.handleLabelSetOpacity}
       onAddData={() => setAddDataOpen(true)}
+      comparisonBlocker={comparison.blocker}
+      onCompare={comparison.compareWith}
       layoutRegistry={layoutRegistry}
       sendCommand={bridge.sendCommand}
       onLayoutChange={() => {
@@ -1112,6 +1119,13 @@ function Viewer({
                       {datasetStatus}
                     </Banner>
                   )}
+                  {hasData && (
+                    <ComparisonBar
+                      comparison={comparison.current}
+                      actions={comparison.actions}
+                      nameOf={comparison.nameOf}
+                    />
+                  )}
                   {/* `#a=<id>` didn't resolve. A recipient without access fails
                       at the gate first, so this never confirms the annotation
                       existed. */}
@@ -1187,6 +1201,7 @@ function Viewer({
               canvasSize={canvasSize}
               showDebugOverlays={showDebugOverlays}
             />
+            <SwipeDivider comparison={comparison.current} actions={comparison.actions} nameOf={comparison.nameOf} />
           </CanvasStage>
           {developer.monitor && (
             // The dock overlays the canvas rather than resizing it, so opening
