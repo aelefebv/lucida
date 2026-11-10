@@ -8,6 +8,7 @@ import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
 import { __resetCommandsForTesting, listCommands } from "../ui/commands.ts";
 import { resolvedLayer, resolvedLayers } from "../resolvedLayerFixtures.ts";
 import type { ResolvedLayers } from "../resolvedLayers.ts";
+import type { SlicePlane } from "../renderer/slicePlane.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleState } from "../pipeline/settle.ts";
 import { failedChunkReport, summarizeFailedChunks } from "../pipeline/failedChunks.ts";
 
@@ -68,6 +69,7 @@ function baseProps(overrides: Partial<Parameters<typeof LayerPanel>[0]> = {}) {
     selectedLayerId: null as string | null,
     expandedLayerId: null as string | null,
     resolvedLayers: resolvedLayers() as ResolvedLayers,
+    slicePlane: "xy" as SlicePlane | null,
     canEdit: true,
     onSelectLayer: vi.fn(),
     onToggleExpand: vi.fn(),
@@ -349,13 +351,62 @@ describe("LayerPanel channels", () => {
       layers: [layer(), layer({ id: "wds-2", name: "plain.zarr" })],
       resolvedLayers: resolvedLayers(resolvedLayer("wds-1"), clamped),
     });
-    render(<LayerPanel {...props} />);
+    const { rerender } = render(<LayerPanel {...props} />);
     const plain = screen.getByRole("region", { name: "plain.zarr" });
-    expect(within(plain).getByTestId("layer-clamped-wds-2").textContent).toBe(
+    expect(within(plain).getByTestId("layer-note-wds-2").textContent).toBe(
       "Past this layer's extent; showing Z 10 · T 1.",
     );
     const original = screen.getByRole("region", { name: "original.zarr" });
     expect(within(original).queryByText(/Past this layer/)).toBeNull();
+
+    // A volume view and a side view draw every plane, so only T is past.
+    for (const slicePlane of [null, "xz"] as const) {
+      rerender(<LayerPanel {...props} slicePlane={slicePlane} />);
+      expect(within(plain).getByTestId("layer-note-wds-2").textContent).toBe(
+        "Past this layer's extent; showing T 1.",
+      );
+    }
+  });
+
+  it("says when the cut passes outside a layer, in the view's plane only", () => {
+    const missed = resolvedLayer("wds-2", [0], {
+      z_range: { start: 23, end: 24 }, z_clamped: true, y_reach: "outside",
+    });
+    const props = baseProps({
+      layers: [layer(), layer({ id: "wds-2", name: "plain.zarr" })],
+      resolvedLayers: resolvedLayers(resolvedLayer("wds-1"), missed),
+      slicePlane: "xz",
+    });
+    const { rerender } = render(<LayerPanel {...props} />);
+    const plain = screen.getByRole("region", { name: "plain.zarr" });
+    expect(within(plain).getByTestId("layer-note-wds-2").textContent).toBe(
+      "Outside this cut, so nothing is drawn.",
+    );
+    expect(screen.getAllByText(/Outside this cut/)).toHaveLength(1);
+
+    // The XY cut along Z passes through it, and a volume view cuts nothing.
+    for (const slicePlane of ["xy", null] as const) {
+      rerender(<LayerPanel {...props} slicePlane={slicePlane} />);
+      expect(screen.queryByText(/Outside this cut/)).toBeNull();
+    }
+  });
+
+  it("says a single plane under a Z cut is shown at every Z position", () => {
+    const flat = resolvedLayer("wds-2", [0], {
+      z_range: { start: 0, end: 1 }, z_clamped: true, z_reach: "every",
+    });
+    const props = baseProps({
+      layers: [layer(), layer({ id: "wds-2", name: "flat.zarr" })],
+      resolvedLayers: resolvedLayers(resolvedLayer("wds-1"), flat),
+    });
+    const { rerender } = render(<LayerPanel {...props} />);
+    const row = screen.getByRole("region", { name: "flat.zarr" });
+    expect(within(row).getByTestId("layer-note-wds-2").textContent).toBe(
+      "One plane, shown at every Z position.",
+    );
+    // A side view draws it where it lies.
+    rerender(<LayerPanel {...props} slicePlane="xz" />);
+    expect(within(row).queryByTestId("layer-note-wds-2")).toBeNull();
   });
 
   it("opens a channel's contrast without touching its visibility", async () => {

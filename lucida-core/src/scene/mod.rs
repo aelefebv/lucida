@@ -5,7 +5,7 @@ mod types;
 
 pub use comparison::{CompareMode, Comparison, Side};
 pub(crate) use layers::LayerExtent;
-pub use layers::{ResolvedLayer, ShownChannel, in_channel_context};
+pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
@@ -726,6 +726,12 @@ impl Scene {
         let multiscale_by_image = multiscale_by_image(manifest);
         let layer = self.resolved_layer(dataset_id)?;
         let channels = layer.channel_indices();
+        // A layer the slice view's cut misses draws nothing, so wants nothing.
+        if let Camera::Slice(slice) = &self.camera
+            && layer.reach(slice.plane) == CutReach::Outside
+        {
+            return Some(Vec::new());
+        }
 
         // The region is in the dataset's frame, where member positions are.
         let region = self.visible_region(dataset_id)?;

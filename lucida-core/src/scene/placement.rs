@@ -146,20 +146,33 @@ impl Scene {
         }
     }
 
+    /// `dataset_id`'s extent along `axis` in the scene frame, as `(min,
+    /// max)` over its members, or `None` with no member to place.
+    pub(crate) fn scene_extent(
+        &self,
+        dataset_id: &DatasetId,
+        axis: SpatialAxis,
+    ) -> Option<(f64, f64)> {
+        let a = axis.xyz();
+        let to_scene = self.placement(dataset_id)?;
+        self.derived
+            .get(dataset_id)?
+            .members
+            .iter()
+            .filter_map(|member| {
+                let (lo, hi) = frame_box(member)?;
+                let (min, max) = to_scene.apply_box(lo, hi);
+                Some((min[a], max[a]))
+            })
+            .reduce(union)
+    }
+
     /// The visible datasets' extent along `axis` in the scene frame, as
     /// `(min, max)`, or `None` with nothing visible.
     fn visible_scene_extent(&self, axis: SpatialAxis) -> Option<(f64, f64)> {
-        let a = axis.xyz();
         self.visible_dataset_ids()
-            .filter_map(|id| Some((self.placement(id)?, self.derived.get(id)?)))
-            .flat_map(|(to_scene, derived)| {
-                derived.members.iter().filter_map(move |member| {
-                    let (lo, hi) = frame_box(member)?;
-                    let (min, max) = to_scene.apply_box(lo, hi);
-                    Some((min[a], max[a]))
-                })
-            })
-            .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
+            .filter_map(|id| self.scene_extent(id, axis))
+            .reduce(union)
     }
 
     /// How many axis positions a view cutting `axis` steps through, at least
@@ -282,6 +295,11 @@ impl Scene {
             }
         })
     }
+}
+
+/// The extent covering two along one axis.
+fn union((lo, hi): (f64, f64), (min, max): (f64, f64)) -> (f64, f64) {
+    (lo.min(min), hi.max(max))
 }
 
 /// One dataset's frame mapped into the scene frame and into world space.
@@ -450,6 +468,79 @@ mod tests {
         assert!(close([a.min[0], a.min[1], 0.0], [b.min[0], b.min[1], 0.0]));
         assert!(close([a.max[0], a.max[1], 0.0], [b.max[0], b.max[1], 0.0]));
         assert_eq!(scene.cut_extent(lucida_content::SpatialAxis::Y), 64);
+    }
+
+    #[test]
+    fn a_side_view_cut_past_a_dataset_misses_it() {
+        use crate::scene::CutReach;
+        use crate::slice_plane::SlicePlane;
+        let mut scene = Scene::new([800, 600]);
+        let unit = Some("micrometer");
+        open(&mut scene, "a", [16, 64, 64], [1.0; 3], [0.0; 3], unit);
+        // B starts 48 micrometers down and 32 across, past most of A.
+        open(
+            &mut scene,
+            "b",
+            [16, 64, 64],
+            [1.0; 3],
+            [0.0, 48.0, 32.0],
+            unit,
+        );
+        // A flat image across the same Y as A.
+        open(&mut scene, "flat", [1, 64, 64], [1.0; 3], [0.0; 3], unit);
+        scene.apply(
+            ViewportCommand::SetSlicePlane {
+                plane: SlicePlane::Xz,
+            }
+            .into(),
+        );
+        let reach = |scene: &Scene, id: &str| scene.layer_reach(&DatasetId::from(id)).unwrap();
+        let at_y = |scene: &mut Scene, y: u32| scene.apply(ViewportCommand::SetY { y }.into());
+
+        at_y(&mut scene, 20);
+        assert_eq!(reach(&scene, "a"), CutReach::Through);
+        assert_eq!(reach(&scene, "b"), CutReach::Outside);
+        // A flat image is a line in a side view, cut like any other layer.
+        assert_eq!(reach(&scene, "flat"), CutReach::Through);
+        assert!(
+            scene
+                .chunk_plan_for(&DatasetId::from("b"))
+                .unwrap()
+                .is_empty()
+        );
+
+        at_y(&mut scene, 50);
+        assert_eq!(reach(&scene, "a"), CutReach::Through);
+        assert_eq!(reach(&scene, "b"), CutReach::Through);
+
+        // Y 63 is A's last unit, and Y 64 the first past it.
+        at_y(&mut scene, 63);
+        assert_eq!(reach(&scene, "a"), CutReach::Through);
+        at_y(&mut scene, 64);
+        assert_eq!(reach(&scene, "a"), CutReach::Outside);
+        assert_eq!(reach(&scene, "flat"), CutReach::Outside);
+        assert_eq!(reach(&scene, "b"), CutReach::Through);
+        assert!(
+            !scene
+                .chunk_plan_for(&DatasetId::from("b"))
+                .unwrap()
+                .is_empty()
+        );
+
+        // A YZ view cuts along X, where B starts at 32.
+        scene.apply(
+            ViewportCommand::SetSlicePlane {
+                plane: SlicePlane::Yz,
+            }
+            .into(),
+        );
+        scene.apply(ViewportCommand::SetX { x: 10 }.into());
+        assert_eq!(reach(&scene, "a"), CutReach::Through);
+        assert_eq!(reach(&scene, "b"), CutReach::Outside);
+        // The Y cut is kept for the XZ view, and the XY view's Z is unmoved.
+        let b = scene.resolved_layer(&DatasetId::from("b")).unwrap();
+        assert_eq!(b.reach(SlicePlane::Xz), CutReach::Through);
+        assert_eq!(b.reach(SlicePlane::Xy), CutReach::Through);
     }
 
     #[test]
