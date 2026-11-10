@@ -112,11 +112,7 @@ function drawnView(ctx: TickContext): TickView {
   return { id: ctx.scene.active_view(), mode: ctx.mode };
 }
 
-/**
- * The views a tick plans for: each view the loop draws, the drawn one first.
- * The fast paths prove their case against the drawn view alone, so a tick
- * that plans another view as well takes the full rebuild.
- */
+/** The views a tick plans for: each view the loop draws, the drawn one first. */
 function plannedViews(ctx: TickContext): TickView[] {
   return [drawnView(ctx)];
 }
@@ -764,6 +760,8 @@ export class TickCoordinator {
     const planningConfig = configStore.get();
 
     const structural = isStructural(causes);
+    // The fast paths prove their case against the drawn view alone.
+    const fastPathsHold = views.length === 1;
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
     // A selection scrub, minimap chunks no plan asked for, or both: the active
@@ -781,6 +779,7 @@ export class TickCoordinator {
     // changed. The active set and residency are then identical, so push a
     // descriptor patch and reuse the cached roster instead of a full replan.
     if (
+      fastPathsHold &&
       selectionOnly &&
       this.tryDisplayOnlyUpdate({ ctx, currentEpochs, settings, layers, tickStart })
     ) {
@@ -793,6 +792,7 @@ export class TickCoordinator {
     // selection patch instead of the O(active-set) descriptor array, and reuse
     // the cached roster.
     if (
+      fastPathsHold &&
       requestsOnly &&
       this.tryScrubOnlyUpdate({
         ctx, currentEpochs, settings, layers, tickStart,
@@ -809,6 +809,7 @@ export class TickCoordinator {
     // delta costs the entities that changed rather than a cold state of all
     // of them.
     if (
+      fastPathsHold &&
       !structural &&
       causes.length === 2 &&
       causes.includes("view") &&
