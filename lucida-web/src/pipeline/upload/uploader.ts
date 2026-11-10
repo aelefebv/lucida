@@ -14,7 +14,7 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
-import { drawnView, type TickContext } from "../../renderLoopTypes.ts";
+import { holderView, type TickContext } from "../../renderLoopTypes.ts";
 import type { ResolvedLayer } from "../../resolvedLayers.ts";
 import type {
   ChunkFeedbackReason,
@@ -284,7 +284,7 @@ export class Uploader {
     const lastView = this.lastViewEpochByDataset.get(datasetId);
     if (lastView === epochs.view) return false;
     const hit = Array.from(
-      ctx.scene.ray_hit_local_image(drawnView(ctx).id, datasetId),
+      ctx.scene.ray_hit_local_image(holderView(ctx, datasetId).id, datasetId),
     ) as [number, number, number];
     ctx.client.viewHotState(build(hit));
     this.lastViewEpochByDataset.set(datasetId, epochs.view);
@@ -344,14 +344,14 @@ export class Uploader {
    * priority item is sent while `remaining > 0`, even if oversized, and
    * the loop stops after the send drives `remaining <= 0`.
    *
-   * `sliceCutFor` names the plane each dataset's slice view shows, the
-   * scene's axis position along the cut clamped into that dataset; `null` in
-   * the volume view.
+   * `sliceCutFor` names the plane a dataset's slice view shows, the view's
+   * axis position along the cut clamped into that dataset, or `null` for a
+   * dataset a volume view holds; `null` alone when every view is a volume.
    */
   deliverToWorker(
     ctx: TickContext,
     budget: number,
-    sliceCutFor: ((datasetId: string) => SliceCut) | null,
+    sliceCutFor: ((datasetId: string) => SliceCut | null) | null,
   ): boolean {
     const tickStart = performance.now();
     if (this.heldBacklog) budget = Math.max(budget, HELD_UPLOAD_BUDGET_BYTES);
@@ -448,7 +448,7 @@ export class Uploader {
     delivery: ReadyChunkDelivery;
     ctx: TickContext;
     manifestByImage: Map<string, ManifestEntry>;
-    sliceCutFor: ((datasetId: string) => SliceCut) | null;
+    sliceCutFor: ((datasetId: string) => SliceCut | null) | null;
     epochs: SceneEpochs;
   }): number {
     const { delivery, ctx, manifestByImage, sliceCutFor, epochs } = args;
@@ -465,12 +465,13 @@ export class Uploader {
     // dispatch reports the real bytes sent so the frame budget throttles
     // uploads, and at least one always goes so labels never starve.
     let sent: Dispatched | DispatchSkip;
+    const { mode } = holderView(ctx, meta.datasetId);
     if (meta.isLabel) {
-      sent = drawnView(ctx).mode === "slice"
+      sent = mode === "slice"
         ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, cut, epochs)
         : dispatchLabelVolumeChunkDelivery(ctx.client, delivery, meta, epochs);
     } else {
-      sent = dispatchChunkDelivery(ctx.client, delivery, meta, drawnView(ctx).mode, cut, epochs);
+      sent = dispatchChunkDelivery(ctx.client, delivery, meta, mode, cut, epochs);
     }
     if (sent === "other-plane") {
       this.currentUploadStats.skippedOtherPlane++;

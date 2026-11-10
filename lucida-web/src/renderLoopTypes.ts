@@ -121,11 +121,44 @@ export interface TickContext {
 }
 
 /**
- * The view whose frame of each dataset the worker holds: the first the loop
- * draws. Its mode picks the pools chunks go to.
+ * The active view, which the loop draws first. Its frame quality and its
+ * gestures lead the tick.
  */
 export function drawnView(ctx: Pick<TickContext, "views">): TickView {
   return ctx.views[0];
+}
+
+const holdersByTick = new WeakMap<readonly TickView[], Map<string, TickView>>();
+
+/**
+ * The view whose form `datasetId`'s pools hold (`Scene::dataset_holder`).
+ * What the worker keeps of the dataset is what this view draws, so its mode
+ * picks the pools the dataset's chunks go to. Read once a tick.
+ */
+export function holderView(ctx: Pick<TickContext, "views" | "scene">, datasetId: string): TickView {
+  if (ctx.views.length === 1) return ctx.views[0];
+  let holders = holdersByTick.get(ctx.views);
+  if (!holders) {
+    holders = new Map();
+    holdersByTick.set(ctx.views, holders);
+  }
+  let holder = holders.get(datasetId);
+  if (!holder) {
+    const id = ctx.scene.dataset_holder(datasetId);
+    holder = ctx.views.find((view) => view.id === id) ?? drawnView(ctx);
+    holders.set(datasetId, holder);
+  }
+  return holder;
+}
+
+/**
+ * The canvas a view draws in, in pixels of the view's backing scale, and
+ * that scale in backing pixels per device pixel.
+ */
+export interface FrameScale {
+  canvasW: number;
+  canvasH: number;
+  scale: number;
 }
 
 /**

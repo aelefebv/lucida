@@ -5,7 +5,7 @@
  * emission and chunk delivery.
  */
 
-import { drawnView, type TickContext, type TickView } from "../renderLoopTypes.ts";
+import { drawnView, holderView, type TickContext, type TickView } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { getSceneSettings } from "../tickCommon.ts";
@@ -101,6 +101,16 @@ export interface TickCoordinatorResult {
 /** The views a tick plans for: each view the loop draws, the drawn one first. */
 function plannedViews(ctx: TickContext): readonly TickView[] {
   return ctx.views;
+}
+
+/** Each dataset's layer as the view holding its pools resolves it. */
+function heldLayers(ctx: TickContext, layersByView: ReadonlyMap<number, ResolvedLayers>): ResolvedLayers {
+  const held = new Map<string, ResolvedLayer>();
+  for (const dsId of ctx.datasets.keys()) {
+    const layer = layersByView.get(holderView(ctx, dsId).id)?.get(dsId);
+    if (layer) held.set(dsId, layer);
+  }
+  return held;
 }
 
 /** One view of a planned dataset. */
@@ -372,15 +382,16 @@ function admitDatasetPlans(
   report: GpuCapacityReport | null,
 ): Admission[] {
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
-  // The worker's pools hold what the drawn view samples.
-  const sliceAxis = cutAxis(ctx.scene.slice_plane(drawnView(ctx).id) as SlicePlane);
   return admitPlans(
     plans.map(({ dsId, requests }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
+      // A dataset's pools hold what its holder samples.
+      const holder = holderView(ctx, dsId);
+      const sliceAxis = cutAxis(ctx.scene.slice_plane(holder.id) as SlicePlane);
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
-        slotOf: gpuSlotsFor(manifest, drawnView(ctx).mode, report, gpuTotalBytes, sliceAxis),
+        slotOf: gpuSlotsFor(manifest, holder.mode, report, gpuTotalBytes, sliceAxis),
       };
     }),
     ctx.cpuCache.tierCapacity(),
@@ -741,8 +752,9 @@ export class TickCoordinator {
     const views = plannedViews(ctx);
     const drawn = views[0];
     const layersByView = new Map(views.map((view) => [view.id, readResolvedLayers(ctx.scene, view.id)]));
-    // The fast paths and the result describe what the worker draws.
-    const layers = layersByView.get(drawn.id)!;
+    // The fast paths and the result describe what the worker holds: each
+    // dataset as its holder draws it, which with one view is that view.
+    const layers = views.length === 1 ? layersByView.get(drawn.id)! : heldLayers(ctx, layersByView);
     const planningConfig = configStore.get();
 
     const structural = isStructural(causes);
@@ -822,11 +834,14 @@ export class TickCoordinator {
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
-      // A layer a view's cut misses draws nothing there, so nothing of it is
-      // planned for that view.
-      const viewsOfDataset = views.filter(
-        (view) => !outsideCut(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)),
-      );
+      // Each view that draws the dataset plans it, its holder first, whose
+      // plan is what the worker holds; a view that leaves it out gets no
+      // view query for it. A layer a view's cut misses draws nothing there,
+      // so nothing of it is planned for that view.
+      const holder = holderView(ctx, dsId);
+      const viewsOfDataset = views
+        .filter((view) => !outsideCut(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)))
+        .sort((a, b) => Number(b.id === holder.id) - Number(a.id === holder.id));
       if (viewsOfDataset.length === 0) continue;
 
       // See `snapshotInputCacheByDataset` for why both keys are checked.

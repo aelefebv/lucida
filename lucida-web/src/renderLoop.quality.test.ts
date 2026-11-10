@@ -16,12 +16,16 @@ vi.mock("./debug/logging.ts", async (importOriginal) => {
 const drawn: Array<{ renderScale: number; resolutionScale: number; marchStepScale: number; bands: number }> = [];
 let dispatch: () => void = () => {};
 
-vi.mock("./volumePath.ts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./volumePath.ts")>();
+vi.mock("./viewTick.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./viewTick.ts")>();
   return {
     ...actual,
-    tickVolume: (ctx: import("./renderLoopTypes.ts").TickContext, _c: unknown, _u: unknown, _m: unknown, shouldRender: boolean) => {
-      if (shouldRender) {
+    tickViews: (
+      ctx: import("./renderLoopTypes.ts").TickContext,
+      _c: unknown, _u: unknown, _m: unknown, _r: unknown,
+      frame: { render: boolean },
+    ) => {
+      if (frame.render) {
         drawn.push({ renderScale: ctx.renderScale, resolutionScale: ctx.resolutionScale, marchStepScale: ctx.marchStepScale, bands: ctx.bands });
         dispatch();
       }
@@ -72,7 +76,7 @@ function makeLoop() {
   const loop = new RenderLoop({
     session: {
       cpuCache,
-      scene: { z: () => 0, active_view: () => 0, view_ids: () => [0], view_rect: () => [0, 0, 1, 1] },
+      scene: { z: () => 0, active_view: () => 0, view_ids: () => [0], view_rect: () => [0, 0, 1, 1], view_mode: () => "volume" },
     } as unknown as Session,
     datasets: new Map(),
     client: client as unknown as RenderClient,

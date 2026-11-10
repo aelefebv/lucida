@@ -1,20 +1,14 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import { assertCanvasSize } from "./applyAndSend.ts";
 import { planeAxes, tczyx, toPlaneFrame, type SlicePlane } from "./renderer/slicePlane.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
 import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { placementInPlane, readPlacement, rectToScene, type Placement } from "./placement.ts";
-import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
+import type { FrameScale, TickContext, TickView } from "./renderLoopTypes.ts";
 import { compositeKey } from "./tickCommon.ts";
-import type { SceneSettings } from "./tickCommon.ts";
-import { outsideCut, readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
-import { sliceCut } from "./pipeline/planning/snapshot.ts";
-import type { SceneEpochs } from "./pipeline/epochs.ts";
-import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
-import type { Uploader } from "./pipeline/upload/uploader.ts";
+import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
+import type { MemberRosterEntry, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { comparisonClip } from "./comparison.ts";
 import type { PixelRect } from "./renderer/layerBatches.ts";
@@ -291,18 +285,6 @@ function clipSliceLayers(layers: SliceLayerParams[], start: number, clip: PixelR
   if (clip) for (let i = start; i < layers.length; i++) layers[i].clip = clip;
 }
 
-/** Result of the plan+fetch phase, passed to the upload+render phase. */
-interface SlicePlanResult {
-  memberRoster: Map<string, MemberRosterEntry[]>;
-  settings: SceneSettings;
-  layers: ResolvedLayers;
-  vpCx: number;
-  vpCy: number;
-  epochs: SceneEpochs;
-  /** Per-dataset memberId → entity index map. */
-  entityIndexByDataset: Map<string, Map<string, number>>;
-}
-
 /**
  * `rect`, device pixels of the canvas, in pixels of a backing store
  * `scale` times the canvas. Each edge rounds on its own, as the canvas's
@@ -320,58 +302,34 @@ export function scaleRect(rect: PixelRect, scale: number): PixelRect {
 }
 
 /**
- * Upload+render phase: deliver decoded chunks via Uploader, then build each
- * slice view's layer params and render it in its rectangle.
+ * The canvas at a slice view's backing scale: the frame's resolution,
+ * capped where a large canvas would hold more than a frame may.
  */
-function uploadAndRenderSlice(
-  ctx: TickContext,
-  uploader: Uploader,
-  planResult: SlicePlanResult,
-  shouldRender: boolean = true,
-): boolean {
-  const { scene, client, canvas } = ctx;
-
+export function sliceFrameScale(ctx: TickContext): FrameScale {
   const dpr = devicePixelRatio;
-  const fullW = Math.round(canvas.clientWidth * dpr);
-  const fullH = Math.round(canvas.clientHeight * dpr);
+  const fullW = Math.round(ctx.canvas.clientWidth * dpr);
+  const fullH = Math.round(ctx.canvas.clientHeight * dpr);
   // Zoom is scaled by the same factor below, so only resolution changes.
   const resolution = ctx.resolutionScale;
-  const backingScale = resolution * sliceBackingScale(fullW * resolution, fullH * resolution);
-  const canvasW = Math.max(1, Math.round(fullW * backingScale));
-  const canvasH = Math.max(1, Math.round(fullH * backingScale));
-
-  const drawn = drawnView(ctx);
-  const budgetExhausted = uploader.deliverToWorker(
-    ctx,
-    MAIN_VIEW_UPLOAD_BUDGET_BYTES,
-    (datasetId) => sliceCut(scene, drawn.id, planResult.layers.get(datasetId)),
-  );
-
-  if (!shouldRender) return budgetExhausted;
-
-  client.resize(canvasW, canvasH);
-  for (const view of ctx.views) {
-    if (view.mode !== "slice") continue;
-    // The drawn view draws the layers its plan resolved, which a coalesced
-    // tick keeps from the plan before.
-    const layers = view.id === drawn.id ? planResult.layers : readResolvedLayers(scene, view.id);
-    renderSliceView(ctx, planResult, layers, view, canvasW, canvasH, backingScale);
-  }
-  return budgetExhausted;
+  const scale = resolution * sliceBackingScale(fullW * resolution, fullH * resolution);
+  return {
+    canvasW: Math.max(1, Math.round(fullW * scale)),
+    canvasH: Math.max(1, Math.round(fullH * scale)),
+    scale,
+  };
 }
 
 /** Build `view`'s layer params and render it in its rectangle of the canvas. */
-function renderSliceView(
+export function renderSliceView(
   ctx: TickContext,
-  planResult: SlicePlanResult,
+  planResult: TickCoordinatorResult,
   resolvedLayers: ResolvedLayers,
   view: TickView,
-  canvasW: number,
-  canvasH: number,
-  backingScale: number,
+  frame: FrameScale,
 ): void {
   const { scene, client, datasets } = ctx;
   const { memberRoster, settings, entityIndexByDataset } = planResult;
+  const { canvasW, canvasH, scale: backingScale } = frame;
   const rect = scaleRect(view.rect, backingScale);
   const [, , viewW, viewH] = rect;
 
@@ -458,42 +416,6 @@ function renderSliceView(
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
   traceRecorder.noteFrameDispatched(frameSeq);
-}
-
-/**
- * Upload slice chunks and render. Returns true if upload budget was exhausted
- * (caller should schedule another frame).
- */
-export function tickSlice(
-  ctx: TickContext,
-  tickCoordinator: TickCoordinator,
-  uploader: Uploader,
-  minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
-  shouldRender: boolean = true,
-): boolean {
-  const { scene, canvas } = ctx;
-
-  const dpr = devicePixelRatio;
-  const canvasW = Math.round(canvas.clientWidth * dpr);
-  const canvasH = Math.round(canvas.clientHeight * dpr);
-  assertCanvasSize(scene, canvasW, canvasH, dpr);
-
-  const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
-  if (!orchResult) return false;
-
-  const vpCenter = scene.center(drawnView(ctx).id);
-  const planResult: SlicePlanResult = {
-    memberRoster: orchResult.memberRoster,
-    settings: orchResult.settings,
-    layers: orchResult.layers,
-    vpCx: vpCenter[0],
-    vpCy: vpCenter[1],
-    epochs: orchResult.epochs,
-    entityIndexByDataset: orchResult.entityIndexByDataset,
-  };
-
-  const result = uploadAndRenderSlice(ctx, uploader, planResult, shouldRender);
-  return result;
 }
 
 export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}

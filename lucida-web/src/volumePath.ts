@@ -1,21 +1,16 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
-import { assertCanvasSize } from "./applyAndSend.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
-import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
+import type { FrameScale, TickContext, TickView } from "./renderLoopTypes.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { computeScissorRect } from "./pipeline/upload/scissor.ts";
 import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import { labelModelMatrices } from "./renderer/labelLayout.ts";
 import { compositeKey } from "./tickCommon.ts";
-import type { DatasetSettings } from "./tickCommon.ts";
-import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
+import type { ResolvedLayers } from "./resolvedLayers.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { comparisonClip, intersectRects } from "./comparison.ts";
 import type { PixelRect } from "./renderer/layerBatches.ts";
-import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
-import type { Uploader } from "./pipeline/upload/uploader.ts";
-import type { SceneEpochs } from "./pipeline/epochs.ts";
+import type { TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
 import { scaleRect } from "./slicePath.ts";
 
 /**
@@ -125,67 +120,34 @@ export type VolumeState = Record<string, never>;
 
 export function createVolumeState(): VolumeState { return {}; }
 
-/** Data passed from the plan+fetch phase to the upload+render phase. */
-interface PlanResult {
-  memberRoster: Map<string, MemberRosterEntry[]>;
-  settings: { layerOrder: string[]; allSettings: Record<string, DatasetSettings> };
-  layers: ResolvedLayers;
-  /** The canvas's backing store, at the frame's render scale. */
-  canvasW: number;
-  canvasH: number;
-  /** Backing-store pixels per device pixel of the canvas. */
-  scale: number;
-  epochs: SceneEpochs;
-  /** Per-dataset memberId → entity index map. */
-  entityIndexByDataset: Map<string, Map<string, number>>;
-}
-
-
-/**
- * Upload+render phase: deliver decoded chunks via Uploader, unless uploads
- * are held, build layer params, and render. Returns true if more work
- * remains.
- */
-function uploadAndRenderVolume(
-  ctx: TickContext,
-  uploader: Uploader,
-  plan: PlanResult,
-  shouldRender: boolean,
-  holdUploads: boolean,
-): boolean {
-  const { scene } = ctx;
-
-  let budgetExhausted = false;
-  if (holdUploads) uploader.holdDelivery();
-  else budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
-
-  if (!shouldRender) return budgetExhausted;
-
-  const drawn = drawnView(ctx);
-  for (const view of ctx.views) {
-    if (view.mode !== "volume") continue;
-    // The drawn view draws the layers its plan resolved, which a coalesced
-    // tick keeps from the plan before.
-    const layers = view.id === drawn.id ? plan.layers : readResolvedLayers(scene, view.id);
-    renderVolumeView(ctx, plan, layers, view);
-  }
-  return budgetExhausted;
+/** The canvas at a volume view's render scale, which drops while the camera moves. */
+export function volumeFrameScale(ctx: TickContext): FrameScale {
+  // The plan sizes levels from the full-resolution canvas, so the scale
+  // lowers only what is drawn.
+  const scale = ctx.renderScale * ctx.resolutionScale;
+  return {
+    canvasW: Math.round(Math.round(ctx.canvas.clientWidth * devicePixelRatio) * scale),
+    canvasH: Math.round(Math.round(ctx.canvas.clientHeight * devicePixelRatio) * scale),
+    scale,
+  };
 }
 
 /** Build `view`'s layer params and render it in its rectangle of the canvas. */
-function renderVolumeView(
+export function renderVolumeView(
   ctx: TickContext,
-  plan: PlanResult,
+  plan: TickCoordinatorResult,
   resolvedLayers: ResolvedLayers,
   view: TickView,
+  frame: FrameScale,
 ): void {
   const { scene, client, datasets } = ctx;
-  const { memberRoster, settings, canvasW: fullCanvasW, canvasH: fullCanvasH, entityIndexByDataset } = plan;
+  const { memberRoster, settings, entityIndexByDataset } = plan;
+  const { canvasW: fullCanvasW, canvasH: fullCanvasH } = frame;
   const { layerOrder, allSettings } = settings;
   // Cursors keep their size whatever the render scale, so they read the
   // view in device pixels.
   const [, , fullW, fullH] = view.rect;
-  const rect = scaleRect(view.rect, plan.scale);
+  const rect = scaleRect(view.rect, frame.scale);
   const [, , canvasW, canvasH] = rect;
 
   // The eye drives the shader's ray-march; `rayHitLocal` is residency-only.
@@ -264,46 +226,6 @@ function renderVolumeView(
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
   traceRecorder.noteFrameDispatched(frameSeq);
-}
-
-/**
- * Upload volume chunks and render. Returns true if upload budget was exhausted
- * (caller should schedule another frame).
- */
-export function tickVolume(
-  ctx: TickContext,
-  tickCoordinator: TickCoordinator,
-  uploader: Uploader,
-  minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
-  shouldRender: boolean = true,
-): boolean {
-  const { scene } = ctx;
-
-  // Use full-res viewport for chunk planning so LOD selection isn't affected
-  // by the render resolution, which drops while the camera moves.
-  const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
-  const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
-  assertCanvasSize(scene, fullW, fullH, devicePixelRatio);
-
-  const scale = ctx.renderScale * ctx.resolutionScale;
-  const canvasW = Math.round(fullW * scale);
-  const canvasH = Math.round(fullH * scale);
-
-  const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
-  if (!orchResult) return false;
-
-  const planResult: PlanResult = {
-    memberRoster: orchResult.memberRoster,
-    settings: orchResult.settings,
-    layers: orchResult.layers,
-    canvasW, canvasH, scale,
-    epochs: orchResult.epochs,
-    entityIndexByDataset: orchResult.entityIndexByDataset,
-  };
-
-  // Read after the plan, which notes whether the view moved.
-  const holdUploads = tickCoordinator.msUntilUploadsResume(performance.now()) !== null;
-  return uploadAndRenderVolume(ctx, uploader, planResult, shouldRender, holdUploads);
 }
 
 export function clearVolumeForDataset(_state: VolumeState, _dsId: string): void {}
