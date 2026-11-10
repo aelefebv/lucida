@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { pushLabelLayers } from "./slicePath.ts";
+import { IDENTITY_PLACEMENT } from "./placement.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberRosterEntry } from "./pipeline/tickCoordinator.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "./manifestTypes.ts";
@@ -57,6 +58,7 @@ describe("pushLabelLayers", () => {
         labelSpec("region-a", "img-0:label:region-a"),
       ]),
       members,
+      IDENTITY_PLACEMENT,
       allOn(3),
     );
     expect(layers).toHaveLength(3);
@@ -71,7 +73,7 @@ describe("pushLabelLayers", () => {
 
   it("aligns the overlay to the source footprint (4x-coarse label → source extent)", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b")]), members, allOn(1));
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b")]), members, IDENTITY_PLACEMENT, allOn(1));
     expect(layers[0].dataW).toBeCloseTo(348, 3); // 87 * 4 / 1
     expect(layers[0].dataH).toBeCloseTo(340, 3);
     expect(layers[0].offsetX).toBe(0);
@@ -81,13 +83,13 @@ describe("pushLabelLayers", () => {
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, allOn(1));
+    pushLabelLayers(layers, manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, IDENTITY_PLACEMENT, allOn(1));
     expect(layers[0].labelColors).toEqual(colors);
   });
 
   it("emits nothing for a label-less manifest", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([]), members);
+    pushLabelLayers(layers, manifest([]), members, IDENTITY_PLACEMENT);
     expect(layers).toHaveLength(0);
   });
 
@@ -100,6 +102,7 @@ describe("pushLabelLayers", () => {
         labelSpec("seg32", "img-0:label:seg32"),
       ]),
       members,
+      IDENTITY_PLACEMENT,
       allOn(2),
     );
     expect(layers).toHaveLength(1);
@@ -108,7 +111,7 @@ describe("pushLabelLayers", () => {
 
   it("MAJOR: renders nothing for a uint8-only label (matches the fetch skip)", () => {
     const layers: SliceLayerParams[] = [];
-    pushLabelLayers(layers, manifest([labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8")]), members, allOn(1));
+    pushLabelLayers(layers, manifest([labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8")]), members, IDENTITY_PLACEMENT, allOn(1));
     expect(layers).toHaveLength(0);
   });
 
@@ -139,6 +142,7 @@ describe("pushLabelLayers", () => {
       layers,
       dsm,
       roster,
+      IDENTITY_PLACEMENT,
       [{ visible: true, opacity: 0.5 }, { visible: true, opacity: 0.5 }],
       memberPositions,
     );
@@ -148,5 +152,19 @@ describe("pushLabelLayers", () => {
     // Not [0, 0], which would stack the off-roster label on the first group.
     expect([d3?.offsetX, d3?.offsetY]).toEqual([0, 0]);
     expect([m13?.offsetX, m13?.offsetY]).toEqual([5000, 6000]);
+  });
+
+  it("places each overlay where its dataset's placement puts the source", () => {
+    const layers: SliceLayerParams[] = [];
+    pushLabelLayers(
+      layers,
+      manifest([labelSpec("region-b", "img-0:label:region-b")]),
+      [{ imageId: "img-0", position: [10, 20] }],
+      { offset: [100, 200, 0], scale: [0.5, 2, 1] },
+      allOn(1),
+    );
+    expect(layers).toHaveLength(1);
+    expect([layers[0].offsetX, layers[0].offsetY]).toEqual([105, 240]);
+    expect([layers[0].dataW, layers[0].dataH]).toEqual([348 * 0.5, 340 * 2]);
   });
 });

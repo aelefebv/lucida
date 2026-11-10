@@ -293,6 +293,7 @@ describe("tickMinimap overview/overlay split", () => {
       // 36 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj, [35] topDown.
       minimap_camera: () => new Float32Array(36),
       member_positions: () => JSON.stringify({ m0: [0, 0] }),
+      dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
       member_render_ids: () => JSON.stringify(["m0"]),
       member_render_matrices: () => new Float32Array(32),
       scene_model_matrix_for: () => new Float32Array(16),
@@ -374,6 +375,17 @@ describe("tickMinimap overview/overlay split", () => {
     // The static layer is drawn in the minimap's own fixed viewProj, which a 2D
     // pan never moves, so it is reused. Only the viewport rect above changed.
     expect(overlay.mock.calls[1][0].staticDirty).toBe(false);
+  });
+
+  it("hands the overlay each member's box placed in the scene frame", () => {
+    const scene = makeScene();
+    // Samples half a scene unit across, the frame starting at scene (50, 20).
+    scene.wasm.dataset_placement = () => new Float64Array([50, 20, 0, 0.5, 0.5, 1]);
+    const overlay = vi.fn();
+    tickMinimap(makeCtx(scene, "slice", { n: 0 }), makeState(overlay), 0);
+    const [member] = overlay.mock.calls[0][0].members;
+    expect(member.position).toEqual([50, 20]);
+    expect([member.width, member.height]).toEqual([250, 250]);
   });
 
   it("skips the O(N) overview redraw on a slice-mode zoom", () => {

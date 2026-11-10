@@ -47,13 +47,6 @@ Options:
                          always chunked at 1. Repeat the flag to give each
                          level its own chunk shape; the last one repeats for
                          the remaining levels. Default 64.
-    --spacing F | Y,X | Z,Y,X
-                         The physical size of a level 0 sample along each
-                         spatial axis, one value or per axis. Default 1. The
-                         picture is drawn across the dataset's extent in
-                         samples, so with spacing that makes the physical
-                         extent a cube, its bright spot is a ball in physical
-                         space.
     --clip-chunks        Clip each level's chunk shape to that level's shape,
                          as writers do that never declare a chunk larger than
                          its array. With tiles of different sizes, a coarse
@@ -75,6 +68,19 @@ Options:
                          uint32 ids of a grid of balls, one ball per 32 level 0
                          samples along each spatial axis, on the image's levels,
                          chunks and shards. A label has no channel axis.
+    --scale S | Y,X | Z,Y,X
+                         The extent of one level 0 sample, in the same axis
+                         order as --size, in --unit when one is given. One value
+                         applies to every spatial axis. Default 1. Each coarser
+                         level's scale is this times the running product of the
+                         factors.
+    --translation T | Y,X | Z,Y,X
+                         Where level 0's first sample sits, in the same axis
+                         order and units as --scale. Default 0. Each coarser
+                         level is shifted by half its extra sample size, so
+                         sample centers keep their place.
+    --unit U             Length unit written on every spatial axis, such as
+                         micrometer or nanometer. Omit to write none.
     --level-index        Give every sample at level L the value L, so a
                          screenshot names the level that rendered. Without it,
                          every level samples one smooth picture at its own
@@ -127,6 +133,10 @@ Examples:
 
     A float volume whose values reach below zero:
         uv run extras/synthetic_ome_zarr.py float.ome.zarr --size 64,256,256 --dtype float32 --range=-200,1000
+
+    Two images of one region at different sample sizes, the second moved:
+        uv run extras/synthetic_ome_zarr.py coarse.ome.zarr --size 64,64 --scale 2 --unit micrometer
+        uv run extras/synthetic_ome_zarr.py fine.ome.zarr --size 256,256 --scale 500 --unit nanometer --translation 0,32000
 
     A large collection for measurements:
         uv run extras/synthetic_ome_zarr.py big.ome.zarr --tiles 216 --size 2048,2048 --channels 3 --chunk 64 --shard 512
@@ -192,10 +202,12 @@ class Options:
     factors: tuple[tuple[int, ...], ...] = ((DEFAULT_FACTOR, DEFAULT_FACTOR),)
     chunks: tuple[tuple[int, ...], ...] = ((DEFAULT_CHUNK, DEFAULT_CHUNK),)
     clip_chunks: bool = False
-    spacing: tuple[float, ...] | None = None
     shard: tuple[int, ...] | None = None
     sparse: bool = False
     unwritten_levels: tuple[int, ...] = ()
+    scale: tuple[float, ...] | None = None
+    translation: tuple[float, ...] | None = None
+    unit: str | None = None
     labels: bool = False
     level_index: bool = False
     dtype: str = DEFAULT_DTYPE
@@ -283,10 +295,10 @@ def _positive_ints(text: str) -> tuple[int, ...]:
     return values
 
 
-def _positive_floats(text: str) -> tuple[float, ...]:
+def _finite_floats(text: str) -> tuple[float, ...]:
     values = tuple(float(part) for part in text.split(","))
-    if not all(math.isfinite(v) and v > 0 for v in values):
-        raise ValueError("every value must be a positive finite number")
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError("every value must be finite")
     return values
 
 
@@ -297,7 +309,7 @@ def _value_range(text: str) -> tuple[float, float]:
     return parts[0], parts[1]
 
 
-def _per_axis(values: tuple[int, ...], ndim: int, flag: str, parser: argparse.ArgumentParser) -> tuple[int, ...]:
+def _per_axis(values: tuple, ndim: int, flag: str, parser: argparse.ArgumentParser) -> tuple:
     """Expand a one-value form to every spatial axis and check the arity."""
     if len(values) == 1:
         return values * ndim
@@ -320,11 +332,13 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--levels", type=int, default=DEFAULT_LEVELS, metavar="N", help="pyramid levels (default 3)")
     parser.add_argument("--factor", type=_positive_ints, action="append", metavar="F|F,F[,F]", help="scale factor to the next level, one value or per axis; repeat for per-level factors (default 2)")
     parser.add_argument("--chunk", type=_positive_ints, action="append", metavar="S|S,S[,S]", help="chunk shape in samples, one value or per axis; repeat for per-level chunk shapes (default 64)")
-    parser.add_argument("--spacing", type=_positive_floats, metavar="F|F,F[,F]", help="physical size of a level 0 sample, one value or per axis (default 1)")
     parser.add_argument("--clip-chunks", action="store_true", help="clip each level's chunk shape to the level's shape")
     parser.add_argument("--shard", type=_positive_ints, metavar="S|S,S[,S]", help="shard shape in samples, a multiple of --chunk; presence means sharded")
     parser.add_argument("--sparse", action="store_true", help="leave a checkerboard of chunks unwritten")
     parser.add_argument("--unwritten-level", type=int, action="append", default=[], metavar="L", help="declare level L but write no chunk for it; repeatable")
+    parser.add_argument("--scale", type=_finite_floats, metavar="S|S,S[,S]", help="extent of one level 0 sample, one value or per axis (default 1)")
+    parser.add_argument("--translation", type=_finite_floats, metavar="T|T,T[,T]", help="where level 0's first sample sits, one value or per axis (default 0)")
+    parser.add_argument("--unit", metavar="U", help="length unit written on every spatial axis (default none)")
     parser.add_argument("--labels", action="store_true", help="also write a label image of uint32 balls beside each image")
     parser.add_argument("--level-index", action="store_true", help="give every sample at level L the value L")
     parser.add_argument("--dtype", choices=DTYPES, default=DEFAULT_DTYPE, help="sample data type (default uint16)")
@@ -359,7 +373,6 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
 
     factors = tuple(_per_axis(f, ndim, "--factor", parser) for f in (args.factor or [(DEFAULT_FACTOR,)]))
     chunks = tuple(_per_axis(c, ndim, "--chunk", parser) for c in (args.chunk or [(DEFAULT_CHUNK,)]))
-    spacing = None if args.spacing is None else _per_axis(args.spacing, ndim, "--spacing", parser)
     shard = None
     if args.shard is not None and args.clip_chunks:
         parser.error("--clip-chunks cannot be combined with --shard, which must be a multiple of every chunk")
@@ -369,6 +382,10 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
             for axis, (s, c) in enumerate(zip(shard, chunk)):
                 if s % c != 0:
                     parser.error(f"--shard must be a multiple of every --chunk on every axis; axis {axis} has {s} % {c} != 0")
+    scale = None if args.scale is None else _per_axis(args.scale, ndim, "--scale", parser)
+    if scale is not None and any(v <= 0 for v in scale):
+        parser.error("--scale takes positive values")
+    translation = None if args.translation is None else _per_axis(args.translation, ndim, "--translation", parser)
     unwritten = tuple(sorted(set(args.unwritten_level)))
     for level in unwritten:
         if level < 1 or level >= args.levels:
@@ -394,10 +411,12 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         factors=factors,
         chunks=chunks,
         clip_chunks=args.clip_chunks,
-        spacing=spacing,
         shard=shard,
         sparse=args.sparse,
         unwritten_levels=unwritten,
+        scale=scale,
+        translation=translation,
+        unit=args.unit,
         labels=args.labels,
         level_index=args.level_index,
         dtype=args.dtype,
@@ -438,17 +457,23 @@ def ome_attributes(opts: Options, blocks: dict) -> dict:
 def multiscale_block(opts: Options, levels: list[Level], name: str, axis_names: list[str]) -> dict:
     """One multiscale over arrays with these axes, the leading ones unscaled."""
     axes = [{"name": axis, "type": AXIS_TYPES[axis]} for axis in axis_names]
-    leading_scale = [1.0] * (len(axis_names) - opts.ndim)
-    spacing = opts.spacing or (1.0,) * opts.ndim
-    datasets = [
-        {
-            "path": f"{opts.level_prefix}{level.index}",
-            "coordinateTransformations": [
-                {"type": "scale", "scale": leading_scale + [float(d * s) for d, s in zip(spacing, level.scale)]}
-            ],
-        }
-        for level in levels
-    ]
+    if opts.unit is not None:
+        for axis in axes:
+            if axis["type"] == "space":
+                axis["unit"] = opts.unit
+    leading = [0.0] * (len(axis_names) - opts.ndim)
+    sample = opts.scale or (1.0,) * opts.ndim
+    origin = opts.translation or (0.0,) * opts.ndim
+    datasets = []
+    for level in levels:
+        scale = [factor * s for factor, s in zip(level.scale, sample)]
+        transforms = [{"type": "scale", "scale": [1.0] * len(leading) + scale}]
+        if opts.translation is not None:
+            # A coarser sample spans several finer ones; its center moves by
+            # half the difference, so every level's centers sit where level 0's do.
+            shift = [o + (s - s0) / 2 for o, s, s0 in zip(origin, scale, sample)]
+            transforms.append({"type": "translation", "translation": leading + shift})
+        datasets.append({"path": f"{opts.level_prefix}{level.index}", "coordinateTransformations": transforms})
     return {"name": name, "axes": axes, "datasets": datasets}
 
 

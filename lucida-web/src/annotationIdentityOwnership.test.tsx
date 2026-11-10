@@ -14,13 +14,14 @@ import {
 import { __resetPreferencesForTesting, setPreference } from "./theme/preferences.ts";
 
 // Minimal WasmScene stub: the overlay only reads annotations() (per dataset)
-// plus zoom()/center() each RAF frame for projection. Everything else the
-// component touches is null-guarded.
+// plus zoom()/center() and the dataset's placement each RAF frame for
+// projection. Everything else the component touches is null-guarded.
 function stubScene(annotations: Annotation[]): WasmScene {
   return {
     annotations: () => JSON.stringify(annotations),
     zoom: () => 1,
     center: () => [0, 0] as [number, number],
+    dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
   } as unknown as WasmScene;
 }
 

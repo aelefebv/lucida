@@ -53,6 +53,7 @@ interface MockScene {
   dataset_volume_shape: (id: string) => Uint32Array;
   export_presence: () => string;
   export_dataset_presence: () => string;
+  camera_space: () => string;
   import_presence: (json: string) => void;
 }
 
@@ -90,6 +91,7 @@ function makeMockScene(): MockScene {
     dataset_volume_shape: () => new Uint32Array(0),
     export_presence: () => JSON.stringify(presence),
     export_dataset_presence: () => JSON.stringify({ dataset_order: [], dataset_settings: {} }),
+    camera_space: () => "null",
     import_presence: (json: string) => {
       const obj = JSON.parse(json);
       m.importedViews.push(obj.view);

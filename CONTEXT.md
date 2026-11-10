@@ -272,10 +272,21 @@ every visible dataset, which a new canvas or new content fits again. An
 there is data, and a client never persists it.
 _Avoid_: auto-fit (fitting follows the camera's state, not an event such as an open)
 
+**Scene frame**:
+The one frame every dataset in a scene is placed in, by its declared scale,
+origin and length units, so datasets over one physical region overlay. The
+first dataset in the document fixes its unit and origin. The slice camera
+views it directly, and the volume cameras view it as world space. When either
+changes, a placed camera moves into the new one and keeps its region, and a
+saved view records the one its camera was saved in.
+_Avoid_: world (unqualified; world space is the volume cameras' view of it)
+
 **Slice plane**:
-The plane a slice view cuts: `xy`, `xz` or `yz`. The two axes it names are on
-screen, Z always drawn down, and the third is cut at an axis position. An `xz`
-or `yz` view is a side view, which draws Z at its physical spacing.
+The plane of the scene frame a slice view cuts: `xy`, `xz` or `yz`. The two
+axes it names are on screen, Z always drawn down, and the third is cut at an
+axis position. An `xz` or `yz` view is a side view: it shows Z as the scene
+frame places it, at its physical spacing, and cuts Y or X at a place in the
+scene frame, so datasets over one region cut the same plane.
 _Avoid_: orientation, section (unqualified)
 
 ## Surfaces

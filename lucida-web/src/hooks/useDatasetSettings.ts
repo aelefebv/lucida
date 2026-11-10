@@ -233,6 +233,7 @@ export function buildLayerInfos(
       displayedLevel: levels?.displayed ?? null,
       displayedCoarserThanTarget: levels?.coarserThanTarget ?? false,
       downsamplingMethod: ds?.manifest.images[0]?.multiscale.downsampling_method ?? null,
+      physicalScale: scene.dataset_has_physical_scale(id),
     };
   });
 }

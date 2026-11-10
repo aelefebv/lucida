@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
+use crate::placement::Affine;
 use crate::slice_plane::SlicePlane;
 use lucida_content::SpatialAxis;
 
@@ -13,9 +14,10 @@ pub struct ViewState {
     /// Z slab range. A single slice is a range of length 1 (e.g. 42..43).
     pub z_range: Range<u32>,
     pub t: u32,
-    /// The plane an XZ view cuts along Y, and the one a YZ view cuts along
-    /// X. Absent until a view of that plane first opens, which picks the
-    /// middle of the data; absent reads as plane 0.
+    /// The place in the scene frame an XZ view cuts along Y, and the one a YZ
+    /// view cuts along X, in the frame's units. Absent until a view of that
+    /// plane first opens, which picks the middle of the data; absent reads
+    /// as 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +77,18 @@ impl ViewState {
             SpatialAxis::Z => self.z_range.clone(),
             SpatialAxis::Y => single(self.y),
             SpatialAxis::X => single(self.x),
+        }
+    }
+
+    /// Move the X and Y axis positions, places in one scene frame, by `map`
+    /// into another, keeping the plane each names.
+    pub fn map_cut_positions(&mut self, map: &Affine) {
+        for (a, position) in [(1, &mut self.y), (0, &mut self.x)] {
+            if let Some(index) = position {
+                let mut at = [0.0; 3];
+                at[a] = *index as f64 + 0.5;
+                *index = map.apply(at)[a].floor().clamp(0.0, u32::MAX as f64) as u32;
+            }
         }
     }
 

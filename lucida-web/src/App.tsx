@@ -18,6 +18,7 @@ import { FpsCounter } from "./components/FpsCounter.tsx";
 import { extractCollectionData } from "./components/CollectionSelector.tsx";
 import type { VoxelRect } from "./pipeline/layoutBuilders.ts";
 import { frameRegionOnCanvas } from "./applyAndSend.ts";
+import { readPlacement, sceneToFrame } from "./placement.ts";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
@@ -843,11 +844,14 @@ function Viewer({
         if (!ws || !canvas) return;
         revealCanvas();
         bridge.breakFollow();
-        frameRegionOnCanvas(ws, canvas, bounds);
+        frameRegionOnCanvas(ws, canvas, ds.id, bounds);
         emitPresenceWithUrl();
         requestRender(render.loopRef.current, "collection_group_click");
       },
-      getViewCenter: () => scene.wasmSceneRef.current?.center() ?? null,
+      getViewCenter: () => {
+        const ws = scene.wasmSceneRef.current;
+        return ws ? sceneToFrame(readPlacement(ws, ds.id), [ws.center()[0], ws.center()[1]]) : null;
+      },
     };
   })();
 

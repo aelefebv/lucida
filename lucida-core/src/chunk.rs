@@ -428,7 +428,7 @@ pub fn enumerate_batch(view: &ChunkView, queries: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::{Camera, SliceCut};
+    use crate::camera::Camera;
 
     /// A level from `[Z, Y, X]` shapes, one timepoint and one channel.
     fn geo(level: u32, shape_zyx: [u64; 3], chunk_zyx: [u64; 3]) -> LevelGeometry {
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_slice_view_at_the_origin_samples_one_chunk() {
-        let region = Camera::new_2d([512, 512]).visible_region(&SliceCut::planes(0..1), None, None);
+        let region = Camera::new_2d([512, 512]).visible_region(&(0..1), None, None);
         let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
         let (found, _) = enumerate(&ChunkView::new(&region, 0.0), &whole(&g));
         assert_eq!(cells(&found), [(0, 0, 0)]);
@@ -483,7 +483,7 @@ mod tests {
         if let Camera::Slice(ref mut v) = cam {
             v.center = [512.0, 512.0];
         }
-        let region = cam.visible_region(&SliceCut::planes(0..1), None, None);
+        let region = cam.visible_region(&(0..1), None, None);
         let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
         let (found, _) = enumerate(&ChunkView::new(&region, 0.0), &whole(&g));
         assert_eq!(found.len(), 4);
@@ -652,7 +652,7 @@ mod tests {
     fn a_slice_view_samples_one_chunk_where_its_plane_spans_two_level_planes() {
         // Plane 2 of 10 spans level planes 0 and 1 of 4. Its center is in
         // plane 1, so only the chunk holding plane 1 is wanted.
-        let region = Camera::new_2d([512, 512]).visible_region(&SliceCut::planes(2..3), None, None);
+        let region = Camera::new_2d([512, 512]).visible_region(&(2..3), None, None);
         let full = geo(0, [10, 512, 512], [1, 512, 512]);
         let level1 = geo(1, [4, 256, 256], [1, 256, 256]);
         let query = ChunkQuery::new(&level1, &full, [0.0, 0.0], RENDER_RADIUS_DISABLED);
@@ -762,7 +762,7 @@ mod tests {
         if let Camera::Slice(ref mut v) = cam {
             v.center = [300.0, 200.0];
         }
-        let region = cam.visible_region(&SliceCut::planes(3..4), None, None);
+        let region = cam.visible_region(&(3..4), None, None);
         let json = serde_json::to_string(&region).unwrap();
         let (read, held) = (
             ChunkView::from_json(&json, 0.25).unwrap(),

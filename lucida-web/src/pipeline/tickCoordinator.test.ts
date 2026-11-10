@@ -141,7 +141,6 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     visible_region: (_dsId: string) => JSON.stringify(config.visibleRegion),
     slice_plane: () => "xy",
     cut_index: () => 0,
-    slice_scales: () => [1, 1],
     t: () => config.t,
     z: () => config.z,
     resolved_layers: () => resolvedLayersJson(config.datasetOrder, config.allSettings, config),

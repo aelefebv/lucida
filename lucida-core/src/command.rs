@@ -567,6 +567,9 @@ impl Scene {
     pub fn apply(&mut self, cmd: Command) {
         match cmd {
             Command::Document(doc_cmd) => {
+                // The datasets fix the camera spaces, so a change to them
+                // carries a placed camera out of the spaces they fixed before.
+                let spaces_before = self.camera_space();
                 // Handle Scene-level side effects for document commands.
                 // SetActiveLayout needs special ordering: apply doc state first,
                 // then rebuild derived. All others do side effects first, then apply.
@@ -583,7 +586,7 @@ impl Scene {
                         self.derived.insert(dataset_id, derived);
                     }
                     self.epochs.layout += 1;
-                    self.content_changed();
+                    self.content_changed(spaces_before);
                     return;
                 }
                 // Opening or removing a dataset changes what a framed camera fits.
@@ -722,7 +725,7 @@ impl Scene {
                 }
                 self.document.apply(doc_cmd);
                 if reframes {
-                    self.content_changed();
+                    self.content_changed(spaces_before);
                 }
             }
             Command::Viewport(vp_cmd) => self.apply_viewport(vp_cmd),

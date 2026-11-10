@@ -9,6 +9,7 @@ import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import { datasetSampleFormat } from "./renderer/dataTypeUtil.ts";
 import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import { compositeKey } from "./tickCommon.ts";
+import { readPlacement, rectToScene } from "./placement.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;
@@ -261,7 +262,10 @@ export interface SliceViewportMemberInput {
   memberId: string;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
-  /** Where the member's top-left corner sits in the slice view's scene XY. */
+  /**
+   * Where the member's top-left corner sits in the slice view's scene XY,
+   * and its extent there: its layout box, placed as its dataset is.
+   */
   position: [number, number];
   width: number;
   height: number;
@@ -603,6 +607,7 @@ function buildMinimapOverview(
     }
 
     const memberMatrices = readMemberRenderMatrices(scene, dsId);
+    const placement = readPlacement(scene, dsId);
 
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
@@ -625,14 +630,16 @@ function buildMinimapOverview(
 
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
       if (level0) {
+        const [x, y] = memberPositions[img.owner] ?? memberPositions[memberId] ?? [0, 0];
+        const placed = rectToScene(placement, x, y, level0.shape[Axis.X], level0.shape[Axis.Y]);
         sliceViewportMembers.push({
           datasetId: dsId,
           memberId,
           modelMatrix: model,
           invModelMatrix: invModel,
-          position: memberPositions[img.owner] ?? memberPositions[memberId] ?? [0, 0],
-          width: level0.shape[Axis.X],
-          height: level0.shape[Axis.Y],
+          position: [placed.x, placed.y],
+          width: placed.w,
+          height: placed.h,
           depth: level0.shape[Axis.Z],
         });
       }

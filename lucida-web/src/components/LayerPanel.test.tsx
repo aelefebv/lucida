@@ -57,6 +57,7 @@ function layer(overrides: Partial<LayerInfo> = {}): LayerInfo {
     displayedLevel: null,
     displayedCoarserThanTarget: false,
     downsamplingMethod: null,
+    physicalScale: true,
     ...overrides,
   };
 }
@@ -654,6 +655,15 @@ describe("LayerPanel level readout", () => {
 
     await renderLevels({ downsamplingMethod: null });
     expect(screen.queryByLabelText("original.zarr downsampling method")).toBeNull();
+  });
+
+  it("says when the data has no physical scale", async () => {
+    await renderLevels({ physicalScale: false });
+    expect(screen.getByLabelText("original.zarr physical scale").textContent).toBe("No physical scale");
+    cleanup();
+
+    await renderLevels({ physicalScale: true });
+    expect(screen.queryByLabelText("original.zarr physical scale")).toBeNull();
   });
 });
 

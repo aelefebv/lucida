@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis, resolveIndex, type IndexChange } from "../axes.ts";
-import { cutAxis, tczyx, type SlicePlane } from "../renderer/slicePlane.ts";
+import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { requestRender } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -38,15 +38,18 @@ export function useDimensions({
   // them into each smaller layer. `datasetsVersion` re-renders on every Map
   // mutation, so reading the ref here is current.
   const cut = cutAxis(slicePlane);
-  let dimZ = 1, dimT = 1, dimCut = 1;
+  let dimZ = 1, dimT = 1;
   void datasetsVersion;
   // eslint-disable-next-line react-hooks/refs
   for (const ds of datasetsRef.current.values()) {
     const shape = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
     dimZ = Math.max(dimZ, shape[Axis.Z]);
     dimT = Math.max(dimT, shape[Axis.T]);
-    dimCut = Math.max(dimCut, shape[tczyx(cut)]);
   }
+  // A side view's position is a place in the scene frame, which the scene
+  // measures across what is visible.
+  // eslint-disable-next-line react-hooks/refs
+  const dimCut = cut === "z" ? dimZ : (wasmSceneRef.current?.cut_extent() ?? 1);
 
   // Saved-view clamping needs T/C counts, which the scene can't supply. An
   // unloaded dataset returns `{}`, leaving every axis unclamped.

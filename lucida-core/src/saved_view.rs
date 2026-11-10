@@ -22,7 +22,8 @@ use lucida_content::{DatasetId, LayoutId};
 use wasm_bindgen::prelude::*;
 
 use crate::camera::{Arcball, Camera, Framing};
-use crate::scene::{DatasetDisplaySettings, DisplayState};
+use crate::placement::CameraSpace;
+use crate::scene::{DatasetDisplaySettings, DisplayState, Scene};
 use crate::view::ViewState;
 
 mod payload;
@@ -114,6 +115,15 @@ pub struct SavedView {
     /// the type-level doc.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub auto_contrast: IndexMap<DatasetId, bool>,
+
+    /// The spaces `camera`'s numbers are in, those of the scene it was saved
+    /// from. Its datasets fixed them, so a restore carries a placed camera
+    /// from them into its own ([`Self::camera_in`]) and shows the region
+    /// saved, whichever dataset the restoring document holds first. Absent,
+    /// the numbers are in the restoring scene's own spaces, which every view
+    /// saved before this field existed assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_space: Option<CameraSpace>,
 }
 
 /// The JSON shape of [`SavedView`].
@@ -133,6 +143,8 @@ struct SavedViewWire {
     dataset_settings: IndexMap<DatasetId, DatasetDisplaySettings>,
     #[serde(default)]
     auto_contrast: IndexMap<DatasetId, bool>,
+    #[serde(default)]
+    camera_space: Option<CameraSpace>,
 }
 
 impl From<SavedViewWire> for SavedView {
@@ -159,6 +171,7 @@ impl From<SavedViewWire> for SavedView {
             dataset_order: wire.dataset_order,
             dataset_settings,
             auto_contrast: wire.auto_contrast,
+            camera_space: wire.camera_space,
         }
     }
 }
@@ -208,7 +221,28 @@ impl SavedView {
             dataset_order: Vec::new(),
             dataset_settings: IndexMap::new(),
             auto_contrast: IndexMap::new(),
+            camera_space: None,
         }
+    }
+
+    /// This view's camera in `scene`'s spaces, carried from the ones it was
+    /// saved in should they differ.
+    pub fn camera_in(&self, scene: &Scene) -> Camera {
+        let mut camera = self.camera.clone();
+        if let Some(from) = &self.camera_space {
+            scene.carry_camera(&mut camera, from);
+        }
+        camera
+    }
+
+    /// This view's selectors in `scene`'s spaces: its side-view axis positions
+    /// carried from the spaces it was saved in should they differ.
+    pub fn view_in(&self, scene: &Scene) -> ViewState {
+        let mut view = self.view.clone();
+        if let Some(from) = &self.camera_space {
+            scene.carry_view(&mut view, from);
+        }
+        view
     }
 
     /// Clear the source-URL list (`datasets`), leaving every workspace-local
@@ -470,6 +504,29 @@ mod tests {
         assert!(back.dataset_order.is_empty());
         assert!(back.dataset_settings.is_empty());
         assert!(back.auto_contrast.is_empty());
+        assert!(back.camera_space.is_none());
+    }
+
+    #[test]
+    fn the_camera_space_rides_last_and_only_when_recorded() {
+        const SPACE: &str = r#"{"frame":{"spacing":[0.5,0.5,2.0],"origin":[3.0,0.0,0.0],"meters":[1e-6,1e-6,1e-6]},"world":{"extent":512.0,"top":256.0}}"#;
+        let mut v = sample_view();
+        let without = serde_json::to_string(&v).unwrap();
+        assert!(!without.contains("camera_space"), "{without}");
+
+        v.camera_space = Some(serde_json::from_str(SPACE).unwrap());
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(
+            json.ends_with(&format!(r#","camera_space":{SPACE}}}"#)),
+            "{json}"
+        );
+        assert_round_trips(&v);
+        let back: SavedView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.camera_space, v.camera_space);
+        // The link codec leaves it as it is.
+        let decoded: SavedView =
+            serde_json::from_value(decode_payload(&v.to_payload()).unwrap()).unwrap();
+        assert_eq!(decoded.camera_space, v.camera_space);
     }
 
     #[test]

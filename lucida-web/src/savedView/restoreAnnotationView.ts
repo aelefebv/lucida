@@ -12,7 +12,7 @@ import type { ViewportCommand } from "../commands.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import { clampViewIndices, clampNotice, datasetDisplayCommands } from "./applier.ts";
 import type { DimensionExtentsResolver, LabelNamesResolver } from "./applier.ts";
-import type { Camera, DatasetId, SavedView } from "./types.ts";
+import type { Camera, CameraSpace, DatasetId, SavedView } from "./types.ts";
 
 /** Apply one command locally, never sent to peers. Inlined rather than importing
  * `applyViewportCommand` so the module is visibly local-only. */
@@ -154,7 +154,7 @@ export function restoreAnnotationView({
     end: clamped.zEnd,
   });
 
-  importCameraOnly(scene, view.camera);
+  importCameraOnly(scene, view);
 
   return {
     cameraModeChanged: mode.changed,
@@ -201,12 +201,16 @@ function restoreDatasetDisplay(
   }
 }
 
-/** Import only the camera shape, keeping the live view and display in presence.
- * Mirrors `SavedViewApplier.importCameraView` without needing an applier
- * instance. A camera the WASM importer rejects is skipped so the rest of the
- * restore stands, instead of throwing out of the navigate handler. */
-function importCameraOnly(scene: WasmScene, camera: Camera): void {
-  let presence: { camera: Camera; view: unknown; display: unknown };
+/** Import only the camera shape, with the spaces it was saved in, keeping the
+ * live view and display in presence. Mirrors `importCameraView` in
+ * `applier.ts` without needing an applier instance. A camera the WASM importer
+ * rejects is skipped so the rest of the restore stands, instead of throwing out
+ * of the navigate handler. */
+function importCameraOnly(
+  scene: WasmScene,
+  { camera, camera_space }: Pick<SavedView, "camera" | "camera_space">,
+): void {
+  let presence: { camera: Camera; view: unknown; display: unknown; camera_space?: CameraSpace };
   try {
     presence = JSON.parse(scene.export_presence()) as {
       camera: Camera;
@@ -218,6 +222,7 @@ function importCameraOnly(scene: WasmScene, camera: Camera): void {
     return;
   }
   presence.camera = camera;
+  presence.camera_space = camera_space;
   try {
     guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
   } catch (e) {

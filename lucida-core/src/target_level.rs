@@ -90,19 +90,6 @@ pub fn target_level(pixels_per_sample: f64, shape_ratios: &[f64], previous: Opti
 /// ratio and is never the target. In a slice view that is a level that only
 /// downsamples `z`.
 pub fn level_shape_ratios(levels: &[LevelGeometry], axes: &[usize]) -> Vec<f64> {
-    weighted_level_shape_ratios(levels, axes, &vec![1.0; axes.len()])
-}
-
-/// [`level_shape_ratios`] for a view that draws one level-0 sample along
-/// `axes[i]` across `weights[i]` times the pixels the measure counts, as a
-/// slice view drawing Z at its physical spacing does. Each axis's ratio is
-/// multiplied by its weight before the largest is taken, so every axis keeps
-/// at least one sample under each device pixel.
-pub fn weighted_level_shape_ratios(
-    levels: &[LevelGeometry],
-    axes: &[usize],
-    weights: &[f64],
-) -> Vec<f64> {
     let resolved: Vec<Vec<u64>> = levels
         .iter()
         .map(|level| axes.iter().map(|&axis| level.shape[axis]).collect())
@@ -125,8 +112,7 @@ pub fn weighted_level_shape_ratios(
             level
                 .iter()
                 .zip(level0)
-                .zip(weights)
-                .map(|((&here, &full), &weight)| weight * full as f64 / (here as f64).max(1.0))
+                .map(|(&here, &full)| full as f64 / (here as f64).max(1.0))
                 .fold(0.0, f64::max)
         })
         .collect()
@@ -226,23 +212,6 @@ mod tests {
         assert_eq!(volume, vec![1.0, 4.0, 16.0]);
         assert_eq!(target_level(0.5, &volume, None), 0);
         assert_eq!(target_level(0.25, &volume, None), 1);
-    }
-
-    #[test]
-    fn a_side_view_counts_z_drawn_wider_than_a_sample_as_that_much_coarser() {
-        // X and Z both halve per level, and Z draws at four world units a
-        // sample: level 1 spreads Z samples 8 world units apart.
-        let levels = vec![level(0, [64, 256, 256]), level(1, [32, 128, 128])];
-        let xz = weighted_level_shape_ratios(&levels, &[AXIS_X, AXIS_Z], &[1.0, 4.0]);
-        assert_eq!(xz, vec![4.0, 8.0]);
-        // At a quarter pixel per world unit level 0 is the coarsest that
-        // keeps a Z sample under every pixel, though X alone would allow 2.
-        assert_eq!(target_level(0.125, &xz, None), 1);
-        assert_eq!(target_level(0.2, &xz, None), 0);
-        assert_eq!(
-            weighted_level_shape_ratios(&levels, &IN_PLANE_AXES, &[1.0, 1.0]),
-            level_shape_ratios(&levels, &IN_PLANE_AXES)
-        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ import { labelFootprint } from "./renderer/labelLayout.ts";
 import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
+import { placementInPlane, readPlacement, rectToScene, type Placement } from "./placement.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { compositeKey } from "./tickCommon.ts";
@@ -62,10 +63,12 @@ export interface MemberLayerInput {
   indexByMember: Map<string, number>;
   channel: number;
   blendMode: "alpha" | "additive" | "max";
-  /** Every member's footprint, in voxels. */
+  /** Every member's footprint, in level-0 samples of its dataset's frame. */
   fullResWidth: number;
   fullResHeight: number;
-  /** Device pixels per voxel at the render backing resolution. */
+  /** Where the dataset's frame sits in the scene frame the camera views. */
+  placement: Placement;
+  /** Device pixels per scene-frame unit at the render backing resolution. */
   zoom: number;
 }
 
@@ -97,7 +100,7 @@ export function pushMemberLayers(
 ): void {
   const {
     members, indexByMember, channel, blendMode,
-    fullResWidth, fullResHeight, zoom,
+    fullResWidth, fullResHeight, placement, zoom,
   } = input;
   // Every layer this call emits shares one target. The index of the first is
   // unique in the frame and needs no counter threaded through the callers.
@@ -120,7 +123,7 @@ export function pushMemberLayers(
       entityIndex,
       dataW,
       dataH,
-      diagPx: Math.hypot(dataW, dataH) * zoom,
+      diagPx: Math.hypot(dataW * placement.scale[0], dataH * placement.scale[1]) * zoom,
       order: candidates.length,
     });
   }
@@ -181,13 +184,15 @@ export function pushMemberLayers(
       // Emitted beneath the individual layers, so a batched member that
       // overlaps an individual one draws under it regardless of roster
       // order. Accepted, since batched members are the smallest on screen.
+      // The quads are fractions of the extent, so placing it places them.
+      const extent = rectToScene(placement, minX, minY, extW, extH);
       layers.push({
         datasetId: batched[0].memberKey,
-        dataW: extW,
-        dataH: extH,
+        dataW: extent.w,
+        dataH: extent.h,
         blendMode,
-        offsetX: minX,
-        offsetY: minY,
+        offsetX: extent.x,
+        offsetY: extent.y,
         // Informational for an aggregate layer; each quad carries its
         // own descriptor index in `quads`.
         entityIndex: batched[0].entityIndex,
@@ -207,13 +212,14 @@ export function pushMemberLayers(
   }
 
   for (const c of individual) {
+    const rect = rectToScene(placement, c.member.position[0], c.member.position[1], c.dataW, c.dataH);
     layers.push({
       datasetId: c.memberKey,
-      dataW: c.dataW,
-      dataH: c.dataH,
+      dataW: rect.w,
+      dataH: rect.h,
       blendMode,
-      offsetX: c.member.position[0],
-      offsetY: c.member.position[1],
+      offsetX: rect.x,
+      offsetY: rect.y,
       entityId: c.member.entityId,
       entityIndex: c.entityIndex,
       passGroup,
@@ -236,12 +242,14 @@ function labelPlaneAt(
  * The drawn set must match what {@link computeLabelChunkRequests} fetches, so
  * both go through {@link resolveVisibleLabels}. Each overlay is sized to the
  * source image's full-resolution footprint, so a coarser label stays aligned
- * rather than shrinking. Labels never change the camera or bounds.
+ * rather than shrinking, and placed as its dataset is. Labels never change the
+ * camera or bounds.
  */
 export function pushLabelLayers(
   layers: SliceLayerParams[],
   manifest: DatasetManifest,
   members: MemberRosterEntry[],
+  placement: Placement,
   labelSettings?: LabelViewSetting[],
   memberPositions?: Record<string, [number, number]>,
   at?: { t: number; z: number },
@@ -257,19 +265,21 @@ export function pushLabelLayers(
     // off-roster label on the first group.
     const sourceMember = members.find((m) => m.imageId === label.source_image_id);
     const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
+    const rect = rectToScene(placement, position[0], position[1], dataW, dataH);
     layers.push({
       datasetId: label.image.image_id,
-      dataW,
-      dataH,
+      dataW: rect.w,
+      dataH: rect.h,
       blendMode: "alpha",
-      offsetX: position[0],
-      offsetY: position[1],
+      offsetX: rect.x,
+      offsetY: rect.y,
       entityId: source.owner,
       entityIndex: 0, // labels render via a transient descriptor, not the cold-state buffer
       isLabel: true,
       opacity,
       labelColors: label.colors,
       labelChunk: at ? labelPlaneAt(resolved, at) : undefined,
+      labelSamples: [dataW, dataH],
     });
   }
 }
@@ -331,13 +341,12 @@ function uploadAndRenderSlice(
     const resolved = resolvedLayers.get(dsId);
     if (!dsSettings || !resolved || !resolved.visible) continue;
 
-    // Each image's extent across the screen and down it, in the slice
-    // camera's world, which draws Z at its physical aspect (`slice_scales`).
+    // Each image's extent across the screen and down it, in its dataset's
+    // frame, and the frame's placement on those two axes of the scene frame.
     const dsShapeL = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
     const [across, down, cut] = planeAxes(plane);
-    const [scaleAcross, scaleDown] = scene.slice_scales(dsId);
-    const fullResWidth = dsShapeL[tczyx(across)] * scaleAcross;
-    const fullResHeight = dsShapeL[tczyx(down)] * scaleDown;
+    const fullResWidth = dsShapeL[tczyx(across)];
+    const fullResHeight = dsShapeL[tczyx(down)];
 
     const roster = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
@@ -347,6 +356,7 @@ function uploadAndRenderSlice(
       position: toPlaneFrame([m.position[0], m.position[1], 0], cut).slice(0, 2) as [number, number],
     }));
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
+    const placement = placementInPlane(readPlacement(scene, dsId), cut);
 
     // The member-pass budget applies per channel. A layer past the scene's z
     // or t draws its clamped plane, which the plan already asked for.
@@ -358,6 +368,7 @@ function uploadAndRenderSlice(
         blendMode: ch.blend_mode,
         fullResWidth,
         fullResHeight,
+        placement,
         zoom: currentZoom,
       });
     }
@@ -373,7 +384,7 @@ function uploadAndRenderSlice(
         labelMemberPositions = undefined;
       }
     }
-    pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings, labelMemberPositions, {
+    pushLabelLayers(layers, ds.manifest, members, placement, dsSettings.label_settings, labelMemberPositions, {
       t: resolved.t,
       z: resolved.z_range.start,
     });

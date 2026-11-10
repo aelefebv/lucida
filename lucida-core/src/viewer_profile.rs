@@ -41,6 +41,10 @@ impl ProfileScene {
         scene.dataset_order = view.dataset_order.clone();
         scene.dataset_settings = view.dataset_settings.clone().into_iter().collect();
         scene.load_document(document.clone());
+        // The camera's numbers are in the spaces the view was saved in.
+        if let Some(from) = &view.camera_space {
+            scene.carry_placed_cameras(from);
+        }
         let auto_contrast = view
             .auto_contrast
             .iter()
@@ -126,6 +130,7 @@ impl ProfileScene {
                 })
                 .collect(),
             auto_contrast: self.auto_contrast.clone(),
+            camera_space: scene.camera_space(),
         }
     }
 
@@ -461,7 +466,7 @@ impl Scene {
         }
         let depth = self
             .visible_bounds()
-            .map_or(0, |bounds| bounds.vox.max[2] as u32);
+            .map_or(0, |bounds| bounds.plane.max[2] as u32);
         self.apply(Command::Viewport(ViewportCommand::SetZ {
             z: depth.saturating_sub(1) / 2,
         }));
@@ -627,6 +632,54 @@ mod tests {
         let settings = &profile.scene.dataset_settings[&DatasetId("wds-l".into())];
         assert_eq!(settings.label_names, vec!["label-0", "label-1"]);
         assert_eq!(settings.label_settings, vec![LabelSettings::default(); 2]);
+    }
+
+    #[test]
+    fn a_stored_view_keeps_its_region_once_the_first_dataset_is_gone() {
+        // `document()`'s dataset, then one over the same region in samples a
+        // quarter the size.
+        let mut both = document();
+        let mut fine = make_dataset_opened_with_shape(
+            "wds-fine",
+            "fine.zarr",
+            1,
+            [1, 1, 40, 2048, 1024],
+            [1, 1, 16, 64, 64],
+            1,
+        );
+        for image in fine.manifest.images_mut() {
+            for level in &mut image.multiscale.levels {
+                level.scale[3] *= 0.25;
+                level.scale[4] *= 0.25;
+            }
+        }
+        both.apply(DocumentCommand::DatasetOpened(fine));
+
+        let mut profile = ProfileScene::fitted(&both);
+        profile
+            .apply(ViewportCommand::SetZoom { value: 2.0 })
+            .unwrap();
+        profile
+            .apply(ViewportCommand::Pan {
+                dx: 120.0,
+                dy: -40.0,
+            })
+            .unwrap();
+        let view = profile.saved_view();
+        assert!(view.camera_space.is_some());
+
+        let fine = DatasetId("wds-fine".into());
+        let region = |p: &ProfileScene| p.scene.visible_region(&fine).unwrap().xy_bounds;
+        let mut only_fine = both.clone();
+        only_fine.remove_dataset(&DatasetId("wds-a".into()));
+        let reopened = ProfileScene::open(&only_fine, &view);
+        let (before, after) = (region(&profile), region(&reopened));
+        for i in 0..4 {
+            assert!(
+                (after[i] - before[i]).abs() < 1e-6,
+                "{after:?} vs {before:?}"
+            );
+        }
     }
 
     #[test]

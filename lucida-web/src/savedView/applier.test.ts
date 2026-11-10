@@ -67,6 +67,24 @@ function createScene(ids: string[] = [], opts: { layouts?: string[] } = {}) {
   };
 }
 
+/** The volume fixture as dataset `id`, its samples a quarter the size. */
+function quarterSamples(id: string): DatasetOpenedJson {
+  const opened = structuredClone(dataset(id));
+  for (const image of opened.manifest.images) {
+    if (!image.multiscale) throw new Error("expected an inline multiscale");
+    for (const level of image.multiscale.levels) {
+      level.scale = level.scale.map((s, axis) => (axis >= 2 ? s / 4 : s));
+    }
+  }
+  return opened;
+}
+
+/** Where `id`'s bounding box corners land on the canvas. */
+function onScreen(scene: WasmScene, id: string): number[] {
+  const b = scene.dataset_fit_bounds(id);
+  return [...scene.project_to_screen(b[0], b[1], b[2]), ...scene.project_to_screen(b[3], b[4], b[5])];
+}
+
 function settingsOf(scene: WasmScene, id: string): { visible: boolean; opacity: number } {
   return JSON.parse(scene.dataset_display_settings(id));
 }
@@ -294,6 +312,44 @@ describe("SavedViewApplier", () => {
       dataset_id: "wds-a",
       layout_id: "L1",
     });
+  });
+
+  it("shows a view's region in a document whose first dataset differs", async () => {
+    // The first dataset fixes the camera's spaces. B covers A's region in
+    // samples a quarter the size, so without A they differ by four.
+    const saved = joinedScene(PAGE, 1, [dataset("wds-a"), quarterSamples("wds-b")]);
+    saved.apply_command(JSON.stringify({ type: "set_zoom", value: 3 }));
+    saved.apply_command(JSON.stringify({ type: "pan", dx: 150, dy: -60 }));
+    const view = buildCapture({
+      scene: saved,
+      urlByDatasetId: new Map(),
+      datasetReferenceMode: "workspace-dataset-id",
+    });
+    expect(view.camera_space).toBeDefined();
+    const shown = onScreen(saved, "wds-b");
+
+    const restored = async (v: SavedView) => {
+      const scene = joinedScene(PAGE, 1, [quarterSamples("wds-b")]);
+      const applier = new SavedViewApplier(
+        bridge,
+        () => scene,
+        fakeIdForUrl,
+        // The view names A, which this document no longer holds.
+        50,
+        "workspace-dataset-id",
+        "refuse",
+      );
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      await applier.apply(v);
+      vi.restoreAllMocks();
+      return onScreen(scene, "wds-b");
+    };
+    const carried = await restored(view);
+    shown.forEach((n, i) => expect(carried[i]).toBeCloseTo(n, 6));
+    // A view saved before the record existed reads in B's spaces as if they
+    // were A's, so it lands elsewhere.
+    const legacy = await restored({ ...view, camera_space: undefined });
+    expect(legacy.some((n, i) => Math.abs(n - shown[i]) > 10)).toBe(true);
   });
 
   it.each(["refuse", "broadcast", "local"] as const)(

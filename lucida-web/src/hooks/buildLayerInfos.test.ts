@@ -71,6 +71,7 @@ function stubScene(
     dataset_name: (id: string) => id,
     c: () => c,
     pinnable_levels: () => Uint32Array.from(pinnableLevels),
+    dataset_has_physical_scale: (id: string) => id.startsWith("physical"),
   } as unknown as WasmScene;
 }
 
@@ -381,6 +382,12 @@ describe("buildLayerInfos level readout", () => {
     expect(buildLayerInfos(scene, datasets, emptyMaps)[0].downsamplingMethod).toBe("gaussian");
 
     expect(buildLayerInfos(scene, datasetsWith([]), emptyMaps)[0].downsamplingMethod).toBeNull();
+  });
+
+  it("reads whether the dataset has a physical scale off the scene", () => {
+    expect(buildLayerInfos(scene, datasetsWith([]), emptyMaps)[0].physicalScale).toBe(false);
+    const physical = stubScene(["physical"], { physical: { visible: true } });
+    expect(buildLayerInfos(physical, new Map(), emptyMaps)[0].physicalScale).toBe(true);
   });
 });
 
