@@ -473,28 +473,80 @@ describe("LayerPanel data problems", () => {
   const shape = "tiles differ in shape, and smaller tiles are padded with fill";
   const sampled = "label discovery was sampled";
   const unwritten = "img: level 0 has no chunks written";
+  const listName = "original.zarr data problems";
 
-  it("marks a layer degraded and spells out what is shown wrong, collapsed or not", () => {
-    const importWarnings = new Map([
-      [
-        "wds-1",
-        [
-          { kind: "mismatched_tile_geometry", target: "wds-1", message: shape, degrades: true },
-          { kind: "unwritten_level", target: "img", message: unwritten, degrades: true },
-          { kind: "sampled_label_discovery", target: "wds-1", message: sampled, degrades: false },
-        ] as const,
-      ],
-    ]);
+  function geometryWarnings(id = "wds-1") {
+    return [
+      { kind: "mismatched_tile_geometry", target: id, message: shape, degrades: true },
+      { kind: "unwritten_level", target: "img", message: unwritten, degrades: true },
+      { kind: "sampled_label_discovery", target: id, message: sampled, degrades: false },
+    ] as const;
+  }
+
+  it("marks a layer with a count of what is shown wrong, and spells each out on demand", async () => {
+    const importWarnings = new Map([["wds-1", geometryWarnings()]]);
     render(<LayerPanel {...baseProps({ importWarnings })} />);
 
-    expect(screen.getByTestId("layer-degraded-wds-1").textContent).toBe("Degraded");
-    const list = screen.getByRole("list", { name: "original.zarr data problems" });
+    const toggle = screen.getByRole("button", { name: "2 data problems" });
+    expect(toggle.textContent).toBe("2");
+    expect(screen.queryByRole("list", { name: listName })).toBeNull();
+
+    await userEvent.click(toggle);
+    const list = screen.getByRole("list", { name: listName });
     expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
       "Tiles differ in shape, and smaller tiles are padded with fill",
       "Some resolution levels were never written, so they draw all zero. Coarser levels do have data.",
     ]);
     expect(screen.queryByText(sampled)).toBeNull();
     expect(screen.queryByText(unwritten)).toBeNull();
+  });
+
+  it("toggles the list on click, and aria-expanded follows", async () => {
+    const importWarnings = new Map([["wds-1", geometryWarnings()]]);
+    render(<LayerPanel {...baseProps({ importWarnings })} />);
+    const toggle = screen.getByTestId("layer-degraded-wds-1");
+    const list = document.getElementById(toggle.getAttribute("aria-controls") ?? "");
+
+    expect(list?.getAttribute("aria-label")).toBe(listName);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(list?.hidden).toBe(true);
+
+    await userEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(list?.hidden).toBe(false);
+
+    await userEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(list?.hidden).toBe(true);
+  });
+
+  it("toggles the list from the keyboard with Enter and Space", async () => {
+    const importWarnings = new Map([["wds-1", geometryWarnings()]]);
+    render(<LayerPanel {...baseProps({ importWarnings })} />);
+    const toggle = screen.getByRole("button", { name: "2 data problems" });
+
+    act(() => toggle.focus());
+    await userEvent.keyboard("{Enter}");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("list", { name: listName })).toBeTruthy();
+
+    await userEvent.keyboard(" ");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("list", { name: listName })).toBeNull();
+  });
+
+  it("opens one layer's problems without opening another's", async () => {
+    const importWarnings = new Map([
+      ["wds-1", geometryWarnings("wds-1")],
+      ["wds-2", geometryWarnings("wds-2")],
+    ]);
+    const layers = [layer(), layer({ id: "wds-2", name: "second.zarr" })];
+    render(<LayerPanel {...baseProps({ layers, importWarnings })} />);
+
+    await userEvent.click(screen.getByTestId("layer-degraded-wds-2"));
+    expect(screen.getByTestId("layer-degraded-wds-1").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("list", { name: listName })).toBeNull();
+    expect(screen.getByRole("list", { name: "second.zarr data problems" })).toBeTruthy();
   });
 
   it("leaves a layer whose warnings are only informational unmarked", () => {
@@ -504,10 +556,10 @@ describe("LayerPanel data problems", () => {
     render(<LayerPanel {...baseProps({ importWarnings })} />);
 
     expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
-    expect(screen.queryByRole("list", { name: "original.zarr data problems" })).toBeNull();
+    expect(document.querySelector(".lc-layer-problems")).toBeNull();
   });
 
-  it("names the chunks that could not be read, and drops the note once none are left", () => {
+  it("names the chunks that could not be read, and drops the note once none are left", async () => {
     render(<LayerPanel {...baseProps()} />);
     expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
 
@@ -518,8 +570,8 @@ describe("LayerPanel data problems", () => {
         { datasetId: "other", imageId: "img", chunkKey: "0/0/0/0/0/0", failure: "permission" },
       ]));
     });
-    expect(screen.getByTestId("layer-degraded-wds-1").textContent).toBe("Degraded");
-    const list = screen.getByRole("list", { name: "original.zarr data problems" });
+    await userEvent.click(screen.getByRole("button", { name: "1 data problem" }));
+    const list = screen.getByRole("list", { name: listName });
     expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
       "2 chunks could not be read (corrupt), so their regions show hatched.",
     ]);

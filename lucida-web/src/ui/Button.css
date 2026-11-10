@@ -96,6 +96,14 @@
   background-image: linear-gradient(var(--lc-danger-subtle), var(--lc-danger-subtle));
 }
 
+.lc-button[data-variant="warning"] {
+  background-color: var(--lc-warning-subtle);
+  color: var(--lc-warning);
+}
+.lc-button[data-variant="warning"][data-hovered] {
+  background-image: linear-gradient(var(--lc-warning-subtle), var(--lc-warning-subtle));
+}
+
 .lc-button[data-pressed]:not([data-variant="primary"]) {
   background-image: linear-gradient(var(--lc-surface-3), var(--lc-surface-3));
 }
