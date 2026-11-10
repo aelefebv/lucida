@@ -121,6 +121,9 @@ vi.mock("lucida-core", () => {
         t: this.view.t,
         z_clamped: false,
         t_clamped: false,
+        z_reach: "through",
+        y_reach: "through",
+        x_reach: "through",
       })));
     }
     camera_mode() { return this.mode; }

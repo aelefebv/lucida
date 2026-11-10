@@ -16,6 +16,7 @@ import { configStore } from "./planning/configStore.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { initialPlanningState } from "./planning/index.ts";
 import { resolvedLayersJson } from "../resolvedLayerFixtures.ts";
+import type { CutReach, ResolvedLayer } from "../resolvedLayers.ts";
 import { loadWasm } from "../viewProperties.ts";
 
 beforeAll(loadWasm);
@@ -1165,6 +1166,56 @@ describe("display-only fast path", () => {
       };
       expect(patch.currentZ).toBe(1);
       expect(patch.visibleRegion.zRangeVox).toEqual([1, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("plans nothing of a layer a Z move takes the cut past, and plans it again once back", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const coldStateSelection = vi.fn();
+      const ctxAt = (z: number, selection: number, reach: CutReach) => {
+        const scene = createMockScene({
+          epochs: { content: 1, layout: 1, view: 1, selection },
+          allSettings: baseSettings(),
+          z,
+          visibleRegion: {
+            xy_bounds: [0, 0, 1024, 1024],
+            z_range: [z, z + 1],
+            effective_zoom: 1.0,
+            sort_center: null,
+            frustum_planes: null,
+          },
+        }) as { resolved_layers: () => string };
+        const resolve = scene.resolved_layers;
+        scene.resolved_layers = () =>
+          JSON.stringify((JSON.parse(resolve()) as ResolvedLayer[]).map((l) => ({ ...l, z_reach: reach })));
+        return makeCtx(scene, datasets, { cpuCache, coldState, coldStateSelection });
+      };
+
+      orch.planAndFetch(ctxAt(0, 1, "through"), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+      vi.mocked(cpuCache.submit).mockClear();
+
+      // The move that takes the cut past the layer is no scrub: nothing of
+      // it is planned, fetched or patched.
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(ctxAt(30, 2, "outside"), emptyMinimap);
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(cpuCache.submit).not.toHaveBeenCalled();
+      expect(coldStateSelection).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(ctxAt(1, 3, "through"), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(coldState).toHaveBeenCalledTimes(1);
+      expect(coldStateSelection).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

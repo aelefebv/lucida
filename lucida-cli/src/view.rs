@@ -8,8 +8,8 @@ use lucida_core::command::ViewportCommand;
 use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
-    BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
-    RenderMode, Scene, declared_channels,
+    BlendMode, ChannelSettings, Colormap, CutReach, DatasetDisplaySettings, DisplayState,
+    DocumentState, RenderMode, Scene, declared_channels,
 };
 use lucida_core::view::ViewState;
 use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
@@ -317,9 +317,13 @@ pub struct LayerState {
     pub z_range: std::ops::Range<u32>,
     pub t: u32,
     /// Whether the scene's z or t reaches past this layer, which then shows
-    /// its nearest plane or last timepoint.
+    /// its nearest plane or last timepoint unless the cut misses it.
     pub z_clamped: bool,
     pub t_clamped: bool,
+    /// How the slice view's cut meets this layer, absent in 3D, which cuts
+    /// nothing. A layer the cut misses draws nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reach: Option<CutReach>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1225,7 +1229,12 @@ fn format_layers(layers: &[LayerState]) -> String {
                 format_level_pin(layer.detail_level_override),
                 layer.channel_count
             );
-            if layer.z_clamped || layer.t_clamped {
+            match layer.reach {
+                Some(CutReach::Outside) => line.push_str(" outside this cut"),
+                Some(CutReach::Every) => line.push_str(" one plane, shown at every z"),
+                _ => {}
+            }
+            if (layer.z_clamped || layer.t_clamped) && layer.reach != Some(CutReach::Outside) {
                 line.push_str(&format!(
                     " clamped to z={}..{} t={}",
                     layer.z_range.start, layer.z_range.end, layer.t
@@ -1690,6 +1699,7 @@ fn layer_states(scene: &Scene) -> Vec<LayerState> {
                 t: layer.t,
                 z_clamped: layer.z_clamped,
                 t_clamped: layer.t_clamped,
+                reach: scene.layer_reach(&layer.dataset_id),
             })
         })
         .collect()
@@ -2836,7 +2846,30 @@ mod tests {
             t: 0,
             z_clamped: false,
             t_clamped: false,
+            reach: None,
         }
+    }
+
+    #[test]
+    fn human_layer_line_says_when_the_cut_misses_a_layer() {
+        let outside = LayerState {
+            z_range: 11..12,
+            z_clamped: true,
+            reach: Some(CutReach::Outside),
+            ..layer_state(None)
+        };
+        let line = format_layers(&[outside]);
+        assert!(line.contains(" outside this cut"), "{line}");
+        assert!(!line.contains("clamped"), "{line}");
+
+        let flat = LayerState {
+            z_clamped: true,
+            reach: Some(CutReach::Every),
+            ..layer_state(None)
+        };
+        let line = format_layers(&[flat]);
+        assert!(line.contains(" one plane, shown at every z"), "{line}");
+        assert!(line.contains(" clamped to z=0..1"), "{line}");
     }
 
     #[test]

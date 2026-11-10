@@ -10,7 +10,7 @@ import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
-import type { ResolvedLayers } from "./resolvedLayers.ts";
+import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
 import { sliceCut } from "./pipeline/planning/snapshot.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
@@ -340,6 +340,9 @@ function uploadAndRenderSlice(
     const dsSettings = allSettings[dsId];
     const resolved = resolvedLayers.get(dsId);
     if (!dsSettings || !resolved || !resolved.visible) continue;
+    // Nor is a layer the cut misses drawn, so the readout, which probes the
+    // drawn frame, finds no value for it.
+    if (outsideCut(resolved, plane)) continue;
 
     // Each image's extent across the screen and down it, in its dataset's
     // frame, and the frame's placement on those two axes of the scene frame.
@@ -358,8 +361,9 @@ function uploadAndRenderSlice(
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
     const placement = placementInPlane(readPlacement(scene, dsId), cut);
 
-    // The member-pass budget applies per channel. A layer past the scene's z
-    // or t draws its clamped plane, which the plan already asked for.
+    // The member-pass budget applies per channel. A layer past the scene's t,
+    // or a flat one under a Z cut, draws its clamped plane, which the plan
+    // already asked for.
     for (const ch of resolved.channels) {
       pushMemberLayers(layers, {
         members,

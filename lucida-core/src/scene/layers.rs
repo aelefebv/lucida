@@ -1,7 +1,8 @@
 //! What each layer shows at the scene's selectors: which channels, through
-//! which colormap and window, at which z and t. Decided here once, so the
-//! renderer, the planner, the minimap, explore thumbnails, the pin-context
-//! check and the CLI cannot disagree about it.
+//! which colormap and window, at which z and t, and whether a slice view's
+//! cut passes through it. Decided here once, so the renderer, the planner,
+//! the minimap, explore thumbnails, the pin-context check, the layer panel
+//! and the CLI cannot disagree about it.
 
 use std::ops::Range;
 
@@ -9,6 +10,7 @@ use lucida_content::{DatasetId, DatasetManifest};
 use serde::{Deserialize, Serialize};
 
 use super::{BlendMode, Colormap, DatasetDisplaySettings, RenderMode, Scene};
+use crate::camera::Camera;
 use crate::placement::Affine;
 use crate::saved_view::SavedView;
 use crate::slice_plane::SlicePlane;
@@ -27,6 +29,21 @@ pub struct ShownChannel {
     /// showing one channel uses its layer blend, and a layer showing several
     /// uses its channel blend for each.
     pub blend_mode: BlendMode,
+}
+
+/// How a slice view's cut along one axis meets a layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CutReach {
+    /// The cut passes through the layer, which draws the plane it cuts.
+    Through,
+    /// The cut passes outside the layer, which draws nothing there: its
+    /// nearest plane would show data from where the cut is not.
+    Outside,
+    /// The layer is one plane deep in Z under a cut along Z that steps
+    /// through deeper layers, and draws that plane at every position, so a
+    /// flat image can sit over a volume.
+    Every,
 }
 
 /// What one layer shows.
@@ -50,11 +67,16 @@ pub struct ResolvedLayer {
     /// frame, in the layer's own samples.
     pub y: u32,
     pub x: u32,
-    /// Whether the scene's z slab reaches past this layer, so it shows its
-    /// nearest plane instead.
+    /// Whether the scene's z slab reaches past this layer's last plane.
     pub z_clamped: bool,
     /// Whether the scene's timepoint is past this layer's last.
     pub t_clamped: bool,
+    /// How the cut along Z, along Y and along X meets this layer. Where a
+    /// cut misses, the planes above are the nearest, and none is drawn. A
+    /// slice view reads the one its plane cuts, see [`Self::reach`].
+    pub z_reach: CutReach,
+    pub y_reach: CutReach,
+    pub x_reach: CutReach,
 }
 
 impl ResolvedLayer {
@@ -69,6 +91,15 @@ impl ResolvedLayer {
             SpatialAxis::Z => self.z_range.clone(),
             SpatialAxis::Y => self.y..self.y + 1,
             SpatialAxis::X => self.x..self.x + 1,
+        }
+    }
+
+    /// How a slice view of `plane` cuts this layer.
+    pub fn reach(&self, plane: SlicePlane) -> CutReach {
+        match plane.cut() {
+            SpatialAxis::Z => self.z_reach,
+            SpatialAxis::Y => self.y_reach,
+            SpatialAxis::X => self.x_reach,
         }
     }
 }
@@ -125,11 +156,30 @@ impl LayerExtent {
         t.min(self.t - 1)
     }
 
+    /// How a Z slab meets this layer, in a scene whose cut along Z steps
+    /// through `depth` positions. Z is each layer's own plane index, so the
+    /// slab misses a layer it starts past.
+    fn reach_z(&self, range: &Range<u32>, depth: u32) -> CutReach {
+        if self.z == 1 {
+            // Alone, a flat layer has no Z to step through, so it says nothing.
+            return if depth > 1 {
+                CutReach::Every
+            } else {
+                CutReach::Through
+            };
+        }
+        if range.start >= self.z {
+            CutReach::Outside
+        } else {
+            CutReach::Through
+        }
+    }
+
     /// The plane of this layer an X or Y axis position cuts. The position is
     /// a place in the scene frame, absent its plane 0, read back through the
     /// layer's placement `to_scene`, so layers over one region cut the same
-    /// plane. Past the layer it takes the nearest plane, as a shallow layer's
-    /// Z does.
+    /// plane. Past the layer it takes the nearest plane, which the layer
+    /// does not draw ([`reach_across`]), as a shallow layer's Z does.
     fn cut_plane(&self, position: Option<u32>, axis: SpatialAxis, to_scene: &Affine) -> u32 {
         let a = axis.xyz();
         let mut at = [0.0; 3];
@@ -149,13 +199,42 @@ impl LayerExtent {
     }
 }
 
+/// Where the scene puts one layer, as the cuts through it read it.
+struct LayerPlace {
+    /// The map from the layer's frame into the scene frame.
+    to_scene: Affine,
+    /// The layer's extent along Y and along X in the scene frame, where a
+    /// side view's axis position is a place. `None` without an image.
+    extent_y: Option<(f64, f64)>,
+    extent_x: Option<(f64, f64)>,
+    /// How many positions the scene's cut along Z steps through.
+    depth: u32,
+}
+
+/// How an X or Y axis position, a place in the scene frame that reads as 0
+/// when absent, meets a layer spanning `extent` of the frame along its axis:
+/// through it when the middle of the unit it names lies inside, the point
+/// [`LayerExtent::cut_plane`] reads a plane at.
+fn reach_across(position: Option<u32>, extent: Option<(f64, f64)>) -> CutReach {
+    // A layer without an image draws nothing to hide.
+    let Some((min, max)) = extent else {
+        return CutReach::Through;
+    };
+    let at = position.unwrap_or(0) as f64 + 0.5;
+    if (min..max).contains(&at) {
+        CutReach::Through
+    } else {
+        CutReach::Outside
+    }
+}
+
 /// What one layer shows with `settings` at the selectors in `view`.
 fn resolve(
     dataset_id: &DatasetId,
     manifest: &DatasetManifest,
     settings: &DatasetDisplaySettings,
     view: &ViewState,
-    to_scene: &Affine,
+    place: &LayerPlace,
 ) -> ResolvedLayer {
     let extent = LayerExtent::of(manifest);
     let shown = settings.shown_channels(extent.c);
@@ -194,8 +273,11 @@ fn resolve(
         z_range,
         t_clamped: t != view.t,
         t,
-        y: extent.cut_plane(view.y, SpatialAxis::Y, to_scene),
-        x: extent.cut_plane(view.x, SpatialAxis::X, to_scene),
+        y: extent.cut_plane(view.y, SpatialAxis::Y, &place.to_scene),
+        x: extent.cut_plane(view.x, SpatialAxis::X, &place.to_scene),
+        z_reach: extent.reach_z(&view.z_range, place.depth),
+        y_reach: reach_across(view.y, place.extent_y),
+        x_reach: reach_across(view.x, place.extent_x),
     }
 }
 
@@ -218,10 +300,31 @@ impl Scene {
                 &seeded
             }
         };
-        let to_scene = self.placement(dataset_id).unwrap_or(Affine::IDENTITY);
         Some(resolve(
-            dataset_id, manifest, settings, &self.view, &to_scene,
+            dataset_id,
+            manifest,
+            settings,
+            &self.view,
+            &self.layer_place(dataset_id),
         ))
+    }
+
+    /// How the slice view's cut meets `dataset_id`, or `None` for a volume
+    /// view, which cuts nothing, or a dataset the document lacks.
+    pub fn layer_reach(&self, dataset_id: &DatasetId) -> Option<CutReach> {
+        let Camera::Slice(slice) = &self.camera else {
+            return None;
+        };
+        Some(self.resolved_layer(dataset_id)?.reach(slice.plane))
+    }
+
+    fn layer_place(&self, dataset_id: &DatasetId) -> LayerPlace {
+        LayerPlace {
+            to_scene: self.placement(dataset_id).unwrap_or(Affine::IDENTITY),
+            extent_y: self.scene_extent(dataset_id, SpatialAxis::Y),
+            extent_x: self.scene_extent(dataset_id, SpatialAxis::X),
+            depth: self.cut_extent(SpatialAxis::Z),
+        }
     }
 
     /// What this scene's layers would show under `view`, as restoring it here
@@ -249,8 +352,13 @@ impl Scene {
                         ..styled.clone()
                     };
                 }
-                let to_scene = self.placement(id).unwrap_or(Affine::IDENTITY);
-                Some(resolve(id, manifest, &settings, &view.view, &to_scene))
+                Some(resolve(
+                    id,
+                    manifest,
+                    &settings,
+                    &view.view,
+                    &self.layer_place(id),
+                ))
             })
             .collect()
     }
@@ -431,40 +539,88 @@ mod tests {
         assert_eq!(layer.channels[0].blend_mode, BlendMode::Alpha);
     }
 
+    fn open_shaped(scene: &mut Scene, id: &str, shape: [u64; 5]) {
+        scene.apply(
+            crate::command::DocumentCommand::DatasetOpened(make_dataset_opened_with_shape(
+                id,
+                id,
+                1,
+                shape,
+                [1, 1, 8, 64, 64],
+                1,
+            ))
+            .into(),
+        );
+    }
+
+    fn layer(scene: &Scene, id: &str) -> ResolvedLayer {
+        scene.resolved_layer(&DatasetId(id.to_string())).unwrap()
+    }
+
+    fn wanted(scene: &Scene, id: &str) -> Vec<crate::chunk::ChunkCoord> {
+        let plans = scene.chunk_plan_for(&DatasetId(id.to_string())).unwrap();
+        plans.into_iter().flat_map(|p| p.needed).collect()
+    }
+
     #[test]
-    fn a_global_z_or_t_past_a_layer_clamps_it_and_says_so() {
+    fn a_z_past_a_layer_misses_it_and_a_flat_layer_shows_at_every_z() {
         let mut scene = Scene::new([800, 600]);
-        for (id, shape) in [("deep", [4, 1, 40, 64, 64]), ("flat", [1, 1, 1, 64, 64])] {
-            scene.apply(
-                crate::command::DocumentCommand::DatasetOpened(make_dataset_opened_with_shape(
-                    id,
-                    id,
-                    1,
-                    shape,
-                    [1, 1, 8, 64, 64],
-                    1,
-                ))
-                .into(),
-            );
-        }
+        open_shaped(&mut scene, "deep", [4, 1, 40, 64, 64]);
+        open_shaped(&mut scene, "shallow", [1, 1, 12, 64, 64]);
+        open_shaped(&mut scene, "flat", [1, 1, 1, 64, 64]);
+
+        scene.apply(ViewportCommand::SetZ { z: 5 }.into());
+        let reach = |scene: &Scene, id| layer(scene, id).reach(SlicePlane::Xy);
+        assert_eq!(reach(&scene, "deep"), CutReach::Through);
+        assert_eq!(reach(&scene, "shallow"), CutReach::Through);
+        // A flat layer over deeper ones says so wherever Z stands.
+        assert_eq!(reach(&scene, "flat"), CutReach::Every);
+
         scene.apply(ViewportCommand::SetZ { z: 30 }.into());
         scene.apply(ViewportCommand::SetT { t: 3 }.into());
-        let deep = scene.resolved_layer(&DatasetId("deep".into())).unwrap();
+        let deep = layer(&scene, "deep");
         assert_eq!((deep.z_range.clone(), deep.t), (30..31, 3));
         assert!(!deep.z_clamped && !deep.t_clamped);
-        let flat = scene.resolved_layer(&DatasetId("flat".into())).unwrap();
+        assert_eq!(deep.z_reach, CutReach::Through);
+
+        // Past its last plane the layer draws nothing, and nothing is planned.
+        assert_eq!(reach(&scene, "shallow"), CutReach::Outside);
+        assert!(wanted(&scene, "shallow").is_empty());
+        assert_eq!(
+            scene.layer_reach(&DatasetId("shallow".into())),
+            Some(CutReach::Outside)
+        );
+
+        // The flat layer shows its one plane and last timepoint.
+        let flat = layer(&scene, "flat");
         assert_eq!((flat.z_range.clone(), flat.t), (0..1, 0));
         assert!(flat.z_clamped && flat.t_clamped);
+        assert_eq!(flat.z_reach, CutReach::Every);
+        let flat_wanted = wanted(&scene, "flat");
+        assert!(!flat_wanted.is_empty());
+        assert!(flat_wanted.iter().all(|c| c.z == 0 && c.t == 0));
 
-        // The plan asks for the clamped plane, not for nothing.
-        let plans = scene.chunk_plan_for(&DatasetId("flat".into())).unwrap();
-        assert!(plans.iter().any(|p| !p.needed.is_empty()));
-        assert!(
-            plans
-                .iter()
-                .flat_map(|p| &p.needed)
-                .all(|c| c.z == 0 && c.t == 0)
+        // A volume view cuts nothing.
+        scene.set_mode_3d();
+        assert_eq!(scene.layer_reach(&DatasetId("shallow".into())), None);
+    }
+
+    #[test]
+    fn a_flat_layer_alone_has_no_z_to_show_at() {
+        let mut scene = Scene::new([800, 600]);
+        open_shaped(&mut scene, "flat", [1, 1, 1, 64, 64]);
+        assert_eq!(layer(&scene, "flat").z_reach, CutReach::Through);
+        // A deeper layer that is hidden leaves no Z to step through either.
+        open_shaped(&mut scene, "deep", [1, 1, 40, 64, 64]);
+        assert_eq!(layer(&scene, "flat").z_reach, CutReach::Every);
+        scene.apply(
+            ViewportCommand::SetDatasetVisible {
+                dataset_id: "deep".into(),
+                visible: false,
+            }
+            .into(),
         );
+        assert_eq!(layer(&scene, "flat").z_reach, CutReach::Through);
     }
 
     #[test]
