@@ -6593,6 +6593,7 @@ mod tests {
             "set_contrast",
             "add",
             "remove",
+            "minimap",
         ];
 
         let command = Cli::command();

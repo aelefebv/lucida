@@ -1,8 +1,8 @@
 //! The trace driver's script: an ordered list of steps
 //! the driver performs on the page once the open has settled, so an agent
 //! can reproduce what a person does headlessly: pan, zoom, orbit, scrub,
-//! select, switch mode, fit, resize, set contrast, and add or remove a
-//! dataset.
+//! select, switch mode, fit, resize, set contrast, add or remove a
+//! dataset, and click or drag on the minimap.
 //!
 //! Steps go through the page's own input handling. Pan, zoom, and orbit are
 //! synthesized as the pointer and wheel events a mouse would raise, over the
@@ -121,6 +121,14 @@ impl std::fmt::Display for ViewMode {
     }
 }
 
+/// What a minimap step does with the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MinimapAction {
+    Click,
+    Drag,
+}
+
 /// One step of a script. The same shape is a script file entry and the
 /// identity of a step's record, so a record reads back as the step that made
 /// it and a bundle's script can be run again.
@@ -206,6 +214,21 @@ pub enum ScriptStep {
     Add { url: String },
     /// Remove the dataset opened from this source URL from the workspace.
     Remove { url: String },
+    /// Click on the minimap at `at`, or drag from `at` to `to`, in CSS
+    /// pixels from the minimap's top-left corner. A drag lands as one burst
+    /// or spread over `durationMs`. The minimap is on the full viewer page.
+    Minimap {
+        action: MinimapAction,
+        at: [f64; 2],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<[f64; 2]>,
+        #[serde(
+            rename = "durationMs",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<u64>,
+    },
 }
 
 fn visible_by_default() -> bool {
@@ -229,6 +252,7 @@ impl ScriptStep {
             Self::Contrast { .. } => "contrast",
             Self::Add { .. } => "add",
             Self::Remove { .. } => "remove",
+            Self::Minimap { .. } => "minimap",
         }
     }
 
@@ -332,6 +356,36 @@ impl ScriptStep {
                 }
                 Ok(())
             }
+            Self::Minimap {
+                action,
+                at,
+                to,
+                duration_ms,
+            } => {
+                let on_minimap =
+                    |point: &[f64; 2]| point.iter().all(|v| v.is_finite() && *v >= 0.0);
+                if !on_minimap(at) || to.as_ref().is_some_and(|to| !on_minimap(to)) {
+                    return Err(
+                        "a minimap point is two finite numbers from its top-left corner"
+                            .to_string(),
+                    );
+                }
+                match (action, to) {
+                    (MinimapAction::Click, None) if duration_ms.is_none() => Ok(()),
+                    (MinimapAction::Click, _) => {
+                        Err("a minimap click has one point and no duration".to_string())
+                    }
+                    (MinimapAction::Drag, None) => {
+                        Err("a minimap drag goes from at to to".to_string())
+                    }
+                    (MinimapAction::Drag, Some(to)) if to == at => {
+                        Err("a minimap drag to where it started moves nothing".to_string())
+                    }
+                    (MinimapAction::Drag, Some(_)) => {
+                        validate_duration("a minimap drag", *duration_ms)
+                    }
+                }
+            }
         }
     }
 
@@ -340,7 +394,8 @@ impl ScriptStep {
         match self {
             Self::Pan { duration_ms, .. }
             | Self::Zoom { duration_ms, .. }
-            | Self::Orbit { duration_ms, .. } => duration_ms.map(Duration::from_millis),
+            | Self::Orbit { duration_ms, .. }
+            | Self::Minimap { duration_ms, .. } => duration_ms.map(Duration::from_millis),
             _ => None,
         }
     }
@@ -407,6 +462,18 @@ impl std::fmt::Display for ScriptStep {
             Self::Contrast { channel, min, max } => write!(f, "contrast {channel}:{min},{max}"),
             Self::Add { url } => write!(f, "add {url}"),
             Self::Remove { url } => write!(f, "remove {url}"),
+            Self::Minimap {
+                at,
+                to,
+                duration_ms,
+                ..
+            } => {
+                write!(f, "minimap {},{}", at[0], at[1])?;
+                if let Some(to) = to {
+                    write!(f, ":{},{}", to[0], to[1])?;
+                }
+                f.write_str(&pace_suffix(*duration_ms))
+            }
         }
     }
 }
@@ -443,7 +510,7 @@ impl Script {
         let steps: Vec<ScriptStep> = serde_json::from_value(steps).map_err(|error| {
             format!(
                 "a step could not be read: {error}; the kinds are wait, hold, pan, zoom, orbit, \
-                 scrub, select, mode, fit, resize, contrast, add, and remove"
+                 scrub, select, mode, fit, resize, contrast, add, remove, and minimap"
             )
         })?;
         let script = Self { steps };
@@ -562,7 +629,7 @@ pub struct ScriptArgs {
 
 /// The flag ids, in the order their help prints. `wait`, `hold`, and `fit`
 /// carry no text to parse; the rest go through `step_from_flag`.
-const STEP_FLAGS: [&str; 13] = [
+const STEP_FLAGS: [&str; 14] = [
     "wait",
     "hold",
     "pan",
@@ -576,6 +643,7 @@ const STEP_FLAGS: [&str; 13] = [
     "set_contrast",
     "add",
     "remove",
+    "minimap",
 ];
 
 /// The flags that carry no value, each occurrence one step.
@@ -728,6 +796,17 @@ impl clap::Args for ScriptArgs {
                         "Remove the dataset opened from this source URL from the run's workspace, \
                          as the layer panel does. The driver opens it before the run if it is not \
                          there",
+                    ),
+            )
+            .arg(
+                Arg::new("minimap")
+                    .long("minimap")
+                    .value_name("X,Y[:X2,Y2][/MS]")
+                    .action(ArgAction::Append)
+                    .help(
+                        "Click on the minimap at a point in CSS pixels from its top-left corner, \
+                         or drag from X,Y to X2,Y2. Add /MS to spread a drag over that many \
+                         milliseconds. The minimap is on the full viewer page (--full-ui)",
                     ),
             )
             .next_help_heading(None)
@@ -916,6 +995,23 @@ pub fn step_from_flag(id: &str, text: &str) -> Result<ScriptStep, String> {
         "remove" => Ok(ScriptStep::Remove {
             url: text.to_string(),
         }),
+        "minimap" => {
+            let (text, duration_ms) = split_pace(text)?;
+            let (at, to) = match text.split_once(':') {
+                Some((at, to)) => (parse_pair(at)?, Some(parse_pair(to)?)),
+                None => (parse_pair(text)?, None),
+            };
+            Ok(ScriptStep::Minimap {
+                action: if to.is_some() {
+                    MinimapAction::Drag
+                } else {
+                    MinimapAction::Click
+                },
+                at: [at.0, at.1],
+                to: to.map(|(x, y)| [x, y]),
+                duration_ms,
+            })
+        }
         "select" => {
             let (target, visible) = match text.rsplit_once('=') {
                 Some((target, "off")) => (target, false),
@@ -1127,6 +1223,11 @@ impl CanvasRect {
         (self.x + at[0], self.y + at[1])
     }
 
+    /// Whether a point given relative to the top-left corner lies on the canvas.
+    pub fn holds(&self, at: [f64; 2]) -> bool {
+        (0.0..=self.width).contains(&at[0]) && (0.0..=self.height).contains(&at[1])
+    }
+
     /// Where a drag of `delta` starts so that it is centered on the canvas
     /// and stays inside it where it can: half the delta before the center,
     /// clamped to the canvas.
@@ -1185,6 +1286,8 @@ pub enum SentInput {
     },
     /// A key pressed and released, named as the viewer's shortcuts name it.
     Key { key: String },
+    /// A left-button press and release at `at`, in CSS pixels.
+    Click { at: [f64; 2] },
     /// `taps` touch taps at `at`, in CSS pixels.
     Tap { at: [f64; 2], taps: u32 },
     /// The viewport changed from `from` to `to`, in CSS pixels, at the same
@@ -1326,6 +1429,16 @@ const CANVAS_RECT_PROBE: &str = r#"(() => {
   const canvas = document.querySelector('.viewer-canvas-wrap canvas') || document.querySelector('canvas');
   if (!canvas) return null;
   const rect = canvas.getBoundingClientRect();
+  return JSON.stringify({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
+})()"#;
+
+/// The minimap's input surface, or null when the page shows none: the
+/// capture surface and a folded or hidden minimap lay it out at no size.
+const MINIMAP_RECT_PROBE: &str = r#"(() => {
+  const surface = document.querySelector('canvas.minimap-overlay');
+  if (!surface) return null;
+  const rect = surface.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return null;
   return JSON.stringify({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
 })()"#;
 
@@ -1562,6 +1675,20 @@ async fn run_step(
             let expression = seam_call("removeDataset", &json_string(url));
             input = Some(control_outcome(page, &expression, wait).await?);
         }
+        // The minimap steers the slice view and the orbit camera; the fly
+        // camera ignores it.
+        ScriptStep::Minimap { action, at, to, .. } => {
+            input = Some(match mode {
+                Some("slice" | "arcball") => {
+                    minimap_input(page, *action, *at, *to, pace, wait).await?
+                }
+                other => withheld(
+                    "a minimap step",
+                    "the slice view or the orbit camera",
+                    other,
+                ),
+            });
+        }
     }
     if !matches!(step, ScriptStep::Wait | ScriptStep::Hold { .. }) {
         if lands_later {
@@ -1712,7 +1839,18 @@ async fn drag(
     wait: Duration,
 ) -> Result<SentInput, CliError> {
     let rect = canvas_rect(page, wait).await?;
-    let from = rect.drag_origin(delta);
+    drag_from(page, rect.drag_origin(delta), delta, shift, pace, wait).await
+}
+
+/// A drag of `delta` from `from`, in page CSS pixels, paced as [`drag`] is.
+async fn drag_from(
+    page: &mut Page,
+    from: (f64, f64),
+    delta: (f64, f64),
+    shift: bool,
+    pace: Option<Duration>,
+    wait: Duration,
+) -> Result<SentInput, CliError> {
     let moves = pace.map_or_else(|| drag_moves(delta), paced_moves);
     let modifiers = if shift { SHIFT_MODIFIER } else { 0 };
     let start = tokio::time::Instant::now();
@@ -1881,6 +2019,56 @@ async fn press_key(page: &mut Page, key: &KeyPress, wait: Duration) -> Result<Se
     })
 }
 
+/// A click at `at` or a drag from `at` to `to` on the minimap, or nothing
+/// when the page shows no minimap or a point lies off it.
+async fn minimap_input(
+    page: &mut Page,
+    action: MinimapAction,
+    at: [f64; 2],
+    to: Option<[f64; 2]>,
+    pace: Option<Duration>,
+    wait: Duration,
+) -> Result<SentInput, CliError> {
+    let Some(rect) = minimap_rect(page, wait).await? else {
+        return Ok(SentInput::Withheld {
+            reason: "the page shows no minimap; it is open on the full viewer page (--full-ui), \
+                     and starts hidden on a phone"
+                .to_string(),
+        });
+    };
+    if let Some(off) = [Some(at), to]
+        .into_iter()
+        .flatten()
+        .find(|p| !rect.holds(*p))
+    {
+        return Ok(SentInput::Withheld {
+            reason: format!(
+                "{},{} is off the {}x{} minimap",
+                off[0], off[1], rect.width, rect.height
+            ),
+        });
+    }
+    match (action, to) {
+        (MinimapAction::Drag, Some(to)) => {
+            let delta = (to[0] - at[0], to[1] - at[1]);
+            drag_from(page, rect.point(at), delta, false, pace, wait).await
+        }
+        _ => click(page, rect.point(at), wait).await,
+    }
+}
+
+/// A left-button press and release at `at`, in page CSS pixels.
+async fn click(page: &mut Page, at: (f64, f64), wait: Duration) -> Result<SentInput, CliError> {
+    for (kind, buttons) in [("mousePressed", 1), ("mouseReleased", 0)] {
+        page.dispatch_mouse_event(
+            json!({ "type": kind, "x": at.0, "y": at.1, "button": "left", "buttons": buttons, "clickCount": 1 }),
+            wait,
+        )
+        .await?;
+    }
+    Ok(SentInput::Click { at: [at.0, at.1] })
+}
+
 /// Two taps on the canvas's center, as a finger makes them.
 async fn double_tap(page: &mut Page, wait: Duration) -> Result<SentInput, CliError> {
     let rect = canvas_rect(page, wait).await?;
@@ -1929,6 +2117,20 @@ async fn control_outcome(
         reason: outcome.reason,
         moves: None,
         span_ms: None,
+    })
+}
+
+/// The minimap's input surface in page CSS pixels, or None when the page shows none.
+async fn minimap_rect(page: &mut Page, wait: Duration) -> Result<Option<CanvasRect>, CliError> {
+    let value = page.evaluate(MINIMAP_RECT_PROBE, wait).await?;
+    let Some(json) = value.as_str() else {
+        return Ok(None);
+    };
+    serde_json::from_str(json).map(Some).map_err(|error| {
+        CliError::new(
+            ErrorKind::Protocol,
+            format!("the page returned a minimap this CLI cannot read: {error}"),
+        )
     })
 }
 
@@ -2247,7 +2449,7 @@ mod tests {
         assert!(
             unknown.contains(
                 "wait, hold, pan, zoom, orbit, scrub, select, mode, fit, resize, contrast, add, \
-                 and remove"
+                 remove, and minimap"
             ),
             "{unknown}"
         );
@@ -3444,6 +3646,78 @@ mod tests {
         assert_eq!(
             sent,
             json!({ "sent": "control", "applied": true, "moves": 3, "spanMs": 400.0 })
+        );
+    }
+
+    #[test]
+    fn a_minimap_step_reads_from_a_file_and_a_flag_and_prints_as_typed() {
+        let script = Script::from_json(
+            r#"[
+                {"kind": "minimap", "action": "click", "at": [150, 40]},
+                {"kind": "minimap", "action": "drag", "at": [100, 100], "to": [140, 120.5], "durationMs": 500}
+            ]"#,
+        )
+        .unwrap();
+        let click = ScriptStep::Minimap {
+            action: MinimapAction::Click,
+            at: [150.0, 40.0],
+            to: None,
+            duration_ms: None,
+        };
+        let drag = ScriptStep::Minimap {
+            action: MinimapAction::Drag,
+            at: [100.0, 100.0],
+            to: Some([140.0, 120.5]),
+            duration_ms: Some(500),
+        };
+        assert_eq!(script.steps, vec![click.clone(), drag.clone()]);
+        assert_eq!(step_from_flag("minimap", "150,40").unwrap(), click);
+        assert_eq!(
+            step_from_flag("minimap", "100,100:140,120.5/500").unwrap(),
+            drag
+        );
+        assert_eq!(click.to_string(), "minimap 150,40");
+        assert_eq!(drag.to_string(), "minimap 100,100:140,120.5/500");
+        assert_eq!(drag.pace(), Some(Duration::from_millis(500)));
+        let args = parse_flags(&["--wait", "--minimap", "10,20", "ds.zarr"]).unwrap();
+        assert_eq!(args.steps.len(), 2);
+
+        let refused = |json: &str| Script::from_json(json).unwrap_err();
+        assert_eq!(
+            refused(r#"[{"kind": "minimap", "action": "drag", "at": [1, 2]}]"#),
+            "step 1 (minimap): a minimap drag goes from at to to"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "minimap", "action": "drag", "at": [1, 2], "to": [1, 2]}]"#),
+            "step 1 (minimap): a minimap drag to where it started moves nothing"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "minimap", "action": "click", "at": [1, 2], "to": [3, 4]}]"#),
+            "step 1 (minimap): a minimap click has one point and no duration"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "minimap", "action": "click", "at": [-1, 2]}]"#),
+            "step 1 (minimap): a minimap point is two finite numbers from its top-left corner"
+        );
+    }
+
+    #[test]
+    fn a_minimap_point_has_to_lie_on_the_minimap() {
+        let rect = CanvasRect {
+            x: 1000.0,
+            y: 500.0,
+            width: 200.0,
+            height: 200.0,
+        };
+        assert!(rect.holds([0.0, 200.0]));
+        assert!(!rect.holds([200.5, 10.0]));
+        assert_eq!(rect.point([20.0, 30.0]), (1020.0, 530.0));
+        assert_eq!(
+            serde_json::to_value(SentInput::Click {
+                at: [1020.0, 530.0]
+            })
+            .unwrap(),
+            json!({ "sent": "click", "at": [1020.0, 530.0] })
         );
     }
 }
