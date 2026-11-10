@@ -26,6 +26,12 @@ Options:
                          takes the i-th size, and the last one repeats.
     --channels C         Channel count. Default 1. A channel axis is written
                          only when C is larger than 1.
+    --channel-colors RRGGBB,...
+                         The color each image declares for each of its
+                         channels, one per channel, written to an `omero`
+                         block. Written verbatim, so a malformed value tests
+                         what a reader does with one. Omit for no `omero`
+                         block.
     --timepoints T       Timepoint count. Default 1. A time axis is written
                          only when T is larger than 1.
     --levels N           Number of pyramid levels, level 0 being finest.
@@ -173,6 +179,7 @@ class Options:
     tiles: int | None = None
     sizes: tuple[tuple[int, ...], ...] = (DEFAULT_SIZE,)
     channels: int = 1
+    channel_colors: tuple[str, ...] = ()
     timepoints: int = 1
     levels: int = DEFAULT_LEVELS
     factors: tuple[tuple[int, ...], ...] = ((DEFAULT_FACTOR, DEFAULT_FACTOR),)
@@ -293,6 +300,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--tiles", type=int, metavar="N", help="write a collection of N tiles instead of one image")
     parser.add_argument("--size", type=_positive_ints, action="append", metavar="Y,X|Z,Y,X", help="spatial size of level 0 (default 256,256); repeat for per-tile sizes in a collection")
     parser.add_argument("--channels", type=int, default=1, metavar="C", help="channel count (default 1)")
+    parser.add_argument("--channel-colors", type=lambda text: tuple(text.split(",")), default=(), metavar="RRGGBB,...", help="the color each channel declares, in an omero block (default none)")
     parser.add_argument("--timepoints", type=int, default=1, metavar="T", help="timepoint count (default 1)")
     parser.add_argument("--levels", type=int, default=DEFAULT_LEVELS, metavar="N", help="pyramid levels (default 3)")
     parser.add_argument("--factor", type=_positive_ints, action="append", metavar="F|F,F[,F]", help="scale factor to the next level, one value or per axis; repeat for per-level factors (default 2)")
@@ -330,6 +338,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
             parser.error(f"{flag} must be at least 1")
     if args.tiles is not None and args.tiles < 1:
         parser.error("--tiles must be at least 1")
+    if args.channel_colors and len(args.channel_colors) != args.channels:
+        parser.error(f"--channel-colors takes one color per channel, {args.channels}, got {len(args.channel_colors)}")
 
     factors = tuple(_per_axis(f, ndim, "--factor", parser) for f in (args.factor or [(DEFAULT_FACTOR,)]))
     chunks = tuple(_per_axis(c, ndim, "--chunk", parser) for c in (args.chunk or [(DEFAULT_CHUNK,)]))
@@ -361,6 +371,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         tiles=args.tiles,
         sizes=sizes,
         channels=args.channels,
+        channel_colors=args.channel_colors,
         timepoints=args.timepoints,
         levels=args.levels,
         factors=factors,
@@ -422,9 +433,12 @@ def multiscale_block(opts: Options, levels: list[Level], name: str, axis_names: 
 
 def multiscales_attributes(opts: Options, levels: list[Level], name: str) -> dict:
     multiscale = multiscale_block(opts, levels, name, opts.axis_names)
+    blocks = {}
+    if opts.channel_colors:
+        blocks["omero"] = {"channels": [{"color": color} for color in opts.channel_colors]}
     if opts.zarr_version == 2:
-        return {"multiscales": [{"version": "0.4", **multiscale}]}
-    return {"ome": {"version": "0.5", "multiscales": [multiscale]}}
+        return {"multiscales": [{"version": "0.4", **multiscale}], **blocks}
+    return {"ome": {"version": "0.5", "multiscales": [multiscale], **blocks}}
 
 
 def labels_index_attributes(opts: Options) -> dict:

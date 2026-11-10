@@ -130,6 +130,23 @@ def test_time_and_channel_axes_appear_when_larger_than_one(tmp_path: Path) -> No
     assert ms["datasets"][1]["coordinateTransformations"][0]["scale"] == [1.0, 1.0, 2.0, 2.0, 2.0]
 
 
+def test_channel_colors_write_an_omero_block_on_every_image(tmp_path: Path) -> None:
+    out = generate(
+        tmp_path, "colors.ome.zarr", "--tiles", "2", "--size", "8,8", "--channels", "2", "--levels", "1", "--chunk", "8",
+        "--channel-colors", "00FFFF,not-a-color",
+    )
+    for tile in ["A/1/0", "A/2/0"]:
+        omero = read_json(out / tile / "zarr.json")["attributes"]["ome"]["omero"]
+        assert omero == {"channels": [{"color": "00FFFF"}, {"color": "not-a-color"}]}
+    v2 = generate(
+        tmp_path, "colors-v2.ome.zarr", "--size", "8,8", "--channels", "2", "--levels", "1", "--chunk", "8",
+        "--zarr-version", "2", "--channel-colors", "FF00FF,00FF00",
+    )
+    assert read_json(v2 / ".zattrs")["omero"] == {"channels": [{"color": "FF00FF"}, {"color": "00FF00"}]}
+    plain = generate(tmp_path, "plain.ome.zarr", "--size", "8,8", "--channels", "2", "--levels", "1", "--chunk", "8")
+    assert "omero" not in read_json(plain / "zarr.json")["attributes"]["ome"]
+
+
 def test_labels_write_a_uint32_label_image_on_the_image_s_levels_without_its_channel_axis(tmp_path: Path) -> None:
     out = generate(
         tmp_path, "labeled.ome.zarr",
@@ -478,6 +495,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         ["out.zarr", "--dtype", "uint8"],
         ["out.zarr", "--zarr-version", "2", "--chunk", "8", "--shard", "16"],
         ["out.zarr", "--zarr-version", "2", "--checksum"],
+        ["out.zarr", "--channels", "3", "--channel-colors", "00FFFF,00FF00"],
     ],
     ids=[
         "size-arity",
@@ -500,6 +518,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         "default-range-past-one-byte-type",
         "v2-shard",
         "v2-checksum",
+        "channel-colors-arity",
     ],
 )
 def test_parse_args_rejects_inconsistent_options(argv: list[str]) -> None:
