@@ -58,7 +58,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
       <AnnotationOverlay
         datasetId="ds-1"
         wasmSceneRef={sceneRef}
-        canvas={canvas}
+        surface={{ view: 0, element: canvas }}
         version={1}
         viewContext={{ z: 0, t: 0, channels: [0] }}
         myId={me}
@@ -100,7 +100,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
       <AnnotationOverlay
         datasetId="ds-1"
         wasmSceneRef={sceneRef}
-        canvas={canvas}
+        surface={{ view: 0, element: canvas }}
         version={1}
         viewContext={{ z: 0, t: 0, channels: [0] }}
         myId={me}

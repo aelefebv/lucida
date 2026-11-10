@@ -2,7 +2,10 @@
  * Event, world, and screen conversions for the live viewer camera, shared by
  * the viewers, peer cursors, and both annotation overlays.
  *
- * 2D: the camera is `zoom` and `center` in physical pixels against the canvas
+ * Each conversion is for one view, in the element laid over its rectangle of
+ * the canvas ({@link ViewSurface}).
+ *
+ * 2D: the camera is `zoom` and `center` in physical pixels against the view's
  * midpoint; {@link eventToWorld} and {@link makeWorldToScreen} are exact
  * inverses. The 2D world is the scene frame every dataset is placed in, and a
  * pin is stored in its own dataset's frame, so pins go through the dataset's
@@ -20,11 +23,17 @@ export interface ClientPoint {
   clientY: number;
 }
 
-/** A pointer event in physical-pixel canvas coords, the space the WASM viewport
- * uses. */
-export function eventToScreenPx(canvas: HTMLCanvasElement, e: ClientPoint): [number, number] {
+/** A view as the page shows it: the scene's view, and the element laid over its rectangle of the canvas. */
+export interface ViewSurface {
+  view: number;
+  element: HTMLElement;
+}
+
+/** A pointer event in physical pixels from `element`'s corner, the space a
+ * view's camera uses when the element covers the view. */
+export function eventToScreenPx(element: HTMLElement, e: ClientPoint): [number, number] {
   const dpr = devicePixelRatio;
-  const rect = canvas.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
   return [(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr];
 }
 
@@ -32,15 +41,15 @@ export function eventToScreenPx(canvas: HTMLCanvasElement, e: ClientPoint): [num
  * Every cursor-anchored producer uses it so all land in the same world frame. */
 export function eventToWorld(
   scene: WasmScene,
-  canvas: HTMLCanvasElement,
+  { view, element }: ViewSurface,
   e: ClientPoint,
 ): [number, number] {
   const dpr = devicePixelRatio;
-  const [cursorX, cursorY] = eventToScreenPx(canvas, e);
-  const zoom = scene.zoom(scene.active_view());
-  const center = scene.center(scene.active_view());
-  const halfW = (canvas.clientWidth * dpr) / 2;
-  const halfH = (canvas.clientHeight * dpr) / 2;
+  const [cursorX, cursorY] = eventToScreenPx(element, e);
+  const zoom = scene.zoom(view);
+  const center = scene.center(view);
+  const halfW = (element.clientWidth * dpr) / 2;
+  const halfH = (element.clientHeight * dpr) / 2;
   return [(cursorX - halfW) / zoom + center[0], (cursorY - halfH) / zoom + center[1]];
 }
 
@@ -50,13 +59,13 @@ export function eventToWorld(
  */
 export function makeWorldToScreen(
   scene: WasmScene,
-  canvas: HTMLCanvasElement,
+  { view, element }: ViewSurface,
 ): (v: ScreenPoint) => ScreenPoint {
   const dpr = devicePixelRatio;
-  const physW = Math.round(canvas.clientWidth * dpr);
-  const physH = Math.round(canvas.clientHeight * dpr);
-  const zoom = scene.zoom(scene.active_view());
-  const center = scene.center(scene.active_view());
+  const physW = Math.round(element.clientWidth * dpr);
+  const physH = Math.round(element.clientHeight * dpr);
+  const zoom = scene.zoom(view);
+  const center = scene.center(view);
   const centerX = center[0];
   const centerY = center[1];
   return (v: ScreenPoint): ScreenPoint => [
@@ -68,11 +77,11 @@ export function makeWorldToScreen(
 /** A pointer event in `datasetId`'s frame, where its pins are stored. */
 export function eventToFrame(
   scene: WasmScene,
-  canvas: HTMLCanvasElement,
+  surface: ViewSurface,
   e: ClientPoint,
   datasetId: string,
 ): [number, number] {
-  return sceneToFrame(readPlacement(scene, datasetId), eventToWorld(scene, canvas, e));
+  return sceneToFrame(readPlacement(scene, datasetId), eventToWorld(scene, surface, e));
 }
 
 /**
@@ -81,10 +90,10 @@ export function eventToFrame(
  */
 export function makeFrameToScreen(
   scene: WasmScene,
-  canvas: HTMLCanvasElement,
+  surface: ViewSurface,
   datasetId: string,
 ): (v: ScreenPoint) => ScreenPoint {
-  const project = makeWorldToScreen(scene, canvas);
+  const project = makeWorldToScreen(scene, surface);
   const placement = readPlacement(scene, datasetId);
   return (v: ScreenPoint): ScreenPoint => project(frameToScene(placement, v));
 }

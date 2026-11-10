@@ -82,7 +82,14 @@ export class RenderLoop implements TraceEnvironment {
   private datasets: Map<string, { manifest: DatasetManifest }>;
   private client: RenderLoopOptions["client"];
   private canvas: HTMLCanvasElement;
-  private mode: "slice" | "volume";
+
+  /**
+   * The active view's mode as of the latest tick, which leads the loop's own
+   * choices: its frame quality, its banding, the uploads a short volume move
+   * holds. Each view still draws in its own mode. Read at the tick, so what
+   * reports it between ticks never reaches into a scene that has gone.
+   */
+  private mode: "slice" | "volume" = "slice";
 
   private interactiveDirty = true;
   private residencyDirty = false;
@@ -124,6 +131,8 @@ export class RenderLoop implements TraceEnvironment {
   private uploader = new Uploader();
   private tickCoordinator = new TickCoordinator(this.uploader);
   private redraws = new ViewRedraws();
+  /** Each view's mode at the latest tick, so a 2D/3D switch is seen once. */
+  private viewModes = new Map<number, "slice" | "volume">();
   private readonly autoContrast = new AutoContrastFitter();
   private autoContrastListener: AutoContrastListener | null = null;
   private cpuCacheUnsub: () => void;
@@ -168,7 +177,6 @@ export class RenderLoop implements TraceEnvironment {
     }
     this.client = opts.client;
     this.canvas = opts.canvas;
-    this.mode = opts.mode;
     this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
       this.setDirty("residency", "cache_subscribe");
     });
@@ -207,6 +215,34 @@ export class RenderLoop implements TraceEnvironment {
     // explain, so it opens a run too, under its own cause.
     if (this.datasets.size > 0) this.openDatasetRun("loop_start");
     this.publishSettle();
+  }
+
+  /** Whether a view this loop drew before has switched between 2D and 3D since. */
+  private switchedMode(views: readonly TickView[]): boolean {
+    let switched = false;
+    for (const view of views) {
+      const before = this.viewModes.get(view.id);
+      if (before !== undefined && before !== view.mode) switched = true;
+      this.viewModes.set(view.id, view.mode);
+    }
+    for (const id of this.viewModes.keys()) {
+      if (!views.some((view) => view.id === id)) this.viewModes.delete(id);
+    }
+    return switched;
+  }
+
+  /**
+   * Start planning and delivery over, as a fresh loop would. A view's 2D/3D
+   * switch changes the form its datasets' pools hold, so nothing planned or
+   * delivered for the other form carries over, and the switch opens a run as
+   * a fresh loop's start did.
+   */
+  private restartPipeline(): void {
+    this.tickCoordinator.dispose();
+    this.uploader = new Uploader();
+    this.tickCoordinator = new TickCoordinator(this.uploader);
+    this.redraws = new ViewRedraws();
+    this.openDatasetRun("mode_switch");
   }
 
   /**
@@ -852,6 +888,9 @@ export class RenderLoop implements TraceEnvironment {
       return;
     }
 
+    const scene = this.session.scene;
+    this.mode = scene.view_mode(scene.active_view()) === "volume" ? "volume" : "slice";
+
     // Before anything in this tick can dirty the loop again: what woke this
     // one is what the samples it publishes carry.
     traceRecorder.noteTickWake(this.wake.take());
@@ -911,6 +950,8 @@ export class RenderLoop implements TraceEnvironment {
     const quality = this.frameQuality(shouldRender);
     const ctx = this.buildContext(quality);
     const seqBefore = this.client.lastFrameSeq();
+
+    if (this.switchedMode(ctx.views)) this.restartPipeline();
 
     // Ahead of this tick's frame, so the frame draws the failures hatched.
     const failed = this.uploader.syncFailedChunks(ctx);

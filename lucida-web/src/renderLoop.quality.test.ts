@@ -81,7 +81,6 @@ function makeLoop() {
     datasets: new Map(),
     client: client as unknown as RenderClient,
     canvas: document.createElement("canvas"),
-    mode: "volume",
   });
   loop.start();
   /** The frame `frameSeq` finished after `ms`. */

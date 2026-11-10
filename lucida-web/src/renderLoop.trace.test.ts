@@ -46,7 +46,6 @@ function makeLoop() {
       captureFrame: () => Promise.resolve({ frame: null, reason: "no frame in this test" }),
     } as unknown as RenderClient,
     canvas,
-    mode: "slice",
   });
   return { loop, canvas };
 }

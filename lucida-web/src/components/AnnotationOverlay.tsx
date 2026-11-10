@@ -29,7 +29,7 @@ import {
   startLongPress,
   useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { eventToFrame, makeFrameToScreen, type ClientPoint } from "./cameraProjection.ts";
+import { eventToFrame, makeFrameToScreen, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { frameToScene, readPlacement } from "../placement.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
@@ -62,7 +62,8 @@ interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
   datasetId: string;
   wasmSceneRef: RefObject<WasmScene | null>;
-  canvas: HTMLCanvasElement;
+  /** The view whose pins show, and the element over its rectangle, which they sit in. */
+  surface: ViewSurface;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
   /** The current Z/T/C. A pin that differs on any axis renders off-context:
@@ -228,7 +229,9 @@ function setShapeGeometry(el: SVGLineElement | SVGPolygonElement, pts: ScreenPoi
   }
 }
 
-export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, surface, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+  // The view's own element: its pixels and its pointer events.
+  const { element } = surface;
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // Line and box elements, re-projected each frame through the same math as
   // the dot.
@@ -334,15 +337,15 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
    * lands in the dataset frame add_annotation stores. */
   const pointerWorld = (e: ClientPoint): [number, number] => {
     const scene = wasmSceneRef.current;
-    return scene ? eventToFrame(scene, canvas, e, datasetId) : [0, 0];
+    return scene ? eventToFrame(scene, surface, e, datasetId) : [0, 0];
   };
 
   /** One's own line or box under a client point, or null. */
   const ownShapeAt = (point: ClientPoint, tolerance: number): string | null => {
     const scene = wasmSceneRef.current;
     if (!scene) return null;
-    const project = makeFrameToScreen(scene, canvas, datasetId);
-    const rect = canvas.getBoundingClientRect();
+    const project = makeFrameToScreen(scene, surface, datasetId);
+    const rect = element.getBoundingClientRect();
     const shapes = annotationsRef.current
       .filter((pin) => isOwnHandledShape(pin, myId))
       .map((pin) => ({ id: pin.id, points: annotationVertices(pin).map(project), closed: isClosedShape(pin) }));
@@ -364,7 +367,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     setMenu({
       x: point.clientX,
       y: point.clientY,
-      target: scene ? { position: eventToFrame(scene, canvas, point, datasetId), z: viewContext.z } : null,
+      target: scene ? { position: eventToFrame(scene, surface, point, datasetId), z: viewContext.z } : null,
     });
   };
 
@@ -383,13 +386,13 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       e.preventDefault();
       openMenuRef.current(e, pointerType);
     };
-    canvas.addEventListener("contextmenu", onContextMenu);
-    return () => canvas.removeEventListener("contextmenu", onContextMenu);
-  }, [canvas]);
+    element.addEventListener("contextmenu", onContextMenu);
+    return () => element.removeEventListener("contextmenu", onContextMenu);
+  }, [element]);
 
   // A tap or click on the canvas selects one's own shape under it, or clears
-  // the selection on empty canvas. Pins take their own taps.
-  useCanvasTaps(canvas, (tap) => {
+  // the selection on empty element. Pins take their own taps.
+  useCanvasTaps(element, (tap) => {
     if (!visible) return;
     if (tool !== "pan" || tap.shiftKey) {
       setSelectedId(null);
@@ -430,7 +433,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       if (scene) {
         // Frame to screen in CSS px, the inverse of the shared screen-to-frame,
         // with the camera snapshotted once per frame.
-        const project = makeFrameToScreen(scene, canvas, datasetId);
+        const project = makeFrameToScreen(scene, surface, datasetId);
 
         // A pin being moved previews at the pointer, carrying its shape along;
         // a pan doesn't move the pin, so its dot keeps reprojecting.
@@ -518,7 +521,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       }
     };
     return frameClock.subscribe(tick);
-  }, [wasmSceneRef, canvas, annotationsRef, datasetId]);
+  }, [surface, wasmSceneRef, element, annotationsRef, datasetId]);
 
   /** A right-click on a marker or shape opens the canvas menu on it. A finger's
    * long press is timed by the gesture instead, so its native menu is only
@@ -534,7 +537,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // Pin gesture. The marker captures the press, so it drives every gesture
   // with Pointer Events bound to it. One's own pin moves when it is selected
   // or with Shift; otherwise a mouse drag pans and a finger's drag goes to the
-  // canvas. A press that never passes the slop is a click: plain toggles the
+  // element. A press that never passes the slop is a click: plain toggles the
   // thread and selects, Shift does nothing. A finger held still opens the menu.
 
   const onPinPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => {
@@ -596,7 +599,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       // toggle the thread.
       suppressClickRef.current = pin.id;
       dragRef.current = null;
-      forwardPressToCanvas(e.currentTarget as Element, canvas, drag, e.buttons);
+      forwardPressToCanvas(e.currentTarget as Element, element, drag, e.buttons);
       return;
     }
 

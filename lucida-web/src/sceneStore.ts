@@ -21,6 +21,31 @@ import type { SlicePlane } from "./renderer/slicePlane.ts";
 
 export type CameraMode = "slice" | "arcball" | "fly";
 
+/** What a dataset's GPU pools hold for a view: one slice cut, or the whole volume, at one timepoint. */
+export type PoolForm =
+  | { kind: "slice"; plane: SlicePlane; cut: { start: number; end: number }; t: number }
+  | { kind: "volume"; t: number };
+
+/** A dataset a view shows but leaves out: another view holds its pools in another form. */
+export interface WithheldDataset {
+  readonly dataset_id: string;
+  /** The view that holds the dataset's pools. */
+  readonly holder: number;
+  readonly held: PoolForm;
+  readonly wanted: PoolForm;
+}
+
+/** One view as the page lays it out. */
+export interface ViewPane {
+  readonly id: number;
+  /** `[x, y, width, height]` in fractions of the canvas from its top-left corner. */
+  readonly rect: readonly [number, number, number, number];
+  readonly cameraMode: CameraMode;
+  /** Whether commands steer it. */
+  readonly active: boolean;
+  readonly withheld: readonly WithheldDataset[];
+}
+
 export interface SceneView {
   readonly z: number;
   readonly t: number;
@@ -33,6 +58,8 @@ export interface SceneView {
   readonly cameraMode: CameraMode;
   /** `2d` for the slice camera, `3d` for either volume camera. */
   readonly viewMode: ViewMode;
+  /** Every view, in the layout's order. The fields above are the active view's. */
+  readonly views: readonly ViewPane[];
 }
 
 /** The epochs that can move what a saved view records, and the comparison's.
@@ -54,6 +81,7 @@ const NO_SCENE_VIEW: SceneView = {
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
+  views: [{ id: 0, rect: [0, 0, 1, 1], cameraMode: "slice", active: true, withheld: [] }],
 };
 
 /** The raw `resolved_layers()` answer each snapshot was parsed from, so an
@@ -169,9 +197,26 @@ function readView(scene: WasmScene, knownLayersJson: string | null, previous: Sc
     layers,
     cameraMode,
     viewMode: cameraMode === "slice" ? "2d" : "3d",
+    views: readViews(scene, previous.views),
   };
   layersJsonOf.set(view, layersJson);
   return view;
+}
+
+/** Every view, keeping `previous` while nothing in it changed. */
+function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly ViewPane[] {
+  const active = scene.active_view();
+  const views = Array.from(scene.view_ids(), (id): ViewPane => {
+    const [x, y, width, height] = scene.view_rect(id);
+    return {
+      id,
+      rect: [x, y, width, height],
+      cameraMode: (scene.view_camera_mode(id) || "slice") as CameraMode,
+      active: id === active,
+      withheld: JSON.parse(scene.withheld(id)) as WithheldDataset[],
+    };
+  });
+  return JSON.stringify(views) === JSON.stringify(previous) ? previous : views;
 }
 
 function sameView(a: SceneView, b: SceneView): boolean {
@@ -181,6 +226,7 @@ function sameView(a: SceneView, b: SceneView): boolean {
     a.slicePlane === b.slicePlane &&
     a.cutIndex === b.cutIndex &&
     a.layers === b.layers &&
-    a.cameraMode === b.cameraMode
+    a.cameraMode === b.cameraMode &&
+    a.views === b.views
   );
 }

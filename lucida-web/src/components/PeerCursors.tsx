@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type RefObject } from 
 import type { WasmScene } from "lucida-core";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
-import { makeWorldToScreen } from "./cameraProjection.ts";
+import { makeWorldToScreen, type ViewSurface } from "./cameraProjection.ts";
 import { peerColor } from "../peerColor.ts";
 import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import "./PeerCursors.css";
@@ -44,7 +44,8 @@ interface Props {
   myId: ClientId;
   followTarget: ClientId | null;
   wasmSceneRef: RefObject<WasmScene | null>;
-  canvas: HTMLCanvasElement;
+  /** The view the labels sit over, and the element over its rectangle. */
+  surface: ViewSurface;
   viewMode: "2d" | "3d";
   z: number;
   t: number;
@@ -78,7 +79,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localIs3d
 
 const EDGE_MARGIN = 16;
 
-export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, viewMode, z, t, cursorLabels }: Props) {
+export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, surface, viewMode, z, t, cursorLabels }: Props) {
   const labelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
@@ -108,8 +109,8 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
-        const canvasW = canvas.clientWidth;
-        const canvasH = canvas.clientHeight;
+        const canvasW = surface.element.clientWidth;
+        const canvasH = surface.element.clientHeight;
         const localIs3d = viewModeRef.current === "3d";
 
         // Build a lookup from client_id → label data from WASM
@@ -123,9 +124,9 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
         let vpMatrix: Float32Array | null = null;
         let projectWorld: ((v: [number, number]) => [number, number]) | null = null;
         if (localIs3d) {
-          vpMatrix = new Float32Array(scene.view_proj(scene.active_view()));
+          vpMatrix = new Float32Array(scene.view_proj(surface.view));
         } else {
-          projectWorld = makeWorldToScreen(scene, canvas);
+          projectWorld = makeWorldToScreen(scene, surface);
         }
 
         for (const [clientId, el] of labelRefs.current) {
@@ -216,7 +217,7 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
     return frameClock.subscribe(tick);
     // myId, peers, etc. are read via the mirror refs above so the tick sees
     // the latest values without re-subscribing on every change.
-  }, [wasmSceneRef, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [wasmSceneRef, surface]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const peerEntries = Array.from(peers.entries()).filter(
     ([id]) => id !== myId,

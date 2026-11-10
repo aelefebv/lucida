@@ -1,0 +1,26 @@
+.lc-view-panes {
+  position: absolute;
+  inset: 0;
+}
+
+/* A view's pane takes every pointer and touch on its rectangle, as the canvas
+   did: the viewers handle each touch (src/input), so a pinch zooms the view,
+   never the page, and a long press neither selects nor calls out. */
+.lc-view-pane {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  overflow: hidden;
+}
+
+/* With several views, the active one is outlined. */
+.lc-view-pane[data-active]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 2px var(--lc-accent);
+}

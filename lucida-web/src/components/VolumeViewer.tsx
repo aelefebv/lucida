@@ -2,9 +2,7 @@
 import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { ORBIT_RADIANS_PER_PIXEL, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
-import { RenderClient } from "../renderer/renderClient.ts";
-import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
-import type { Session } from "../session.ts";
+import type { RenderLoop } from "../renderLoop.ts";
 import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import { useHeldKeys } from "../hooks/useHeldKeys.ts";
@@ -18,7 +16,7 @@ import { FlyCameraHint } from "./FlyCameraHint.tsx";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
-import { eventToScreenPx, type ClientPoint } from "./cameraProjection.ts";
+import { eventToScreenPx, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { frameClock } from "../frameClock.ts";
 import { requestRender } from "../invalidation.ts";
@@ -27,20 +25,20 @@ import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
 import { FULL_RENDER_SCALE, GESTURE_RESTORE_DELAY_MS, INTERACTION_RENDER_SCALE, SCALE_RESTORE_DELAY_MS } from "./volumeRenderScale.ts";
 
 interface Props {
-  session: Session;
   scene: WasmScene;
-  datasets: Map<string, DatasetEntry>;
-  client: RenderClient;
+  /** The view this takes input for, and the element over its rectangle. */
+  surface: ViewSurface;
+  /** The canvas every view divides, which a fit sizes the scene to. */
   canvas: HTMLCanvasElement;
-  remoteDocumentVersion: number;
+  /** Whether it is the active view, the one keyboard shortcuts steer. */
+  active: boolean;
   emitPresence: () => void;
   breakFollow: () => void;
   sendCursor: (position: [number, number] | null) => void;
-  /** The scene's camera mode. A control outside this viewer or a restored
+  /** The view's camera mode. A control outside this viewer or a restored
    *  view can switch it too. */
   cameraMode: CameraMode;
   loopRef: RefObject<RenderLoop | null>;
-  onLoopChange: (loop: RenderLoop | null) => void;
   /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
   annotationDatasetId: string | null;
   /** The canvas tool: pan, or the annotation shape a press draws. */
@@ -63,11 +61,12 @@ interface Props {
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
 
-function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, cameraMode, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
-  const loopRef = useRef<RenderLoop | null>(null);
+function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakFollow, sendCursor, cameraMode, loopRef, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+  // The view's own element: its pixels, its pointer events, its cursor.
+  const { element } = surface;
   const [showHint, setShowHint] = useState(false);
 
-  // Mirror pin-drop props into refs so the canvas-bound pointer handlers read the
+  // Mirror pin-drop props into refs so the element-bound pointer handlers read the
   // latest values without re-binding on every doc change.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
   // eslint-disable-next-line react-hooks/refs
@@ -101,9 +100,10 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
   // The fly keys bind whenever the volume shows, so the shortcut sheet lists
   // them, and take precedence over global keys (L is also the line tool)
   // only in fly mode. Clipping works in either camera.
-  const flyKeys = useHeldKeys(FLY_BINDINGS, { group: "Fly camera", scope: "fly", enabled: true });
-  const clipKeys = useHeldKeys(CLIP_BINDINGS, { group: "View", enabled: true });
-  useShortcutScope("fly", isFlyMode);
+  // Keys steer the active view alone.
+  const flyKeys = useHeldKeys(FLY_BINDINGS, { group: "Fly camera", scope: "fly", enabled: active });
+  const clipKeys = useHeldKeys(CLIP_BINDINGS, { group: "View", enabled: active });
+  useShortcutScope("fly", isFlyMode && active);
   const flyKeysRef = useRef(flyKeys);
 
   const toggleFly = () => {
@@ -131,7 +131,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
     run: toggleFly,
     // Steered by keys and a mouse, so offered only with one of them, or to
     // get back out.
-    enabled: canFly || isFlyMode,
+    enabled: active && (canFly || isFlyMode),
   });
 
   // A fly-specific dirty source: fly ticks every frame, so attribution is useful
@@ -140,13 +140,13 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
     sceneRef,
     applyViewportCommand,
     flyKeysRef,
-    isFlyMode,
+    isFlyMode && active,
     emitPresence,
-    useCallback(() => loopRef.current?.markInteractiveDirty("fly_camera_input"), []),
+    useCallback(() => loopRef.current?.markInteractiveDirty("fly_camera_input"), [loopRef]),
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
       loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
-    }, []),
+    }, [loopRef]),
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
       // scaleTimerRef is captured by useFlyCameraInput's callback chain;
@@ -155,29 +155,8 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       scaleTimerRef.current = window.setTimeout(() => {
         loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
       }, SCALE_RESTORE_DELAY_MS);
-    }, []),
+    }, [loopRef]),
   );
-
-  // Create/start render loop. Same intentional omission as SliceViewer:
-  // `datasets` is a live mutable Map, onLoopChange is a stable parent
-  // callback, parentLoopRef is a ref — re-creating the loop on those would
-  // tear down GPU state every frame.
-  useEffect(() => {
-    const loop = new RenderLoop({ session, datasets, client, canvas, mode: "volume" });
-    loopRef.current = loop;
-    parentLoopRef.current = loop;
-    loop.start();
-    onLoopChange(loop);
-    return () => {
-      loop.stop();
-      parentLoopRef.current = null;
-      onLoopChange(null);
-    };
-  }, [session, client, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    loopRef.current?.markInteractiveDirty();
-  }, [remoteDocumentVersion]);
 
   // Held clip keys.
   useEffect(() => {
@@ -201,14 +180,14 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       // A held key moves the clip every frame without further input.
       return true;
     });
-  }, [scene, clipKeys, emitPresence]);
+  }, [loopRef, scene, clipKeys, emitPresence]);
 
   // Resolution scaling during interaction
   const scaleTimerRef = useRef<number>(0);
   const setLowRes = useCallback(() => {
     clearTimeout(scaleTimerRef.current);
     loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
-  }, []);
+  }, [loopRef]);
   const scheduleFullRes = useCallback((delayMs: number = SCALE_RESTORE_DELAY_MS) => {
     clearTimeout(scaleTimerRef.current);
     // Same reasoning as the inline callback above: deferred write inside
@@ -217,7 +196,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
     scaleTimerRef.current = window.setTimeout(() => {
       loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
     }, delayMs);
-  }, []);
+  }, [loopRef]);
   useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
 
   // Arcball input handling
@@ -253,11 +232,11 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       if (!datasetId) return null;
       // pick_annotation_voxel takes physical-pixel screen coords (the same space
       // the WASM viewport uses), matching project_to_screen.
-      const [screenX, screenY] = eventToScreenPx(canvas, { clientX, clientY });
+      const [screenX, screenY] = eventToScreenPx(element, { clientX, clientY });
       const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
       return voxel.length < 3 ? null : [voxel[0], voxel[1], voxel[2]];
     },
-    [canvas, scene],
+    [element, scene],
   );
 
   /** Draw an annotation from a shift gesture. A line/box depth-picks both
@@ -313,7 +292,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       );
       onDocumentChangedRef.current();
     },
-    [scene, pickVoxel],
+    [loopRef, scene, pickVoxel],
   );
 
   // A press, from a mouse, a pen, or a finger drawing with a tool. Touch
@@ -335,21 +314,21 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
 
   const onArcballPointerDown = useCallback(
     (e: PointerEvent) => {
-      // The right button opens the canvas menu instead.
+      // The right button opens the view's menu instead.
       if (e.pointerType === "touch" || e.button === 2) return;
       beginArcballPress(e, e.shiftKey);
-      canvas.setPointerCapture(e.pointerId);
+      element.setPointerCapture(e.pointerId);
       setLowRes();
     },
-    [canvas, setLowRes, beginArcballPress],
+    [element, setLowRes, beginArcballPress],
   );
 
   const moveArcballPress = useCallback(
     (e: ClientPoint, atMs?: number) => {
       // Always broadcast cursor as normalized screen coordinates
-      const rect = canvas.getBoundingClientRect();
-      const nx = (e.clientX - rect.left) / canvas.clientWidth;
-      const ny = (e.clientY - rect.top) / canvas.clientHeight;
+      const rect = element.getBoundingClientRect();
+      const nx = (e.clientX - rect.left) / element.clientWidth;
+      const ny = (e.clientY - rect.top) / element.clientHeight;
       sendCursor([nx, ny]);
 
       if (!dragging) return;
@@ -361,7 +340,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
         if (exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)) {
           press.moved = true;
         }
-        // Live draw preview in canvas-relative CSS px. The camera holds still
+        // Live draw preview in view-relative CSS px. The camera holds still
         // during a draw, so raw screen coords match where the shape lands.
         annotationDraftRef.current = press.moved
           ? { kind: press.kind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
@@ -395,7 +374,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       emitPresence();
       loopRef.current?.markInput(shiftDragRef.current ? "pan" : "orbit", atMs);
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
+    [loopRef, dragging, scene, element, emitPresence, breakFollow, sendCursor, annotationDraftRef],
   );
 
   const onArcballPointerMove = useCallback(
@@ -436,22 +415,22 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
   // Fly input handling
   const onFlyPointerDown = useCallback(
     (e: PointerEvent) => {
-      canvas.setPointerCapture(e.pointerId);
+      element.setPointerCapture(e.pointerId);
       fly.onPointerDown(e);
     },
-    [canvas, fly],
+    [element, fly],
   );
 
   const onFlyPointerMove = useCallback(
     (e: PointerEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      const nx = (e.clientX - rect.left) / canvas.clientWidth;
-      const ny = (e.clientY - rect.top) / canvas.clientHeight;
+      const rect = element.getBoundingClientRect();
+      const nx = (e.clientX - rect.left) / element.clientWidth;
+      const ny = (e.clientY - rect.top) / element.clientHeight;
       sendCursor([nx, ny]);
 
       fly.onPointerMove(e);
     },
-    [canvas, sendCursor, fly],
+    [element, sendCursor, fly],
   );
 
   const onFlyPointerUp = useCallback(
@@ -487,13 +466,13 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
   };
 
   const sendTouchCursor = (g: { x: number; y: number }) => {
-    const rect = canvas.getBoundingClientRect();
-    sendCursor([(g.x - rect.left) / canvas.clientWidth, (g.y - rect.top) / canvas.clientHeight]);
+    const rect = element.getBoundingClientRect();
+    sendCursor([(g.x - rect.left) / element.clientWidth, (g.y - rect.top) / element.clientHeight]);
   };
 
   // One finger orbits, or draws with a tool; two pinch to zoom and drag to
   // pan. Fly mode keeps its own pointer handling, touch included.
-  useTouchGestures(canvas, !isFlyMode, {
+  useTouchGestures(element, !isFlyMode, {
     claimsPress: () => toolRef.current !== "pan",
     onGesture: (g) => {
       switch (g.type) {
@@ -555,7 +534,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       setLowRes();
       scheduleFullRes(GESTURE_RESTORE_DELAY_MS);
     },
-    [scene, emitPresence, breakFollow, setLowRes, scheduleFullRes],
+    [loopRef, scene, emitPresence, breakFollow, setLowRes, scheduleFullRes],
   );
 
   const onFlyWheel = useCallback(
@@ -575,26 +554,26 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
   const onPointerUp = isFlyMode ? onFlyPointerUp : onArcballPointerUp;
 
   useEffect(() => {
-    canvas.addEventListener("pointerdown", onPointerDown);
-    canvas.addEventListener("pointermove", onPointerMove);
-    canvas.addEventListener("pointerup", onPointerUp);
-    canvas.addEventListener("pointercancel", onPointerCancel);
-    canvas.addEventListener("pointerleave", onPointerLeave);
-    canvas.addEventListener("wheel", onWheel, { passive: false });
+    element.addEventListener("pointerdown", onPointerDown);
+    element.addEventListener("pointermove", onPointerMove);
+    element.addEventListener("pointerup", onPointerUp);
+    element.addEventListener("pointercancel", onPointerCancel);
+    element.addEventListener("pointerleave", onPointerLeave);
+    element.addEventListener("wheel", onWheel, { passive: false });
     // Same cursor-mutation pattern as SliceViewer: lightweight DOM mutation
     // for hover/drag feedback, vs a parent-driven CSS class that would
     // re-render the whole viewport on every transition.
     // eslint-disable-next-line react-hooks/immutability
-    canvas.style.cursor = isFlyMode || tool !== "pan" ? "crosshair" : (dragging ? "grabbing" : "grab");
+    element.style.cursor = isFlyMode || tool !== "pan" ? "crosshair" : (dragging ? "grabbing" : "grab");
     return () => {
-      canvas.removeEventListener("pointerdown", onPointerDown);
-      canvas.removeEventListener("pointermove", onPointerMove);
-      canvas.removeEventListener("pointerup", onPointerUp);
-      canvas.removeEventListener("pointercancel", onPointerCancel);
-      canvas.removeEventListener("pointerleave", onPointerLeave);
-      canvas.removeEventListener("wheel", onWheel);
+      element.removeEventListener("pointerdown", onPointerDown);
+      element.removeEventListener("pointermove", onPointerMove);
+      element.removeEventListener("pointerup", onPointerUp);
+      element.removeEventListener("pointercancel", onPointerCancel);
+      element.removeEventListener("pointerleave", onPointerLeave);
+      element.removeEventListener("wheel", onWheel);
     };
-  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging, isFlyMode, tool]);
+  }, [element, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging, isFlyMode, tool]);
 
   const dismissHint = useCallback(() => setShowHint(false), []);
 

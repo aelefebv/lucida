@@ -25,7 +25,7 @@ import {
   startLongPress,
   useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { eventToScreenPx, makeProjectAnnotationToCss, type ClientPoint } from "./cameraProjection.ts";
+import { eventToScreenPx, makeProjectAnnotationToCss, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import { applyViewportCommand } from "../applyAndSend.ts";
@@ -42,7 +42,8 @@ interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
   datasetId: string;
   wasmSceneRef: RefObject<WasmScene | null>;
-  canvas: HTMLCanvasElement;
+  /** The view whose pins show, and the element over its rectangle, which they sit in. */
+  surface: ViewSurface;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
   /** The current Z/T/C. A pin off it renders dimmed with a locator, through the
@@ -98,7 +99,9 @@ interface Pin3DDrag {
   cancelLongPress: () => void;
 }
 
-export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, surface, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+  // The view's own element: its pixels and its pointer events.
+  const { element } = surface;
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // Lines and boxes re-project each frame through the same call as the dots.
   const shapeRefs = useRef<Map<string, SVGLineElement | SVGPolygonElement>>(new Map());
@@ -123,7 +126,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   const pickPlacement = (point: ClientPoint): AnnotationPlacement | null => {
     const scene = wasmSceneRef.current;
     if (!scene) return null;
-    const [screenX, screenY] = eventToScreenPx(canvas, point);
+    const [screenX, screenY] = eventToScreenPx(element, point);
     const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
     if (voxel.length < 3) return null;
     // A far-face pick can round past the last plane, where 2D could never
@@ -138,7 +141,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     const scene = wasmSceneRef.current;
     if (!scene) return null;
     const project = makeProjectAnnotationToCss(scene, datasetId);
-    const rect = canvas.getBoundingClientRect();
+    const rect = element.getBoundingClientRect();
     const shapes = [];
     for (const pin of annotationsRef.current) {
       if (pin.author !== String(myId) || !pin.end || (pin.kind !== "line" && pin.kind !== "box")) continue;
@@ -178,12 +181,12 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       e.preventDefault();
       openMenuRef.current(e, pointerType);
     };
-    canvas.addEventListener("contextmenu", onContextMenu);
-    return () => canvas.removeEventListener("contextmenu", onContextMenu);
-  }, [canvas]);
+    element.addEventListener("contextmenu", onContextMenu);
+    return () => element.removeEventListener("contextmenu", onContextMenu);
+  }, [element]);
 
   // A tap on one's own line or box selects it; a tap elsewhere deselects.
-  useCanvasTaps(canvas, (tap) => {
+  useCanvasTaps(element, (tap) => {
     if (!visible) return;
     if (tool !== "pan" || tap.shiftKey) {
       setSelectedId(null);
@@ -288,7 +291,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       }
     };
     return frameClock.subscribe(tick);
-  }, [wasmSceneRef, canvas, annotationsRef]);
+  }, [wasmSceneRef, element, annotationsRef]);
 
   /** A right-click on a marker opens the canvas menu on it. A finger's long
    * press is timed by the gesture instead, so its native menu is only
@@ -354,7 +357,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
         drag.forwarded = true;
         // A real drag must not also toggle the thread on the trailing click.
         suppressClickRef.current = pin.id;
-        forwardPressToCanvas(e.currentTarget as Element, canvas, drag, e.buttons);
+        forwardPressToCanvas(e.currentTarget as Element, element, drag, e.buttons);
         // The canvas owns the rest of the gesture, so release our state now; a
         // stale orbit drag would block the next press here. The suppress flag
         // stays to swallow the trailing click.
@@ -367,7 +370,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     // is live, and release commits the position.
     const el = dotRefs.current.get(pin.id);
     if (el) {
-      const rect = canvas.getBoundingClientRect();
+      const rect = element.getBoundingClientRect();
       el.style.display = "";
       el.style.transform = `translate(${e.clientX - rect.left}px, ${e.clientY - rect.top}px)`;
     }
@@ -394,7 +397,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     suppressClickRef.current = pin.id;
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    const [screenX, screenY] = eventToScreenPx(canvas, e);
+    const [screenX, screenY] = eventToScreenPx(element, e);
     const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
     if (voxel.length < 3) return; // ray missed → don't move
     // A move is in-plane only: take x/y from the picked voxel but keep the pin's

@@ -126,7 +126,7 @@ function renderOverlay(opts: {
     <AnnotationOverlay3D
       datasetId="wds-1"
       wasmSceneRef={sceneRef}
-      canvas={canvas}
+      surface={{ view: 0, element: canvas }}
       version={v}
       viewContext={viewContext}
       myId={opts.myId ?? MY_ID}
@@ -587,7 +587,7 @@ describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author'
       <AnnotationOverlay3D
         datasetId="wds-1"
         wasmSceneRef={sceneRef}
-        canvas={canvas}
+        surface={{ view: 0, element: canvas }}
         version={0}
         viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}

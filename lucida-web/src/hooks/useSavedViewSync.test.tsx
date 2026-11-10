@@ -43,6 +43,10 @@ interface MockScene {
   z: () => number;
   t: () => number;
   active_view: () => number;
+  view_ids: () => number[];
+  view_rect: () => number[];
+  view_camera_mode: () => string;
+  withheld: () => string;
   slice_plane: () => string;
   cut_index: () => number;
   camera_mode: () => string;
@@ -75,6 +79,10 @@ function makeMockScene(): MockScene {
     z: () => m.zVal,
     t: () => m.tVal,
     active_view: () => 0,
+    view_ids: () => [0],
+    view_rect: () => [0, 0, 1, 1],
+    view_camera_mode: () => m.cameraModeVal,
+    withheld: () => "[]",
     slice_plane: () => "xy",
     cut_index: () => m.zVal,
     camera_mode: () => m.cameraModeVal,
