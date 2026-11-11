@@ -18,6 +18,7 @@ import { readComparison, type Comparison } from "./comparison.ts";
 import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { ViewMode } from "./types.ts";
 import type { SlicePlane } from "./renderer/slicePlane.ts";
+import type { ViewLayoutName } from "./commands.ts";
 
 export type CameraMode = "slice" | "arcball" | "fly";
 
@@ -38,6 +39,10 @@ export interface WithheldDataset {
 /** One view as the page lays it out. */
 export interface ViewPane {
   readonly id: number;
+  /** What it shows: every dataset, or these alone. */
+  readonly shows: "all" | readonly string[];
+  /** The datasets it draws, in layer order: those it shows, less those it leaves out. */
+  readonly draws: readonly string[];
   /** `[x, y, width, height]` in fractions of the canvas from its top-left corner. */
   readonly rect: readonly [number, number, number, number];
   readonly cameraMode: CameraMode;
@@ -58,8 +63,12 @@ export interface SceneView {
   readonly cameraMode: CameraMode;
   /** `2d` for the slice camera, `3d` for either volume camera. */
   readonly viewMode: ViewMode;
-  /** Every view, in the layout's order. The fields above are the active view's. */
+  /** Every view on the canvas, in the layout's order. The fields above are the active view's. */
   readonly views: readonly ViewPane[];
+  /** How the canvas divides among the views. */
+  readonly layout: ViewLayoutName;
+  /** The view shown alone across the canvas, if one is. */
+  readonly maximized: number | null;
 }
 
 /** The epochs that can move what a saved view records, and the comparison's.
@@ -81,7 +90,9 @@ const NO_SCENE_VIEW: SceneView = {
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
-  views: [{ id: 0, rect: [0, 0, 1, 1], cameraMode: "slice", active: true, withheld: [] }],
+  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, withheld: [] }],
+  layout: "single",
+  maximized: null,
 };
 
 /** The raw `resolved_layers()` answer each snapshot was parsed from, so an
@@ -198,6 +209,8 @@ function readView(scene: WasmScene, knownLayersJson: string | null, previous: Sc
     cameraMode,
     viewMode: cameraMode === "slice" ? "2d" : "3d",
     views: readViews(scene, previous.views),
+    layout: (scene.view_layout() || "single") as ViewLayoutName,
+    maximized: scene.maximized_view() ?? null,
   };
   layersJsonOf.set(view, layersJson);
   return view;
@@ -208,8 +221,11 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
   const active = scene.active_view();
   const views = Array.from(scene.view_ids(), (id): ViewPane => {
     const [x, y, width, height] = scene.view_rect(id);
+    const shows = JSON.parse(scene.view_datasets(id)) as "all" | { only: string[] } | null;
     return {
       id,
+      shows: shows === null || shows === "all" ? "all" : shows.only,
+      draws: JSON.parse(scene.drawn_datasets(id)) as string[],
       rect: [x, y, width, height],
       cameraMode: (scene.view_camera_mode(id) || "slice") as CameraMode,
       active: id === active,
@@ -227,6 +243,8 @@ function sameView(a: SceneView, b: SceneView): boolean {
     a.cutIndex === b.cutIndex &&
     a.layers === b.layers &&
     a.cameraMode === b.cameraMode &&
-    a.views === b.views
+    a.views === b.views &&
+    a.layout === b.layout &&
+    a.maximized === b.maximized
   );
 }

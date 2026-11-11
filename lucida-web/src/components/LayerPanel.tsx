@@ -1,10 +1,13 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { DATASET_DRAG_TYPE } from "../viewer/viewPane.ts";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
   CaretDownIcon,
   CaretRightIcon,
   CaretUpIcon,
+  ColumnsIcon,
+  DotsSixVerticalIcon,
   DotsThreeIcon,
   DotsThreeVerticalIcon,
   EyeIcon,
@@ -13,6 +16,7 @@ import {
   PencilSimpleIcon,
   PlusIcon,
   SplitHorizontalIcon,
+  SquareHalfIcon,
   TrashIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
@@ -59,6 +63,16 @@ import { positionLabel } from "../axes.ts";
 import { layerReach, type ResolvedLayer, type ResolvedLayers } from "../resolvedLayers.ts";
 import type { SlicePlane } from "../renderer/slicePlane.ts";
 import "./LayerPanel.css";
+
+/** Where a layer shows when several views divide the canvas. */
+export interface LayerViewPlacement {
+  /** How many views divide the canvas. */
+  count: number;
+  /** Show a layer in the `index`th view, in layout order, and in no other. */
+  moveTo(id: string, index: number): void;
+  /** Show a layer in every view. */
+  showEverywhere(id: string): void;
+}
 
 export interface LayerChannel {
   /** The override, else the metadata label, else `Channel n`. */
@@ -158,6 +172,9 @@ interface Props {
   comparisonBlocker?: (id: string, other: string) => string | null;
   /** Compare a layer with another. Without it the layer menu offers no comparison. */
   onCompare?: (id: string, other: string) => void;
+  /** Where a layer shows when several views divide the canvas. Without it the
+   *  layer menu offers no view, and a layer doesn't drag. */
+  viewPlacement?: LayerViewPlacement;
   onSetBlendMode: (id: string, mode: BlendMode) => void;
   onSetRenderMode: (id: string, mode: RenderMode) => void;
   onSetLevelPin: (id: string, level: number | null) => void;
@@ -375,6 +392,20 @@ function LayerRow(props: LayerRowProps) {
             </Button>
           </Tooltip>
         )}
+        {props.viewPlacement && (
+          <span
+            className="lc-layer-drag"
+            draggable
+            aria-hidden="true"
+            title={`Drag ${layer.name} onto a view`}
+            onDragStart={(event) => {
+              event.dataTransfer.setData(DATASET_DRAG_TYPE, layer.id);
+              event.dataTransfer.effectAllowed = "move";
+            }}
+          >
+            <DotsSixVerticalIcon size={14} />
+          </span>
+        )}
         <Menu
           label={`Layer ${layer.name} actions`}
           placement="bottom end"
@@ -414,6 +445,19 @@ function LayerRow(props: LayerRowProps) {
                     </MenuItem>
                   );
                 })}
+            </MenuSection>
+          )}
+          {props.viewPlacement && <MenuSeparator />}
+          {props.viewPlacement && (
+            <MenuSection title="Views">
+              {Array.from({ length: props.viewPlacement.count }, (_, at) => (
+                <MenuItem key={at} icon={SquareHalfIcon} onAction={() => props.viewPlacement?.moveTo(layer.id, at)}>
+                  {`Move to view ${at + 1}`}
+                </MenuItem>
+              ))}
+              <MenuItem icon={ColumnsIcon} onAction={() => props.viewPlacement?.showEverywhere(layer.id)}>
+                {props.viewPlacement.count === 2 ? "Show in both views" : "Show in every view"}
+              </MenuItem>
             </MenuSection>
           )}
           <MenuSeparator />

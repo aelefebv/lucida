@@ -1,0 +1,13 @@
+{
+  "description": "two views side by side, a second dataset moved into the right one; orbit the left volume half a turn over 3 s, then drag across the right slice view for 3 s, each at a person's pace, to set against orbit-sustained and pan-sustained in one view",
+  "requires": ["physical", "volume"],
+  "camera": "arcball",
+  "steps": [
+    { "kind": "add", "url": "dataset:physical-volume-coarse" },
+    { "kind": "views", "layout": "columns", "show": [[], ["dataset:physical-volume-coarse"]] },
+    { "kind": "target", "view": 0 },
+    { "kind": "orbit", "theta": 180, "phi": 0, "durationMs": 3000 },
+    { "kind": "target", "view": 1 },
+    { "kind": "pan", "dx": -1200, "dy": -300, "durationMs": 3000 }
+  ]
+}

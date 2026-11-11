@@ -1,4 +1,4 @@
-import { PauseIcon, PlayIcon, VideoCameraIcon } from "@phosphor-icons/react";
+import { ColumnsIcon, PauseIcon, PlayIcon, RowsIcon, VideoCameraIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { stepIndex, type IndexChange } from "../axes.ts";
 import type { ClipDepth } from "../components/clipDepth.ts";
@@ -10,6 +10,7 @@ import { Card } from "../ui/Card.tsx";
 import { Popover } from "../ui/Popover.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { useShortcut, type KeyCombo } from "../ui/shortcuts.ts";
+import { useCommand } from "../ui/commands.ts";
 import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { AxisScrubber } from "./AxisScrubber.tsx";
 import "./DimensionBar.css";
@@ -39,6 +40,12 @@ export type CameraMode = "arcball" | "fly";
 export interface DimensionBarProps {
   viewMode: "2d" | "3d";
   onViewModeToggle: () => void;
+  /** Whether two views divide the canvas. */
+  split: boolean;
+  /** Whether a split stacks the views, as a phone does, rather than setting them side by side. */
+  stacked: boolean;
+  /** Divide the canvas into two views, or show one again. */
+  onSplitToggle: () => void;
   /** The plane the 2D view cuts. Its choice shows only in 2D, and only with depth to cut. */
   slicePlane: SlicePlane;
   onSlicePlaneChange: (plane: SlicePlane) => void;
@@ -68,6 +75,9 @@ export interface DimensionBarProps {
 export function DimensionBar({
   viewMode,
   onViewModeToggle,
+  split,
+  stacked,
+  onSplitToggle,
   slicePlane,
   onSlicePlaneChange,
   dimZ,
@@ -103,6 +113,13 @@ export function DimensionBar({
     label: "Switch 2D and 3D",
     group: "View",
     onTrigger: onViewModeToggle,
+  });
+  useCommand({
+    id: "view.split",
+    label: split ? "Show one view" : "Split view",
+    group: "View",
+    keywords: ["layout", "side by side", "compare", "two views"],
+    run: onSplitToggle,
   });
   useShortcut({
     id: "view.cyclePlane",
@@ -172,6 +189,13 @@ export function DimensionBar({
           onChange={(mode) => {
             if (mode !== viewMode) onViewModeToggle();
           }}
+        />
+        <IconButton
+          icon={stacked ? RowsIcon : ColumnsIcon}
+          size="sm"
+          label={split ? "Show one view" : "Split view"}
+          isSelected={split}
+          onSelectedChange={onSplitToggle}
         />
         {viewMode === "3d" && <CameraPopover mode={cameraMode} onToggle={onCameraModeToggle} clipDepth={clipDepth} />}
         {showPlane && (

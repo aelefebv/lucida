@@ -264,7 +264,8 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         if (shown.length > views.length) {
           return { applied: false, reason: `a ${layout} layout has ${views.length} view(s), not ${shown.length}` };
         }
-        shown.forEach((ids, at) => viewLayout.show(views[at], ids));
+        // Each dataset moves into its view, as a layer dropped on it does.
+        shown.forEach((ids, at) => ids.forEach((id) => viewLayout.move(views[at], id)));
         return { applied: true, reason: null };
       },
     });

@@ -13,13 +13,19 @@ import type { WasmScene } from "lucida-core";
 export interface ViewLayoutActions {
   /** How the canvas divides now. */
   layout(): ViewLayoutName;
-  /** Every view's id, in the layout's order. */
+  /** Every view's id on the canvas, in the layout's order. */
   views(): number[];
   setLayout(layout: ViewLayoutName): void;
   /** Make `view` the one commands steer. */
   activate(view: number): void;
   /** Show these datasets alone in `view`. */
   show(view: number, datasetIds: readonly string[]): void;
+  /** Show `datasetId` in `view` and in no other view, as a layer dropped on it moves there. */
+  move(view: number, datasetId: string): void;
+  /** Show `datasetId` in every view, as well as what each shows. */
+  showEverywhere(datasetId: string): void;
+  /** Show `view` alone across the canvas, or every view again with null. */
+  maximize(view: number | null): void;
 }
 
 export function viewLayoutActions(
@@ -43,5 +49,22 @@ export function viewLayoutActions(
       view,
       datasets: { only: [...datasetIds] },
     })),
+    move: (view, datasetId) => write((s) => applyViewportCommand(s, {
+      type: "move_dataset_to_view",
+      view,
+      dataset_id: datasetId,
+    })),
+    showEverywhere: (datasetId) => write((s) => {
+      for (const view of s.view_ids()) {
+        const shows = JSON.parse(s.view_datasets(view)) as "all" | { only: string[] } | null;
+        if (shows === null || shows === "all" || shows.only.includes(datasetId)) continue;
+        applyViewportCommand(s, {
+          type: "set_view_datasets",
+          view,
+          datasets: { only: [...shows.only, datasetId] },
+        });
+      }
+    }),
+    maximize: (view) => write((s) => applyViewportCommand(s, { type: "maximize_view", view })),
   };
 }

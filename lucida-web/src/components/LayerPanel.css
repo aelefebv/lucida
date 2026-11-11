@@ -319,3 +319,11 @@
 .lc-level-notice {
   color: var(--lc-warning);
 }
+
+/* The handle a layer is dragged onto a view by, with several views. */
+.lc-layer-drag {
+  display: inline-flex;
+  align-items: center;
+  color: var(--lc-text-muted);
+  cursor: grab;
+}

@@ -248,6 +248,19 @@ export interface SetViewDatasetsCommand {
   datasets: "all" | { only: string[] };
 }
 
+/** Show `dataset_id` in `view` and in no other view, as a layer dropped on a view moves there. */
+export interface MoveDatasetToViewCommand {
+  type: "move_dataset_to_view";
+  view: number;
+  dataset_id: string;
+}
+
+/** Show `view` alone across the canvas, or every view again with null. */
+export interface MaximizeViewCommand {
+  type: "maximize_view";
+  view: number | null;
+}
+
 /** Cut another plane with the slice camera, which fits the data again. */
 export interface SetSlicePlaneCommand {
   type: "set_slice_plane";
@@ -383,6 +396,8 @@ export type ViewportCommand =
   | SetViewLayoutCommand
   | SetActiveViewCommand
   | SetViewDatasetsCommand
+  | MoveDatasetToViewCommand
+  | MaximizeViewCommand
   | SetModeSliceCommand
   | SetModeArcballCommand
   | SetModeFlyCommand

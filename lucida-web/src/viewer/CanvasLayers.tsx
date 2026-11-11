@@ -90,7 +90,7 @@ export function CanvasLayers({
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
-  const { viewMode, z, t, layers, views } = useSceneView(engine.store);
+  const { viewMode, z, t, layers, views, maximized } = useSceneView(engine.store);
 
   // A finger's long press stands for both a right-click and a hover.
   const readoutRef = useRef<PixelReadoutHandle>(null);
@@ -134,10 +134,12 @@ export function CanvasLayers({
   };
   const nameOf = (datasetId: string) => datasets.get(datasetId)?.name ?? datasetId;
 
-  // What a view's pane holds: its viewer, in its own mode, and in the active
-  // view the annotations and peer cursors drawn over it.
+  // What a view's pane holds: its viewer, in its own mode; the annotations of
+  // the selected layer, where the view draws it; and in the active view the
+  // draft and the peer cursors. Only the active view's overlay opens a menu.
   const paneContent = (pane: ViewPane, surface: ViewSurface) => {
     const slice = pane.cameraMode === "slice";
+    const pins = overlays !== null && pane.draws.includes(overlays.datasetId);
     return (
       <>
         {viewers && slice && (
@@ -184,9 +186,9 @@ export function CanvasLayers({
         {overlays && pane.active && (
           <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
         )}
-        {overlays && pane.active && slice && (
+        {overlays && pins && slice && (
           <AnnotationOverlay
-            ref={overlay2dRef}
+            ref={pane.active ? overlay2dRef : undefined}
             datasetId={overlays.datasetId}
             wasmSceneRef={scene.wasmSceneRef}
             surface={surface}
@@ -202,9 +204,9 @@ export function CanvasLayers({
             onGoToAuthorView={onGoToAuthorView}
           />
         )}
-        {overlays && pane.active && !slice && (
+        {overlays && pins && !slice && (
           <AnnotationOverlay3D
-            ref={overlay3dRef}
+            ref={pane.active ? overlay3dRef : undefined}
             datasetId={overlays.datasetId}
             wasmSceneRef={scene.wasmSceneRef}
             surface={surface}
@@ -239,7 +241,7 @@ export function CanvasLayers({
   };
   return (
     <>
-      <ViewPanes views={views} activate={viewLayout.activate} rootRef={setPanesRoot}>
+      <ViewPanes views={views} maximized={maximized} actions={viewLayout} rootRef={setPanesRoot}>
         {paneContent}
       </ViewPanes>
       {viewers && panesRoot && (

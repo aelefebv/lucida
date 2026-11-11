@@ -38,13 +38,17 @@ function Harness({ mode = "2d", dimZ = 1, dimT = 1, dimY = 1, z: z0 = 0, t: t0 =
   const [y, setY] = useState(0);
   const [plane, setPlane] = useState<SlicePlane>("xy");
   const [cameraMode, setCameraMode] = useState<"arcball" | "fly">("arcball");
+  const [split, setSplit] = useState(false);
   const side = plane !== "xy";
   return (
     <>
-      <output data-testid="state">{`${viewMode} z=${z} t=${t} ${plane} y=${y} ${cameraMode}`}</output>
+      <output data-testid="state">{`${viewMode} z=${z} t=${t} ${plane} y=${y} ${cameraMode}${split ? " split" : ""}`}</output>
       <DimensionBar
         viewMode={viewMode}
         onViewModeToggle={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
+        split={split}
+        stacked={false}
+        onSplitToggle={() => setSplit((on) => !on)}
         slicePlane={plane}
         onSlicePlaneChange={setPlane}
         dimZ={dimZ}
@@ -102,12 +106,23 @@ describe("DimensionBar", () => {
     expect(screen.getByRole("slider", { name: "Focal depth" })).toBeTruthy();
   });
 
+  it("splits the canvas into two views and shows one again", () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "Split view" }));
+    expect(screen.getByTestId("state").textContent).toContain("split");
+    fireEvent.click(screen.getByRole("button", { name: "Show one view" }));
+    expect(screen.getByTestId("state").textContent).not.toContain("split");
+  });
+
   it("offers the clip plane in the camera popover when there is a volume to clip", async () => {
     const depth = { read: () => 0, write: vi.fn() };
     render(
       <DimensionBar
         viewMode="3d"
         onViewModeToggle={() => {}}
+        split={false}
+        stacked={false}
+        onSplitToggle={() => {}}
         slicePlane="xy"
         onSlicePlaneChange={() => {}}
         dimZ={8}

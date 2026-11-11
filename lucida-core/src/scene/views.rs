@@ -11,7 +11,7 @@ use lucida_content::DatasetId;
 use super::Scene;
 use crate::camera::Camera;
 use crate::slice_plane::SlicePlane;
-use crate::view::{View, ViewDatasets, ViewId, ViewLayout};
+use crate::view::{View, ViewDatasets, ViewId, ViewLayout, ViewRect};
 
 /// What a dataset's GPU pools hold for one view: one slice cut, or the whole
 /// volume, at one timepoint. A dataset's pools hold one form at a time, so
@@ -67,9 +67,27 @@ impl Scene {
             self.views.push(View::empty(id, rect, self.canvas));
         }
         self.layout = layout;
+        self.maximized = None;
+        let ids: Vec<ViewId> = self.views.iter().map(View::id).collect();
+        self.view_query_cursors
+            .retain(|(view, _), _| ids.contains(view));
+        self.arrange();
+    }
+
+    /// Give each view its rectangle: the layout's, or the whole canvas for a
+    /// maximized view. A camera whose size changed fits again when its pose
+    /// is the fit or a stand-in.
+    fn arrange(&mut self) {
+        let rects = self.layout.rects();
         let canvas = self.canvas;
+        let maximized = self.maximized;
         let mut resized = Vec::new();
         for (view, rect) in self.views.iter_mut().zip(rects) {
+            let rect = if maximized == Some(view.id()) {
+                ViewRect::WHOLE
+            } else {
+                rect
+            };
             view.rect = rect;
             let before = view.camera.clone();
             view.resize(rect.size_on(canvas), None);
@@ -77,10 +95,73 @@ impl Scene {
                 resized.push(view.id());
             }
         }
-        let ids: Vec<ViewId> = self.views.iter().map(View::id).collect();
-        self.view_query_cursors
-            .retain(|(view, _), _| ids.contains(view));
         for id in resized {
+            self.reframe(id);
+        }
+    }
+
+    /// Show `view` alone across the canvas, or every view again with `None`.
+    /// The others keep what they show, but while hidden they are neither
+    /// drawn nor planned and hold no dataset's pools. A view the scene
+    /// doesn't hold, or a layout of one view, changes nothing.
+    pub(crate) fn set_maximized(&mut self, view: Option<ViewId>) {
+        if view.is_some_and(|id| self.view(id).is_none() || self.views.len() < 2) {
+            return;
+        }
+        self.maximized = view;
+        if let Some(id) = view {
+            self.active = id;
+        }
+        self.arrange();
+    }
+
+    /// The view shown alone across the canvas, if one is.
+    pub fn maximized_view(&self) -> Option<ViewId> {
+        self.maximized
+    }
+
+    /// Whether `view` is on the canvas: every view is, unless another is
+    /// maximized.
+    pub fn is_shown(&self, view: ViewId) -> bool {
+        self.maximized.is_none_or(|id| id == view)
+    }
+
+    /// The views on the canvas, in the layout's order.
+    pub fn shown_views(&self) -> impl Iterator<Item = &View> {
+        self.views.iter().filter(|view| self.is_shown(view.id()))
+    }
+
+    /// Show `dataset_id` in `view` and in no other view, as a layer dropped
+    /// on a view moves there. A view that showed every dataset keeps the
+    /// others. Each view whose datasets changed fits them when its pose is
+    /// the fit or a stand-in.
+    pub(crate) fn move_dataset_to_view(&mut self, view: ViewId, dataset_id: &DatasetId) {
+        if self.view(view).is_none() || !self.document.manifests.contains_key(dataset_id) {
+            return;
+        }
+        let all = self.dataset_order.clone();
+        let mut changed = Vec::new();
+        for shown in &mut self.views {
+            let before = shown.datasets.clone();
+            if shown.id() == view {
+                if let ViewDatasets::Only(ids) = &mut shown.datasets
+                    && !ids.contains(dataset_id)
+                {
+                    ids.push(dataset_id.clone());
+                }
+            } else {
+                let mut ids = match &shown.datasets {
+                    ViewDatasets::All => all.clone(),
+                    ViewDatasets::Only(ids) => ids.clone(),
+                };
+                ids.retain(|id| id != dataset_id);
+                shown.datasets = ViewDatasets::Only(ids);
+            }
+            if shown.datasets != before {
+                changed.push(shown.id());
+            }
+        }
+        for id in changed {
             self.reframe(id);
         }
     }
@@ -120,13 +201,18 @@ impl Scene {
         self.holders
             .get(dataset_id)
             .copied()
-            .filter(|id| self.view(*id).is_some_and(|view| view.shows(dataset_id)))
+            .filter(|id| self.can_hold(*id, dataset_id))
             .or_else(|| {
-                self.views
-                    .iter()
+                self.shown_views()
                     .find(|view| view.shows(dataset_id))
                     .map(View::id)
             })
+    }
+
+    /// Whether `view` can hold `dataset_id`'s pools: it is on the canvas and
+    /// shows the dataset.
+    fn can_hold(&self, view: ViewId, dataset_id: &DatasetId) -> bool {
+        self.is_shown(view) && self.view(view).is_some_and(|v| v.shows(dataset_id))
     }
 
     /// Record each dataset's holder, so it stays until it stops showing the
@@ -137,7 +223,7 @@ impl Scene {
             .iter()
             .filter(|(dataset_id, view)| {
                 !self.document.manifests.contains_key(*dataset_id)
-                    || !self.view(**view).is_some_and(|view| view.shows(dataset_id))
+                    || !self.can_hold(**view, dataset_id)
             })
             .map(|(dataset_id, _)| dataset_id.clone())
             .collect();
@@ -151,7 +237,7 @@ impl Scene {
             .keys()
             .filter(|dataset_id| !self.holders.contains_key(*dataset_id))
             .filter_map(|dataset_id| {
-                let view = self.views.iter().find(|view| view.shows(dataset_id))?;
+                let view = self.shown_views().find(|view| view.shows(dataset_id))?;
                 Some((dataset_id.clone(), view.id()))
             })
             .collect();
@@ -389,6 +475,54 @@ mod tests {
         show(&mut scene, first, &["a", "b"]);
         assert_eq!(scene.dataset_holder(&id("a")), Some(second));
         assert!(!scene.draws(first, &id("a")));
+    }
+
+    #[test]
+    fn a_dataset_moved_into_a_view_leaves_the_others() {
+        let mut scene = split();
+        let [first, second] = both(&scene);
+        let moved = ViewportCommand::MoveDatasetToView {
+            view: second,
+            dataset_id: id("b"),
+        };
+        apply(&mut scene, moved);
+        assert_eq!(
+            scene.view(first).unwrap().datasets,
+            ViewDatasets::Only(vec![id("a")])
+        );
+        assert_eq!(
+            scene.view(second).unwrap().datasets,
+            ViewDatasets::Only(vec![id("b")])
+        );
+        assert!(scene.draws(second, &id("b")) && !scene.draws(first, &id("b")));
+    }
+
+    #[test]
+    fn a_maximized_view_takes_the_canvas_and_the_others_hold_nothing() {
+        let mut scene = split();
+        let [first, second] = both(&scene);
+        show(&mut scene, second, &["a"]);
+        apply(&mut scene, ViewportCommand::SetActiveView { view: second });
+        apply(&mut scene, ViewportCommand::SetZ { z: 5 });
+        assert!(!scene.draws(second, &id("a")));
+
+        let maximize = |view| ViewportCommand::MaximizeView { view };
+        apply(&mut scene, maximize(Some(second)));
+        let shown: Vec<ViewId> = scene.shown_views().map(View::id).collect();
+        assert_eq!(shown, vec![second]);
+        assert_eq!(scene.active_view().id(), second);
+        assert_eq!(scene.view(second).unwrap().camera.viewport(), [800, 600]);
+        // The hidden view holds nothing, so the maximized one draws it.
+        assert_eq!(scene.dataset_holder(&id("a")), Some(second));
+        assert!(scene.draws(second, &id("a")));
+
+        apply(&mut scene, maximize(None));
+        assert_eq!(scene.shown_views().count(), 2);
+        assert_eq!(scene.view(second).unwrap().camera.viewport(), [400, 600]);
+        // A layout change shows every view again.
+        apply(&mut scene, maximize(Some(first)));
+        layout(&mut scene, ViewLayout::Rows);
+        assert_eq!(scene.maximized_view(), None);
     }
 
     #[test]

@@ -99,16 +99,18 @@ export function makeFrameToScreen(
 }
 
 /**
- * The 3D per-vertex projection to CSS px via `scene.project_annotation`. `null`
- * means behind the camera or no anchorable member; the caller hides the marker.
+ * The 3D per-vertex projection through `view`'s camera to CSS px from its
+ * pane's corner, via `scene.project_annotation`. `null` means behind the
+ * camera or no anchorable member; the caller hides the marker.
  */
 export function makeProjectAnnotationToCss(
   scene: WasmScene,
+  view: number,
   datasetId: string,
 ): (v: ScreenPoint, z: number) => ScreenPoint | null {
   const dpr = devicePixelRatio;
   return (v: ScreenPoint, z: number): ScreenPoint | null => {
-    const proj = scene.project_annotation(datasetId, v[0], v[1], z);
+    const proj = scene.project_annotation(view, datasetId, v[0], v[1], z);
     return proj.length < 2 ? null : [proj[0] / dpr, proj[1] / dpr];
   };
 }

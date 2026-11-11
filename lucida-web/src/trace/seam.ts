@@ -350,7 +350,7 @@ export interface LucidaTraceSeam {
   blink(withUrl?: string | null): Promise<StepOutcome>;
   /**
    * A scripted layout: divide the canvas as `layout` does, `"single"`,
-   * `"columns"` or `"rows"`, and show in each view, in order, the datasets
+   * `"columns"` or `"rows"`, and move into each view, in order, the datasets
    * opened from the source URLs `show` lists for it.
    */
   views(layout: string, show?: string[][]): Promise<StepOutcome>;
