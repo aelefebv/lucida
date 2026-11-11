@@ -37,7 +37,7 @@ import {
 import { RejectionTracker } from "./rejection.ts";
 import { DeliveryState } from "./deliveryState.ts";
 import { TickDemand } from "./tickDemand.ts";
-import { PendingDeliveries, deliverySlot, type DeliveryJudgement } from "./pendingDeliveries.ts";
+import { WantedResidents, deliverySlot, type ResidentJudgement } from "./wantedResidents.ts";
 import { deliveryTarget } from "../../renderer/poolKeys.ts";
 import type { CacheKnobField, CacheKnobs } from "./cacheKnobs.ts";
 import { debugLog } from "../../debug/logging.ts";
@@ -376,26 +376,17 @@ export class CpuCache {
   private readonly demand = new TickDemand();
 
   /**
-   * Moves whenever the plan side of what the demand counts read changes: a
-   * submit, a rebuild, rejections cleared, a dataset dropped. With the
-   * stores' own versions it keys a reading that would otherwise walk every
-   * cached chunk on every frame, which on a wide collection is thousands of
-   * entries a frame.
+   * The resident chunks the plans want: what settling counts, and what
+   * {@link getDeliverable} hands out. Every change to what an entry counts
+   * or delivers reaches it here: an arrival, a send, an answer from the
+   * worker, a rejection, a plan refreshing the entry, an entry leaving.
    */
-  private planVersion = 0;
-  /**
-   * What {@link getDeliverable} hands out. Every change to what an entry
-   * delivers reaches it here: an arrival, a send, an answer from the worker,
-   * a rejection, a plan refreshing the entry, an entry leaving.
-   */
-  private readonly pending = new PendingDeliveries(
-    (entry) => this.judgeDelivery(entry),
-    () => this.deliveryCandidates(),
+  private readonly residents = new WantedResidents(
+    (entry) => this.judgeResident(entry),
+    () => this.allResidents(),
   );
   /** The datasets submitted since the last rebuild started. */
   private readonly submittedThisRebuild = new Set<string>();
-  /** The last demand counts, and the versions they were counted at. */
-  private demandAt: { plan: number; detail: number; coarse: number; demand: CacheTelemetry["tierDemand"] } | null = null;
 
   /**
    * Latest wanted metadata for in-flight fetches. The request object
@@ -471,7 +462,7 @@ export class CpuCache {
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
         traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
-        this.pending.forget(entry);
+        this.residents.forget(entry);
         this.noteEvicted(entry);
       },
       protects,
@@ -492,7 +483,7 @@ export class CpuCache {
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
         traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
-        this.pending.forget(entry);
+        this.residents.forget(entry);
         this.noteEvicted(entry);
       },
       protects,
@@ -533,14 +524,13 @@ export class CpuCache {
    * one dataset's, so it stands for that dataset's fetches from then on.
    */
   submit(plan: RequestPlan, chunkBytes?: (req: ChunkRequest) => number): void {
-    this.planVersion++;
     this.currentEpochs = plan.epochs;
     if (plan.requests.length > 0) {
       const datasetId = plan.requests[0].datasetId;
       if (chunkBytes) this.chunkBytesByDataset.set(datasetId, chunkBytes);
       // A second plan of a dataset in one rebuild can add targets to chunks
       // the first refreshed and the second does not touch.
-      if (this.submittedThisRebuild.has(datasetId)) this.pending.invalidate();
+      if (this.submittedThisRebuild.has(datasetId)) this.residents.invalidate();
       this.submittedThisRebuild.add(datasetId);
     }
 
@@ -654,7 +644,7 @@ export class CpuCache {
         if (cachedEntry.wantedAtMs !== undefined && Number.isNaN(cachedEntry.wantedAtMs) && wantedByView(cachedEntry)) {
           cachedEntry.wantedAtMs = enqueueNow;
         }
-        this.pending.touch(cachedEntry);
+        this.residents.touch(cachedEntry);
         continue;
       }
 
@@ -874,8 +864,7 @@ export class CpuCache {
    * view/layout/selection bumps — those must not abort fetches.
    */
   cancelDataset(datasetId: string, entityIds: string[]): void {
-    this.planVersion++;
-    this.pending.invalidate();
+    this.residents.invalidate();
     const entityIdSet = new Set(entityIds);
 
     this.chunkScheduler.cancelDataset(
@@ -923,7 +912,7 @@ export class CpuCache {
     if (!wasNew) return;
     for (const store of [this.chunkStore, this.overviewStore]) {
       const entry = store.get(entityId, chunkKey);
-      if (entry) this.pending.touch(entry);
+      if (entry) this.residents.touch(entry);
     }
 
     // The renderer's own reason for a skip: the atlas was full and the
@@ -966,13 +955,11 @@ export class CpuCache {
   }
 
   clearRejected(): void {
-    this.planVersion++;
     this.rejectionTracker.clear();
-    this.pending.invalidate();
+    this.residents.invalidate();
   }
 
   onPlanRebuildStart(): void {
-    this.planVersion++;
     for (const [entityId, submit] of this.entityPlannedAt) {
       if (submit >= this.rebuildFirstSubmit) continue;
       this.entityPlannedAt.delete(entityId);
@@ -990,7 +977,7 @@ export class CpuCache {
     this.demand.clear();
     this.rejectionTracker.clear();
     // No entry is wanted at the new tick until a submit refreshes it.
-    this.pending.clear();
+    this.residents.clear();
     this.submittedThisRebuild.clear();
     // The submits that follow carry the new wanted set and re-arm for it.
     this.wantedRequests = [];
@@ -1008,40 +995,45 @@ export class CpuCache {
    * each target that wants it, in delivery order.
    */
   getDeliverable(): Iterable<ReadyChunkDelivery> {
-    return this.pending.read();
+    return this.residents.deliveries();
   }
 
   /**
-   * What `entry` delivers: one delivery for each target that wants it this
-   * tick and was not sent it, the volume pools and each plane views cut it
-   * at. Null when it is not resident as a view chunk. Volume pools hold
-   * whole chunks, so an entry of some planes goes only to slice pools; the
-   * volume's whole chunk is fetched on its own and replaces it.
+   * What the plans make of `entry`. It counts as wanted and resident when it
+   * is a detail chunk of the main store that the view's own lanes want, or a
+   * coarse chunk of the overview store, planned this tick. It delivers once
+   * for each target that wants it this tick and was not sent it, the volume
+   * pools and each plane views cut it at. Volume pools hold whole chunks, so
+   * an entry of some planes goes only to slice pools; the volume's whole
+   * chunk is fetched on its own and replaces it.
    */
-  private judgeDelivery(entry: CacheEntry): DeliveryJudgement | null {
-    const resident =
-      this.chunkStore.get(entry.entityId, entry.chunkKey) === entry
-        ? entry.lane === "detail" && entry.tier === "active-detail"
-        : this.overviewStore.get(entry.entityId, entry.chunkKey) === entry && entry.lane === "coarse";
-    if (!resident || entry.lastSeenTick !== this.currentSubmitTick) return null;
-    if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) return null;
-    let wanted = false;
+  private judgeResident(entry: CacheEntry): ResidentJudgement | null {
+    const inDetail = this.chunkStore.get(entry.entityId, entry.chunkKey) === entry;
+    if (!inDetail && this.overviewStore.get(entry.entityId, entry.chunkKey) !== entry) return null;
+    if (entry.lastSeenTick !== this.currentSubmitTick) return null;
+    const key = chunkSchedulerKey(entry, entry.residencyTier);
+    const wantedIn = inDetail
+      ? entry.residencyTier === "detail" && this.demand.viewWantsDetail(key) ? "detail" : null
+      : entry.residencyTier === "coarse" ? "coarse" : null;
+    const deliverable = inDetail ? entry.lane === "detail" && entry.tier === "active-detail" : entry.lane === "coarse";
+    let slot: string | null = null;
     const deliveries: ReadyChunkDelivery[] = [];
-    let cached: CachedChunk | null = null;
-    this.demand.forEachViewTarget(chunkSchedulerKey(entry, entry.residencyTier), (target, { mode, cut }) => {
-      if (mode === "volume" && entry.planes) return;
-      wanted = true;
-      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey, entry.residencyTier, target)) return;
-      cached ??= this.chunkEntryToCached(entry);
-      deliveries.push(cut ? { ...cached, mode, cut } : { ...cached, mode });
-    });
-    if (!wanted) return null;
-    return { slot: deliverySlot(entry.imageId, entry.c, entry.residencyTier, entry.chunkKey), deliveries };
+    if (deliverable && !this.rejectionTracker.has(entry.entityId, entry.chunkKey)) {
+      let cached: CachedChunk | null = null;
+      this.demand.forEachViewTarget(key, (target, { mode, cut }) => {
+        if (mode === "volume" && entry.planes) return;
+        slot ??= deliverySlot(entry.imageId, entry.c, entry.residencyTier, entry.chunkKey);
+        if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey, entry.residencyTier, target)) return;
+        cached ??= this.chunkEntryToCached(entry);
+        deliveries.push(cut ? { ...cached, mode, cut } : { ...cached, mode });
+      });
+    }
+    if (wantedIn === null && slot === null) return null;
+    return { wantedIn, slot, deliveries };
   }
 
-  /** The entries a view can want: the main store's active detail and every coarse entry. */
-  private *deliveryCandidates(): Iterable<CacheEntry> {
-    yield* this.chunkStore.iterateTier("active-detail");
+  private *allResidents(): Iterable<CacheEntry> {
+    yield* this.chunkStore.allEntries();
     yield* this.overviewStore.allEntries();
   }
 
@@ -1075,8 +1067,8 @@ export class CpuCache {
     this.deliveryState.markChunkSent(
       delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier, deliveryTarget(delivery.mode, delivery.cut),
     );
-    if (detail) this.pending.touch(detail);
-    if (coarse) this.pending.touch(coarse);
+    if (detail) this.residents.touch(detail);
+    if (coarse) this.residents.touch(coarse);
     let images = this.sentImagesByEntity.get(delivery.entityId);
     if (!images) {
       images = new Set();
@@ -1106,7 +1098,7 @@ export class CpuCache {
   ): void {
     for (const key of keys) {
       this.deliveryState.markChunkRefused(imageId, c, key, tier, target);
-      this.pending.touchSlot(deliverySlot(imageId, c, tier, key));
+      this.residents.touchSlot(deliverySlot(imageId, c, tier, key));
       const entry =
         this.chunkStore.findByImageChunk(imageId, c, key) ??
         this.overviewStore.findByImageChunk(imageId, c, key);
@@ -1133,7 +1125,7 @@ export class CpuCache {
   ): void {
     for (const key of keys) {
       this.deliveryState.markChunkLost(imageId, c, key, tier, target);
-      this.pending.touchSlot(deliverySlot(imageId, c, tier, key));
+      this.residents.touchSlot(deliverySlot(imageId, c, tier, key));
       if (reason !== "evicted") continue;
       const entry =
         this.chunkStore.findByImageChunk(imageId, c, key) ??
@@ -1157,7 +1149,7 @@ export class CpuCache {
     tier: ResidencyTier,
   ): boolean {
     if (!this.deliveryState.markChunkMissing(imageId, c, chunkKey, tier, target)) return false;
-    this.pending.touchSlot(deliverySlot(imageId, c, tier, chunkKey));
+    this.residents.touchSlot(deliverySlot(imageId, c, tier, chunkKey));
     return true;
   }
 
@@ -1166,10 +1158,9 @@ export class CpuCache {
    * is eligible to send again, the ones it refused included.
    */
   forgetDelivered(): void {
-    this.planVersion++;
     this.deliveryState.reset();
     this.rejectionTracker.clear();
-    this.pending.invalidate();
+    this.residents.invalidate();
   }
 
   snapshot(): CacheStateSnapshot {
@@ -1598,8 +1589,7 @@ export class CpuCache {
   }
 
   reset(): void {
-    this.planVersion++;
-    this.pending.invalidate();
+    this.residents.invalidate();
     this.submittedThisRebuild.clear();
     this.chunkScheduler.reset();
 
@@ -1892,8 +1882,8 @@ export class CpuCache {
       this.refuseArrival(chunk, traceRow);
       return;
     }
-    if (resident) this.pending.forget(resident);
-    this.pending.touch(cacheEntry);
+    if (resident) this.residents.forget(resident);
+    this.residents.touch(cacheEntry);
     // Any fetch still bringing planes of a chunk now held whole brings
     // nothing new.
     if (result.planes === undefined) this.cancelPlaneFetches(chunk);
@@ -2260,62 +2250,20 @@ export class CpuCache {
 
   /** The demand counts, walked again only once a plan or either store has moved. */
   private computeTierDemandTelemetry(): CacheTelemetry["tierDemand"] {
-    const held = this.demandAt;
-    if (
-      held &&
-      held.plan === this.planVersion &&
-      held.detail === this.chunkStore.version &&
-      held.coarse === this.overviewStore.version
-    ) {
-      return held.demand;
-    }
-    const demand = this.countTierDemand();
-    this.demandAt = {
-      plan: this.planVersion,
-      detail: this.chunkStore.version,
-      coarse: this.overviewStore.version,
-      demand,
-    };
-    return demand;
-  }
-
-  private countTierDemand(): CacheTelemetry["tierDemand"] {
-    let residentDetailChunks = 0;
-    let residentDetailBytes = 0;
-    let residentCoarseChunks = 0;
-    let residentCoarseBytes = 0;
-
-    for (const entry of this.chunkStore.allEntries()) {
-      if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (entry.residencyTier !== "detail") continue;
-      if (!this.demand.viewWantsDetail(chunkSchedulerKey(entry, "detail"))) continue;
-      residentDetailChunks++;
-      residentDetailBytes += entry.sizeBytes;
-    }
-    for (const entry of this.overviewStore.allEntries()) {
-      if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (entry.residencyTier === "coarse") {
-        residentCoarseChunks++;
-        residentCoarseBytes += entry.sizeBytes;
-      }
-    }
-
+    const resident = this.residents.residency();
     const desiredDetail = this.demand.viewDetailKeys;
-    const detailCoverageRatio =
-      desiredDetail > 0 ? residentDetailChunks / desiredDetail : 1;
-
     return {
       desired: {
         detailChunks: desiredDetail,
         coarseChunks: this.demand.coarseKeys,
       },
       resident: {
-        detailChunks: residentDetailChunks,
-        coarseChunks: residentCoarseChunks,
-        detailBytes: residentDetailBytes,
-        coarseBytes: residentCoarseBytes,
+        detailChunks: resident.detailChunks,
+        coarseChunks: resident.coarseChunks,
+        detailBytes: resident.detailBytes,
+        coarseBytes: resident.coarseBytes,
       },
-      detailCoverageRatio,
+      detailCoverageRatio: desiredDetail > 0 ? resident.detailChunks / desiredDetail : 1,
     };
   }
 

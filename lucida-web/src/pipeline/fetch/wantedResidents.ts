@@ -2,14 +2,22 @@ import type { CacheEntry, ReadyChunkDelivery } from "./types.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import { deliveryTarget } from "../../renderer/poolKeys.ts";
 
-/**
- * What a resident entry stands for in the delivery order: its delivery slot,
- * and one delivery for each target that wants it and was not sent it.
- */
-export interface DeliveryJudgement {
-  /** {@link deliverySlot} of the entry. */
-  slot: string;
+/** What the current plans make of one resident entry. */
+export interface ResidentJudgement {
+  /** The tier the entry counts in as wanted and resident, or null when it counts in neither. */
+  wantedIn: ResidencyTier | null;
+  /** {@link deliverySlot} of the entry when a view wants it delivered, else null. */
+  slot: string | null;
+  /** One delivery for each target that wants the entry and was not sent it. */
   deliveries: ReadyChunkDelivery[];
+}
+
+/** The wanted chunks resident in each tier, and their bytes. */
+export interface WantedResidency {
+  detailChunks: number;
+  detailBytes: number;
+  coarseChunks: number;
+  coarseBytes: number;
 }
 
 /**
@@ -41,40 +49,49 @@ export function compareDeliveries(a: ReadyChunkDelivery, b: ReadyChunkDelivery):
   );
 }
 
+interface Judged {
+  wantedIn: ResidencyTier | null;
+  bytes: number;
+  slot: string | null;
+  deliveries: ReadyChunkDelivery[];
+}
+
 /**
- * The deliveries waiting to go to the render worker, in delivery order, kept
- * from one read to the next. The cache tells it which entries may have
- * changed (arrived, sent, released, refreshed by a plan) and which left, and
- * a read judges those again and merges what they deliver into the order. A
- * read costs what changed since the last one, where walking every resident
- * entry would cost about a microsecond each on every tick of a load.
+ * The resident chunks the current plans want, kept from one tick to the
+ * next: how many each tier holds, which settling reads, and the deliveries
+ * still waiting to go to the render worker, in delivery order.
+ *
+ * The cache says which entries may have changed (arrived, sent, answered for
+ * by the worker, refreshed by a plan) and which left, and a read judges those
+ * again. A read costs what changed since the last one, where judging every
+ * resident entry would cost about a microsecond each on every tick of a load.
  */
-export class PendingDeliveries {
-  /** The entries a view wants, by slot, so an answer that names a slot finds its entry. */
+export class WantedResidents {
+  private readonly judged = new Map<CacheEntry, Judged>();
+  /** The entries a view wants delivered, by slot, so an answer that names a slot finds its entry. */
   private readonly bySlot = new Map<string, CacheEntry>();
-  private readonly slotOf = new Map<CacheEntry, string>();
-  private readonly waiting = new Map<CacheEntry, ReadyChunkDelivery[]>();
   private readonly dirty = new Set<CacheEntry>();
   /** Every entry is judged again on the next read. */
   private stale = true;
+  private readonly counts: WantedResidency = { detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0 };
   private order: ReadyChunkDelivery[] = [];
   /** Deliveries that left the order since the last read. */
   private readonly dropped = new Set<ReadyChunkDelivery>();
 
-  /** What `entry` delivers now, or null when no view wants it this tick. */
-  private readonly judge: (entry: CacheEntry) => DeliveryJudgement | null;
-  /** Every resident entry a view may want, for a read after {@link invalidate}. */
-  private readonly candidates: () => Iterable<CacheEntry>;
+  /** What the plans make of `entry` now, or null when they want nothing of it. */
+  private readonly judge: (entry: CacheEntry) => ResidentJudgement | null;
+  /** Every resident entry, for a read after {@link invalidate}. */
+  private readonly residents: () => Iterable<CacheEntry>;
 
   constructor(
-    judge: (entry: CacheEntry) => DeliveryJudgement | null,
-    candidates: () => Iterable<CacheEntry>,
+    judge: (entry: CacheEntry) => ResidentJudgement | null,
+    residents: () => Iterable<CacheEntry>,
   ) {
     this.judge = judge;
-    this.candidates = candidates;
+    this.residents = residents;
   }
 
-  /** `entry` may deliver something else now. */
+  /** `entry` may count or deliver differently now. */
   touch(entry: CacheEntry): void {
     this.dirty.add(entry);
   }
@@ -91,14 +108,17 @@ export class PendingDeliveries {
     this.drop(entry);
   }
 
-  /** No view wants anything until a plan says so. */
+  /** No plan wants anything until one says so. */
   clear(): void {
+    this.judged.clear();
     this.bySlot.clear();
-    this.slotOf.clear();
-    this.waiting.clear();
     this.dirty.clear();
     this.dropped.clear();
     this.order = [];
+    this.counts.detailChunks = 0;
+    this.counts.detailBytes = 0;
+    this.counts.coarseChunks = 0;
+    this.counts.coarseBytes = 0;
     this.stale = false;
   }
 
@@ -107,15 +127,26 @@ export class PendingDeliveries {
     this.stale = true;
   }
 
+  /** The wanted chunks resident in each tier. The object is reused; read it before the next change. */
+  residency(): Readonly<WantedResidency> {
+    this.update();
+    return this.counts;
+  }
+
   /**
    * The waiting deliveries in delivery order. The array is replaced, never
    * changed, when the order changes, so a caller may hold it across sends.
    */
-  read(): readonly ReadyChunkDelivery[] {
+  deliveries(): readonly ReadyChunkDelivery[] {
+    this.update();
+    return this.order;
+  }
+
+  private update(): void {
     const added: ReadyChunkDelivery[] = [];
     if (this.stale) {
       this.clear();
-      for (const entry of this.candidates()) this.admit(entry, added);
+      for (const entry of this.residents()) this.admit(entry, added);
     } else if (this.dirty.size > 0) {
       for (const entry of this.dirty) {
         this.drop(entry);
@@ -131,29 +162,35 @@ export class PendingDeliveries {
       added.sort(compareDeliveries);
       this.order = merge(this.order, added);
     }
-    return this.order;
   }
 
   private admit(entry: CacheEntry, added: ReadyChunkDelivery[]): void {
-    const judged = this.judge(entry);
-    if (!judged) return;
-    this.bySlot.set(judged.slot, entry);
-    this.slotOf.set(entry, judged.slot);
-    if (judged.deliveries.length === 0) return;
-    this.waiting.set(entry, judged.deliveries);
+    const judgement = this.judge(entry);
+    if (!judgement) return;
+    const judged: Judged = { ...judgement, bytes: entry.sizeBytes };
+    this.judged.set(entry, judged);
+    this.count(judged, 1);
+    if (judged.slot !== null) this.bySlot.set(judged.slot, entry);
     for (const delivery of judged.deliveries) added.push(delivery);
   }
 
   private drop(entry: CacheEntry): void {
-    const slot = this.slotOf.get(entry);
-    if (slot !== undefined) {
-      this.slotOf.delete(entry);
-      if (this.bySlot.get(slot) === entry) this.bySlot.delete(slot);
+    const judged = this.judged.get(entry);
+    if (judged === undefined) return;
+    this.judged.delete(entry);
+    this.count(judged, -1);
+    if (judged.slot !== null && this.bySlot.get(judged.slot) === entry) this.bySlot.delete(judged.slot);
+    for (const delivery of judged.deliveries) this.dropped.add(delivery);
+  }
+
+  private count(judged: Judged, sign: 1 | -1): void {
+    if (judged.wantedIn === "detail") {
+      this.counts.detailChunks += sign;
+      this.counts.detailBytes += sign * judged.bytes;
+    } else if (judged.wantedIn === "coarse") {
+      this.counts.coarseChunks += sign;
+      this.counts.coarseBytes += sign * judged.bytes;
     }
-    const deliveries = this.waiting.get(entry);
-    if (deliveries === undefined) return;
-    this.waiting.delete(entry);
-    for (const delivery of deliveries) this.dropped.add(delivery);
   }
 }
 

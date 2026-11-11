@@ -1,8 +1,9 @@
 /**
- * The cache keeps what it has to deliver between walks and updates it as
- * chunks arrive, are sent, come back and leave. These tests hold it to what
- * judging every resident chunk afresh gives, across a long run of the events
- * that change it, and hold a walk to costing what changed.
+ * The cache keeps what the plans make of its resident chunks between ticks,
+ * how many each tier holds for the view and what is still to deliver, and
+ * updates it as chunks arrive, are sent, come back and leave. These tests
+ * hold it to what judging every resident chunk afresh gives, across a long
+ * run of the events that change it, and hold a tick to costing what changed.
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -19,6 +20,7 @@ import type { DecodePool } from "./decodePool.ts";
 import type { ReadyChunkDelivery } from "./types.ts";
 import type { ActiveSetEntry, ChunkRequest, RequestPlan } from "../planning/index.ts";
 import { createSyntheticState, emptyPlanStats } from "../planning/index.ts";
+import { createSettleState } from "../settle.ts";
 import { deliveryTarget } from "../../renderer/poolKeys.ts";
 
 /** Four planes of 16 one-byte samples. */
@@ -133,14 +135,23 @@ function key(delivery: ReadyChunkDelivery): string {
     `|${delivery.priority}|${delivery.lane}|${delivery.traceRow}|${delivery.planes?.join(":") ?? "whole"}`;
 }
 
-/** What judging every resident chunk afresh delivers, read without disturbing what the cache keeps. */
-function judgedAfresh(cache: CpuCache): string[] {
-  const pending = (cache as unknown as { pending: { invalidate(): void } }).pending;
-  pending.invalidate();
-  return Array.from(cache.getDeliverable(), key);
+/** What the cache reports of its resident chunks: what it delivers, and what settling counts. */
+function reading(cache: CpuCache): { deliveries: string[]; resident: number[] } {
+  const deliveries = Array.from(cache.getDeliverable(), key);
+  const s = cache.settleInputs(createSettleState());
+  return {
+    deliveries,
+    resident: [s.desiredDetailChunks, s.residentDetailChunks, s.desiredCoarseChunks, s.residentCoarseChunks],
+  };
 }
 
-describe("the deliveries the cache keeps between walks", () => {
+/** The same reading from every resident chunk judged afresh. */
+function judgedAfresh(cache: CpuCache): ReturnType<typeof reading> {
+  (cache as unknown as { residents: { invalidate(): void } }).residents.invalidate();
+  return reading(cache);
+}
+
+describe("what the cache keeps of its resident chunks between ticks", () => {
   it("match a fresh judgment of every resident chunk through a long run of changes", async () => {
     for (const seed of [1, 2, 3, 4, 5, 6]) {
       const random = seeded(seed);
@@ -213,7 +224,7 @@ describe("the deliveries the cache keeps between walks", () => {
           held.length = 0;
         }
 
-        const kept = Array.from(cache.getDeliverable(), key);
+        const kept = reading(cache);
         expect(kept, `seed ${seed}, step ${step}`).toEqual(judgedAfresh(cache));
       }
     }
@@ -237,8 +248,7 @@ describe("the deliveries the cache keeps between walks", () => {
     // The second plan wants a plane the held planes lack, so it misses them
     // and refreshes nothing, but its target is the chunk's too.
     cache.submit(planOf([drawing(3, [3, 4])]));
-    const kept = Array.from(cache.getDeliverable(), key);
-    expect(kept).toEqual(judgedAfresh(cache));
+    expect(reading(cache)).toEqual(judgedAfresh(cache));
   });
 
   it("walks no store and asks the ledger nothing on a frame that changed nothing", async () => {
@@ -261,11 +271,13 @@ describe("the deliveries the cache keeps between walks", () => {
     const entries = vi.spyOn(ChunkStore.prototype, "allEntries");
     const asked = vi.spyOn(DeliveryState.prototype, "wasChunkSent");
     try {
-      // The first read judges the 39 sent; the frames after it judge nothing.
+      // The first read judges the 39 sent; the frames after it judge nothing,
+      // and settling counts what is resident without walking it either.
       expect(Array.from(cache.getDeliverable(), (d) => d.x)).toEqual([39]);
       expect(asked).toHaveBeenCalledTimes(39);
       for (let frame = 0; frame < 10; frame++) {
         expect(Array.from(cache.getDeliverable(), (d) => d.x)).toEqual([39]);
+        expect(cache.settleInputs(createSettleState())).toMatchObject({ desiredDetailChunks: 40, residentDetailChunks: 40 });
       }
       expect(asked).toHaveBeenCalledTimes(39);
       expect(walks).not.toHaveBeenCalled();
