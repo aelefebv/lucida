@@ -188,14 +188,21 @@ impl Scene {
     }
 
     /// End every comparison whose datasets no longer line up, as when one is
-    /// removed or a layout moves it away.
+    /// removed or a layout moves it away, or that its view no longer shows
+    /// both of, as when one moves to another view. A comparison belongs to
+    /// its view, its divider a fraction of that view's width and its set
+    /// aside that view's other layers, so it never follows its pair
+    /// elsewhere: moved together, they start in the other view uncompared,
+    /// as they would one move at a time.
     pub(crate) fn keep_comparison_lined_up(&mut self) {
         let apart: Vec<usize> = (0..self.views.len())
             .filter(|&i| {
-                self.views[i]
-                    .comparison
-                    .as_ref()
-                    .is_some_and(|c| self.line_up(&c.a, &c.b) != LineUp::Yes)
+                let view = &self.views[i];
+                view.comparison.as_ref().is_some_and(|c| {
+                    !view.shows(&c.a)
+                        || !view.shows(&c.b)
+                        || self.line_up(&c.a, &c.b) != LineUp::Yes
+                })
             })
             .collect();
         let set_aside = apart
@@ -410,5 +417,92 @@ mod tests {
         scene.views[1].comparison = scene.comparison().cloned();
         scene.apply(DocumentCommand::RemoveDataset { id: a }.into());
         assert!(scene.views().iter().all(|view| view.comparison.is_none()));
+    }
+
+    /// A, B and C over one region, in two views, the first comparing A and
+    /// B by swipe and so setting C aside.
+    fn comparing_in_two_views() -> (Scene, [crate::view::ViewId; 2]) {
+        let mut scene = lined_up();
+        open(&mut scene, "c", [1, 64, 64], 1.0, true);
+        let layout = crate::view::ViewLayout::Columns;
+        scene.apply(ViewportCommand::SetViewLayout { layout }.into());
+        let views = [scene.views()[0].id(), scene.views()[1].id()];
+        let [a, b] = ids();
+        scene.compare(a, b, CompareMode::Swipe).unwrap();
+        assert_eq!(scene.set_aside(views[0]), vec![DatasetId::from("c")]);
+        (scene, views)
+    }
+
+    fn drawn(scene: &Scene, view: crate::view::ViewId, id: &str) -> Option<(bool, bool)> {
+        let layer = scene.resolved_layer(view, &DatasetId::from(id))?;
+        Some((layer.visible, layer.set_aside))
+    }
+
+    #[test]
+    fn moving_a_compared_dataset_to_another_view_ends_the_comparison() {
+        let (mut scene, [first, second]) = comparing_in_two_views();
+        let (epoch, selection) = (scene.epochs.comparison, scene.epochs.selection);
+        let [_, b] = ids();
+        scene.apply(
+            ViewportCommand::MoveDatasetToView {
+                view: second,
+                dataset_id: b.clone(),
+            }
+            .into(),
+        );
+        assert_eq!(scene.view(first).unwrap().comparison, None);
+        assert!(scene.epochs.comparison > epoch);
+        assert!(scene.epochs.selection > selection);
+        // What it set aside draws again, and B draws where it went.
+        assert!(scene.set_aside(first).is_empty());
+        assert_eq!(drawn(&scene, first, "c"), Some((true, false)));
+        assert_eq!(drawn(&scene, first, "a"), Some((true, false)));
+        assert_eq!(drawn(&scene, second, "b"), Some((true, false)));
+    }
+
+    #[test]
+    fn showing_a_view_without_one_of_its_pair_ends_the_comparison() {
+        let (mut scene, [first, _]) = comparing_in_two_views();
+        let datasets = crate::view::ViewDatasets::Only(vec!["a".into(), "c".into()]);
+        scene.apply(
+            ViewportCommand::SetViewDatasets {
+                view: first,
+                datasets,
+            }
+            .into(),
+        );
+        assert_eq!(scene.view(first).unwrap().comparison, None);
+        assert_eq!(drawn(&scene, first, "c"), Some((true, false)));
+    }
+
+    /// The pair moved together starts in the other view uncompared: the
+    /// comparison stays with the view it divided, which ends it.
+    #[test]
+    fn moving_both_compared_datasets_leaves_the_comparison_behind() {
+        let (mut scene, [first, second]) = comparing_in_two_views();
+        for dataset_id in ids() {
+            scene.apply(
+                ViewportCommand::MoveDatasetToView {
+                    view: second,
+                    dataset_id,
+                }
+                .into(),
+            );
+        }
+        assert!(scene.views().iter().all(|view| view.comparison.is_none()));
+        assert_eq!(drawn(&scene, first, "c"), Some((true, false)));
+        assert_eq!(drawn(&scene, second, "a"), Some((true, false)));
+        assert_eq!(drawn(&scene, second, "b"), Some((true, false)));
+    }
+
+    #[test]
+    fn a_recorded_comparison_of_a_dataset_its_view_no_longer_shows_stays_out() {
+        let (mut scene, [first, _]) = comparing_in_two_views();
+        let mut record = scene.record_views(true).unwrap();
+        record.views[0].datasets = crate::view::ViewDatasets::Only(vec!["a".into(), "c".into()]);
+        assert!(record.views[0].comparison.is_some());
+        scene.import_views(Some(&record), None, true);
+        assert_eq!(scene.view(first).unwrap().comparison, None);
+        assert_eq!(drawn(&scene, first, "c"), Some((true, false)));
     }
 }
