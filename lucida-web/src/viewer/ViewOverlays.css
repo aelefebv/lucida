@@ -31,8 +31,8 @@
   pointer-events: auto;
 }
 
-/* A notice across the column: that the view covers less than it asks for,
-   or where a link took it past its data. */
+/* A note across the column, such as that the point under the pointer is
+   outside the view's data. */
 .lc-view-notice {
   align-self: stretch;
   display: flex;

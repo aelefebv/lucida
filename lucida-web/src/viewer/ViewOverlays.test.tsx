@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 /**
- * A comparison's controls stand over the view that holds it, above the
- * notice of the detail the view leaves out, and a press in them makes that view
- * the one they steer.
+ * A comparison's controls stand over the view that holds it, above the icon
+ * that holds the view's notices, and a press in them makes that view the one
+ * they steer.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
@@ -10,7 +10,7 @@ import type { Comparison, ComparisonActions } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
 import type { ViewLinkNotices } from "../viewLinks.ts";
 import { ViewOverlays } from "./ViewOverlays.tsx";
-import type { Coverage } from "./CoverageNotice.tsx";
+import type { Coverage } from "./coverage.ts";
 
 afterEach(cleanup);
 
@@ -61,18 +61,27 @@ describe("a view's overlays", () => {
     expect(of(3).style.width).toBe("50%");
     expect(of(3).querySelector(".lc-comparison-bar")).not.toBeNull();
     expect(of(3).querySelector(".lc-swipe-divider")).not.toBeNull();
-    expect(of(3).textContent).toContain("1 other layer hidden while comparing");
   });
 
-  it("stack the compare bar and then the notice in one column at the view's top", () => {
+  it("say what a comparison hides among the view's notices, not on its bar", () => {
+    const { of } = overlays(new Map([[3, SWIPE]]));
+    expect(of(3).querySelector(".lc-comparison-bar")!.textContent).not.toContain("hidden while comparing");
+    expect(of(3).querySelector(".lc-view-notices-list")!.textContent).toBe("1 other layer is hidden while comparing.");
+    expect(of(3).querySelector(".lc-view-notices")!.getAttribute("data-severity")).toBe("note");
+  });
+
+  it("stack the compare bar and then the notices' icon in one column at the view's top", () => {
     const { of } = overlays(new Map([[3, SWIPE]]), { 3: { wanted: 100, short: 40 } });
     const column = of(3).querySelector(".lc-view-overlay-top")!;
     const children = [...column.children];
-    expect(children.map((child) => child.className)).toEqual(["lc-view-comparison-bar", "lc-view-notice"]);
+    expect(children.map((child) => child.className)).toEqual(["lc-view-comparison-bar", "lc-view-notices"]);
+    // The shortfall is the most severe, so the icon wears a warning and counts both.
+    expect(of(3).querySelector(".lc-view-notices")!.getAttribute("data-severity")).toBe("warning");
+    expect(of(3).querySelector(".lc-view-notices button")!.textContent).toBe("2");
     // A view without a comparison still says what it leaves out.
     cleanup();
     const plain = overlays(new Map(), { 0: { wanted: 100, short: 40 } });
-    expect(plain.of(0).querySelector(".lc-view-overlay-top .lc-view-notice")).not.toBeNull();
+    expect(plain.of(0).querySelector(".lc-view-overlay-top .lc-view-notices-list")!.textContent).toContain("40 of the 100");
   });
 
   it("say in the view a link took past its data where it went, and in no other", () => {
@@ -81,12 +90,24 @@ describe("a view's overlays", () => {
       { view: 3, notices: [{ kind: "depth" }, { kind: "time", last: 1 }] },
     ];
     const { of } = overlays(new Map(), {}, notices);
-    expect(of(0).querySelector("[data-link-notices]")).toBeNull();
-    const shown = of(3).querySelector("[data-link-notices]")!;
+    expect(of(0).querySelector(".lc-view-notices")).toBeNull();
+    const shown = of(3).querySelector(".lc-view-notices-list")!;
+    // The timepoint held at the layer's last comes first: it shows a value as another.
     expect([...shown.children].map((line) => line.textContent)).toEqual([
-      "The linked depth is outside this view's data, so nothing is drawn.",
       "The linked time is past this view's data, so it shows its last timepoint, 2.",
+      "The linked depth is outside this view's data, so nothing is drawn.",
     ]);
+  });
+
+  it("leave the active view as it is when someone reads another view's notices", () => {
+    const notices: ViewLinkNotices[] = [{ view: 3, notices: [{ kind: "position" }] }];
+    const { activate, of } = overlays(new Map(), {}, notices);
+    const icon = of(3).querySelector(".lc-view-notices button") as HTMLElement;
+    fireEvent.pointerDown(icon);
+    fireEvent.focus(icon);
+    fireEvent.click(icon);
+    expect(activate).not.toHaveBeenCalled();
+    expect(icon.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("make their view the active one on a press or focus, before they act", () => {

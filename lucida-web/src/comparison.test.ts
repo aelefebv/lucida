@@ -54,8 +54,8 @@ describe("where a compared dataset shows", () => {
 describe("what the compare bar says of the layers set aside", () => {
   it("counts them, and says nothing when there are none", () => {
     expect(setAsideNote([])).toBeNull();
-    expect(setAsideNote(["c"])).toBe("1 other layer hidden while comparing");
-    expect(setAsideNote(["c", "d"])).toBe("2 other layers hidden while comparing");
+    expect(setAsideNote(["c"])).toBe("1 other layer is hidden while comparing.");
+    expect(setAsideNote(["c", "d"])).toBe("2 other layers are hidden while comparing.");
   });
 });
 

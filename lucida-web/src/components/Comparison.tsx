@@ -28,15 +28,13 @@ interface BarProps {
   comparison: Comparison | null;
   actions: ComparisonActions;
   nameOf: (datasetId: string) => string;
-  /** What it says of the layers the comparison sets aside, or null for none. */
-  setAside: string | null;
   /** Says when the pair lines up because someone placed it by hand, or null. */
   byHand?: string | null;
   /** Whether its view is the active one, which the actions steer. */
   active: boolean;
 }
 
-export function ComparisonBar({ comparison, actions, nameOf, setAside, byHand, active }: BarProps) {
+export function ComparisonBar({ comparison, actions, nameOf, byHand, active }: BarProps) {
   // A running blink belongs to the pair it was started on, so a new
   // comparison starts still. It runs only while its view is active, since a
   // flip steers the active view.
@@ -74,7 +72,6 @@ export function ComparisonBar({ comparison, actions, nameOf, setAside, byHand, a
           <Badge tone="accent">By hand</Badge>
         </span>
       )}
-      {setAside && <span className="lc-comparison-aside">{setAside}</span>}
       <SegmentedControl<CompareMode>
         label="Compare by"
         size="sm"

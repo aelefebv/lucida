@@ -16,11 +16,6 @@
   text-overflow: ellipsis;
 }
 
-.lc-comparison-aside {
-  font-size: var(--lc-text-sm);
-  color: var(--lc-text-muted);
-}
-
 /* The slider spans the view so the divider's value is its place across it,
    but only the divider takes the pointer: the view under it still pans. */
 .lc-swipe {
