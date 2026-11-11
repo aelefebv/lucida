@@ -48,7 +48,62 @@ impl CutGrid {
     }
 }
 
+/// Where a view stands along one axis, as a person reads it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AxisReading {
+    /// The axis the view stands along.
+    pub axis: SpatialAxis,
+    /// The position on the view's grid, from 0.
+    pub position: u32,
+    /// How many positions the grid has.
+    pub count: u32,
+    /// The place in the scene frame, the middle of the position's cell.
+    pub place: f64,
+    /// The place as a physical coordinate, such as `48.5 \u{b5}m`, when the
+    /// scene frame measures lengths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length: Option<String>,
+    /// The characters the longer of the grid's two end coordinates takes, so
+    /// a readout can hold one width as the position moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_width: Option<usize>,
+}
+
 impl Scene {
+    /// Where `view` stands along the axis its slice plane cuts.
+    pub fn cut_reading(&self, view: ViewId) -> AxisReading {
+        let axis = self
+            .view(view)
+            .map_or(SpatialAxis::Z, |v| v.slice_plane().cut());
+        self.axis_reading(view, axis)
+    }
+
+    /// Where `view` stands along `axis`: its position on its grid and the
+    /// place, in the scene frame's units and, when the frame measures them,
+    /// as a physical coordinate against the origins datasets declare.
+    pub fn axis_reading(&self, view: ViewId, axis: SpatialAxis) -> AxisReading {
+        let grid = self.cut_grid(view, axis);
+        let place = self.cut_place(view, axis);
+        let frame = self.scene_frame();
+        let label = |place: f64| {
+            let (meters, unit) = frame.as_ref()?.place_meters(axis.xyz(), place)?;
+            Some(super::scale_bar::coordinate_label(meters, grid.step * unit))
+        };
+        let ends = [grid.center(0), grid.center(grid.count - 1)];
+        AxisReading {
+            axis,
+            position: grid.index_of(place),
+            count: grid.count,
+            place,
+            length: label(place),
+            length_width: ends
+                .into_iter()
+                .filter_map(label)
+                .map(|end| end.chars().count())
+                .max(),
+        }
+    }
+
     /// The positions `view` steps through cutting `axis`: a grid at the
     /// finest placed sample spacing among the visible layers it shows, over
     /// the union of where they lie, so it reaches before the first dataset's
@@ -240,6 +295,44 @@ mod tests {
         // A place past either end reads as the nearest position.
         assert_eq!(grid.index_of(-100.0), 0);
         assert_eq!(grid.index_of(100.0), 4);
+    }
+
+    #[test]
+    fn a_reading_names_the_position_and_the_physical_place() {
+        // The second dataset starts 1 mm down; the first fixes the frame.
+        let mut scene = Scene::new([800, 600]);
+        open(
+            &mut scene,
+            "a",
+            [40, 64, 64],
+            [2.0, 1.0, 1.0],
+            [1000.0, 0.0, 0.0],
+        );
+        apply(&mut scene, ViewportCommand::SetZ { z: 3 });
+        let reading = scene.axis_reading(scene.active_view().id(), SpatialAxis::Z);
+        assert_eq!(
+            (reading.position, reading.count, reading.place),
+            (3, 40, 7.0)
+        );
+        assert_eq!(reading.length.as_deref(), Some("1.0070 mm"));
+        assert_eq!(reading.length_width, Some(9));
+        let plane = SlicePlane::Xz;
+        apply(&mut scene, ViewportCommand::SetSlicePlane { plane });
+        let reading = scene.axis_reading(scene.active_view().id(), SpatialAxis::Y);
+        assert_eq!(reading.length.as_deref(), Some("32.5 \u{b5}m"));
+    }
+
+    #[test]
+    fn a_frame_without_lengths_reads_no_physical_place() {
+        let mut scene = Scene::new([800, 600]);
+        let image =
+            make_dataset_opened_with_shape("i", "i", 1, [1, 1, 8, 8, 8], [1, 1, 8, 8, 8], 1);
+        scene.apply(DocumentCommand::DatasetOpened(image).into());
+        let reading = scene.axis_reading(scene.active_view().id(), SpatialAxis::Z);
+        assert_eq!(
+            (reading.position, reading.count, reading.length),
+            (0, 8, None)
+        );
     }
 
     #[test]

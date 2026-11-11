@@ -58,7 +58,8 @@ cuts. Along Z, Y and X it is a place in the scene frame, so one position cuts
 the same place in every layer, and each layer reads its own plane there; a
 layer the place misses is outside the cut. The view steps through a grid of
 positions at the finest spacing among the layers it shows, over all of them.
-People see a position counted from 1 on that grid, as `Z 5` or `Z 5/40`;
+People see a position counted from 1 on that grid, as `Z 5` or `Z 5/40`,
+with the place as a physical coordinate when the scene measures lengths;
 commands and CLI flags carry the 0-based position, and saved views carry the
 place. T is a timepoint index.
 _Avoid_: position (unqualified; an entity's position is its place in a layout)

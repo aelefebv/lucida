@@ -14,6 +14,7 @@ import { useCommand } from "../ui/commands.ts";
 import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { AxisScrubber } from "./AxisScrubber.tsx";
 import { LinkPopover, type LinkPopoverProps } from "./LinkPopover.tsx";
+import type { PlaceLabel } from "../sceneStore.ts";
 import "./DimensionBar.css";
 
 const MODE_KEYS: readonly KeyCombo[] = ["M"];
@@ -56,6 +57,8 @@ export interface DimensionBarProps {
   dimZ: number;
   /** The axis position along the plane's cut axis: Z, or Y or X for a side view. */
   cut: number;
+  /** The place it cuts as a physical coordinate, when the scene measures one. */
+  cutPlace?: PlaceLabel | null;
   /** Positions along the cut axis; its scrubber shows only in 2D, and only with more than one. */
   dimCut: number;
   onCutChange: (index: IndexChange) => void;
@@ -86,6 +89,7 @@ export function DimensionBar({
   onSlicePlaneChange,
   dimZ,
   cut,
+  cutPlace,
   dimCut,
   onCutChange,
   t,
@@ -219,6 +223,7 @@ export function DimensionBar({
           name={`${cutLetter} plane`}
           value={cut}
           count={dimCut}
+          place={cutPlace ?? undefined}
           onChange={onCutChange}
           previousShortcut={PREVIOUS_Z_KEYS}
           nextShortcut={NEXT_Z_KEYS}

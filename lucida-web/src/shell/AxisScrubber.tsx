@@ -4,6 +4,7 @@ import { positionNumber, stepIndex, type IndexChange } from "../axes.ts";
 import { IconButton } from "../ui/Button.tsx";
 import type { KeyCombo } from "../ui/shortcuts.ts";
 import { Slider } from "../ui/Slider.tsx";
+import type { PlaceLabel } from "../sceneStore.ts";
 
 export interface AxisScrubberProps {
   /** The short letter drawn before the controls, e.g. `Z`. */
@@ -14,6 +15,8 @@ export interface AxisScrubberProps {
   value: number;
   /** How many positions the axis has. */
   count: number;
+  /** Where the position lies, as a physical coordinate, after the count. */
+  place?: PlaceLabel;
   /** Called with a zero-based position from the slider, or a step from a step button. */
   onChange: (value: IndexChange) => void;
   previousShortcut?: readonly KeyCombo[];
@@ -24,12 +27,14 @@ export interface AxisScrubberProps {
   trailing?: ReactNode;
 }
 
-/** Step buttons, a slider, and an `n / total` readout for one axis. */
+/** Step buttons, a slider, and an `n / total` readout for one axis, with
+ *  the place the position stands at when it has a physical one. */
 export function AxisScrubber({
   axis,
   name,
   value,
   count,
+  place,
   onChange,
   previousShortcut,
   nextShortcut,
@@ -77,6 +82,12 @@ export function AxisScrubber({
           {positionNumber(value)}
         </span>
         {` / ${count}`}
+        {place && (
+          // As wide as the widest coordinate on the axis, so it never shifts either.
+          <span className="lc-dim-place" style={{ minWidth: `${place.width}ch` }}>
+            {place.label}
+          </span>
+        )}
       </span>
       {trailing}
     </div>
