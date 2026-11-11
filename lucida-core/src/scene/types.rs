@@ -9,6 +9,7 @@ use lucida_content::{
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
+use crate::placement::UserTransform;
 use crate::view::LegacyChannels;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -705,6 +706,10 @@ pub struct DocumentState {
     /// via `DocumentCommand::AddAnnotation` / `RemoveAnnotation`.
     #[serde(default)]
     pub annotations: IndexMap<DatasetId, Vec<Annotation>>,
+    /// Where a person put each dataset they moved or resized by hand. A
+    /// dataset without an entry sits where its declared frame places it.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub user_transforms: IndexMap<DatasetId, UserTransform>,
 }
 
 impl DocumentState {
@@ -764,6 +769,7 @@ impl DocumentState {
         rekey(&mut self.annotations, &fate, |new_id, anns| {
             on_kept_annotations(new_id, anns);
         });
+        rekey(&mut self.user_transforms, &fate, |_, _| {});
     }
 
     /// Rewrite every workspace-local [`DatasetId`] in the document through
@@ -793,8 +799,8 @@ impl DocumentState {
     }
 
     /// Remove a dataset by id from every id-keyed field of the document: its
-    /// manifest, registered layouts, active-layout id, asset catalog, and
-    /// annotations, so nothing is left orphaned.
+    /// manifest, registered layouts, active-layout id, asset catalog,
+    /// annotations and user transform, so nothing is left orphaned.
     pub fn remove_dataset(&mut self, id: &DatasetId) {
         self.rekey_dataset_ids(
             |candidate| {
@@ -814,6 +820,21 @@ impl DocumentState {
     pub fn rename_dataset(&mut self, id: &DatasetId, name: String) {
         if let Some(manifest) = self.manifests.get_mut(id) {
             manifest.name = name;
+        }
+    }
+
+    /// Place `dataset_id` by `transform` on top of its declared frame; the
+    /// identity leaves no entry. A dataset the document doesn't hold, or a
+    /// transform no scene can place by, changes nothing, so a late or
+    /// malformed command never mints an entry.
+    pub fn set_user_transform(&mut self, dataset_id: DatasetId, transform: UserTransform) {
+        if !self.manifests.contains_key(&dataset_id) || !transform.is_valid() {
+            return;
+        }
+        if transform.is_identity() {
+            self.user_transforms.shift_remove(&dataset_id);
+        } else {
+            self.user_transforms.insert(dataset_id, transform);
         }
     }
 
@@ -1145,6 +1166,12 @@ impl DocumentState {
                 text,
             } => {
                 self.edit_comment(&dataset_id, &annotation_id, &id, text);
+            }
+            DocumentCommand::SetUserTransform {
+                dataset_id,
+                transform,
+            } => {
+                self.set_user_transform(dataset_id, transform);
             }
         }
     }
@@ -1529,6 +1556,13 @@ mod annotation_view_tests {
         doc.active_layout_ids
             .insert(id.clone(), LayoutId("img".into()));
         doc.add_annotation(id.clone(), pin_with_view(None));
+        doc.set_user_transform(
+            id.clone(),
+            UserTransform {
+                translation: [1.0, 0.0, 0.0],
+                ..UserTransform::IDENTITY
+            },
+        );
         doc
     }
 
@@ -1598,6 +1632,7 @@ mod annotation_view_tests {
         assert!(doc.registered_layouts.is_empty());
         assert!(doc.active_layout_ids.is_empty());
         assert!(doc.annotations.is_empty());
+        assert!(doc.user_transforms.is_empty());
     }
 
     /// A remap and a removal preserve the iteration order of the `IndexMap`

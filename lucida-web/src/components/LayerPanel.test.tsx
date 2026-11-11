@@ -60,6 +60,8 @@ function layer(overrides: Partial<LayerInfo> = {}): LayerInfo {
     displayedCoarserThanTarget: false,
     downsamplingMethod: null,
     physicalScale: true,
+    userTransform: null,
+    units: [null, null, null],
     ...overrides,
   };
 }
@@ -740,6 +742,61 @@ describe("LayerPanel level readout", () => {
 
     await renderLevels({ physicalScale: true });
     expect(screen.queryByLabelText("original.zarr physical scale")).toBeNull();
+  });
+});
+
+describe("LayerPanel placement by hand", () => {
+  const moved = { translation: [5, 0, 0], rotation: [0, 0, 0, 1], scale: [2, 2, 2] } satisfies LayerInfo["userTransform"];
+
+  async function renderPlacement(overrides: Partial<LayerInfo>, props: Partial<Parameters<typeof LayerPanel>[0]> = {}) {
+    const onSetUserTransform = vi.fn();
+    const onResetUserTransform = vi.fn();
+    render(
+      <LayerPanel
+        {...baseProps({
+          expandedLayerId: "wds-1",
+          layers: [layer(overrides)],
+          onSetUserTransform,
+          onResetUserTransform,
+          ...props,
+        })}
+      />,
+    );
+    await openAdvanced();
+    return { onSetUserTransform, onResetUserTransform };
+  }
+
+  it("says on the row when a layer was moved by hand", async () => {
+    await renderPlacement({ userTransform: moved });
+    const badge = screen.getByTestId("layer-moved-wds-1");
+    expect(badge.textContent).toBe("Moved");
+    expect(badge.getAttribute("aria-label")).toBe("Moved by hand");
+    cleanup();
+    await renderPlacement({ userTransform: null });
+    expect(screen.queryByTestId("layer-moved-wds-1")).toBeNull();
+  });
+
+  it("changes one number of the transform, in the layer's own units", async () => {
+    const { onSetUserTransform } = await renderPlacement({ userTransform: moved, units: ["micrometer", "micrometer", "micrometer"] });
+    const field = screen.getByRole("textbox", { name: "original.zarr scale Y" });
+    await userEvent.clear(field);
+    await userEvent.type(field, "3{Enter}");
+    expect(onSetUserTransform).toHaveBeenLastCalledWith("wds-1", moved, { ...moved, scale: [2, 3, 2] });
+    expect(screen.getByRole("textbox", { name: "original.zarr offset X in micrometers" })).toBeTruthy();
+  });
+
+  it("resets only a layer that was moved, and only for an editor", async () => {
+    const { onResetUserTransform } = await renderPlacement({ userTransform: moved });
+    await userEvent.click(screen.getByRole("button", { name: "Reset position and size" }));
+    expect(onResetUserTransform).toHaveBeenCalledWith("wds-1");
+    cleanup();
+
+    await renderPlacement({ userTransform: null });
+    expect(screen.getByRole("button", { name: "Reset position and size" }).hasAttribute("disabled")).toBe(true);
+    cleanup();
+
+    await renderPlacement({ userTransform: moved }, { canEdit: false });
+    expect(screen.getByRole("button", { name: "Reset position and size" }).hasAttribute("disabled")).toBe(true);
   });
 });
 

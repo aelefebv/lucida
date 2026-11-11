@@ -18,13 +18,16 @@ import type { SavedView } from "./types.ts";
  */
 export function buildAnnotationView(scene: WasmScene): SavedView | null {
   try {
-    return buildCapture({
+    // A pin restores how its author looked, never where datasets sit, which
+    // the document holds; a view without the record leaves placement alone.
+    const { user_transforms: _placement, ...view } = buildCapture({
       scene,
       // Empty on purpose: this mode never reads it, and a pin's view must not
       // embed source URLs.
       urlByDatasetId: new Map(),
       datasetReferenceMode: "workspace-dataset-id",
     });
+    return view;
   } catch (e) {
     console.warn("[Annotation] view capture failed:", e);
     return null;

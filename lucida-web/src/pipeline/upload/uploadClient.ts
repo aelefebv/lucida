@@ -15,6 +15,7 @@ import type {
 } from "../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
+import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 
 /** Worker `chunkResidency` callback. */
 export type ChunkResidencyHandler = (msg: ChunkResidencyMessage) => void;
@@ -67,8 +68,9 @@ export interface UploadClient {
 
   /**
    * Deliver one Z-plane of each chunk, the plane `fullResZ` maps to at
-   * `level`. Each `chunk.data` is transferred, so it must be a buffer cut for
-   * the worker, never the cache's own.
+   * `level`, in the frame of the plane cutting `sliceAxis`. Each
+   * `chunk.data` is transferred, so it must be a buffer cut for the worker,
+   * never the cache's own.
    */
   sliceChunkData(
     memberId: string,
@@ -94,6 +96,7 @@ export interface UploadClient {
     fullResZ: number,
     epochs: SceneEpochs,
     tier: ResidencyTier,
+    sliceAxis?: SpatialAxis,
   ): void;
 
   /**

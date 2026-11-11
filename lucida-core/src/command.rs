@@ -8,6 +8,7 @@ use lucida_content::{
 use lucida_protocol::DatasetOpened;
 
 use crate::camera::{Camera, Framing};
+use crate::placement::UserTransform;
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 use crate::slice_plane::SlicePlane;
 use crate::view::{ViewDatasets, ViewId, ViewLayout};
@@ -147,6 +148,15 @@ pub enum DocumentCommand {
         annotation_id: String,
         id: String,
         text: String,
+    },
+    /// Place `dataset_id` by `transform`, on top of where its declared frame
+    /// puts it; the identity puts it back. Every peer places it alike, and
+    /// it persists with the workspace. An unknown dataset, or a transform no
+    /// scene can place by ([`UserTransform::is_valid`]), is a no-op. Bumps
+    /// `epochs.layout` when the placement changes.
+    SetUserTransform {
+        dataset_id: DatasetId,
+        transform: UserTransform,
     },
 }
 
@@ -425,7 +435,8 @@ impl From<ViewportCommand> for Command {
 /// settings map, the one snapshot with real cost at scale. Classification is
 /// exhaustive, so an unclassified new variant is a compile error.
 enum ViewportScope {
-    /// Mutates the active view's camera only. A change bumps `epochs.view`.
+    /// Mutates the active view's camera only. A change bumps `epochs.view`,
+    /// and one to the plane a slice camera cuts `epochs.selection` too.
     Camera,
     /// Mutates the active view's axis positions (the slice and timepoint
     /// selectors) only. A change bumps `epochs.selection`.
@@ -769,10 +780,24 @@ impl Scene {
                         // state, so comment edits share the annotation epoch.
                         self.epochs.annotation += 1;
                     }
+                    // Followed once the document holds the new placement.
+                    DocumentCommand::SetUserTransform { .. } => {}
                 }
+                let moved = match &doc_cmd {
+                    DocumentCommand::SetUserTransform { dataset_id, .. } => Some((
+                        dataset_id.clone(),
+                        self.document.user_transforms.get(dataset_id).copied(),
+                    )),
+                    _ => None,
+                };
                 self.document.apply(doc_cmd);
                 if reframes {
                     self.content_changed(spaces_before);
+                }
+                if let Some((id, before)) = moved
+                    && self.document.user_transforms.get(&id).copied() != before
+                {
+                    self.dataset_moved();
                 }
             }
             Command::Viewport(vp_cmd) => self.apply_viewport(vp_cmd),
@@ -810,9 +835,12 @@ impl Scene {
                 let others_before = self.other_cameras();
                 // A plane switch also places the axis position it cuts at.
                 let axes_before = self.active_view().axes.clone();
+                let plane_before = self.active_view().slice_plane();
                 self.mutate_viewport(cmd);
                 let view = self.active_view_mut();
-                let axes_changed = view.axes != axes_before;
+                // Another plane draws other planes of every layer, as a moved
+                // axis position does, even where no position moved.
+                let cut_changed = view.axes != axes_before || view.slice_plane() != plane_before;
                 let moved = view.camera != before;
                 // Steering a fit makes it a choice, which a new canvas
                 // keeps. A stand-in stays one: moving an empty canvas
@@ -820,7 +848,7 @@ impl Scene {
                 if moved && steers && view.camera.framing() == Framing::Framed {
                     view.camera.set_framing(Framing::Placed);
                 }
-                if axes_changed {
+                if cut_changed {
                     self.epochs.selection += 1;
                 }
                 if moved || self.other_cameras() != others_before {

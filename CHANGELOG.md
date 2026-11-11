@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.31.0](https://github.com/aelefebv/lucida/compare/v0.30.0...v0.31.0) (2026-11-11)
+
+
+### Features
+
+* **web:** a dataset's slice and volume pools stay resident together ([#1503](https://github.com/aelefebv/lucida/issues/1503)) ([c0c1184](https://github.com/aelefebv/lucida/commit/c0c11842eb85955e4172857c3a1d0f28722023d0))
+* **web:** each view settles and reports its own coverage, and says when it covers less ([#1507](https://github.com/aelefebv/lucida/issues/1507)) ([beb2d51](https://github.com/aelefebv/lucida/commit/beb2d510326773fe0eb5c483fb5ac1fe7a508a89))
+* **web:** split the canvas into two views, move layers between them, and show one alone ([#1504](https://github.com/aelefebv/lucida/issues/1504)) ([c3748a0](https://github.com/aelefebv/lucida/commit/c3748a0fee342152177d3070c55e38a4d72069cb))
+
+
+### Bug Fixes
+
+* show only the compared pair during swipe and blink ([#1505](https://github.com/aelefebv/lucida/issues/1505)) ([b03dd17](https://github.com/aelefebv/lucida/commit/b03dd17159929639d520077dd4684ac06bb25037))
+
+
+### Refactors
+
+* **web:** one loop draws every view, and each view takes input in its own pane ([#1498](https://github.com/aelefebv/lucida/issues/1498)) ([ca94fdb](https://github.com/aelefebv/lucida/commit/ca94fdbabebfa9ca8abccd367f1487420c2831d0))
+
 ## [0.30.0](https://github.com/aelefebv/lucida/compare/v0.29.0...v0.30.0) (2026-11-10)
 
 

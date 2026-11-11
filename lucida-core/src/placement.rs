@@ -15,6 +15,7 @@
 use lucida_content::{DatasetManifest, LevelGeometry};
 use serde::{Deserialize, Serialize};
 
+use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
 
 /// A per-axis scale and offset, `[x, y, z]`: `offset + point * scale`. Every
@@ -138,6 +139,98 @@ impl DeclaredFrame {
     /// another such frame. Without one, a sample measures one unit.
     pub fn has_physical_scale(&self) -> bool {
         self.meters.is_some()
+    }
+}
+
+/// Where a person put a dataset by hand, on top of where its declared frame
+/// places it: stretched by `scale` and moved by `translation`, about the
+/// frame's origin, the corner where its first sample starts. It changes only
+/// where the scene draws the dataset, never the data or what the dataset
+/// declares.
+///
+/// `translation` is `[x, y, z]` in the dataset's own declared numbers, so it
+/// means the same whichever dataset fixes the scene frame. `rotation` is a
+/// unit quaternion `[x, y, z, w]` applied between the two, held so a rotation
+/// can join without a new record; this build places only the identity
+/// ([`Self::is_valid`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UserTransform {
+    #[serde(default = "no_translation")]
+    pub translation: [f64; 3],
+    #[serde(default = "no_rotation")]
+    pub rotation: [f64; 4],
+    #[serde(default = "unit_scale")]
+    pub scale: [f64; 3],
+}
+
+fn no_translation() -> [f64; 3] {
+    [0.0; 3]
+}
+
+fn no_rotation() -> [f64; 4] {
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+fn unit_scale() -> [f64; 3] {
+    [1.0; 3]
+}
+
+impl Default for UserTransform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl UserTransform {
+    pub const IDENTITY: UserTransform = UserTransform {
+        translation: [0.0; 3],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        scale: [1.0; 3],
+    };
+
+    pub fn is_identity(&self) -> bool {
+        *self == Self::IDENTITY
+    }
+
+    /// Whether a scene can place a dataset by it: every number finite, every
+    /// scale above zero, so the dataset keeps a size and its orientation, and
+    /// no rotation, which placement can't express yet.
+    pub fn is_valid(&self) -> bool {
+        self.translation.iter().all(|v| v.is_finite())
+            && self.scale.iter().all(|s| s.is_finite() && *s > 0.0)
+            && self.rotation == no_rotation()
+    }
+
+    /// The map this transform makes of `frame`'s samples, ahead of the
+    /// frame's declared placement.
+    pub fn in_frame(&self, frame: &DeclaredFrame) -> Affine {
+        Affine {
+            scale: self.scale,
+            offset: std::array::from_fn(|i| self.translation[i] / frame.spacing[i]),
+        }
+    }
+
+    /// The transform whose map of `frame`'s samples is `in_frame`, the
+    /// inverse of [`Self::in_frame`] with this transform's rotation.
+    fn with_frame_map(&self, frame: &DeclaredFrame, in_frame: &Affine) -> UserTransform {
+        UserTransform {
+            translation: std::array::from_fn(|i| in_frame.offset[i] * frame.spacing[i]),
+            rotation: self.rotation,
+            scale: in_frame.scale,
+        }
+    }
+
+    /// This transform followed by `map`, a map of the scene frame, for a
+    /// dataset of `frame` that `declared` places there: the transform that
+    /// draws the dataset where `map` takes it from where this one draws it.
+    pub fn then_in_scene(
+        &self,
+        frame: &DeclaredFrame,
+        declared: &Affine,
+        map: &Affine,
+    ) -> UserTransform {
+        let placed = self.in_frame(frame).then(declared).then(map);
+        self.with_frame_map(frame, &placed.then(&declared.inverse()))
     }
 }
 
@@ -313,6 +406,67 @@ pub fn member_cube_to_frame(position: [f64; 2], shape: [u64; 5]) -> Affine {
     }
 }
 
+/// How a side view lays out the tiles of a collection.
+///
+/// One cut through the scene frame passes through a single row of tiles,
+/// and the nearest hides the rest. So a side view cuts every tile at one
+/// place measured from the tile's own first plane, and draws each tile's cut
+/// in its own cell. A tile keeps its place in the layout, stretched so that
+/// its cell holds the section, as tall as the tile is deep, and the grid
+/// stays a grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileCells {
+    /// How far a layout position stretches down the screen: Z samples per Y
+    /// sample of the tile deepest for its height.
+    down: f64,
+    /// How far it stretches across a YZ view, whose cells are as wide as a
+    /// tile is tall: Y samples per X sample of the tile tallest for its width.
+    across_yz: f64,
+}
+
+impl TileCells {
+    /// The cells for tiles whose level-0 shapes, `[t, c, z, y, x]`, are
+    /// `shapes`. Each ratio is the largest any tile needs, so every cell
+    /// holds its tile's section.
+    pub fn new(shapes: impl IntoIterator<Item = [u64; 5]>) -> Self {
+        let mut cells = TileCells {
+            down: 0.0,
+            across_yz: 0.0,
+        };
+        for shape in shapes {
+            let [z, y, x] = [shape[2], shape[3], shape[4]].map(|n| n.max(1) as f64);
+            cells.down = cells.down.max(z / y);
+            cells.across_yz = cells.across_yz.max(y / x);
+        }
+        if cells.down == 0.0 {
+            cells.down = 1.0;
+            cells.across_yz = 1.0;
+        }
+        cells
+    }
+
+    /// Where `plane` draws the tile at layout `position`, `[across, down]`
+    /// in its dataset's samples. An XY view draws the layout as it is.
+    pub fn position(&self, plane: SlicePlane, position: [f64; 2]) -> [f64; 2] {
+        let [x, y] = position;
+        match plane {
+            SlicePlane::Xy => position,
+            SlicePlane::Xz => [x, y * self.down],
+            SlicePlane::Yz => [x * self.across_yz, y * self.down],
+        }
+    }
+
+    /// The map a side view's axis position reads back through into a tile's
+    /// own planes, for a dataset `to_scene` places: its scale alone, since
+    /// the position is measured from the tile's first plane.
+    pub fn cut_placement(to_scene: &Affine) -> Affine {
+        Affine {
+            scale: to_scene.scale,
+            offset: [0.0; 3],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,11 +603,126 @@ mod tests {
     }
 
     #[test]
+    fn a_user_transform_moves_in_declared_numbers_and_scales_about_the_origin() {
+        let reference = frame([1.0; 3], [0.0; 3], Some(1e-6));
+        let own = frame([0.5, 0.5, 2.0], [10.0, 0.0, 0.0], Some(1e-6));
+        let declared = SceneFrame::new(reference).place(&own);
+        let moved = UserTransform {
+            translation: [4.0, -2.0, 6.0],
+            scale: [2.0, 2.0, 1.0],
+            ..UserTransform::IDENTITY
+        };
+        let placed = moved.in_frame(&own).then(&declared);
+        // The first sample moves by the translation, in micrometers here.
+        assert!(close(placed.apply([0.0; 3]), [14.0, -2.0, 6.0]));
+        // A sample spans twice its declared extent in X and Y.
+        assert!(close(placed.scale, [1.0, 1.0, 2.0]));
+        assert!(close(
+            UserTransform::IDENTITY
+                .in_frame(&own)
+                .then(&declared)
+                .offset,
+            declared.offset
+        ));
+    }
+
+    #[test]
+    fn a_scene_map_after_a_user_transform_lands_where_it_says() {
+        let reference = frame([2.0; 3], [0.0; 3], Some(1e-6));
+        let own = frame([500.0; 3], [1_000.0, 0.0, 0.0], Some(1e-9));
+        let declared = SceneFrame::new(reference).place(&own);
+        let from = UserTransform {
+            translation: [250.0, 0.0, 0.0],
+            scale: [1.5; 3],
+            ..UserTransform::IDENTITY
+        };
+        // Twice the size about scene point (10, 20, 0), then 3 across.
+        let map = Affine {
+            scale: [2.0, 2.0, 1.0],
+            offset: [-10.0 + 3.0, -20.0, 0.0],
+        };
+        let after = from.then_in_scene(&own, &declared, &map);
+        let p = [7.0, 9.0, 3.0];
+        let expected = map.apply(from.in_frame(&own).then(&declared).apply(p));
+        assert!(close(
+            after.in_frame(&own).then(&declared).apply(p),
+            expected
+        ));
+        assert!(close(after.scale, [3.0, 3.0, 1.5]));
+        assert!(after.is_valid());
+    }
+
+    #[test]
+    fn a_user_transform_is_valid_only_with_a_size_and_no_rotation() {
+        assert!(UserTransform::IDENTITY.is_valid());
+        let with = |f: fn(&mut UserTransform)| {
+            let mut t = UserTransform::IDENTITY;
+            f(&mut t);
+            t.is_valid()
+        };
+        assert!(!with(|t| t.scale[1] = 0.0));
+        assert!(!with(|t| t.scale[0] = -1.0));
+        assert!(!with(|t| t.translation[2] = f64::NAN));
+        assert!(!with(|t| t.rotation = [0.0, 0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn a_user_transform_records_all_three_parts_and_defaults_what_it_lacks() {
+        let t = UserTransform {
+            translation: [1.5, 0.0, 0.0],
+            scale: [2.0, 2.0, 2.0],
+            ..UserTransform::IDENTITY
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(
+            json,
+            r#"{"translation":[1.5,0.0,0.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[2.0,2.0,2.0]}"#
+        );
+        assert_eq!(serde_json::from_str::<UserTransform>(&json).unwrap(), t);
+        let sparse: UserTransform = serde_json::from_str(r#"{"scale":[3,3,3]}"#).unwrap();
+        assert_eq!(sparse.translation, [0.0; 3]);
+        assert_eq!(sparse.rotation, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn boxes_overlap_only_when_they_share_a_region_on_every_axis() {
         let unit = ([0.0; 3], [1.0; 3]);
         assert!(boxes_overlap(unit, ([0.5; 3], [2.0; 3])));
         assert!(!boxes_overlap(unit, ([1.0, 0.0, 0.0], [2.0, 1.0, 1.0])));
         assert!(!boxes_overlap(unit, ([0.0, 0.0, 3.0], [1.0, 1.0, 4.0])));
+    }
+
+    #[test]
+    fn a_side_view_stretches_the_layout_so_each_cell_holds_its_tiles_section() {
+        // Tiles 100 wide, 50 tall and 20 deep, laid out with a gap of 10.
+        let cells = TileCells::new([[1, 1, 20, 50, 100]; 4]);
+        let second_row = [0.0, 60.0];
+        let second_column = [110.0, 0.0];
+        assert_eq!(cells.position(SlicePlane::Xy, [110.0, 60.0]), [110.0, 60.0]);
+        // Rows stack 20 deep with a gap of 4, the layout's gap stretched alike.
+        assert_eq!(cells.position(SlicePlane::Xz, second_row), [0.0, 24.0]);
+        assert_eq!(cells.position(SlicePlane::Xz, second_column), [110.0, 0.0]);
+        // Across a YZ view a cell is as wide as its tile is tall.
+        assert_eq!(cells.position(SlicePlane::Yz, second_column), [55.0, 0.0]);
+        assert_eq!(cells.position(SlicePlane::Yz, second_row), [0.0, 24.0]);
+    }
+
+    #[test]
+    fn tile_cells_take_the_room_the_largest_section_needs() {
+        let cells = TileCells::new([[1, 1, 10, 50, 50], [1, 1, 40, 40, 20]]);
+        assert_eq!(cells.position(SlicePlane::Xz, [0.0, 10.0]), [0.0, 10.0]);
+        assert_eq!(cells.position(SlicePlane::Yz, [10.0, 0.0]), [20.0, 0.0]);
+        assert_eq!(TileCells::new([]), TileCells::new([[1, 1, 1, 1, 1]]));
+    }
+
+    #[test]
+    fn a_tile_cut_reads_the_position_from_the_tiles_own_edge() {
+        let to_scene = Affine {
+            scale: [0.5, 2.0, 1.0],
+            offset: [100.0, 200.0, 0.0],
+        };
+        let cut = TileCells::cut_placement(&to_scene).inverse();
+        assert!(close(cut.apply([3.0, 9.0, 0.0]), [6.0, 4.5, 0.0]));
     }
 
     #[test]

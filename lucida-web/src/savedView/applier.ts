@@ -2,14 +2,25 @@
 //
 // Source-url views name datasets by URL and open the missing ones.
 // Workspace-dataset-id views name loaded workspace members and never open
-// source URLs. Everything but a layout change is a recipient-local
-// ViewportCommand. The camera goes last, through `import_presence`, so it
+// source URLs. Everything but a layout change or a placement by hand is a
+// recipient-local ViewportCommand. Placement is restored only when the caller
+// asks, for a view someone chose to apply: a link, a member's last view, the
+// default view or a viewer profile is restored automatically, and an
+// automatic restore must never undo a move someone else made since. The camera
+// goes last, through `import_presence`, so it
 // lands through one mutator. The in-progress state lets urlSync suppress URL
 // writes while an apply runs.
 
 import type { WasmScene } from "lucida-core";
 import type { DocumentCommand, ViewportCommand } from "../commands.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
+import {
+  IDENTITY_USER_TRANSFORM,
+  readUserTransform,
+  sameUserTransform,
+  setUserTransformCommand,
+  type UserTransform,
+} from "../userTransform.ts";
 import type {
   Camera,
   CameraSpace,
@@ -73,6 +84,20 @@ export interface ApplyResult {
 
 export type ApplyResultListener = (r: ApplyResult) => void;
 
+/** How an `apply()` treats placement by hand. */
+export interface ApplyOptions {
+  /** Put each dataset where the view recorded it. Only for a view someone
+   *  chose to apply; every automatic restore leaves the document's placement. */
+  restorePlacement?: boolean;
+}
+
+/** A dataset an `apply()` placed by hand, from where it was. */
+export interface PlacementChange {
+  datasetId: string;
+  from: UserTransform;
+  to: UserTransform;
+}
+
 /** Fires once at the end of every `apply()`, before `inProgress` drops, so
  *  subscribers can read post-apply scene state. The applier writes WASM only;
  *  `useSavedViewSync` uses this to refresh the render loop and React mirrors. */
@@ -103,6 +128,7 @@ function workspaceDatasetIdsForView(view: SavedView): string[] {
   for (const id of Object.keys(view.dataset_settings)) add(id);
   for (const id of Object.keys(view.active_layouts)) add(id);
   for (const id of Object.keys(view.auto_contrast ?? {})) add(id);
+  for (const id of Object.keys(view.user_transforms ?? {})) add(id);
 
   return out;
 }
@@ -237,9 +263,11 @@ export class SavedViewApplier {
    * Apply a SavedView to the live scene. Returns when all in-flight
    * commands are dispatched and the camera has been imported. Resolves
    * even on partial dataset-open failure (the loading banner shows the
-   * indicator).
+   * indicator). Says which datasets it placed by hand, none unless
+   * `restorePlacement` asked it to.
    */
-  async apply(view: SavedView): Promise<void> {
+  async apply(view: SavedView, options: ApplyOptions = {}): Promise<PlacementChange[]> {
+    const placed: PlacementChange[] = [];
     if (this.state.inProgress) {
       throw new Error("SavedViewApplier.apply: another apply already in progress");
     }
@@ -259,7 +287,7 @@ export class SavedViewApplier {
       const scene = this.getScene();
       if (!scene) {
         // The caller re-invokes once the scene exists.
-        return;
+        return placed;
       }
       const loadedIds = new Set<string>(
         JSON.parse(scene.dataset_ids()) as string[],
@@ -282,7 +310,7 @@ export class SavedViewApplier {
 
       // Best effort: if opens raced or failed, proceed with whatever loaded.
       const sceneAfter = this.getScene();
-      if (!sceneAfter) return;
+      if (!sceneAfter) return placed;
       const loadedAfter = new Set<string>(
         JSON.parse(sceneAfter.dataset_ids()) as string[],
       );
@@ -332,6 +360,10 @@ export class SavedViewApplier {
             this.layoutMutation === "broadcast",
           );
         }
+      }
+
+      if (options.restorePlacement) {
+        placed.push(...this.applyPlacement(sceneAfter, view, requestedSet, loadedAfter));
       }
 
       const filteredOrder = view.dataset_order.filter((id) => loadedAfter.has(id));
@@ -391,6 +423,38 @@ export class SavedViewApplier {
     } finally {
       this.setState({ ...this.state, inProgress: false });
     }
+    return placed;
+  }
+
+  /**
+   * Put each dataset the view names where it sat by hand, the identity where
+   * its record leaves one out, and say which moved. A view that records no
+   * placement leaves the document's.
+   */
+  private applyPlacement(
+    scene: WasmScene,
+    view: SavedView,
+    requested: ReadonlySet<string>,
+    loaded: ReadonlySet<string>,
+  ): PlacementChange[] {
+    const placed: PlacementChange[] = [];
+    const recorded = view.user_transforms;
+    if (!recorded) return placed;
+    for (const id of requested) {
+      if (!loaded.has(id)) continue;
+      const want = recorded[id] ?? IDENTITY_USER_TRANSFORM;
+      const have = readUserTransform(scene, id) ?? IDENTITY_USER_TRANSFORM;
+      if (sameUserTransform(want, have)) continue;
+      if (this.layoutMutation === "refuse") {
+        const warning = `Workspace view places dataset ${id} by hand differently; leaving the shared placement unchanged`;
+        console.warn(`[SavedViewApplier] ${warning}`);
+        this.addWarning(warning);
+        continue;
+      }
+      this.applyDocument(setUserTransformCommand(id, want), this.layoutMutation === "broadcast");
+      placed.push({ datasetId: id, from: have, to: want });
+    }
+    return placed;
   }
 
   private emitApplyResult(scene: WasmScene, view: SavedView): void {

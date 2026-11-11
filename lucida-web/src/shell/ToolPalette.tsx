@@ -1,4 +1,5 @@
 import {
+  ArrowsOutCardinalIcon,
   BoundingBoxIcon,
   EyeIcon,
   EyeSlashIcon,
@@ -23,6 +24,7 @@ import "./ToolPalette.css";
 
 const TOOL_BUTTONS: readonly { tool: Tool; label: string; icon: Icon; combo: KeyCombo }[] = [
   { tool: "pan", label: "Pan tool", icon: HandIcon, combo: "V" },
+  { tool: "move", label: "Move and scale tool", icon: ArrowsOutCardinalIcon, combo: "T" },
   { tool: "point", label: "Point tool", icon: MapPinIcon, combo: "P" },
   { tool: "line", label: "Line tool", icon: LineSegmentIcon, combo: "L" },
   { tool: "box", label: "Box tool", icon: BoundingBoxIcon, combo: "B" },
@@ -38,6 +40,12 @@ export interface ToolPaletteProps {
    * them would cover the canvas. It shows the active tool.
    */
   compact?: boolean;
+  /**
+   * Offer the move tool, which places the selected layer by hand in a 2D
+   * view. It changes the shared workspace, so only a member who may edit it
+   * gets the tool, and not on a phone.
+   */
+  canMove?: boolean;
 }
 
 /**
@@ -52,8 +60,11 @@ export function ToolPalette({
   annotationsVisible,
   onAnnotationsVisibleChange,
   compact,
+  canMove = false,
 }: ToolPaletteProps) {
+  const moveOffered = canMove && !compact;
   useToolCommand("pan", tool, onToolChange);
+  useToolCommand("move", tool, onToolChange, moveOffered);
   useToolCommand("point", tool, onToolChange);
   useToolCommand("line", tool, onToolChange);
   useToolCommand("box", tool, onToolChange);
@@ -78,9 +89,10 @@ export function ToolPalette({
   const { roomRef, orientation } = useFittedOrientation(!compact);
   const tooltipPlacement = orientation === "vertical" ? "right" : "bottom";
 
+  const offered = TOOL_BUTTONS.filter((button) => button.tool !== "move" || moveOffered);
   const tools = (placement: "right" | "bottom", onPicked?: () => void) => (
     <>
-      {TOOL_BUTTONS.map((button) => (
+      {offered.map((button) => (
         <IconButton
           key={button.tool}
           icon={button.icon}
@@ -181,14 +193,23 @@ function useFittedOrientation(enabled: boolean) {
   return { roomRef, orientation };
 }
 
-function useToolCommand(id: Tool, current: Tool, onToolChange: (tool: Tool) => void): void {
+const TOOL_KEYWORDS: Record<Tool, readonly string[]> = {
+  pan: ["navigate"],
+  move: ["move", "scale", "align", "transform", "position"],
+  point: ["annotate", "draw"],
+  line: ["annotate", "draw"],
+  box: ["annotate", "draw"],
+};
+
+function useToolCommand(id: Tool, current: Tool, onToolChange: (tool: Tool) => void, enabled = true): void {
   const button = TOOL_BUTTONS.find((b) => b.tool === id)!;
   useCommand({
     id: `tools.${id}`,
     keys: [button.combo],
     label: button.label,
     group: "Tools",
-    keywords: id === "pan" ? ["navigate", "move"] : ["annotate", "draw"],
+    enabled,
+    keywords: TOOL_KEYWORDS[id],
     run: () => {
       if (current !== id) onToolChange(id);
     },

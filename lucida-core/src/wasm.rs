@@ -5,7 +5,7 @@ use lucida_content::DatasetId;
 use crate::camera::{Arcball, Camera, ClipMode, Framing};
 use crate::command::{Command, ViewportCommand};
 use crate::framing::PlaneBox;
-use crate::placement::CameraSpace;
+use crate::placement::{Affine, CameraSpace, UserTransform};
 use crate::saved_view::SavedView;
 use crate::scene::{
     CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, PoolKind, Scene,
@@ -245,6 +245,84 @@ impl WasmScene {
             .inner
             .line_up(&DatasetId(a.to_string()), &DatasetId(b.to_string()));
         serde_json::to_string(&verdict).unwrap()
+    }
+
+    /// Of a pair that lines up, the datasets placed by hand
+    /// ([`Scene::line_up_by_hand`]), as a JSON array of ids.
+    pub fn datasets_line_up_by_hand(&self, a: &str, b: &str) -> String {
+        let by_hand = self
+            .inner
+            .line_up_by_hand(&DatasetId(a.to_string()), &DatasetId(b.to_string()));
+        serde_json::to_string(&by_hand).unwrap()
+    }
+
+    /// How `dataset_id` was placed by hand ([`Scene::user_transform`]), as
+    /// JSON, or `null` where it wasn't.
+    pub fn dataset_user_transform(&self, dataset_id: &str) -> String {
+        serde_json::to_string(
+            &self
+                .inner
+                .user_transform(&DatasetId(dataset_id.to_string())),
+        )
+        .unwrap()
+    }
+
+    /// Every dataset placed by hand and how, as a JSON object in document
+    /// order.
+    pub fn user_transforms(&self) -> String {
+        serde_json::to_string(&self.inner.document.user_transforms).unwrap()
+    }
+
+    /// The user transform `from_json` followed by the scene-frame map
+    /// `offset + point * scale` ([`Scene::user_transform_after`]), as JSON.
+    /// Empty for a dataset the scene doesn't hold.
+    pub fn user_transform_after(
+        &self,
+        dataset_id: &str,
+        from_json: &str,
+        scale: &[f64],
+        offset: &[f64],
+    ) -> Result<String, JsError> {
+        let from: UserTransform =
+            serde_json::from_str(from_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let (Ok(scale), Ok(offset)) = (<[f64; 3]>::try_from(scale), <[f64; 3]>::try_from(offset))
+        else {
+            return Err(JsError::new("scale and offset take three numbers each"));
+        };
+        Ok(self
+            .inner
+            .user_transform_after(
+                &DatasetId(dataset_id.to_string()),
+                &from,
+                &Affine { scale, offset },
+            )
+            .map(|after| serde_json::to_string(&after).unwrap())
+            .unwrap_or_default())
+    }
+
+    /// The length unit each of `dataset_id`'s axes declares, `[x, y, z]`, as
+    /// JSON, `null` where one declares none.
+    pub fn dataset_units(&self, dataset_id: &str) -> String {
+        let units = self
+            .inner
+            .document
+            .manifests
+            .get(&DatasetId(dataset_id.to_string()))
+            .and_then(|manifest| manifest.space())
+            .map_or([None, None, None], |space| {
+                let [z, y, x] = space.units.clone();
+                [x, y, z]
+            });
+        serde_json::to_string(&units).unwrap()
+    }
+
+    /// `dataset_id`'s box in `view`'s slice plane as `[min_across,
+    /// min_down, max_across, max_down]` in the scene frame; empty when it
+    /// has none.
+    pub fn dataset_plane_bounds(&self, view: u32, dataset_id: &str) -> Vec<f64> {
+        self.inner
+            .dataset_plane_bounds(ViewId(view), dataset_id)
+            .map_or_else(Vec::new, |b| vec![b.min[0], b.min[1], b.max[0], b.max[1]])
     }
 
     /// The comparison this view shows, as JSON, or `null`.
@@ -661,6 +739,22 @@ impl WasmScene {
             map.insert(&member.entity_id.0, member.position);
         }
         serde_json::to_string(&map).unwrap()
+    }
+
+    /// Where `view` places each member of `dataset_id`, as JSON:
+    /// `{"entity_id": [across, down], ...}` in the dataset's own samples.
+    /// The layout positions in a volume view or an XY cut, and in a side view
+    /// the axes across and down the screen, where a collection's tiles sit
+    /// in cells of their own. Chunk planning and the renderer place members
+    /// by these. See [`Scene::plane_positions`].
+    pub fn plane_positions(&self, view: u32, dataset_id: &str) -> String {
+        let positions: std::collections::HashMap<&str, [f64; 2]> = self
+            .inner
+            .plane_positions(ViewId(view), &DatasetId(dataset_id.to_string()))
+            .into_iter()
+            .map(|(entity, position)| (entity.0.as_str(), position))
+            .collect();
+        serde_json::to_string(&positions).unwrap()
     }
 
     /// The levels a level pin on `dataset_id` may hold, finest first: every

@@ -1,18 +1,18 @@
 //! The scene's placement of each dataset in the scene frame and world space.
 //! None of it depends on a camera, so every view of the scene shares it.
 
-use lucida_content::{DatasetId, SpatialAxis};
+use lucida_content::{DatasetId, EntityId, SpatialAxis};
 
-use crate::camera::{Camera, VisibleRegion};
+use crate::camera::{Camera, Framing, VisibleRegion};
 use crate::placement::{
-    Affine, CameraSpace, LineUp, SceneFrame, SpaceMap, WorldSpace, boxes_overlap,
-    member_cube_to_frame,
+    Affine, CameraSpace, LineUp, SceneFrame, SpaceMap, TileCells, UserTransform, WorldSpace,
+    boxes_overlap, member_cube_to_frame,
 };
 use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
-use crate::view::{AxisPositions, ViewId};
+use crate::view::{AxisPositions, View, ViewId};
 
-use super::{LayerExtent, MemberState, Scene};
+use super::{DatasetDerivedState, LayerExtent, MemberState, Scene};
 
 impl Scene {
     /// The scene frame, fixed by the first dataset in the document with an
@@ -30,13 +30,68 @@ impl Scene {
     }
 
     /// The map from `dataset_id`'s frame into the scene frame, where the
-    /// slice camera looks. `None` for a dataset the scene doesn't hold.
+    /// slice camera looks: its user transform, then the placement its
+    /// declared frame makes. Every view, plan, pick and readout goes
+    /// through this one map. `None` for a dataset the scene doesn't hold.
     pub fn placement(&self, dataset_id: &DatasetId) -> Option<Affine> {
+        let derived = self.derived.get(dataset_id)?;
+        let declared = self.declared_placement(dataset_id)?;
+        Some(match self.user_transform(dataset_id) {
+            Some(user) => user.in_frame(&derived.frame).then(&declared),
+            None => declared,
+        })
+    }
+
+    /// Where `dataset_id`'s declared frame alone puts it in the scene frame.
+    fn declared_placement(&self, dataset_id: &DatasetId) -> Option<Affine> {
         let derived = self.derived.get(dataset_id)?;
         Some(
             self.scene_frame()
                 .map_or(Affine::IDENTITY, |scene| scene.place(&derived.frame)),
         )
+    }
+
+    /// How a person placed `dataset_id` by hand, or `None` where they
+    /// haven't.
+    pub fn user_transform(&self, dataset_id: &DatasetId) -> Option<&UserTransform> {
+        self.document.user_transforms.get(dataset_id)
+    }
+
+    /// `from`, a user transform of `dataset_id`, followed by `map`, a map of
+    /// the scene frame: the transform that draws the dataset where `map`
+    /// takes it from where `from` draws it. A gesture builds `map` from the
+    /// pointer, a move or a scale about a fixed point, and this keeps the
+    /// numbers in the dataset's own terms. `None` for a dataset the scene
+    /// doesn't hold.
+    pub fn user_transform_after(
+        &self,
+        dataset_id: &DatasetId,
+        from: &UserTransform,
+        map: &Affine,
+    ) -> Option<UserTransform> {
+        let derived = self.derived.get(dataset_id)?;
+        let declared = self.declared_placement(dataset_id)?;
+        Some(from.then_in_scene(&derived.frame, &declared, map))
+    }
+
+    /// Follow a dataset a person moved by hand. Where they put it is what
+    /// they chose to look at, so a camera fitted to everything holds its
+    /// pose, placed, rather than chasing the dataset across the canvas. The
+    /// camera spaces don't move: the scene frame and world space follow the
+    /// declared frames alone. A comparison that no longer lines up ends.
+    pub(crate) fn dataset_moved(&mut self) {
+        self.epochs.layout += 1;
+        let mut held = false;
+        for view in &mut self.views {
+            if view.camera.framing() == Framing::Framed {
+                view.camera.set_framing(Framing::Placed);
+                held = true;
+            }
+        }
+        if held {
+            self.epochs.view += 1;
+        }
+        self.keep_comparison_lined_up();
     }
 
     /// The volume cameras' view of the scene frame. Lengths divide by the
@@ -173,18 +228,46 @@ impl Scene {
             .reduce(union)
     }
 
-    /// The extent along `axis` in the scene frame of the datasets `view`
+    /// The map a side view's axis position reads back through into
+    /// `dataset_id`'s planes: its placement, or for a collection its
+    /// placement's scale alone ([`TileCells::cut_placement`]), since there
+    /// the position is measured from each tile's own first plane. `None` for
+    /// a dataset the scene doesn't hold.
+    pub(crate) fn cut_placement(&self, dataset_id: &DatasetId) -> Option<Affine> {
+        let to_scene = self.placement(dataset_id)?;
+        Some(match self.derived.get(dataset_id)?.tile_cells {
+            Some(_) => TileCells::cut_placement(&to_scene),
+            None => to_scene,
+        })
+    }
+
+    /// The places along `axis` where a side view's axis position cuts
+    /// `dataset_id`, as `(min, max)`: its extent in the scene frame, or for
+    /// a collection a tile's own extent from its first plane. A collection's
+    /// tiles share the first one's footprint, as the renderer draws them.
+    /// `None` with no member to place.
+    pub(crate) fn cut_span(&self, dataset_id: &DatasetId, axis: SpatialAxis) -> Option<(f64, f64)> {
+        if self.derived.get(dataset_id)?.tile_cells.is_none() {
+            return self.scene_extent(dataset_id, axis);
+        }
+        let planes = LayerExtent::of(self.document.manifests.get(dataset_id)?).along(axis);
+        let scale = self.placement(dataset_id)?.scale[axis.xyz()].abs();
+        Some((0.0, planes as f64 * scale))
+    }
+
+    /// The places along `axis` where a side view cuts the datasets `view`
     /// shows, as `(min, max)`, or `None` with nothing shown.
-    fn shown_scene_extent(&self, view: ViewId, axis: SpatialAxis) -> Option<(f64, f64)> {
+    fn shown_cut_span(&self, view: ViewId, axis: SpatialAxis) -> Option<(f64, f64)> {
         self.shown_dataset_ids(view)
-            .filter_map(|id| self.scene_extent(id, axis))
+            .filter_map(|id| self.cut_span(id, axis))
             .reduce(union)
     }
 
     /// How many axis positions `view` steps through cutting `axis`, at least
     /// one. Z counts the planes of the deepest layer it shows, since each
     /// layer steps through its own. A side view's position is a place in the
-    /// scene frame, so datasets over one region cut the same plane, and it
+    /// scene frame, so datasets over one region cut the same plane, or in a
+    /// collection a place from each tile's own edge ([`Self::cut_span`]). It
     /// counts the frame's whole units up to the far edge of what it shows.
     pub fn cut_extent(&self, view: ViewId, axis: SpatialAxis) -> u32 {
         if axis.is_z() {
@@ -196,14 +279,14 @@ impl Scene {
                 .unwrap_or(1);
         }
         // An edge a rounding error puts just past a whole unit stays on it.
-        self.shown_scene_extent(view, axis).map_or(1, |(_, max)| {
+        self.shown_cut_span(view, axis).map_or(1, |(_, max)| {
             (max - max.abs() * 1e-12).ceil().clamp(1.0, u32::MAX as f64) as u32
         })
     }
 
     /// The axis position in the middle of what `view` shows along `axis`.
     pub(crate) fn cut_middle(&self, view: ViewId, axis: SpatialAxis) -> u32 {
-        self.shown_scene_extent(view, axis).map_or(0, |(min, max)| {
+        self.shown_cut_span(view, axis).map_or(0, |(min, max)| {
             ((min + max) / 2.0).floor().clamp(0.0, u32::MAX as f64) as u32
         })
     }
@@ -241,9 +324,30 @@ impl Scene {
             })
     }
 
+    /// Whether `dataset_id` is placed by length or by a person: it declares
+    /// length units, or someone gave it a user transform, which says where
+    /// it sits and how large it is whatever it declares.
+    fn placed_by_length_or_hand(&self, dataset_id: &DatasetId) -> bool {
+        self.has_physical_scale(dataset_id) || self.user_transform(dataset_id).is_some()
+    }
+
+    /// Of a pair that lines up, the datasets a person placed by hand, which
+    /// the compare and link controls name as why. Empty for a pair that
+    /// doesn't line up.
+    pub fn line_up_by_hand(&self, a: &DatasetId, b: &DatasetId) -> Vec<DatasetId> {
+        if self.line_up(a, b) != LineUp::Yes {
+            return Vec::new();
+        }
+        [a, b]
+            .into_iter()
+            .filter(|id| self.user_transform(id).is_some())
+            .cloned()
+            .collect()
+    }
+
     /// Whether `a` and `b` line up in physical space: each declares length
-    /// units and their placed extents overlap. Only such a pair can stand in
-    /// for each other on one region of the screen.
+    /// units or was placed by hand, and their placed extents overlap. Only
+    /// such a pair can stand in for each other on one region of the screen.
     pub fn line_up(&self, a: &DatasetId, b: &DatasetId) -> LineUp {
         if a == b {
             return LineUp::Same;
@@ -258,7 +362,7 @@ impl Scene {
         };
         let unscaled: Vec<DatasetId> = [a, b]
             .into_iter()
-            .filter(|id| !self.has_physical_scale(id))
+            .filter(|id| !self.placed_by_length_or_hand(id))
             .cloned()
             .collect();
         if !unscaled.is_empty() {
@@ -269,6 +373,26 @@ impl Scene {
         } else {
             LineUp::Apart
         }
+    }
+
+    /// Where `view` places each member of `dataset_id`, by entity id,
+    /// `[across, down]` in the dataset's samples
+    /// ([`DatasetDerivedState::plane_position`]). Empty for an unknown view
+    /// or dataset.
+    pub fn plane_positions(
+        &self,
+        view: ViewId,
+        dataset_id: &DatasetId,
+    ) -> Vec<(&EntityId, [f64; 2])> {
+        let (Some(view), Some(derived)) = (self.view(view), self.derived.get(dataset_id)) else {
+            return Vec::new();
+        };
+        let plane = placing_plane(view);
+        derived
+            .members
+            .iter()
+            .map(|member| (&member.entity_id, derived.plane_position(plane, member)))
+            .collect()
     }
 
     /// What of `dataset_id` `view`'s camera shows, in the dataset's own
@@ -305,6 +429,15 @@ impl Scene {
     }
 }
 
+/// The plane `view` places members on: its slice camera's, or XY for a
+/// volume camera, which places them by their layout.
+pub(crate) fn placing_plane(view: &View) -> SlicePlane {
+    match &view.camera {
+        Camera::Slice(slice) => slice.plane,
+        Camera::Arcball(_) | Camera::Fly(_) => SlicePlane::Xy,
+    }
+}
+
 /// The extent covering two along one axis.
 fn union((lo, hi): (f64, f64), (min, max): (f64, f64)) -> (f64, f64) {
     (lo.min(min), hi.max(max))
@@ -333,20 +466,25 @@ pub(crate) fn frame_box(member: &MemberState) -> Option<([f64; 3], [f64; 3])> {
 }
 
 /// `member`'s box in the slice camera's space, as `[across, down, cut]`
-/// minima and maxima: the axes `plane` draws as `to_scene` places them, and
-/// along the cut its own planes, which an axis position steps through.
-/// `None` without levels.
+/// minima and maxima: on the axes `plane` draws, where `derived` places it
+/// on the plane ([`DatasetDerivedState::plane_position`]) as `to_scene`
+/// places its dataset, and along the cut its own planes, which an axis
+/// position steps through. `None` without levels.
 pub(crate) fn slice_box(
     plane: SlicePlane,
     to_scene: &Affine,
+    derived: &DatasetDerivedState,
     member: &MemberState,
 ) -> Option<([f64; 3], [f64; 3])> {
-    let (lo, hi) = frame_box(member)?;
+    let level0 = member.levels.first()?;
+    let extent = [level0.shape[4], level0.shape[3], level0.shape[2]].map(|n| n as f64);
+    let lo = plane.frame_point(derived.plane_position(plane, member));
+    let hi: [f64; 3] = std::array::from_fn(|i| lo[i] + extent[i]);
     let (min, max) = to_scene.apply_box(lo, hi);
     let [across, down, cut] = plane.axes().map(SpatialAxis::xyz);
     Some((
         [min[across], min[down], 0.0],
-        [max[across], max[down], hi[cut] - lo[cut]],
+        [max[across], max[down], extent[cut]],
     ))
 }
 
@@ -369,7 +507,7 @@ mod tests {
     use crate::camera::{Camera, Framing};
     use crate::command::{DocumentCommand, ViewportCommand};
     use crate::framing::PlaneBox;
-    use crate::placement::LineUp;
+    use crate::placement::{Affine, LineUp, UserTransform};
     use crate::saved_view::SavedView;
     use crate::scene::{FrameTarget, Scene};
 
@@ -712,6 +850,222 @@ mod tests {
         assert_eq!(scene.line_up(&a, &DatasetId::from("deep")), LineUp::Apart);
     }
 
+    fn place_by_hand(scene: &mut Scene, id: &str, translation: [f64; 3], scale: [f64; 3]) {
+        scene.apply(
+            DocumentCommand::SetUserTransform {
+                dataset_id: DatasetId::from(id),
+                transform: UserTransform {
+                    translation,
+                    scale,
+                    ..UserTransform::IDENTITY
+                },
+            }
+            .into(),
+        );
+    }
+
+    #[test]
+    fn a_user_transform_moves_and_scales_a_dataset_on_its_declared_placement() {
+        let mut scene = Scene::new([800, 600]);
+        let unit = Some("micrometer");
+        open(&mut scene, "a", [8, 64, 64], [1.0; 3], [0.0; 3], unit);
+        // Half-micrometer samples, so 64 of them span 32 micrometers.
+        open(
+            &mut scene,
+            "b",
+            [8, 64, 64],
+            [1.0, 0.5, 0.5],
+            [0.0; 3],
+            unit,
+        );
+        let view = scene.active_view().id();
+        let before = scene.dataset_plane_bounds(view, "b").unwrap();
+        assert!(close(before.max, [32.0, 32.0, 8.0]));
+        let epoch = scene.epochs.layout;
+
+        // 10 micrometers across and twice the size in X and Y.
+        place_by_hand(&mut scene, "b", [10.0, 0.0, 0.0], [2.0, 2.0, 1.0]);
+        assert!(scene.epochs.layout > epoch);
+        let after = scene.dataset_plane_bounds(view, "b").unwrap();
+        assert!(close(after.min, [10.0, 0.0, 0.0]), "{after:?}");
+        assert!(close(after.max, [74.0, 64.0, 8.0]), "{after:?}");
+        // The volume cameras see the same move, and A stays where it was.
+        let world = scene.dataset_world_bounds("b").unwrap();
+        let a = scene.dataset_world_bounds("a").unwrap();
+        assert!(world.min[0] > a.min[0] && (world.max[1] - a.max[1]).abs() < 1e-9);
+        assert!(close(
+            scene.dataset_plane_bounds(view, "a").unwrap().max,
+            [64.0, 64.0, 8.0]
+        ));
+        // What a view shows of B still reads in B's own samples.
+        assert!(scene.frame(&FrameTarget::Visible, [800, 600]));
+        let region = scene.visible_region(view, &DatasetId::from("b")).unwrap();
+        assert!(region.xy_bounds[0] <= 0.0 && region.xy_bounds[2] >= 64.0);
+    }
+
+    #[test]
+    fn moving_the_first_dataset_keeps_the_scene_frame_and_camera_spaces() {
+        let mut scene = a_then_b();
+        let spaces = scene.camera_space();
+        let b = scene
+            .dataset_plane_bounds(scene.active_view().id(), "b")
+            .unwrap();
+        place_by_hand(&mut scene, "a", [5.0, 5.0, 0.0], [3.0; 3]);
+        assert_eq!(scene.camera_space(), spaces);
+        assert_eq!(
+            scene.dataset_plane_bounds(scene.active_view().id(), "b"),
+            Some(b)
+        );
+        let a = scene
+            .dataset_plane_bounds(scene.active_view().id(), "a")
+            .unwrap();
+        assert!(close(a.min, [5.0, 5.0, 0.0]));
+    }
+
+    #[test]
+    fn a_framed_camera_holds_its_pose_when_a_dataset_moves() {
+        for volume in [false, true] {
+            let mut scene = a_then_b();
+            if volume {
+                scene.set_mode_3d();
+            }
+            assert!(scene.frame(&FrameTarget::Visible, [800, 600]));
+            assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
+            let camera = scene.active_view().camera.clone();
+            place_by_hand(&mut scene, "b", [40.0, 0.0, 0.0], [1.0; 3]);
+            let held = &scene.active_view().camera;
+            assert_eq!(held.framing(), Framing::Placed);
+            let mut pose = held.clone();
+            pose.set_framing(Framing::Framed);
+            assert_eq!(pose, camera);
+        }
+    }
+
+    #[test]
+    fn a_volume_view_frames_and_flies_by_the_extent_as_moved() {
+        let mut scene = a_then_b();
+        scene.set_mode_3d();
+        let view = scene.active_view().id();
+        let diagonal = scene.volume_diagonal(view);
+        place_by_hand(&mut scene, "b", [0.0; 3], [4.0; 3]);
+        // Fly speed follows the visible extent, which grows with B.
+        assert!(scene.volume_diagonal(view) > 2.0 * diagonal);
+        assert!(scene.frame(&FrameTarget::Visible, [800, 600]));
+        let b = scene.dataset_world_bounds("b").unwrap();
+        // The fit keeps all of B on screen.
+        for corner in [b.min, b.max] {
+            let [x, y] = scene
+                .active_view()
+                .camera
+                .project_to_screen(corner)
+                .unwrap();
+            assert!((0.0..=800.0).contains(&x) && (0.0..=600.0).contains(&y));
+        }
+    }
+
+    #[test]
+    fn the_identity_and_removal_clear_a_user_transform_and_bad_ones_change_nothing() {
+        let mut scene = a_then_b();
+        let b = DatasetId::from("b");
+        place_by_hand(&mut scene, "b", [1.0, 0.0, 0.0], [1.0; 3]);
+        assert!(scene.user_transform(&b).is_some());
+        let placed = scene.placement(&b);
+        let epoch = scene.epochs.layout;
+        // No size, or a dataset the scene doesn't hold, is refused.
+        place_by_hand(&mut scene, "b", [0.0; 3], [0.0, 1.0, 1.0]);
+        place_by_hand(&mut scene, "gone", [9.0; 3], [1.0; 3]);
+        assert_eq!(scene.placement(&b), placed);
+        assert_eq!(scene.epochs.layout, epoch);
+        assert!(
+            !scene
+                .document
+                .user_transforms
+                .contains_key(&DatasetId::from("gone"))
+        );
+
+        place_by_hand(&mut scene, "b", [0.0; 3], [1.0; 3]);
+        assert!(scene.user_transform(&b).is_none());
+        place_by_hand(&mut scene, "b", [1.0, 0.0, 0.0], [1.0; 3]);
+        remove(&mut scene, "b");
+        assert!(scene.document.user_transforms.is_empty());
+    }
+
+    #[test]
+    fn a_dataset_placed_by_hand_lines_up_whatever_it_declares() {
+        let mut scene = Scene::new([800, 600]);
+        let unit = Some("micrometer");
+        open(&mut scene, "a", [1, 64, 64], [1.0; 3], [0.0; 3], unit);
+        open(&mut scene, "bare", [1, 32, 32], [1.0; 3], [0.0; 3], None);
+        // Starts where A ends, so the two only touch.
+        let beside_origin = [0.0, 0.0, 64.0];
+        open(
+            &mut scene,
+            "beside",
+            [1, 64, 64],
+            [1.0; 3],
+            beside_origin,
+            unit,
+        );
+        let [a, bare, beside] = ["a", "bare", "beside"].map(DatasetId::from);
+        assert!(matches!(
+            scene.line_up(&a, &bare),
+            LineUp::NoPhysicalScale { .. }
+        ));
+        assert_eq!(scene.line_up(&a, &beside), LineUp::Apart);
+        assert!(scene.line_up_by_hand(&a, &bare).is_empty());
+
+        // Given a size, the bare dataset sits where its user put it.
+        place_by_hand(&mut scene, "bare", [0.0; 3], [2.0; 3]);
+        assert_eq!(scene.line_up(&a, &bare), LineUp::Yes);
+        assert_eq!(scene.line_up_by_hand(&a, &bare), vec![bare.clone()]);
+        // Moved over A, the other lines up by its moved extent.
+        place_by_hand(&mut scene, "beside", [-32.0, 0.0, 0.0], [1.0; 3]);
+        assert_eq!(scene.line_up(&a, &beside), LineUp::Yes);
+        assert_eq!(scene.line_up_by_hand(&beside, &a), vec![beside]);
+        // A pair placed only by what it declares names no one.
+        open(&mut scene, "same", [1, 64, 64], [1.0; 3], [0.0; 3], unit);
+        let same = DatasetId::from("same");
+        assert!(scene.line_up_by_hand(&a, &same).is_empty());
+    }
+
+    #[test]
+    fn a_move_that_takes_a_pair_apart_ends_its_comparison() {
+        use crate::scene::CompareMode;
+        let mut scene = two_over_one_region();
+        let [coarse, fine] = ["coarse", "fine"].map(DatasetId::from);
+        scene.compare(coarse, fine, CompareMode::Swipe).unwrap();
+        place_by_hand(&mut scene, "fine", [10_000.0, 0.0, 0.0], [1.0; 3]);
+        assert!(scene.comparison().is_some());
+        place_by_hand(&mut scene, "fine", [500_000.0, 0.0, 0.0], [1.0; 3]);
+        assert!(scene.comparison().is_none());
+    }
+
+    #[test]
+    fn a_scene_map_after_a_user_transform_draws_the_dataset_where_it_says() {
+        let mut scene = a_then_b();
+        let b = DatasetId::from("b");
+        place_by_hand(&mut scene, "b", [1_000.0, 0.0, 0.0], [1.5; 3]);
+        let from = *scene.user_transform(&b).unwrap();
+        // Twice the size about scene point (20, 10), then 4 down.
+        let map = Affine {
+            scale: [2.0, 2.0, 2.0],
+            offset: [-20.0, -10.0 + 4.0, 0.0],
+        };
+        let p = [100.0, 30.0, 4.0];
+        let expected = map.apply(scene.placement(&b).unwrap().apply(p));
+        let after = scene.user_transform_after(&b, &from, &map).unwrap();
+        scene.apply(
+            DocumentCommand::SetUserTransform {
+                dataset_id: b.clone(),
+                transform: after,
+            }
+            .into(),
+        );
+        assert!(close(scene.placement(&b).unwrap().apply(p), expected));
+        let gone = DatasetId::from("gone");
+        assert!(scene.user_transform_after(&gone, &from, &map).is_none());
+    }
+
     #[test]
     fn framing_two_datasets_is_the_same_on_every_load() {
         let fit = || {
@@ -1015,5 +1369,121 @@ mod tests {
             restore(&mut same, &legacy);
             assert_same_region(on_screen(&same, "b"), before);
         }
+    }
+
+    /// Six tiles 64 wide, 32 tall and 16 deep, three across and two down
+    /// with a gap of 8, in chunks 8 deep, 8 tall and 32 wide.
+    fn six_tiles(plane: crate::slice_plane::SlicePlane) -> (Scene, DatasetId) {
+        use super::super::test_helpers::make_collection_dataset_opened;
+        let ids = ["t0", "t1", "t2", "t3", "t4", "t5"];
+        let members = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, [(i % 3) as f64 * 72.0, (i / 3) as f64 * 40.0]))
+            .collect();
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(make_collection_dataset_opened(
+                "tiles",
+                "tiles",
+                members,
+                [1, 1, 16, 32, 64],
+                [1, 1, 8, 8, 32],
+            ))
+            .into(),
+        );
+        scene.apply(ViewportCommand::SetSlicePlane { plane }.into());
+        (scene, DatasetId::from("tiles"))
+    }
+
+    #[test]
+    fn a_side_view_draws_each_tile_of_a_collection_in_a_cell_of_its_own() {
+        use crate::slice_plane::SlicePlane;
+        for (plane, column_width) in [(SlicePlane::Xz, 72.0), (SlicePlane::Yz, 36.0)] {
+            let (scene, tiles) = six_tiles(plane);
+            let view = scene.active_view().id();
+            let mut positions: Vec<(String, [f64; 2])> = scene
+                .plane_positions(view, &tiles)
+                .into_iter()
+                .map(|(entity, at)| (entity.0.clone(), at))
+                .collect();
+            positions.sort_by(|a, b| a.0.cmp(&b.0));
+            // Rows stack as deep as a tile, with the gap stretched alike.
+            for (i, (_, at)) in positions.iter().enumerate() {
+                let expected = [(i % 3) as f64 * column_width, (i / 3) as f64 * 20.0];
+                assert_eq!(*at, expected, "{plane} tile {i}");
+            }
+            let derived = &scene.derived[&tiles];
+            let to_scene = scene.placement(&tiles).unwrap();
+            let boxes: Vec<_> = derived
+                .members
+                .iter()
+                .map(|member| super::slice_box(plane, &to_scene, derived, member).unwrap())
+                .collect();
+            for (i, a) in boxes.iter().enumerate() {
+                for b in &boxes[i + 1..] {
+                    let apart = (0..2).any(|k| a.1[k] <= b.0[k] || b.1[k] <= a.0[k]);
+                    assert!(apart, "{plane}: {a:?} overlaps {b:?}");
+                }
+            }
+            let bounds = scene.dataset_plane_bounds(view, "tiles").unwrap();
+            assert_eq!(bounds.max[1] - bounds.min[1], 36.0, "{plane}");
+        }
+    }
+
+    #[test]
+    fn a_side_view_cuts_every_tile_of_a_collection_at_one_place_from_its_own_edge() {
+        use crate::scene::CutReach;
+        use crate::slice_plane::SlicePlane;
+        let (mut scene, tiles) = six_tiles(SlicePlane::Xz);
+        let view = scene.active_view().id();
+        // The axis position steps through a tile's own rows, from its middle.
+        assert_eq!(scene.cut_extent(view, lucida_content::SpatialAxis::Y), 32);
+        assert_eq!(scene.active_view().axes.y, Some(16));
+        let layer = scene.resolved_layer(view, &tiles).unwrap();
+        assert_eq!((layer.y, layer.y_reach), (16, CutReach::Through));
+
+        // Every tile is planned, and only in the chunk row the cut crosses.
+        let plans = scene.chunk_plan_for(view, &tiles).unwrap();
+        assert_eq!(plans.len(), 6);
+        for plan in &plans {
+            assert!(!plan.needed.is_empty(), "{:?}", plan.image_id);
+            assert!(plan.needed.iter().all(|chunk| chunk.y == 2), "{plan:?}");
+        }
+
+        scene.apply(ViewportCommand::SetY { y: 31 }.into());
+        let layer = scene.resolved_layer(view, &tiles).unwrap();
+        assert_eq!((layer.y, layer.y_reach), (31, CutReach::Through));
+        scene.apply(ViewportCommand::SetY { y: 32 }.into());
+        assert_eq!(scene.layer_reach(view, &tiles), Some(CutReach::Outside));
+        assert!(scene.chunk_plan_for(view, &tiles).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_xy_view_and_a_volume_view_place_a_collections_tiles_by_their_layout() {
+        use crate::slice_plane::SlicePlane;
+        let (mut scene, tiles) = six_tiles(SlicePlane::Xz);
+        scene.apply(
+            ViewportCommand::SetSlicePlane {
+                plane: SlicePlane::Xy,
+            }
+            .into(),
+        );
+        let view = scene.active_view().id();
+        let layout: Vec<[f64; 2]> = scene.derived[&tiles]
+            .members
+            .iter()
+            .map(|m| m.position)
+            .collect();
+        let on_plane = |scene: &Scene| -> Vec<[f64; 2]> {
+            scene
+                .plane_positions(view, &tiles)
+                .into_iter()
+                .map(|(_, at)| at)
+                .collect()
+        };
+        assert_eq!(on_plane(&scene), layout);
+        scene.set_mode_3d();
+        assert_eq!(on_plane(&scene), layout);
     }
 }
