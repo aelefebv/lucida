@@ -139,10 +139,10 @@ export function getOrCreateLabelSlicePool(
 
   const sizeKey = `${memberId}|${w}x${h}`;
   if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
-  if (!reserveGpuBytes(ctx, w * h * LABEL_SLICE_BYTES_PER_TEXEL)) return null;
 
   const grid: CellGrid = { x: Math.ceil(w / cx), y: Math.ceil(h / cy), z: 1 };
   const indirection = identityIndirection(grid.x * grid.y);
+  if (!reserveGpuBytes(ctx, w * h * LABEL_SLICE_BYTES_PER_TEXEL + indirection.byteLength)) return null;
   let texture: GPUTexture | undefined;
   let indirectionBuf: GPUBuffer;
   try {
@@ -192,9 +192,10 @@ export function getOrCreateLabelSlicePool(
 /** Bytes one `r32uint` label texel holds. */
 const LABEL_SLICE_BYTES_PER_TEXEL = 4;
 
-/** The bytes a label slice pool's texture holds. */
+/** The bytes a label slice pool holds on the GPU: everything {@link destroyLabelSlicePool} frees. */
 export function labelSlicePoolBytes(pool: LabelSlicePool): number {
-  return pool.width * pool.height * LABEL_SLICE_BYTES_PER_TEXEL;
+  return pool.width * pool.height * LABEL_SLICE_BYTES_PER_TEXEL + pool.indirection.byteLength +
+    (pool.descBuffer?.size ?? 0) + (pool.labelColorBuffer?.size ?? 0);
 }
 
 /** The cell a label slice chunk at grid `(x, y)` is written to, as {@link LabelSlicePool.keys} keys it. */
