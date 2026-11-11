@@ -1,6 +1,5 @@
 /** 2D slice viewer. WebGPU rendering runs in a worker via RenderClient. */
 import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { SLICE_ZOOM_IN_PER_NOTCH, SLICE_ZOOM_OUT_PER_NOTCH } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
 import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
@@ -10,6 +9,7 @@ import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToWorld as sceneEventToWorld, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
+import { wheelZoom } from "../input/wheel.ts";
 import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { comboFromEvent, useShortcut } from "../ui/shortcuts.ts";
@@ -281,6 +281,8 @@ function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFo
   const onWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
+      const factor = wheelZoom(e);
+      if (factor === 1) return;
 
       const dpr = devicePixelRatio;
       const rect = element.getBoundingClientRect();
@@ -292,7 +294,6 @@ function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFo
       // The zoom anchor, read before the zoom changes the camera.
       const [worldX, worldY] = sceneEventToWorld(scene, surface, e);
 
-      const factor = e.deltaY > 0 ? SLICE_ZOOM_OUT_PER_NOTCH : SLICE_ZOOM_IN_PER_NOTCH;
       breakFollow();
       applyViewportCommand(scene, { type: "zoom_by", factor });
       const newZoom = scene.zoom(scene.active_view());
