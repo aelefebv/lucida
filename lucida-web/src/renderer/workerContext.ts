@@ -32,16 +32,17 @@ export interface WorkerCtx {
   /** Post a message to the main thread. `transfer` moves transferables instead of cloning them. */
   post(msg: WorkerToMainMessage, transfer?: Transferable[]): void;
   /**
-   * Recompute and post the wanted-set delta and level report for one
-   * dataset's pools of `mode`, or of each mode it holds when `mode` is
-   * absent: the dataset named, else the cold state that arrived last. An
-   * upload names the dataset its member belongs to, so a workspace with
-   * several datasets keeps each one's report current.
+   * Recompute and post the wanted-set delta and level report of each view
+   * that draws one dataset from its pools of `mode`, or from either mode's
+   * when `mode` is absent, or of `view` alone: the dataset named, else the
+   * view whose cold state arrived last. An upload names the dataset its
+   * member belongs to, so a workspace with several datasets keeps each one's
+   * report current.
    */
-  postWantedSet(datasetId?: string, mode?: PoolMode): void;
+  postWantedSet(datasetId?: string, mode?: PoolMode, view?: number): void;
   /**
-   * The entity descriptor buffer and index maps of the dataset's pools of
-   * `mode`, or null before that mode's first cold state.
+   * The entity descriptor buffer and index maps of `view`'s draw of the
+   * dataset, or null before the view's first cold state for it.
    */
-  lookupEntityDescriptor(datasetId: string, mode: PoolMode): EntityDescriptorIndex | null;
+  lookupEntityDescriptor(datasetId: string, view: number): EntityDescriptorIndex | null;
 }

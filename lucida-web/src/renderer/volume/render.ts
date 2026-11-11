@@ -12,6 +12,7 @@ import type { VolumeLayerParams, VolumeRenderMultiPassMessage } from "../workerP
 import type { RowBand, VolumeMemberDraw, VolumePoolBinding } from "../volumeRenderer.ts";
 import { batchLayers, type BatchLayer } from "../layerBatches.ts";
 import { resolveMemberPools } from "../descriptorBuffer.ts";
+import { flushViewIndirection } from "../viewIndirection.ts";
 import {
   type AtlasState,
   type LabelVolumePool,
@@ -156,11 +157,16 @@ function renderLabelVolumeLayer(
   return true;
 }
 
-/** An atlas as the renderer binds it. */
-function poolBinding(atlas: AtlasState): VolumePoolBinding {
+/**
+ * An atlas as the renderer binds it for `view`: the shared texture, read
+ * through the view's own indirection, written to the GPU first if it changed.
+ */
+function poolBinding(ctx: WorkerCtx, atlas: AtlasState, view: number): VolumePoolBinding {
+  const indirection = atlas.views.get(view)!;
+  flushViewIndirection(ctx.device, indirection);
   return {
     texture: atlas.texture,
-    indirectionBuf: atlas.indirectionBuf,
+    indirectionBuf: indirection.indirectionBuf,
     slotsX: atlas.slotsX,
     slotsY: atlas.slotsY,
     slotsZ: atlas.slotsZ,
@@ -268,28 +274,21 @@ export async function handleVolumeRenderMultiPass(
     // The orchestrator's entity index matches the worker's descriptor build
     // by construction.
     const datasetId = ctx.state.memberToDataset.get(memberId);
-    const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, "volume") : null;
+    const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, msg.view) : null;
     if (!descIndex) continue;
 
-    const pools = resolveMemberPools(atlasMap, descIndex, memberId);
+    const pools = resolveMemberPools(atlasMap, descIndex, memberId, msg.view);
     const hasDetail = pools.levels.some((atlas) => atlas !== null);
     const hasCoarse = pools.coarse !== null;
     // Anything resident is enough to draw; the shader's sampling chain
     // covers what this member lacks.
     if (!hasDetail && !hasCoarse) continue;
 
-    for (const atlas of [...pools.levels, pools.coarse]) {
-      if (atlas && atlas.indirectionDirty) {
-        ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
-        atlas.indirectionDirty = false;
-      }
-    }
-
     const renderMode = layer.renderMode === "max_intensity" ? 1 : 0;
     drawn.push({ draw: draws.length });
     draws.push({
-      levels: pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
-      coarse: pools.coarse ? poolBinding(pools.coarse) : null,
+      levels: pools.levels.map((atlas) => (atlas ? poolBinding(ctx, atlas, msg.view) : null)),
+      coarse: pools.coarse ? poolBinding(ctx, pools.coarse, msg.view) : null,
       colormap: ctx.getOrCreateLUT(descIndex.colormapNameByMember.get(memberId) ?? "gray"),
       renderMode,
       descriptorBuffer: descIndex.buffer,

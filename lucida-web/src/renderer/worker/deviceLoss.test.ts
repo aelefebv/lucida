@@ -179,8 +179,9 @@ function cold(datasetId: string): ColdStateMessage {
       invModelMatrix: identity(),
       displayStateByChannel: { 0: display },
     }],
+    view: 0,
     viewMode: "volume",
-    drawnModes: ["volume"],
+    drawnViews: [0],
     sampleFormat: "u16",
   };
 }
@@ -355,6 +356,8 @@ describe("GPU errors", () => {
     await dispatchMessage(ctx, chunksAt("ds1-img:ch0", [[0, 0], [1, 0]]));
     const lost = ctx.state.volumeAtlases.get(DETAIL_POOL)!;
     expect(lost.slots.size).toBe(2);
+    const view = lost.views.get(0)!;
+    const entries = view.indirectionData.length;
 
     gpu.scopeOf(lost.texture)!.resolve({ message: "out of memory" } as GPUError);
     await flush();
@@ -374,9 +377,10 @@ describe("GPU errors", () => {
     const rebuilt = ctx.state.volumeAtlases.get(DETAIL_POOL)!;
     expect(rebuilt).not.toBe(lost);
     expect(rebuilt.slots.size).toBe(0);
-    expect(rebuilt.entityMetas).toBe(lost.entityMetas);
-    expect(rebuilt.indirectionData.length).toBe(lost.indirectionData.length);
-    expect(rebuilt.indirectionData.every((entry) => entry === 0xFFFFFFFF)).toBe(true);
+    // The view's indirection survives the lost texture, emptied.
+    expect(rebuilt.views.get(0)).toBe(view);
+    expect(view.indirectionData.length).toBe(entries);
+    expect(view.indirectionData.every((entry) => entry === 0xFFFFFFFF)).toBe(true);
     gpu.settleScopes();
     clearGpuErrorReports(ctx);
   });

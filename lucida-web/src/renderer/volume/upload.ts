@@ -1,7 +1,8 @@
 /**
  * Volume chunk upload: staleness check, admission against the planner's
  * wanted keys, eviction, GPU write, and the residency report for every
- * chunk.
+ * chunk. A chunk is written once, into the pool every 3D view of the dataset
+ * shares, and mapped into each view at its timepoint.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -16,9 +17,10 @@ import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint32, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import { makeCompositeKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
-import { mayEvict } from "../eviction.ts";
-import { wantedChunksFor } from "../wantedChunks.ts";
-import { chunkDistSq, findEvictionSlot, rayHitForMember } from "./eviction.ts";
+import { findEvictionSlot, incomingDistSq, mayEvict } from "../eviction.ts";
+import { anyViewWants } from "../worker/draws.ts";
+import { anySection, anyViewHolds, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
+import { volumeEvictionParams } from "./eviction.ts";
 import {
   acquireLabelSlot,
   getOrCreateLabelVolumePool,
@@ -145,20 +147,17 @@ export function handleVolumeChunkData(
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
     console.warn(`[volumeChunkData] chunkDims mismatch for ${memberId}: pool=[${atlas.chunkX},${atlas.chunkY},${atlas.chunkZ}] msg=[${chunkX},${chunkY},${chunkZ}] level=${level}`);
   }
-  const entityLodMetas = atlas.entityMetas.get(memberId);
-  if (!entityLodMetas) {
-    console.warn(`[volumeChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
+  if (!anyViewHolds(atlas, memberId)) {
+    console.warn(`[volumeChunkData] no view lays out ${memberId} in pool ${poolKey}`);
     refuseAll("missing-entity-meta");
     return;
   }
-  const lodMeta = entityLodMetas.find(m => m.level === level);
-  if (!lodMeta) {
-    console.warn(`[volumeChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
+  if (!anySection(atlas, memberId, level)) {
+    console.warn(`[volumeChunkData] no view lays out level ${level} of ${memberId} in pool ${poolKey}`);
     refuseAll("missing-lod-meta");
     return;
   }
 
-  const wanted = wantedChunksFor(ctx.state, "volume", memberId, tier);
   const batch = new ResidencyBatch();
   let failure: unknown = null;
 
@@ -171,7 +170,7 @@ export function handleVolumeChunkData(
         batch.held.push(chunk.key);
         continue;
       }
-      if (!wanted?.has(chunk.key)) {
+      if (!anyViewWants(atlas, memberId, tier, chunk.key)) {
         batch.refuse(chunk.key, "unwanted");
         continue;
       }
@@ -185,14 +184,15 @@ export function handleVolumeChunkData(
       if (atlas.freeSlots.length > 0) {
         slotIndex = atlas.freeSlots.pop()!;
       } else {
-        const victim = findEvictionSlot(ctx.state, atlas, tier);
+        const params = volumeEvictionParams(ctx.state, atlas, tier);
+        const victim = findEvictionSlot(params);
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
           growVolumePoolWithin(ctx, poolKey, atlas, true)
         ) {
           slotIndex = atlas.freeSlots.pop()!;
         } else {
-          const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, rayHitForMember(ctx.state, memberId));
+          const incomingDist = incomingDistSq(params, memberId, { level, x: chunk.x, y: chunk.y, z: chunk.z });
           if (!victim || !mayEvict(victim, incomingDist)) {
             batch.refuse(chunk.key, "atlas-policy");
             continue;
@@ -200,10 +200,7 @@ export function handleVolumeChunkData(
           slotIndex = atlas.slots.get(victim.key)!;
           atlas.slots.delete(victim.key);
           batch.evicted.push(victim.key);
-          const oldGridIdx = atlas.slotGridIdx[slotIndex];
-          if (oldGridIdx >= 0) {
-            atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
-          }
+          unmapSlot(atlas, slotIndex);
         }
       }
       claimed = slotIndex;
@@ -225,15 +222,16 @@ export function handleVolumeChunkData(
         atlasTextureFormat(atlas.format),
       );
 
-      const [, lodGridY, lodGridX] = lodMeta.gridDims;
-      const globalIdx = lodMeta.offset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
-      if (globalIdx < atlas.indirectionData.length) {
-        atlas.indirectionData[globalIdx] = slotIndex;
-        atlas.slotGridIdx[slotIndex] = globalIdx;
+      // Each view at the chunk's timepoint with a section for its level maps it.
+      for (const view of atlas.views.values()) {
+        if (view.draw.cold.currentT !== msg.t) continue;
+        const meta = sectionOf(view, memberId, level);
+        if (!meta) continue;
+        const [, gridY, gridX] = meta.gridDims;
+        mapSlot(view, meta.offset + chunk.z * gridY * gridX + chunk.y * gridX + chunk.x, slotIndex);
       }
       atlas.slots.set(compositeKey, slotIndex);
       claimed = -1;
-      atlas.indirectionDirty = true;
       batch.held.push(chunk.key);
       landed = true;
     } catch (err) {
@@ -253,6 +251,6 @@ export function handleVolumeChunkData(
 }
 
 function releaseSlot(atlas: AtlasState, slot: number): void {
-  atlas.slotGridIdx[slot] = -1;
+  unmapSlot(atlas, slot);
   atlas.freeSlots.push(slot);
 }

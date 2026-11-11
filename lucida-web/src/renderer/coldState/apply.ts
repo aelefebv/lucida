@@ -1,11 +1,13 @@
 /**
- * Cold-state ingestion orchestrator: rebuilds the worker's routing
- * registries, pools, indirection sections, and descriptor buffer for one
- * dataset's pools of one mode from a cold-state message. The dataset's pools
- * of the other mode are another cold state's, and this one leaves them be.
+ * Cold-state ingestion orchestrator: rebuilds what the worker keeps of one
+ * view's draw of one dataset from a cold-state message: its routes, its
+ * indirection over each pool it draws from, and its descriptor buffer. The
+ * pools themselves are the dataset's, shared by every view of their mode, so
+ * a cold state creates the ones it needs and frees only those no view draws
+ * from any more.
  *
  * The descriptor build reads the sections this cold state produced rather
- * than the pools, so it never picks up stale offsets from pools an earlier
+ * than the pools, so it never picks up stale offsets from sections an earlier
  * cold state laid out with different levels.
  */
 
@@ -16,25 +18,33 @@ import { targetLevelOf, type EntitySource } from "../entitySources.ts";
 import {
   getOrCreateVolumePool,
   removeLabelVolumePoolsForDataset,
-  removeVolumeAtlasesForDataset,
-  resizeIndirection,
   remapIndirection,
+  type AtlasState,
   type LodIndirectionMeta,
 } from "../volume/index.ts";
 import {
   getOrCreateSlicePool,
   removeLabelSlicePoolsForDataset,
-  removeSliceAtlasesForDataset,
-  resizeSliceIndirection,
   remapSliceIndirection,
+  type SliceAtlasState,
 } from "../slice/index.ts";
+import { destroyAtlas } from "../volume/atlas.ts";
+import { destroySliceAtlas } from "../slice/atlas.ts";
 import { groupEntriesByPool, type PoolGroup } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
-import { datasetModeKey, sourceKey } from "../poolKeys.ts";
-import { postFreedPools } from "../chunkUploadFeedback.ts";
+import { chunkPoolTier, datasetViewKey, sourceKey } from "../poolKeys.ts";
+import { postSlotsLost } from "../chunkUploadFeedback.ts";
 import { indexWantedChunks, wantedEntryKey, type WantedChunkIndex } from "../wantedChunks.ts";
 import { renderRadiusEnabled } from "../../pipeline/renderRadius.ts";
-import type { RemapInputs } from "../worker/state.ts";
+import type { RemapInputs, ViewDraw } from "../worker/state.ts";
+import { drawsOf } from "../worker/draws.ts";
+import {
+  createViewIndirection,
+  destroyViewIndirection,
+  resizeViewIndirection,
+  type SharedChunkPool,
+  type ViewIndirection,
+} from "../viewIndirection.ts";
 
 /**
  * The failed chunks a pool's members want in its tier, by member. Only wanted
@@ -64,7 +74,7 @@ function failedInGroup(
   return out;
 }
 
-/** Whether two pool layouts give every member the same sections at the same offsets. */
+/** Whether two layouts give every member the same sections at the same offsets. */
 function sameSections(
   held: ReadonlyMap<string, readonly LodIndirectionMeta[]>,
   next: ReadonlyMap<string, readonly LodIndirectionMeta[]>,
@@ -88,62 +98,90 @@ function sameSections(
 }
 
 /**
- * Whether a pool's indirection already says what a remap would write. A remap
- * walks every resident slot, and uploads and evictions keep the indirection
- * current between cold states, so a pool whose sections, T and plane are the
- * ones it was last remapped for, with no render radius or failed marks either
- * time, would only rebuild what it holds. On a view move that is every pool
- * whose members stayed put, such as a collection's coarse pools.
+ * Whether a view's indirection already says what a remap would write. A remap
+ * walks every resident slot, and uploads and evictions keep each view's
+ * indirection current between cold states, so one whose sections, T and plane
+ * are the ones it was last remapped for, with no render radius or failed
+ * marks either time, would only rebuild what it holds. On a view move that is
+ * every pool whose members stayed put, such as a collection's coarse pools.
  */
 function remapHolds(
   state: WorkerCtx["state"],
-  atlas: { entityMetas: Map<string, LodIndirectionMeta[]>; indirectionData: Uint32Array },
+  view: ViewIndirection,
   metas: Map<string, LodIndirectionMeta[]>,
   totalEntries: number,
   inputs: RemapInputs,
 ): boolean {
-  const last = state.remappedFor.get(atlas);
+  const last = state.remappedFor.get(view);
   return last !== undefined &&
     !last.viewDependent && !inputs.viewDependent &&
     last.t === inputs.t && last.z === inputs.z &&
-    atlas.indirectionData.length === totalEntries &&
-    sameSections(atlas.entityMetas, metas);
+    view.indirectionData.length === totalEntries &&
+    sameSections(view.entityMetas, metas);
+}
+
+/** The view's draw of the cold state's dataset, created on its first cold state. */
+function drawFor(ctx: WorkerCtx, msg: ColdStateMessage, wanted: WantedChunkIndex): ViewDraw {
+  const key = datasetViewKey(msg.datasetId, msg.view);
+  let draw = ctx.state.draws.get(key);
+  if (!draw) {
+    draw = {
+      datasetId: msg.datasetId,
+      view: msg.view,
+      mode: msg.viewMode,
+      cold: msg,
+      wanted,
+      routes: new Map(),
+      targetLevels: new Map(),
+      sources: new Map(),
+      descriptor: null,
+    };
+    ctx.state.draws.set(key, draw);
+  }
+  draw.mode = msg.viewMode;
+  draw.cold = msg;
+  draw.wanted = wanted;
+  return draw;
+}
+
+/** The view's indirection over `pool`, added on the first cold state that draws from it. */
+function viewOver(ctx: WorkerCtx, pool: SharedChunkPool, draw: ViewDraw): ViewIndirection {
+  let view = pool.views.get(draw.view);
+  if (!view) {
+    view = createViewIndirection(ctx.device, draw, pool.totalSlots);
+    pool.views.set(draw.view, view);
+  }
+  view.draw = draw;
+  return view;
 }
 
 /** Apply a cold-state message. The caller posts the wanted-set afterward. */
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const state = ctx.state;
   const mode = msg.viewMode;
-  const key = datasetModeKey(msg.datasetId, mode);
-  const routes = state.memberSourcePools[mode];
-  const targetLevels = state.targetLevelByMember[mode];
 
   const wanted = indexWantedChunks(msg.wantedChunks);
-  state.wantedByDatasetMode.set(key, wanted);
-
-  for (const [memberId, datasetId] of state.memberToDataset) {
-    if (datasetId !== msg.datasetId) continue;
-    routes.delete(memberId);
-  }
+  const draw = drawFor(ctx, msg, wanted);
+  draw.routes.clear();
+  draw.targetLevels.clear();
 
   // 1. Register member→dataset mappings and target levels. Canonical
   // iteration produces the same memberId scheme as the rest of the pipeline.
   for (const { entry, memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
     const target = targetLevelOf(entry);
-    if (target === undefined) targetLevels.delete(memberId);
-    else targetLevels.set(memberId, target);
+    if (target !== undefined) draw.targetLevels.set(memberId, target);
   }
 
   // 2. Partition activeSet by (tier, channel, chunkDims). Entries with no
-  // chunk levels are skipped here but stay in memberToDataset from step 2.
+  // chunk levels are skipped here but stay in memberToDataset from step 1.
   const dimArity: 2 | 3 = mode === "volume" ? 3 : 2;
   const groups = groupEntriesByPool(msg, mode);
 
   const currentSources = new Map<string, EntitySource[]>();
 
-  // 3. Per group: allocate the pool, lay out one section per (member,
-  // level) at sequential offsets, resize + remap its indirection.
+  // 3. Per group: get the pool, lay out one section per (member, level) at
+  // sequential offsets in the view's indirection over it, resize and remap.
   for (const group of groups.values()) {
     const [pcZ, pcY, pcX] = group.chunkDims;
     const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
@@ -170,10 +208,10 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         dimArity,
       );
       if (meta) {
-        let pools = routes.get(memberId);
+        let pools = draw.routes.get(memberId);
         if (!pools) {
           pools = new Map();
-          routes.set(memberId, pools);
+          draw.routes.set(memberId, pools);
         }
         pools.set(sourceKey(tier, level), group.poolKey);
         const metas = newEntityMetas.get(memberId);
@@ -190,114 +228,123 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     const failed = failedInGroup(state, msg.datasetId, wanted, group);
     const radius = msg.renderRadiusView?.[group.tier];
     const viewDependent = (radius !== undefined && renderRadiusEnabled(radius)) || (failed?.size ?? 0) > 0;
+    const remapOptions = { visibleRegion: msg.visibleRegion, renderRadiusView: radius, entryByMember, failed };
     if (mode === "volume") {
-      const atlas = getOrCreateVolumePool(
-        ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, msg.currentT, group.channel, msg.sampleFormat,
-      );
+      const atlas = getOrCreateVolumePool(ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, group.channel, msg.sampleFormat);
+      const view = viewOver(ctx, atlas, draw);
       const inputs: RemapInputs = { t: msg.currentT, z: 0, viewDependent };
-      const holds = remapHolds(state, atlas, newEntityMetas, offset, inputs);
-      atlas.entityMetas = newEntityMetas;
+      const holds = remapHolds(state, view, newEntityMetas, offset, inputs);
+      view.entityMetas = newEntityMetas;
       if (!holds) {
-        resizeIndirection(ctx, atlas, offset);
-        remapIndirection(atlas, msg.currentT, group.channel, {
-          visibleRegion: msg.visibleRegion,
-          renderRadiusView: radius,
-          entryByMember,
-          failed,
-        });
-        state.remappedFor.set(atlas, inputs);
+        resizeViewIndirection(ctx.device, view, offset);
+        remapIndirection(atlas, view, msg.currentT, group.channel, remapOptions);
+        state.remappedFor.set(view, inputs);
       }
     } else {
-      const atlas = getOrCreateSlicePool(
-        ctx, group.poolKey, msg.datasetId, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
-        msg.sampleFormat,
-      );
+      const atlas = getOrCreateSlicePool(ctx, group.poolKey, msg.datasetId, pcX, pcY, group.channel, msg.sampleFormat);
       atlas.axis = msg.sliceAxis ?? "z";
+      const view = viewOver(ctx, atlas, draw);
       const inputs: RemapInputs = { t: msg.currentT, z: msg.currentZ, viewDependent };
-      const holds = remapHolds(state, atlas, newEntityMetas, offset, inputs);
-      atlas.entityMetas = newEntityMetas;
+      const holds = remapHolds(state, view, newEntityMetas, offset, inputs);
+      view.entityMetas = newEntityMetas;
       if (!holds) {
-        resizeSliceIndirection(ctx, atlas, offset);
-        remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ, {
-          visibleRegion: msg.visibleRegion,
-          renderRadiusView: radius,
-          entryByMember,
-          failed,
-        });
-        state.remappedFor.set(atlas, inputs);
+        resizeViewIndirection(ctx.device, view, offset);
+        remapSliceIndirection(atlas, view, msg.currentT, group.channel, msg.currentZ, remapOptions);
+        state.remappedFor.set(view, inputs);
       }
     }
   }
 
-  // 4. Free this dataset's pools of this mode that no group above names: a
-  // hidden channel, another slice axis, or a chunk shape no resident level
-  // uses. Nothing routes to them now, so nothing would sample them again.
-  // Their chunks are reported lost, so the page resends what a recreated pool
-  // needs. The other mode's pools belong to its own cold state, and go once
-  // no view draws the dataset in that mode (`releaseUndrawnPools`).
-  const referenced = new Set(groups.keys());
-  postFreedPools(ctx, msg.datasetId, mode, referenced);
-  if (mode === "volume") removeVolumeAtlasesForDataset(ctx, msg.datasetId, referenced);
-  else removeSliceAtlasesForDataset(ctx, msg.datasetId, referenced);
-  // A side view draws no label overlay. Its chunks are reported lost, so a
-  // return to an XY cut sends them again.
-  if (mode === "slice" && msg.sliceAxis) removeLabelSlicePoolsForDataset(ctx, msg.datasetId, "freed");
+  // 4. The view stops drawing from the dataset's pools no group above names:
+  // a hidden channel, another slice axis, a chunk shape no resident level
+  // uses, or the other mode's after a switch. A pool no view draws from then
+  // goes, its chunks reported lost so the page resends what a recreated one
+  // needs.
+  detachView(ctx, msg.datasetId, msg.view, new Set(groups.keys()));
+  releaseUndrawnLabels(ctx, msg.datasetId);
 
-  state.currentSourcesByDatasetMode.set(key, currentSources);
+  draw.sources = currentSources;
 
   // 5. Rebuild the descriptor buffer's contents from scratch, like the sections.
-  state.descriptorBuffersByDatasetMode.set(
-    key,
-    rebuildDescriptorBuffer(ctx.device, state.descriptorBuffersByDatasetMode.get(key), msg, currentSources),
-  );
+  draw.descriptor = rebuildDescriptorBuffer(ctx.device, draw.descriptor ?? undefined, msg, currentSources);
 }
 
 /**
- * Free the dataset's pools of each mode no view draws it in, as
- * {@link releasePools} does. A cold state names the modes that draw it, so a
- * page that starts over with another view still frees what an earlier one
- * left.
+ * Take `view`'s indirection off each of the dataset's pools outside `keep`,
+ * and free each pool that no view draws from after that.
  */
-export function releaseUndrawnPools(ctx: WorkerCtx, datasetId: string, drawn: readonly PoolMode[]): void {
-  for (const mode of ["slice", "volume"] as const) {
-    if (!drawn.includes(mode)) releasePools(ctx, datasetId, mode);
+function detachView(ctx: WorkerCtx, datasetId: string, view: number, keep: ReadonlySet<string>): void {
+  detachFrom(ctx, ctx.state.sliceAtlases, "slice", datasetId, view, keep, destroySliceAtlas);
+  detachFrom(ctx, ctx.state.volumeAtlases, "volume", datasetId, view, keep, destroyAtlas);
+}
+
+function detachFrom<A extends SliceAtlasState | AtlasState>(
+  ctx: WorkerCtx,
+  atlases: Map<string, A>,
+  mode: PoolMode,
+  datasetId: string,
+  view: number,
+  keep: ReadonlySet<string>,
+  destroy: (atlas: A) => void,
+): void {
+  for (const [poolKey, atlas] of atlases) {
+    if (atlas.datasetId !== datasetId || keep.has(poolKey)) continue;
+    const held = atlas.views.get(view);
+    if (held) {
+      destroyViewIndirection(held);
+      atlas.views.delete(view);
+    }
+    if (atlas.views.size > 0) continue;
+    postSlotsLost(ctx, mode, chunkPoolTier(poolKey), atlas.slots.keys(), "freed");
+    destroy(atlas);
+    atlases.delete(poolKey);
   }
 }
 
 /**
- * Free a dataset's pools of `mode`, its label pools of that mode included,
- * and what the worker kept to lay them out, once no view draws the dataset
- * from them. Their chunks are reported lost, so a view that draws from them
- * again has them sent again.
+ * Drop what the worker kept of the dataset for each view that no longer draws
+ * it, and free what only those views drew from, as {@link releaseDraw} does.
+ * A cold state names every view that draws its dataset, so a page that starts
+ * over still frees what an earlier view left.
  */
-function releasePools(ctx: WorkerCtx, datasetId: string, mode: PoolMode): void {
+export function releaseUndrawnViews(ctx: WorkerCtx, datasetId: string, drawn: readonly number[]): void {
+  for (const draw of drawsOf(ctx.state, datasetId)) {
+    if (!drawn.includes(draw.view)) releaseDraw(ctx, draw);
+  }
+}
+
+/**
+ * Release one view's draw of a dataset: its indirection over each pool, the
+ * pools only it drew from, its descriptors, and the label pools of its mode
+ * once no view draws the dataset in that mode. Freed chunks are reported
+ * lost, so a view that draws from them again has them sent again.
+ */
+export function releaseDraw(ctx: WorkerCtx, draw: ViewDraw): void {
   const state = ctx.state;
-  const key = datasetModeKey(datasetId, mode);
-  const none = new Set<string>();
-  postFreedPools(ctx, datasetId, mode, none);
-  if (mode === "volume") {
-    removeVolumeAtlasesForDataset(ctx, datasetId, none);
-    removeLabelVolumePoolsForDataset(ctx, datasetId, "freed");
-  } else {
-    removeSliceAtlasesForDataset(ctx, datasetId, none);
-    removeLabelSlicePoolsForDataset(ctx, datasetId, "freed");
-  }
-  // The page's level readout for these pools would outlive them otherwise.
-  if (state.coldStateByDatasetMode.has(key)) {
-    ctx.post({ type: "entityLevels", datasetId, viewMode: mode, entities: [] });
-  }
-  const desc = state.descriptorBuffersByDatasetMode.get(key);
-  if (desc) destroyDescriptorBuffer(desc);
-  state.descriptorBuffersByDatasetMode.delete(key);
-  state.currentSourcesByDatasetMode.delete(key);
-  state.coldStateByDatasetMode.delete(key);
-  state.wantedByDatasetMode.delete(key);
+  detachView(ctx, draw.datasetId, draw.view, new Set());
+  // The page's level readout for this view would outlive the draw otherwise.
+  ctx.post({ type: "entityLevels", datasetId: draw.datasetId, view: draw.view, entities: [] });
+  if (draw.descriptor) destroyDescriptorBuffer(draw.descriptor);
+  state.draws.delete(datasetViewKey(draw.datasetId, draw.view));
   for (const [memberId, owner] of state.memberToDataset) {
-    if (owner !== datasetId) continue;
-    state.memberSourcePools[mode].delete(memberId);
-    state.targetLevelByMember[mode].delete(memberId);
+    if (owner !== draw.datasetId) continue;
+    state.cameraUVs.get(draw.view)?.delete(memberId);
+    state.rayHits.get(draw.view)?.delete(memberId);
   }
-  if (state.currentColdState?.datasetId === datasetId && state.currentColdState.viewMode === mode) {
-    state.currentColdState = null;
+  releaseUndrawnLabels(ctx, draw.datasetId);
+  if (state.currentColdState === draw.cold) state.currentColdState = null;
+}
+
+/**
+ * Free the dataset's label pools of a mode no view draws it in. A side view
+ * draws no label overlay, so the slice ones go too once no view cuts XY.
+ * Their chunks are reported lost, so a view that draws them again has them
+ * sent again.
+ */
+function releaseUndrawnLabels(ctx: WorkerCtx, datasetId: string): void {
+  const draws = drawsOf(ctx.state, datasetId);
+  if (!draws.some((draw) => draw.mode === "volume")) removeLabelVolumePoolsForDataset(ctx, datasetId, "freed");
+  if (!draws.some((draw) => draw.mode === "slice" && (draw.cold.sliceAxis ?? "z") === "z")) {
+    removeLabelSlicePoolsForDataset(ctx, datasetId, "freed");
   }
 }

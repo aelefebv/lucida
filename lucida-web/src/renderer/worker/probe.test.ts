@@ -16,8 +16,10 @@ import type { LabelSlicePool, SliceAtlasState } from "../slice/atlas.ts";
 import { labelCellKey } from "../slice/atlas.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { AtlasState, LabelVolumePool, LodIndirectionMeta } from "../volume/atlas.ts";
-import { INDIRECTION_FAILED, INDIRECTION_MISS } from "../remap.ts";
+import { INDIRECTION_FAILED } from "../remap.ts";
 import { identityIndirection } from "../failedCells.ts";
+import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
+import type { ViewDraw } from "./state.ts";
 import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
 
@@ -39,20 +41,19 @@ interface FakePool extends SliceAtlasState {
   texels: Uint16Array;
 }
 
+/** A pool with view 0 drawing from it through an indirection of `cells` cells, all empty. */
 function fakePool(datasetId: string, chunk: number, cells: number): FakePool {
   const slotsX = 4;
   const slotsY = 4;
   const texels = new Uint16Array(slotsX * chunk * slotsY * chunk);
-  return {
+  const pool: FakePool = {
     datasetId,
     texture: { texels, width: slotsX * chunk, height: slotsY * chunk } as unknown as GPUTexture,
     texels,
     format: "u16",
-    indirectionBuf: {} as GPUBuffer,
-    indirectionData: new Uint32Array(cells).fill(INDIRECTION_MISS),
     slots: new Map(),
     planesByChunk: new Map(),
-    slotGridIdx: new Int32Array(slotsX * slotsY).fill(-1),
+    views: new Map(),
     freeSlots: [],
     totalSlots: slotsX * slotsY,
     chunkX: chunk,
@@ -60,14 +61,25 @@ function fakePool(datasetId: string, chunk: number, cells: number): FakePool {
     slotsX,
     slotsY,
     maxSlotsY: slotsY,
-    entityMetas: new Map(),
     entityZInfo: new Map(),
-    z: 0,
     axis: "z",
-    t: 0,
     c: 0,
-    indirectionDirty: false,
   };
+  attachView(pool, new Map(), { entries: cells, draw: fakeDraw({ datasetId, mode: "slice" }) });
+  return pool;
+}
+
+/** View 0's draw of "ds" in `mode`, laid out from `cold` with `sources`; its descriptor comes from `fakeWorker`. */
+function drawIn(
+  state: ReturnType<typeof createInitialState>,
+  mode: "slice" | "volume",
+  cold: ColdStateMessage,
+  sources: ViewDraw["sources"],
+): void {
+  const draw = fakeDraw({ datasetId: "ds", mode });
+  draw.cold = cold;
+  draw.sources = sources;
+  state.draws.set("ds|0", draw);
 }
 
 /** Make `plane` (chunk x chunk samples) resident in `slot`, at indirection `cell`. */
@@ -79,7 +91,7 @@ function hold(pool: FakePool, slot: number, cell: number, plane: ArrayLike<numbe
   for (let y = 0; y < chunk; y++) {
     for (let x = 0; x < chunk; x++) pool.texels[(sy + y) * width + sx + x] = plane[y * chunk + x];
   }
-  pool.indirectionData[cell] = slot;
+  viewOf(pool).indirectionData[cell] = slot;
 }
 
 interface Level {
@@ -107,13 +119,13 @@ function drewImage(levels: Level[], fullDims: [number, number], chunk: number) {
     offset: 0,
   }));
   levels.forEach(({ pool }, i) => {
-    pool.entityMetas.set(memberId, [metas[i]]);
+    viewOf(pool).entityMetas.set(memberId, [metas[i]]);
     state.sliceAtlases.set(`pool${i}`, pool);
   });
-  state.currentSourcesByDatasetMode.set("ds|slice", new Map([[
+  const sources = new Map([[
     memberId,
     metas.map((meta, i) => ({ tier: "detail" as const, poolKey: `pool${i}`, meta })),
-  ]]));
+  ]]);
   const entry: ColdStateActiveEntry = {
     entityId: "entity",
     imageId: "img",
@@ -137,7 +149,7 @@ function drewImage(levels: Level[], fullDims: [number, number], chunk: number) {
     visibleChannels: [0],
     activeSet: [entry],
   } as unknown as ColdStateMessage;
-  state.coldStateByDatasetMode.set("ds|slice", cold);
+  drawIn(state, "slice", cold, sources);
   const [height, width] = fullDims;
   const frame: SliceRenderMultiPassMessage = {
     type: "sliceRenderMultiPass",
@@ -178,6 +190,7 @@ interface FakeTexture {
 
 /** A worker over `state` whose device copies texels out of fake textures' arrays. */
 function fakeWorker(state: ReturnType<typeof createInitialState>, descriptorOf: (id: string) => EntityDescriptorIndex | null) {
+  for (const draw of state.draws.values()) draw.descriptor ??= descriptorOf(draw.datasetId);
   const posts: WorkerToMainMessage[] = [];
   let mapped: () => void = () => {};
   const copies: Array<{ texture: FakeTexture; x: number; y: number; z: number; offset: number }> = [];
@@ -362,14 +375,16 @@ function drewVolume(renderMode: "translucent" | "max_intensity", window: { contr
     datasetId: "ds",
     texture: { texels, width: side, height: side } as unknown as GPUTexture,
     format: "u16",
-    indirectionData: Uint32Array.from({ length: 8 }, (_, i) => i),
     slotsX: 2,
     slotsY: 2,
     slotsZ: 2,
-    entityMetas: new Map([[memberId, [meta]]]),
+    views: new Map([[0, {
+      indirectionData: Uint32Array.from({ length: 8 }, (_, i) => i),
+      entityMetas: new Map([[memberId, [meta]]]),
+    }]]),
   } as unknown as AtlasState;
   state.volumeAtlases.set("pool", pool);
-  state.currentSourcesByDatasetMode.set("ds|volume", new Map([[memberId, [{ tier: "detail" as const, poolKey: "pool", meta }]]]));
+  const sources = new Map([[memberId, [{ tier: "detail" as const, poolKey: "pool", meta }]]]);
   const entry: ColdStateActiveEntry = {
     entityId: "entity",
     imageId: "vol",
@@ -381,7 +396,7 @@ function drewVolume(renderMode: "translucent" | "max_intensity", window: { contr
     invModelMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0.5, 0.5, 1]),
     displayStateByChannel: { 0: { ...window, gamma: 1, opacity: 1, colormapName: "gray", channelMask: 1 } },
   };
-  state.coldStateByDatasetMode.set("ds|volume", {
+  drawIn(state, "volume", {
     type: "coldState",
     datasetId: "ds",
     currentT: 0,
@@ -389,7 +404,7 @@ function drewVolume(renderMode: "translucent" | "max_intensity", window: { contr
     visibleChannels: [0],
     activeSet: [entry],
     sampleFormat: "u16",
-  } as unknown as ColdStateMessage);
+  } as unknown as ColdStateMessage, sources);
   state.lastFrames.set(0, {
     type: "volumeRenderMultiPass",
     epochs: EPOCHS,
@@ -457,7 +472,7 @@ describe("the worker's pixel probe of a 3D label overlay", () => {
     } as unknown as LabelVolumePool;
     ctx.state.labelVolumePools.set("vol:label:regions", label);
     const frame = [...ctx.state.lastFrames.values()][0] as VolumeRenderMultiPassMessage;
-    const entry = ctx.state.coldStateByDatasetMode.get("ds|volume")!.activeSet[0];
+    const entry = ctx.state.draws.get("ds|0")!.cold.activeSet[0];
     frame.layers.push({
       datasetId: "vol:label:regions",
       blendMode: "alpha",

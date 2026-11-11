@@ -18,6 +18,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 import { UNTIMED } from "../passTiming.ts";
 import type { VolumeMemberDraw, VolumePoolBinding } from "../volumeRenderer.ts";
 import type { VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
+import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
 
@@ -46,11 +47,17 @@ function makeDevice(): GPUDevice {
   } as unknown as GPUDevice;
 }
 
-/** The binding the renderer receives for `atlas`. */
+/** `atlas` with view 0 drawing from it, laying out nothing yet. */
+function withView(atlas: AtlasState): AtlasState {
+  attachView(atlas, new Map(), { entries: 1, draw: fakeDraw({ datasetId: atlas.datasetId }) });
+  return atlas;
+}
+
+/** The binding the renderer receives for `atlas` in view 0. */
 function bindingOf(atlas: AtlasState): VolumePoolBinding {
   return {
     texture: atlas.texture,
-    indirectionBuf: atlas.indirectionBuf,
+    indirectionBuf: viewOf(atlas).indirectionBuf,
     slotsX: atlas.slotsX,
     slotsY: atlas.slotsY,
     slotsZ: atlas.slotsZ,
@@ -275,18 +282,8 @@ describe("handleVolumeRenderMultiPass", () => {
     const renderer = makeRenderer();
     const composite = vi.fn();
     const state = createInitialState();
-    const atlas = getOrCreateVolumePool(
-      { device, state } as unknown as WorkerCtx,
-      "pool-b",
-      "ds-0",
-      16,
-      16,
-      16,
-      0,
-      0,
-      "u16",
-    );
-    atlas.entityMetas.set("img-b", [
+    const atlas = withView(getOrCreateVolumePool({ device, state } as unknown as WorkerCtx, "pool-b", "ds-0", 16, 16, 16, 0, "u16"));
+    viewOf(atlas).entityMetas.set("img-b", [
       {
         level: 0,
         gridDims: [1, 1, 1],
@@ -322,19 +319,9 @@ describe("handleVolumeRenderMultiPass", () => {
     const renderer = makeRenderer();
     const composite = vi.fn();
     const state = createInitialState();
-    const coarseAtlas = getOrCreateVolumePool(
-      { device, state } as unknown as WorkerCtx,
-      "coarse-pool",
-      "ds-0",
-      64,
-      64,
-      16,
-      0,
-      0,
-      "u16",
-    );
-    coarseAtlas.indirectionDirty = false;
-    coarseAtlas.entityMetas.set("img-a", [
+    const coarseAtlas = withView(getOrCreateVolumePool({ device, state } as unknown as WorkerCtx, "coarse-pool", "ds-0", 64, 64, 16, 0, "u16"));
+    viewOf(coarseAtlas).dirty = false;
+    viewOf(coarseAtlas).entityMetas.set("img-a", [
       {
         level: 2,
         gridDims: [1, 2, 2],
@@ -362,9 +349,9 @@ describe("handleVolumeRenderMultiPass", () => {
     const composite = vi.fn();
     const state = createInitialState();
     const stub = { device, state } as unknown as WorkerCtx;
-    const finePool = getOrCreateVolumePool(stub, "ds-0:32x32x32:detail", "ds-0", 32, 32, 32, 0, 0, "u16");
-    const smallChunkPool = getOrCreateVolumePool(stub, "ds-0:16x16x16:detail", "ds-0", 16, 16, 16, 0, 0, "u16");
-    const coarsePool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, 0, "u16");
+    const finePool = withView(getOrCreateVolumePool(stub, "ds-0:32x32x32:detail", "ds-0", 32, 32, 32, 0, "u16"));
+    const smallChunkPool = withView(getOrCreateVolumePool(stub, "ds-0:16x16x16:detail", "ds-0", 16, 16, 16, 0, "u16"));
+    const coarsePool = withView(getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, "u16"));
     const meta = (level: number, chunk: number) => [{
       level,
       gridDims: [1, 1, 1] as [number, number, number],
@@ -372,12 +359,12 @@ describe("handleVolumeRenderMultiPass", () => {
       levelDims: [chunk, chunk, chunk] as [number, number, number],
       offset: 0,
     }];
-    finePool.entityMetas.set("img-a", meta(0, 32));
-    smallChunkPool.entityMetas.set("img-a", meta(1, 16));
-    coarsePool.entityMetas.set("img-a", meta(3, 16));
-    finePool.indirectionDirty = true;
-    smallChunkPool.indirectionDirty = true;
-    coarsePool.indirectionDirty = true;
+    viewOf(finePool).entityMetas.set("img-a", meta(0, 32));
+    viewOf(smallChunkPool).entityMetas.set("img-a", meta(1, 16));
+    viewOf(coarsePool).entityMetas.set("img-a", meta(3, 16));
+    viewOf(finePool).dirty = true;
+    viewOf(smallChunkPool).dirty = true;
+    viewOf(coarsePool).dirty = true;
 
     const descIndex = makeDescIndex(["img-a"], {
       sourceBindingByMember: bindings({
@@ -397,9 +384,9 @@ describe("handleVolumeRenderMultiPass", () => {
       coarse: bindingOf(coarsePool),
     });
     // Every bound pool's indirection is flushed before the draw.
-    expect(finePool.indirectionDirty).toBe(false);
-    expect(smallChunkPool.indirectionDirty).toBe(false);
-    expect(coarsePool.indirectionDirty).toBe(false);
+    expect(viewOf(finePool).dirty).toBe(false);
+    expect(viewOf(smallChunkPool).dirty).toBe(false);
+    expect(viewOf(coarsePool).dirty).toBe(false);
   });
 
   describe("a frame drawn in bands", () => {
@@ -410,11 +397,11 @@ describe("handleVolumeRenderMultiPass", () => {
       const composite = vi.fn();
       const state = createInitialState();
       const stub = { device, state } as unknown as WorkerCtx;
-      const pool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, 0, "u16");
-      pool.indirectionDirty = false;
+      const pool = withView(getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, "u16"));
+      viewOf(pool).dirty = false;
       const members = ["c0", "c1"];
       for (const id of members) {
-        pool.entityMetas.set(id, [{ level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0 }]);
+        viewOf(pool).entityMetas.set(id, [{ level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0 }]);
       }
       const descIndex = makeDescIndex(members, {
         sourceBindingByMember: bindings(Object.fromEntries(
@@ -501,12 +488,12 @@ describe("handleVolumeRenderMultiPass", () => {
     const composite = vi.fn();
     const state = createInitialState();
     const stub = { device, state } as unknown as WorkerCtx;
-    const pool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, 0, "u16");
-    pool.indirectionDirty = false;
+    const pool = withView(getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, "u16"));
+    viewOf(pool).dirty = false;
     // Three members side by side, each shown in two channels.
     const members = ["a0", "a1", "b0", "b1", "c0", "c1"];
     for (const id of members) {
-      pool.entityMetas.set(id, [{
+      viewOf(pool).entityMetas.set(id, [{
         level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0,
       }]);
     }

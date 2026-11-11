@@ -32,7 +32,10 @@ import type {
   SliceChunkDataMessage,
   VolumeChunkDataMessage,
 } from "../workerProtocol.ts";
-import { createInitialState, type RendererState } from "../worker/state.ts";
+import { createInitialState, type RendererState, type ViewDraw } from "../worker/state.ts";
+import { drawsOf } from "../worker/draws.ts";
+import type { SharedChunkPool } from "../viewIndirection.ts";
+import { viewOf } from "../viewIndirectionFixtures.ts";
 import { UNTIMED } from "../passTiming.ts";
 import { findEvictionSlot, handleVolumeChunkData } from "../volume/index.ts";
 import { handleSliceChunkData } from "../slice/index.ts";
@@ -152,8 +155,9 @@ function makeCold(
     },
     wantedChunks: [],
     activeSet,
+    view: opts?.view ?? 0,
     viewMode: opts?.viewMode ?? "volume",
-    drawnModes: opts?.drawnModes ?? [opts?.viewMode ?? "volume"],
+    drawnViews: opts?.drawnViews ?? [opts?.view ?? 0],
     sampleFormat: "u16",
   };
 }
@@ -165,9 +169,18 @@ function sli(state: RendererState) {
   return state.sliceAtlases;
 }
 
-/** Pool routing for one member's (tier, level) section. */
+/** Pool routing for one member's (tier, level) section, in any view. */
 function poolOf(state: RendererState, memberId: string, tier: "detail" | "coarse", level: number) {
-  return state.memberSourcePools.volume.get(memberId)?.get(sourceKey(tier, level)) ?? state.memberSourcePools.slice.get(memberId)?.get(sourceKey(tier, level));
+  for (const draw of state.draws.values()) {
+    const poolKey = draw.routes.get(memberId)?.get(sourceKey(tier, level));
+    if (poolKey) return poolKey;
+  }
+  return undefined;
+}
+
+/** The draw of "ds1" in view 0, which these tests' cold states lay out. */
+function draw0(state: RendererState): ViewDraw {
+  return state.draws.get("ds1|0")!;
 }
 
 /**
@@ -186,15 +199,15 @@ const HALVING_PYRAMID: ColdStateActiveEntry["levels"] = [
  * dispatcher does, so the upload path's radius filter and the epoch
  * check see it.
  */
-/** Add chunks to the wanted set of the member's dataset, as a cold state from the planner would. */
+/** Add chunks to the wanted set of each view drawing the member's dataset in `mode`, as a cold state from the planner would. */
 function wantChunks(
   ctx: WorkerCtx, mode: "slice" | "volume", memberId: string, tier: ResidencyTier, keys: string[],
 ): void {
-  const key = `${ctx.state.memberToDataset.get(memberId)!}|${mode}`;
-  const index = new Map(ctx.state.wantedByDatasetMode.get(key) ?? []);
-  const entry = wantedEntryKey(tier, memberId);
-  index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
-  ctx.state.wantedByDatasetMode.set(key, index);
+  for (const draw of drawsOf(ctx.state, ctx.state.memberToDataset.get(memberId)!, mode)) {
+    const index = draw.wanted as Map<string, ReadonlySet<string>>;
+    const entry = wantedEntryKey(tier, memberId);
+    index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
+  }
 }
 
 /** Upload chunks the planner wants. These tests are about sections, not admission. */
@@ -220,13 +233,10 @@ function ingest(ctx: WorkerCtx, activeSet: ColdStateActiveEntry[]): ColdStateMes
   return cold;
 }
 
-function mappedLevels(
-  atlas: { slots: Map<string, number>; slotGridIdx: Int32Array },
-  memberId: string,
-): number[] {
+function mappedLevels(atlas: SharedChunkPool, memberId: string): number[] {
   const levels = new Set<number>();
   for (const [key, slot] of atlas.slots) {
-    if (atlas.slotGridIdx[slot] < 0) continue;
+    if (viewOf(atlas).slotGridIdx[slot] < 0) continue;
     const [member, chunkKey] = key.split("|");
     if (member !== memberId) continue;
     levels.add(Number(chunkKey.split("/")[0]));
@@ -280,15 +290,15 @@ describe("Suite A — applyColdState", () => {
     const atlas = vol(ctx.state).get("ds1:ch0:64x64x32:detail")!;
     expect(atlas).toBeTruthy();
     // entityMetas pinned on the atlas.
-    expect(atlas.entityMetas.get("imgA:ch0")).toEqual([
+    expect(viewOf(atlas).entityMetas.get("imgA:ch0")).toEqual([
       { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 64, 64], levelDims: [64, 256, 256], offset: 0 },
     ]);
     // Indirection sized to gridX*gridY*gridZ = 2*4*4 = 32.
-    expect(atlas.indirectionData.length).toBe(32);
+    expect(viewOf(atlas).indirectionData.length).toBe(32);
     // Snapshot captured for the dataset.
-    expect(ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.get("imgA:ch0")).toHaveLength(1);
+    expect(draw0(ctx.state)?.sources?.get("imgA:ch0")).toHaveLength(1);
     // Descriptor buffer was built for the dataset.
-    expect(ctx.state.descriptorBuffersByDatasetMode.has("ds1|volume")).toBe(true);
+    expect((draw0(ctx.state)?.descriptor != null)).toBe(true);
   });
 
   // 2. Multi-channel volume cold state
@@ -336,12 +346,12 @@ describe("Suite A — applyColdState", () => {
     expect(vol(ctx.state).size).toBe(1);
     const atlas = vol(ctx.state).get("ds1:ch0:64x64x32:detail")!;
     // Both members live in the same pool.
-    expect(atlas.entityMetas.size).toBe(2);
+    expect(viewOf(atlas).entityMetas.size).toBe(2);
     // Sequential offsets: A starts at 0; B starts at 32 (= 2*4*4 from A).
-    expect(atlas.entityMetas.get("imgA:ch0")?.[0].offset).toBe(0);
-    expect(atlas.entityMetas.get("imgB:ch0")?.[0].offset).toBe(32);
+    expect(viewOf(atlas).entityMetas.get("imgA:ch0")?.[0].offset).toBe(0);
+    expect(viewOf(atlas).entityMetas.get("imgB:ch0")?.[0].offset).toBe(32);
     // Indirection sized to cover both: 64 entries.
-    expect(atlas.indirectionData.length).toBe(64);
+    expect(viewOf(atlas).indirectionData.length).toBe(64);
   });
 
   // 5. Tiles with different chunk dims → multiple pools per dataset
@@ -362,10 +372,10 @@ describe("Suite A — applyColdState", () => {
     expect(vol(ctx.state).size).toBe(2);
     const a = vol(ctx.state).get("ds1:ch0:64x64x32:detail")!;
     const b = vol(ctx.state).get("ds1:ch0:32x32x16:detail")!;
-    expect(a.entityMetas.get("imgA:ch0")).toBeTruthy();
-    expect(a.entityMetas.has("imgB:ch0")).toBe(false);
-    expect(b.entityMetas.get("imgB:ch0")).toBeTruthy();
-    expect(b.entityMetas.has("imgA:ch0")).toBe(false);
+    expect(viewOf(a).entityMetas.get("imgA:ch0")).toBeTruthy();
+    expect(viewOf(a).entityMetas.has("imgB:ch0")).toBe(false);
+    expect(viewOf(b).entityMetas.get("imgB:ch0")).toBeTruthy();
+    expect(viewOf(b).entityMetas.has("imgA:ch0")).toBe(false);
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe("ds1:ch0:64x64x32:detail");
     expect(poolOf(ctx.state, "imgB:ch0", "detail", 0)).toBe("ds1:ch0:32x32x16:detail");
   });
@@ -391,24 +401,24 @@ describe("Suite A — applyColdState", () => {
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe("ds1:ch0:64x64x32:detail");
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 2)).toBe("ds1:ch0:128x128x8:detail");
     expect(poolOf(ctx.state, "imgA:ch0", "coarse", 2)).toBe("ds1:ch0:128x128x8:coarse");
-    expect(vol(ctx.state).get("ds1:ch0:64x64x32:detail")?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
+    expect(vol(ctx.state).get("ds1:ch0:64x64x32:detail")?.views.get(0)?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
       level: 0,
       chunkDims: [32, 64, 64],
       offset: 0,
     });
-    expect(vol(ctx.state).get("ds1:ch0:128x128x8:coarse")?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
+    expect(vol(ctx.state).get("ds1:ch0:128x128x8:coarse")?.views.get(0)?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
       level: 2,
       chunkDims: [8, 128, 128],
       offset: 0,
     });
-    const sources = ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.get("imgA:ch0") ?? [];
+    const sources = draw0(ctx.state)?.sources?.get("imgA:ch0") ?? [];
     expect(sources.map((s) => [s.tier, s.meta.level])).toEqual([
       ["detail", 0],
       ["detail", 2],
       ["coarse", 2],
     ]);
     // The draw binds both detail pools (finest first) and the coarse pool.
-    expect(ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")?.sourceBindingByMember.get("imgA:ch0")).toEqual({
+    expect(draw0(ctx.state).descriptor?.sourceBindingByMember.get("imgA:ch0")).toEqual({
       levelPoolKeys: ["ds1:ch0:64x64x32:detail", "ds1:ch0:128x128x8:detail"],
       coarsePoolKey: "ds1:ch0:128x128x8:coarse",
     });
@@ -431,15 +441,15 @@ describe("Suite A — applyColdState", () => {
 
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 1)).toBe("ds1:ch0:64x64x32:detail");
     expect(poolOf(ctx.state, "imgA:ch0", "coarse", 1)).toBe("ds1:ch0:64x64x32:coarse");
-    expect(vol(ctx.state).get("ds1:ch0:64x64x32:detail")?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
+    expect(vol(ctx.state).get("ds1:ch0:64x64x32:detail")?.views.get(0)?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
       level: 1,
       offset: 0,
     });
-    expect(vol(ctx.state).get("ds1:ch0:64x64x32:coarse")?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
+    expect(vol(ctx.state).get("ds1:ch0:64x64x32:coarse")?.views.get(0)?.entityMetas.get("imgA:ch0")?.[0]).toMatchObject({
       level: 1,
       offset: 0,
     });
-    const sources = ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.get("imgA:ch0") ?? [];
+    const sources = draw0(ctx.state)?.sources?.get("imgA:ch0") ?? [];
     expect(sources.map((s) => [s.tier, s.meta.level])).toEqual([["detail", 1], ["coarse", 1]]);
   });
 
@@ -458,16 +468,16 @@ describe("Suite A — applyColdState", () => {
     applyColdState(ctx, cold);
 
     const atlas = vol(ctx.state).get("ds1:ch0:32x32x32:detail")!;
-    expect(atlas.entityMetas.get("imgA:ch0")?.map((m) => [m.level, m.offset])).toEqual([
+    expect(viewOf(atlas).entityMetas.get("imgA:ch0")?.map((m) => [m.level, m.offset])).toEqual([
       [1, 0], [2, 1], [3, 2], [4, 3],
     ]);
-    expect(atlas.indirectionData.length).toBe(4);
+    expect(viewOf(atlas).indirectionData.length).toBe(4);
     for (const level of [1, 2, 3, 4]) {
       expect(poolOf(ctx.state, "imgA:ch0", "detail", level)).toBe("ds1:ch0:32x32x32:detail");
     }
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBeUndefined();
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 5)).toBeUndefined();
-    expect(ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")?.sourceBindingByMember.get("imgA:ch0")).toEqual({
+    expect(draw0(ctx.state).descriptor?.sourceBindingByMember.get("imgA:ch0")).toEqual({
       levelPoolKeys: ["ds1:ch0:32x32x32:detail"],
       coarsePoolKey: null,
     });
@@ -488,7 +498,7 @@ describe("Suite A — applyColdState", () => {
     const atlas = vol(ctx.state).get(poolKey)!;
     const slot = atlas.slots.get("imgA:ch0|2/0/0/0/0/0");
     expect(slot).toBeDefined();
-    expect(atlas.indirectionData[0]).toBe(slot);
+    expect(viewOf(atlas).indirectionData[0]).toBe(slot);
 
     // Target 0: sections for 0..3. The resident level-2 chunk stays mapped
     // in level 2's section, so it fills the screen until level 0 arrives.
@@ -496,19 +506,19 @@ describe("Suite A — applyColdState", () => {
     ctx.state.currentColdState = coldFine;
     applyColdState(ctx, coldFine);
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe(poolKey);
-    const metas = atlas.entityMetas.get("imgA:ch0")!;
+    const metas = viewOf(atlas).entityMetas.get("imgA:ch0")!;
     expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 32], [2, 36], [3, 37]]);
-    expect(atlas.indirectionData[36]).toBe(slot);
-    expect(atlas.slotGridIdx[slot!]).toBe(36);
+    expect(viewOf(atlas).indirectionData[36]).toBe(slot);
+    expect(viewOf(atlas).slotGridIdx[slot!]).toBe(36);
 
     // Target 3: level 2 is now finer than the target. Its chunk stays in
     // the pool but is unmapped, which makes it the first eviction victim.
     const coldCoarsest = makeCold([entryAt(3)]);
     ctx.state.currentColdState = coldCoarsest;
     applyColdState(ctx, coldCoarsest);
-    expect(atlas.entityMetas.get("imgA:ch0")?.map((m) => m.level)).toEqual([3]);
+    expect(viewOf(atlas).entityMetas.get("imgA:ch0")?.map((m) => m.level)).toEqual([3]);
     expect(atlas.slots.has("imgA:ch0|2/0/0/0/0/0")).toBe(true);
-    expect(atlas.slotGridIdx[slot!]).toBe(-1);
+    expect(viewOf(atlas).slotGridIdx[slot!]).toBe(-1);
     expect(findEvictionSlot(ctx.state, atlas, "detail")).toEqual({ key: "imgA:ch0|2/0/0/0/0/0", class: "unsampled", dist: Infinity });
   });
 
@@ -520,23 +530,23 @@ describe("Suite A — applyColdState", () => {
     deliverVolume(ctx, chunkUpload("imgA:ch0", 2), first.epochs, poolKey, "imgA:ch0");
     const atlas = vol(ctx.state).get(poolKey)!;
     const slot = atlas.slots.get("imgA:ch0|2/0/0/0/0/0")!;
-    const indirection = atlas.indirectionData;
+    const indirection = viewOf(atlas).indirectionData;
     // As if the frame after the upload had written the indirection out.
-    atlas.indirectionDirty = false;
+    viewOf(atlas).dirty = false;
 
     // The same layout, as a view move with nothing entering or leaving sends.
     ingest(ctx, [entry()]);
-    expect(atlas.indirectionDirty).toBe(false);
-    expect(atlas.indirectionData).toBe(indirection);
-    expect(atlas.indirectionData[0]).toBe(slot);
+    expect(viewOf(atlas).dirty).toBe(false);
+    expect(viewOf(atlas).indirectionData).toBe(indirection);
+    expect(viewOf(atlas).indirectionData[0]).toBe(slot);
 
     // Another timepoint maps none of the resident chunks.
     const later = makeCold([entry()], { currentT: 1 });
     ctx.state.currentColdState = later;
     applyColdState(ctx, later);
-    expect(atlas.indirectionDirty).toBe(true);
-    expect(atlas.indirectionData[0]).toBe(0xffffffff);
-    expect(atlas.slotGridIdx[slot]).toBe(-1);
+    expect(viewOf(atlas).dirty).toBe(true);
+    expect(viewOf(atlas).indirectionData[0]).toBe(0xffffffff);
+    expect(viewOf(atlas).slotGridIdx[slot]).toBe(-1);
   });
 
   it("remaps only the pools whose sections moved", () => {
@@ -551,15 +561,15 @@ describe("Suite A — applyColdState", () => {
     ingest(ctx, [entry(1)]);
     const detail = vol(ctx.state).get("ds1:ch0:64x64x32:detail")!;
     const coarse = vol(ctx.state).get("ds1:ch0:128x128x8:coarse")!;
-    detail.indirectionDirty = false;
-    coarse.indirectionDirty = false;
+    viewOf(detail).dirty = false;
+    viewOf(coarse).dirty = false;
 
     // A finer target adds a level-0 section to the detail pool and leaves the
     // coarse pool's one section where it was.
     ingest(ctx, [entry(0)]);
-    expect(detail.indirectionDirty).toBe(true);
-    expect(detail.entityMetas.get("imgA:ch0")?.map((m) => m.level)).toEqual([0, 1]);
-    expect(coarse.indirectionDirty).toBe(false);
+    expect(viewOf(detail).dirty).toBe(true);
+    expect(viewOf(detail).entityMetas.get("imgA:ch0")?.map((m) => m.level)).toEqual([0, 1]);
+    expect(viewOf(coarse).dirty).toBe(false);
   });
 
   it("remaps every time while failed chunks are marked, since the marks follow the wanted set", () => {
@@ -570,11 +580,11 @@ describe("Suite A — applyColdState", () => {
     cold.wantedChunks = [{ tier: "detail", memberId: "imgA:ch0", chunkKeys: ["2/0/0/0/0/0"] }];
     applyColdState(ctx, cold);
     const atlas = vol(ctx.state).get(poolOf(ctx.state, "imgA:ch0", "detail", 2)!)!;
-    expect(atlas.indirectionData[0]).toBe(0xfffffffe);
-    atlas.indirectionDirty = false;
+    expect(viewOf(atlas).indirectionData[0]).toBe(0xfffffffe);
+    viewOf(atlas).dirty = false;
 
     applyColdState(ctx, cold);
-    expect(atlas.indirectionDirty).toBe(true);
+    expect(viewOf(atlas).dirty).toBe(true);
   });
 
   it("records each member's target level for eviction, and drops it with the dataset", () => {
@@ -583,13 +593,13 @@ describe("Suite A — applyColdState", () => {
       makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [2], levels: HALVING_PYRAMID }),
     ]);
     applyColdState(ctx, cold);
-    expect(ctx.state.targetLevelByMember.volume.get("imgA:ch0")).toBe(2);
-    expect(ctx.state.targetLevelByMember.volume.has("grp")).toBe(false);
+    expect(draw0(ctx.state).targetLevels.get("imgA:ch0")).toBe(2);
+    expect(draw0(ctx.state).targetLevels.has("grp")).toBe(false);
 
     applyColdState(ctx, makeCold([
       makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [0], levels: HALVING_PYRAMID }),
     ]));
-    expect(ctx.state.targetLevelByMember.volume.get("imgA:ch0")).toBe(0);
+    expect(draw0(ctx.state).targetLevels.get("imgA:ch0")).toBe(0);
   });
 
   // Pins the four-level bound from the eviction side. The bound itself is
@@ -636,7 +646,7 @@ describe("Suite A — applyColdState", () => {
     ingest(ctx, [entryAt(1)]);
     expect(mappedLevels(atlas, "imgA:ch0")).toEqual([1, 2, 3, 4]);
     expect(atlas.slots.has("imgA:ch0|5/0/0/0/0/0")).toBe(true);
-    expect(atlas.slotGridIdx[atlas.slots.get("imgA:ch0|5/0/0/0/0/0")!]).toBe(-1);
+    expect(viewOf(atlas).slotGridIdx[atlas.slots.get("imgA:ch0|5/0/0/0/0/0")!]).toBe(-1);
   });
 
   it("a coarser resident the planner no longer wants leaves before any wanted chunk; the old target's chunks leave first after it moves coarser", () => {
@@ -650,7 +660,7 @@ describe("Suite A — applyColdState", () => {
         chunks: [{ ...base.chunks[0], x, y, z, key: `${level}/0/0/${z}/${y}/${x}` }],
       };
     };
-    ctx.state.rayHitPerEntity.set("imgA:ch0", [0, 0, 0]);
+    ctx.state.rayHits.set(0, new Map([["imgA:ch0", [0, 0, 0]]]));
 
     const coldCoarse = ingest(ctx, [entryAt(2)]);
     const poolKey = poolOf(ctx.state, "imgA:ch0", "detail", 2)!;
@@ -664,7 +674,7 @@ describe("Suite A — applyColdState", () => {
 
     // The coarser resident is still mapped as fallback, but the planner wants
     // only level 0 now, so it goes rather than the farther wanted chunk.
-    expect(atlas.slotGridIdx[atlas.slots.get("imgA:ch0|2/0/0/0/0/0")!]).toBeGreaterThanOrEqual(0);
+    expect(viewOf(atlas).slotGridIdx[atlas.slots.get("imgA:ch0|2/0/0/0/0/0")!]).toBeGreaterThanOrEqual(0);
     deliverVolume(ctx, uploadAt(0, 0, 0, 0), coldFine.epochs, poolKey, "imgA:ch0");
     expect([...atlas.slots.keys()].sort()).toEqual(["imgA:ch0|0/0/0/0/0/0", "imgA:ch0|0/0/0/1/3/3"]);
 
@@ -712,24 +722,24 @@ describe("Suite A — applyColdState", () => {
     deliverSlice(ctx, sliceUpload(1, 0), coldCoarse.epochs, poolKey, "imgA:ch0");
     const atlas = sli(ctx.state).get(poolKey)!;
     const slot1 = atlas.slots.get("imgA:ch0|1/0/0/0/0/0|10")!;
-    expect(atlas.indirectionData[0]).toBe(slot1);
+    expect(viewOf(atlas).indirectionData[0]).toBe(slot1);
 
     // Target 0: level 1's plane stays mapped in its own section while
     // level 0 has nothing yet.
     const coldFine = makeCold([entryAt(0)], { viewMode: "slice", currentZ: 20 });
     ctx.state.currentColdState = coldFine;
     applyColdState(ctx, coldFine);
-    const metas = atlas.entityMetas.get("imgA:ch0")!;
+    const metas = viewOf(atlas).entityMetas.get("imgA:ch0")!;
     expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 16]]);
-    expect(atlas.indirectionData[16]).toBe(slot1);
+    expect(viewOf(atlas).indirectionData[16]).toBe(slot1);
 
     // Level 0's chunk for the same plane is z=1; both levels map at once,
     // each against its own chunk-Z target.
     deliverSlice(ctx, sliceUpload(0, 1), coldFine.epochs, poolOf(ctx.state, "imgA:ch0", "detail", 0)!, "imgA:ch0");
     const slot0 = atlas.slots.get("imgA:ch0|0/0/0/1/0/0|20")!;
     applyColdState(ctx, coldFine);
-    expect(atlas.indirectionData[0]).toBe(slot0);
-    expect(atlas.indirectionData[16]).toBe(slot1);
+    expect(viewOf(atlas).indirectionData[0]).toBe(slot0);
+    expect(viewOf(atlas).indirectionData[16]).toBe(slot1);
   });
 
   // 7. Slice mode cold state
@@ -756,9 +766,9 @@ describe("Suite A — applyColdState", () => {
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe("ds1:ch0:128x128:detail");
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 1)).toBe("ds1:ch0:128x128:detail");
     // 2D sections: level 0 is 2*2 = 4 entries, level 1 is 1*1 = 1 entry.
-    const metas = atlas.entityMetas.get("imgA:ch0")!;
+    const metas = viewOf(atlas).entityMetas.get("imgA:ch0")!;
     expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 4]]);
-    expect(atlas.indirectionData.length).toBe(5);
+    expect(viewOf(atlas).indirectionData.length).toBe(5);
   });
 
   // 8. Cold-state churn (replace)
@@ -771,7 +781,7 @@ describe("Suite A — applyColdState", () => {
       }),
     ]);
     applyColdState(ctx, coldA);
-    const descA = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
+    const descA = draw0(ctx.state).descriptor!;
     const descABuffer = descA.buffer as unknown as MockBuffer;
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe("ds1:ch0:64x64x32:detail");
 
@@ -787,13 +797,13 @@ describe("Suite A — applyColdState", () => {
     expect(poolOf(ctx.state, "imgB:ch0", "detail", 0)).toBe("ds1:ch0:32x32x16:detail");
     // B's entries are written into A's buffer, which holds them, so every
     // bind group that names it stays valid.
-    const descB = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
+    const descB = draw0(ctx.state).descriptor!;
     expect(descB).not.toBe(descA);
     expect(descB.buffer).toBe(descA.buffer);
     expect(descABuffer.destroyed).toBe(false);
     expect([...descB.indexByMember.keys()]).toEqual(["imgB:ch0"]);
     // Stale routing for A is cleared before B is registered.
-    expect(ctx.state.memberSourcePools.volume.has("imgA:ch0")).toBe(false);
+    expect(draw0(ctx.state).routes.has("imgA:ch0")).toBe(false);
   });
 
   it("replaces a descriptor buffer too small for the next cold state, destroying the old one", () => {
@@ -803,11 +813,11 @@ describe("Suite A — applyColdState", () => {
       levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
     });
     applyColdState(ctx, makeCold([entry("imgA")]));
-    const descA = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
+    const descA = draw0(ctx.state).descriptor!;
 
     applyColdState(ctx, makeCold([entry("imgA"), entry("imgB"), entry("imgC")]));
 
-    const descB = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
+    const descB = draw0(ctx.state).descriptor!;
     expect(descB.buffer).not.toBe(descA.buffer);
     expect((descA.buffer as unknown as MockBuffer).destroyed).toBe(true);
     expect(descB.entityCount).toBe(3);
@@ -821,14 +831,14 @@ describe("Suite A — applyColdState", () => {
     // No pools.
     expect(vol(ctx.state).size).toBe(0);
     // No routing entries.
-    expect(ctx.state.memberSourcePools.volume.size).toBe(0);
+    expect(draw0(ctx.state).routes.size).toBe(0);
     // No memberToDataset entries (iterateColdMembers yields nothing).
     expect(ctx.state.memberToDataset.size).toBe(0);
     // Snapshot recorded (empty) for the dataset.
-    expect(ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.size).toBe(0);
+    expect(draw0(ctx.state)?.sources?.size).toBe(0);
     // Descriptor buffer was still built (empty buffer is fine — the
     // build path always runs).
-    expect(ctx.state.descriptorBuffersByDatasetMode.has("ds1|volume")).toBe(true);
+    expect((draw0(ctx.state)?.descriptor != null)).toBe(true);
   });
 
 });

@@ -1,7 +1,8 @@
 /**
  * Volume-mode eviction state and view hot-state application, over
- * `ctx.state.rayHitPerEntity`: the per-entity ray-pick point that
- * `findEvictionSlot` uses to keep chunks near the camera's hit point.
+ * `ctx.state.rayHits`: each view's ray-pick point per entity, which
+ * `findEvictionSlot` uses to keep chunks near the hit point of a view that
+ * draws them.
  */
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
@@ -14,41 +15,47 @@ import {
   type EvictionCandidate,
   type FindEvictionParams,
 } from "../eviction.ts";
-import { wantedChunksFor } from "../wantedChunks.ts";
+import { wantedEntryKey } from "../wantedChunks.ts";
 import type { AtlasState, LodIndirectionMeta } from "./atlas.ts";
 
-/** Apply a view hot-state message to the per-entity ray hits. Latest message wins per entity. */
+/** Apply a view hot-state message to that view's ray hits. Latest message wins per entity. */
 export function applyViewHotState(ctx: WorkerCtx, msg: ViewHotStateMessage): void {
-  const map = ctx.state.rayHitPerEntity;
+  let map = ctx.state.rayHits.get(msg.view);
+  if (!map) {
+    map = new Map();
+    ctx.state.rayHits.set(msg.view, map);
+  }
   for (const [entityId, hit] of msg.rayHitsByEntity) {
     map.set(entityId, hit);
   }
 }
 
-/** Test/debug: read the per-entity ray-pick reference for a member. */
+/** Test/debug: read one view's ray-pick reference for a member. */
 export function getRayHitForMember(
   state: RendererState,
+  view: number,
   memberId: string,
 ): [number, number, number] | undefined {
-  return state.rayHitPerEntity.get(memberId);
+  return state.rayHits.get(view)?.get(memberId);
 }
 
-/** Internal: read the per-entity ray-pick map (used by chunk upload + render). */
+/** One view's ray-pick reference for a member, its center before any pick. */
 export function rayHitForMember(
   state: RendererState,
+  view: number,
   memberId: string,
 ): [number, number, number] {
-  return state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5];
+  return state.rayHits.get(view)?.get(memberId) ?? [0.5, 0.5, 0.5];
 }
 
-/** Drop ray-hit state for a removed dataset / member. */
+/** Drop ray-hit state for a removed dataset / member, in every view. */
 export function clearRayHitForMember(state: RendererState, idOrMember: string): void {
-  state.rayHitPerEntity.delete(idOrMember);
+  for (const map of state.rayHits.values()) map.delete(idOrMember);
 }
 
 /** Drop all ray-hit state (worker destroy). */
 export function clearAllRayHits(state: RendererState): void {
-  state.rayHitPerEntity.clear();
+  state.rayHits.clear();
 }
 
 /** Squared distance from a chunk grid coordinate to a reference point in [0,1] entity-local space. */
@@ -69,7 +76,7 @@ export function findEvictionSlot(
   return sharedFindEvictionSlot(volumeEvictionParams(state, atlas, tier));
 }
 
-/** What the shared eviction kernels read of a volume pool of `tier`. */
+/** What the shared eviction kernels read of a volume pool of `tier`, and of each view drawing from it. */
 export function volumeEvictionParams(
   state: RendererState,
   atlas: AtlasState,
@@ -77,11 +84,13 @@ export function volumeEvictionParams(
 ): FindEvictionParams {
   return {
     slots: atlas.slots,
-    slotGridIdx: atlas.slotGridIdx,
-    entityMetas: atlas.entityMetas,
-    cameraFor: (memberId) => state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
-    targetLevelFor: (memberId) => state.targetLevelByMember.volume.get(memberId),
-    isWanted: (memberId, chunkKey) => wantedChunksFor(state, "volume", memberId, tier)?.has(chunkKey) ?? false,
+    views: [...atlas.views.values()].map((view) => ({
+      slotGridIdx: view.slotGridIdx,
+      entityMetas: view.entityMetas,
+      cameraFor: (memberId) => rayHitForMember(state, view.draw.view, memberId),
+      targetLevelFor: (memberId) => view.draw.targetLevels.get(memberId),
+      isWanted: (memberId, chunkKey) => view.draw.wanted.get(wantedEntryKey(tier, memberId))?.has(chunkKey) ?? false,
+    })),
     is3D: true,
   };
 }

@@ -72,8 +72,9 @@ function makeCold(
     },
     wantedChunks: [],
     activeSet,
+    view: 0,
     viewMode: "slice",
-    drawnModes: ["slice"],
+    drawnViews: [0],
     sampleFormat: "u16",
   };
 }
@@ -122,14 +123,15 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
   });
 });
 
-// removeLayerResources cleanup contract: every memberToDataset and
-// memberSourcePools entry owned by datasetId is gone afterward. Without it
+// removeLayerResources cleanup contract: every memberToDataset entry and view
+// draw owned by datasetId is gone afterward. Without it
 // these maps grow for the worker's lifetime and a recurring memberId could
 // collide. GPU teardown is
 // in `worker/poolLifetime.test.ts`.
 
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import { removeDatasetResources } from "../worker/lifecycle.ts";
+import { fakeDraw } from "../viewIndirectionFixtures.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 
 function removeMemberRoutingForDataset(state: RendererState, datasetId: string): void {
@@ -137,30 +139,27 @@ function removeMemberRoutingForDataset(state: RendererState, datasetId: string):
 }
 
 describe("Suite D — removeLayerResources cleanup", () => {
-  it("removeLayerResources clears memberToDataset / memberSourcePools entries for the dataset", () => {
+  it("removeLayerResources clears memberToDataset entries and view draws for the dataset", () => {
     const state = createInitialState();
-    // Two datasets share the worker. Seed routing for each.
+    // Two datasets share the worker, ds1 drawn in two views. Seed routing for each.
     state.memberToDataset.set("imgA", "ds1");
     state.memberToDataset.set("imgB", "ds1");
     state.memberToDataset.set("imgC", "ds2");
-    state.memberSourcePools.volume.set("imgA", new Map([["detail:0", "ds1:64x64x32:detail"]]));
-    state.memberSourcePools.volume.set("imgB", new Map([["detail:0", "ds1:64x64x32:detail"]]));
-    state.memberSourcePools.volume.set("imgC", new Map([["detail:0", "ds2:64x64x32:detail"]]));
-    state.currentSourcesByDatasetMode.set("ds1|volume", new Map());
-    state.currentSourcesByDatasetMode.set("ds2|volume", new Map());
+    for (const [datasetId, view, members] of [["ds1", 0, ["imgA", "imgB"]], ["ds1", 1, ["imgA"]], ["ds2", 0, ["imgC"]]] as const) {
+      const draw = fakeDraw({ datasetId, view });
+      for (const member of members) draw.routes.set(member, new Map([["detail:0", `${datasetId}:64x64x32:detail`]]));
+      state.draws.set(`${datasetId}|${view}`, draw);
+    }
 
     removeMemberRoutingForDataset(state, "ds1");
 
     // ds1's entries are gone.
     expect(state.memberToDataset.has("imgA")).toBe(false);
     expect(state.memberToDataset.has("imgB")).toBe(false);
-    expect(state.memberSourcePools.volume.has("imgA")).toBe(false);
-    expect(state.memberSourcePools.volume.has("imgB")).toBe(false);
-    expect(state.currentSourcesByDatasetMode.has("ds1|volume")).toBe(false);
+    expect([...state.draws.keys()]).toEqual(["ds2|0"]);
     // ds2's entries are untouched.
     expect(state.memberToDataset.get("imgC")).toBe("ds2");
-    expect(state.memberSourcePools.volume.get("imgC")?.get("detail:0")).toBe("ds2:64x64x32:detail");
-    expect(state.currentSourcesByDatasetMode.has("ds2|volume")).toBe(true);
+    expect(state.draws.get("ds2|0")?.routes.get("imgC")?.get("detail:0")).toBe("ds2:64x64x32:detail");
   });
 
   it("clears currentColdState when the dropped dataset is the active one", () => {

@@ -20,7 +20,6 @@ import type {
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
-  PoolMode,
   FailedChunksMessage,
   ViewHotStateMessage,
   RgbaColor,
@@ -34,6 +33,7 @@ import type {
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import type { SpatialAxis } from "./slicePlane.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
+import { datasetViewKey } from "./poolKeys.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
@@ -121,11 +121,11 @@ export class RenderClient implements UploadClient {
   /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
   /**
-   * The worker's level readout for one dataset changed: its target level
-   * and the level on screen, summarised across its entities. Null when the
-   * dataset reports no image-bearing entity.
+   * The worker's level readout for one view's draw of a dataset changed: its
+   * target level and the level on screen, summarised across its entities.
+   * Null when the draw reports no image-bearing entity.
    */
-  onEntityLevels: ((datasetId: string, mode: PoolMode, levels: DatasetLevels | null) => void) | null = null;
+  onEntityLevels: ((datasetId: string, view: number, levels: DatasetLevels | null) => void) | null = null;
 
   private readonly pipelinesCompiledHandlers = new Set<() => void>();
 
@@ -324,10 +324,10 @@ export class RenderClient implements UploadClient {
       this.onWantedSetDelta(msg.datasetId, msg.viewMode, msg.epochs, msg.missing);
     } else if (msg.type === "entityLevels") {
       const levels = summarizeDatasetLevels(msg.entities);
-      const key = `${msg.datasetId}|${msg.viewMode}`;
+      const key = datasetViewKey(msg.datasetId, msg.view);
       if (levels === null) this.levelsByDataset.delete(key);
       else this.levelsByDataset.set(key, levels);
-      this.onEntityLevels?.(msg.datasetId, msg.viewMode, levels);
+      this.onEntityLevels?.(msg.datasetId, msg.view, levels);
     } else if (msg.type === "gpuPassTime") {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
@@ -830,13 +830,13 @@ export class RenderClient implements UploadClient {
   }
 
   /**
-   * The worker's latest level readout for a dataset's pools of `mode`, or
-   * null before their first report. What the planning tick records as the
+   * The worker's latest level readout for `view`'s draw of a dataset, or
+   * null before its first report. What the planning tick records as the
    * displayed level, since the worker is the only side that knows which
    * resident level each visible position samples from.
    */
-  datasetLevels(datasetId: string, mode: PoolMode): DatasetLevels | null {
-    return this.levelsByDataset.get(`${datasetId}|${mode}`) ?? null;
+  datasetLevels(datasetId: string, view: number): DatasetLevels | null {
+    return this.levelsByDataset.get(datasetViewKey(datasetId, view)) ?? null;
   }
 
   /** Idempotent. */

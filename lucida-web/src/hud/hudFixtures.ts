@@ -59,6 +59,7 @@ export function gpuReport(overrides: Partial<GpuMemoryReport> = {}): GpuMemoryRe
     budgetBytes: 1536 * MIB,
     bytes,
     chunkBytes: bytes,
+    indirectionBytes: 0,
     labelBytes: 0,
     targetBytes: 0,
     minimapBytes: 0,

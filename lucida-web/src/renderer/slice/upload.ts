@@ -3,9 +3,11 @@
  * wanted keys, eviction, GPU write, and the residency report for every
  * chunk.
  *
- * Each delivery is the one plane the page cut for the current Z. It takes the
- * slot of another plane of the same chunk that the pool no longer draws, so a
- * move through one chunk re-cuts it in place. Pairs with `slice/zRetarget.ts`.
+ * Each delivery is the one plane the page cut for a view's Z. It is written
+ * once, into the pool every view of the dataset shares, and mapped into each
+ * view that draws that plane. It takes the slot of another plane of the same
+ * chunk that no view draws any more, so a move through one chunk re-cuts it
+ * in place. Pairs with `slice/zRetarget.ts`.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -20,10 +22,11 @@ import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint32Slice, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import { makeSliceSlotKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
-import { mayEvict } from "../eviction.ts";
+import { findEvictionSlot, incomingDistSq, mayEvict } from "../eviction.ts";
 import { sliceLevelPlane } from "../slicePlane.ts";
-import { wantedChunksFor } from "../wantedChunks.ts";
-import { cameraUVForMember, chunkDistSq2D, findEvictionSlot2D } from "./eviction.ts";
+import { anyViewWants } from "../worker/draws.ts";
+import { anySection, anyViewHolds, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
+import { sliceEvictionParams } from "./eviction.ts";
 import {
   dropSliceSlot,
   getOrCreateLabelSlicePool,
@@ -33,7 +36,7 @@ import {
   labelCellKey,
   type SliceAtlasState,
 } from "./atlas.ts";
-import { drawsPlane } from "./zRetarget.ts";
+import { drawsPlane, viewDrawsPlane } from "./zRetarget.ts";
 
 /**
  * Write pre-sliced uint32 label planes into the member's r32uint label pool.
@@ -132,15 +135,13 @@ export function handleSliceChunkData(
     refuseAll("wrong-slice");
     return;
   }
-  const entityLodMetas = atlas.entityMetas.get(memberId);
-  if (!entityLodMetas) {
-    console.warn(`[sliceChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
+  if (!anyViewHolds(atlas, memberId)) {
+    console.warn(`[sliceChunkData] no view lays out ${memberId} in pool ${poolKey}`);
     refuseAll("missing-entity-meta");
     return;
   }
-  const lodMeta = entityLodMetas.find(m => m.level === level);
-  if (!lodMeta) {
-    console.warn(`[sliceChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
+  if (!anySection(atlas, memberId, level)) {
+    console.warn(`[sliceChunkData] no view lays out level ${level} of ${memberId} in pool ${poolKey}`);
     refuseAll("missing-lod-meta");
     return;
   }
@@ -158,7 +159,6 @@ export function handleSliceChunkData(
 
   const levelZ = sliceLevelPlane(fullResZ, fullResDepth, levelDepth);
   const targetChunkZ = Math.floor(levelZ / chunkZ);
-  const wanted = wantedChunksFor(ctx.state, "slice", memberId, tier);
 
   const batch = new ResidencyBatch();
   let failure: unknown = null;
@@ -170,7 +170,7 @@ export function handleSliceChunkData(
         batch.held.push(chunk.key);
         continue;
       }
-      if (!wanted?.has(chunk.key)) {
+      if (!anyViewWants(atlas, memberId, tier, chunk.key)) {
         batch.refuse(chunk.key, "unwanted");
         continue;
       }
@@ -181,7 +181,7 @@ export function handleSliceChunkData(
         continue;
       }
 
-      const existingSlot = takeUndrawnPlane(atlas, memberId, chunk.key, level);
+      const existingSlot = takeUndrawnPlane(atlas, memberId, chunk.key, level, msg.t);
       // A pool grows only once every slot it has holds a chunk, and freely
       // only while the GPU total has room (`worker/gpuBudget.ts`).
       if (existingSlot === undefined && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
@@ -193,14 +193,15 @@ export function handleSliceChunkData(
       } else if (atlas.freeSlots.length > 0) {
         slotIndex = atlas.freeSlots.pop()!;
       } else {
-        const victim = findEvictionSlot2D(ctx.state, atlas, tier);
+        const params = sliceEvictionParams(ctx.state, atlas, tier);
+        const victim = findEvictionSlot(params);
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
           growSlicePoolWithin(ctx, poolKey, atlas, true)
         ) {
           slotIndex = atlas.freeSlots.pop()!;
         } else {
-          const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cameraUVForMember(ctx.state, memberId));
+          const incomingDist = incomingDistSq(params, memberId, { level, x: chunk.x, y: chunk.y, z: chunk.z });
           if (!victim || !mayEvict(victim, incomingDist)) {
             batch.refuse(chunk.key, "atlas-policy");
             continue;
@@ -208,10 +209,7 @@ export function handleSliceChunkData(
           slotIndex = atlas.slots.get(victim.key)!;
           dropSliceSlot(atlas, victim.key);
           batch.evicted.push(victim.key);
-          const oldGridIdx = atlas.slotGridIdx[slotIndex];
-          if (oldGridIdx >= 0) {
-            atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
-          }
+          unmapSlot(atlas, slotIndex);
         }
       }
       claimed = slotIndex;
@@ -229,17 +227,16 @@ export function handleSliceChunkData(
         atlasTextureFormat(atlas.format),
       );
 
-      const [, , lodGridX] = lodMeta.gridDims;
-      const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;
-      // A plane cut ahead of the cold state is held, but the cell keeps
-      // showing the plane the pool draws until a remap moves it.
-      if (globalIdx < atlas.indirectionData.length && drawsPlane(atlas, memberId, level, levelZ)) {
-        atlas.indirectionData[globalIdx] = slotIndex;
-        atlas.slotGridIdx[slotIndex] = globalIdx;
+      // Each view that draws this plane maps it. A plane cut ahead of a
+      // view's cold state is held, but its cell keeps showing the plane the
+      // view draws until a remap moves it.
+      for (const view of atlas.views.values()) {
+        if (!viewDrawsPlane(atlas, view, memberId, level, msg.t, levelZ)) continue;
+        const meta = sectionOf(view, memberId, level)!;
+        mapSlot(view, meta.offset + chunk.y * meta.gridDims[2] + chunk.x, slotIndex);
       }
       holdSliceSlot(atlas, memberId, chunk.key, levelZ, slotIndex);
       claimed = -1;
-      atlas.indirectionDirty = true;
       batch.held.push(chunk.key);
     } catch (err) {
       // A chunk that throws goes back to the page to be sent again, and the
@@ -258,31 +255,30 @@ export function handleSliceChunkData(
 }
 
 /**
- * Free the slot of a plane of `chunkKey` the pool no longer draws, and return
- * it for the arriving plane, or undefined when there is none. Its chunk key
- * is the arriving one's, which the page already counts as sent, so nothing
- * is reported lost.
+ * Free the slot of a plane of `chunkKey` that no view draws, and return it
+ * for the arriving plane, or undefined when there is none. Its chunk key is
+ * the arriving one's, which the page already counts as sent, so nothing is
+ * reported lost.
  */
 function takeUndrawnPlane(
   atlas: SliceAtlasState,
   memberId: string,
   chunkKey: string,
   level: number,
+  t: number,
 ): number | undefined {
   const held = heldPlanesOf(atlas, memberId, chunkKey);
   if (!held) return undefined;
   for (const [plane, slot] of held) {
-    if (drawsPlane(atlas, memberId, level, plane)) continue;
+    if (drawsPlane(atlas, memberId, level, t, plane)) continue;
     dropSliceSlot(atlas, makeSliceSlotKey(memberId, chunkKey, plane));
-    const gridIdx = atlas.slotGridIdx[slot];
-    if (gridIdx >= 0) atlas.indirectionData[gridIdx] = 0xFFFFFFFF;
-    atlas.slotGridIdx[slot] = -1;
+    unmapSlot(atlas, slot);
     return slot;
   }
   return undefined;
 }
 
 function releaseSlot(atlas: SliceAtlasState, slot: number): void {
-  atlas.slotGridIdx[slot] = -1;
+  unmapSlot(atlas, slot);
   atlas.freeSlots.push(slot);
 }

@@ -93,7 +93,8 @@ function makeColdState(
     wantedChunks: [],
     activeSet: [makeActiveEntry()],
     viewMode: "volume",
-    drawnModes: [overrides?.viewMode ?? "volume"],
+    view: 0,
+    drawnViews: [0],
     sampleFormat: "u16",
     ...overrides,
   };
@@ -126,7 +127,7 @@ function vk(memberId: string, chunkKey: string): string {
 /**
  * Resolver over an atlas map: a member's section for `level` lives in
  * whichever pool holds a section meta at that level for it (the worker's
- * `memberSourcePools` routing, derived from the fixture pools).
+ * view's routes, derived from the fixture pools).
  */
 function poolsFromAtlases(atlases: Map<string, AtlasSnapshot>): SourcePoolResolver {
   return (memberId, _tier, level) => {

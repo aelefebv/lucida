@@ -22,6 +22,7 @@ export function buildViewHotStateFromMembers(args: {
   rayHit: [number, number, number];
   epochs: SceneEpochs;
   datasetId: string;
+  view: number;
 }): ViewHotStateMessage {
   const rayHitsByEntity: Array<[string, [number, number, number]]> = [];
   const seen = new Set<string>();
@@ -34,6 +35,7 @@ export function buildViewHotStateFromMembers(args: {
     type: "viewHotState",
     epochs: args.epochs,
     datasetId: args.datasetId,
+    view: args.view,
     rayHitsByEntity,
   };
 }
@@ -52,5 +54,6 @@ export function buildViewHotState(args: {
     rayHit: args.rayHit,
     epochs: args.epochs,
     datasetId: args.datasetId,
+    view: args.coldMsg.view,
   });
 }

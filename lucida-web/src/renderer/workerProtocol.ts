@@ -647,13 +647,15 @@ export interface ColdStateMessage {
    */
   wantedChunks: WantedMemberChunks[];
   activeSet: ColdStateActiveEntry[];
-  /** The pools this cold state lays out, and the views that draw from them. */
+  /** The view this cold state lays out the dataset for. */
+  view: number;
+  /** The mode of {@link view}, whose pools it draws the dataset from. */
   viewMode: PoolMode;
   /**
-   * The modes of every view that draws the dataset. The worker keeps the
-   * dataset's pools of these modes and frees the rest.
+   * Every view that draws the dataset. The worker drops what it kept of the
+   * dataset for any other view, and frees the pools no view draws from.
    */
-  drawnModes: PoolMode[];
+  drawnViews: number[];
   /** How this dataset's atlases hold samples, and so how its descriptors read them. */
   sampleFormat: SampleFormat;
 }
@@ -669,13 +671,15 @@ export interface WantedMemberChunks {
 /**
  * Camera-ray pick coordinates for chunk eviction priority, sent once per
  * dataset when `epochs.view` advances. CPU-side residency only; the shader
- * never reads them. The worker stores them in `rayHitPerEntity` for
+ * never reads them. The worker stores them per view in `rayHits` for
  * `findEvictionSlot`'s distance metric.
  */
 export interface ViewHotStateMessage {
   type: "viewHotState";
   epochs: SceneEpochs;
   datasetId: string;
+  /** The view whose camera cast the rays. */
+  view: number;
   /** Per-entity ray-pick local coords for chunk eviction prioritization. */
   rayHitsByEntity: Array<[entityId: string, hit: [number, number, number]]>;
 }
@@ -691,7 +695,7 @@ export interface ViewHotStateMessage {
 export interface ColdStateDisplayMessage {
   type: "coldStateDisplay";
   datasetId: string;
-  viewMode: PoolMode;
+  view: number;
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
 
@@ -705,7 +709,7 @@ export interface ColdStateDisplayMessage {
 export interface ColdStateSelectionMessage {
   type: "coldStateSelection";
   datasetId: string;
-  viewMode: PoolMode;
+  view: number;
   currentT: number;
   currentZ: number;
   visibleRegion: VisibleRegion;
@@ -728,9 +732,9 @@ export interface ColdStateSelectionMessage {
 export interface ColdStateDeltaMessage {
   type: "coldStateDelta";
   datasetId: string;
-  viewMode: PoolMode;
-  /** See {@link ColdStateMessage.drawnModes}. */
-  drawnModes: PoolMode[];
+  view: number;
+  /** See {@link ColdStateMessage.drawnViews}. */
+  drawnViews: number[];
   epochs: SceneEpochs;
   currentT: number;
   currentZ: number;
@@ -988,7 +992,8 @@ export interface EntityLevelReport {
 export interface EntityLevelsMessage {
   type: "entityLevels";
   datasetId: string;
-  viewMode: PoolMode;
+  /** The view whose draw of the dataset the levels describe. */
+  view: number;
   entities: EntityLevelReport[];
 }
 
@@ -1014,8 +1019,10 @@ export interface GpuMemoryReport {
   /** The device-fitted total, halved when the device runs out of memory under it. */
   budgetBytes: number;
   bytes: number;
-  /** Chunk pools: textures and indirection buffers. */
+  /** Chunk pools: textures and every view's indirection buffers over them. */
   chunkBytes: number;
+  /** The share of {@link chunkBytes} in views' indirection buffers, one per view and pool. */
+  indirectionBytes: number;
   labelBytes: number;
   /** Viewport render targets and the depth texture. */
   targetBytes: number;

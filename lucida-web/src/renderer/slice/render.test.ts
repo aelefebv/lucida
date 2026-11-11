@@ -15,6 +15,7 @@ import { createInitialState, type RendererState } from "../worker/state.ts";
 import type { SliceAtlasState } from "./atlas.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { handleSliceRenderMultiPass } from "./render.ts";
+import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
 
 vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 
@@ -32,16 +33,15 @@ function makeDevice(): GPUDevice {
   } as unknown as GPUDevice;
 }
 
-function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState {
-  return {
+/** A slice pool whose view 0 lays out `entityMetas`. */
+function makeAtlas(entityMetas: Map<string, LodIndirectionMeta[]>): SliceAtlasState {
+  const atlas: SliceAtlasState = {
     datasetId: "ds-0",
     texture: {} as GPUTexture,
     format: "u16",
-    indirectionBuf: {} as GPUBuffer,
-    indirectionData: new Uint32Array([0]),
     slots: new Map(),
     planesByChunk: new Map(),
-    slotGridIdx: new Int32Array(1),
+    views: new Map(),
     freeSlots: [],
     totalSlots: 1,
     chunkX: 64,
@@ -49,21 +49,19 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
     slotsX: 1,
     slotsY: 1,
     maxSlotsY: 1,
-    entityMetas,
     entityZInfo: new Map(),
-    z: 0,
     axis: "z",
-    t: 0,
     c: 0,
-    indirectionDirty: false,
   };
+  attachView(atlas, entityMetas, { entries: 1, draw: fakeDraw({ datasetId: "ds-0", mode: "slice" }) });
+  return atlas;
 }
 
-/** The binding the renderer receives for `atlas`. */
+/** The binding the renderer receives for `atlas` in view 0. */
 function bindingOf(atlas: SliceAtlasState): SlicePoolBinding {
   return {
     texture: atlas.texture,
-    indirectionBuf: atlas.indirectionBuf,
+    indirectionBuf: viewOf(atlas).indirectionBuf,
     slotsX: atlas.slotsX,
     slotsY: atlas.slotsY,
   };
@@ -325,11 +323,11 @@ describe("handleSliceRenderMultiPass", () => {
     expect(memberOf(renderer).levels).toEqual([bindingOf(finePool), bindingOf(smallChunkPool)]);
     expect(memberOf(renderer).coarse).toBeNull();
     // Both pools' indirections are flushed before the draw.
-    finePool.indirectionDirty = true;
-    smallChunkPool.indirectionDirty = true;
+    viewOf(finePool).dirty = true;
+    viewOf(smallChunkPool).dirty = true;
     await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
-    expect(finePool.indirectionDirty).toBe(false);
-    expect(smallChunkPool.indirectionDirty).toBe(false);
+    expect(viewOf(finePool).dirty).toBe(false);
+    expect(viewOf(smallChunkPool).dirty).toBe(false);
   });
 
   it("leaves a level slot unbound when its pool holds no section for the member", async () => {
@@ -421,7 +419,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
       ["img-0", residentMetas()],
       ["img-1", residentMetas()],
     ]));
-    coarseAtlas.indirectionDirty = true;
+    viewOf(coarseAtlas).dirty = true;
     state.sliceAtlases.set("coarse-pool", coarseAtlas);
     const descIndex = makeDescIndex(["img-0", "img-1"], {
       sourceBindingByMember: bindings({ "img-0": coarseOnly("coarse-pool"), "img-1": coarseOnly("coarse-pool") }),
@@ -448,9 +446,9 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     const u32 = new Uint32Array(params.quadData);
     expect([u32[4], u32[12]]).toEqual([0, 1]);
     // Dirty indirection flushed before the draw.
-    expect(coarseAtlas.indirectionDirty).toBe(false);
+    expect(viewOf(coarseAtlas).dirty).toBe(false);
     expect(device.queue.writeBuffer).toHaveBeenCalledWith(
-      coarseAtlas.indirectionBuf, 0, coarseAtlas.indirectionData,
+      viewOf(coarseAtlas).indirectionBuf, 0, viewOf(coarseAtlas).indirectionData,
     );
     // One composite layer for the whole batch.
     expect(composite.mock.calls[0][1]).toHaveLength(1);
@@ -476,8 +474,8 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     // View center (cx=1124, cy=712) in each member's own UV space:
     // img-0 spans [100..1124]×[200..712], img-1 spans [1124..2148]×[712..1224].
-    expect(state.cameraUVPerEntity.get("img-0")).toEqual([1, 1]);
-    expect(state.cameraUVPerEntity.get("img-1")).toEqual([0, 0]);
+    expect(state.cameraUVs.get(0)?.get("img-0")).toEqual([1, 1]);
+    expect(state.cameraUVs.get(0)?.get("img-1")).toEqual([0, 0]);
   });
 
   it("skips the whole layer when no batched member has resident content", async () => {
@@ -523,8 +521,8 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(params.quadData.byteLength).toBe(32);
     expect(new Uint32Array(params.quadData)[4]).toBe(0);
     // The dead member contributes no eviction-recency update either.
-    expect(state.cameraUVPerEntity.has("img-0")).toBe(true);
-    expect(state.cameraUVPerEntity.has("img-1")).toBe(false);
+    expect(state.cameraUVs.get(0)?.has("img-0")).toBe(true);
+    expect(state.cameraUVs.get(0)?.has("img-1")).toBe(false);
   });
 
   it("sub-batches by pool-binding set so members never sample another pool", async () => {
@@ -665,6 +663,6 @@ describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () 
     await handleSliceRenderMultiPass(ctx, msg);
 
     expect(renderer.renderLayerGroup).not.toHaveBeenCalled();
-    expect(ctx.state.cameraUVPerEntity.has("img-0:ch0")).toBe(true);
+    expect(ctx.state.cameraUVs.get(0)?.has("img-0:ch0")).toBe(true);
   });
 });
