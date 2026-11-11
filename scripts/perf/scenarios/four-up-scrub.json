@@ -1,12 +1,11 @@
 {
-  "description": "four-up, then press the XZ view and step Y by one twice and jump 150 planes, or to the last, which moves XY's and YZ's lines and the volume's outline with it; to set against xz-scrub in one view",
+  "description": "four-up, then press the XZ view, step Y by one and jump 150 planes, or to the last, which moves XY's and YZ's lines and the volume's outline with it; to set against xz-scrub in one view",
   "requires": ["volume"],
   "camera": "slice",
   "steps": [
     { "kind": "views", "layout": "four_up" },
     { "kind": "target", "view": 2 },
     { "kind": "pan", "dx": 1, "dy": 0 },
-    { "kind": "scrub", "axis": "y", "count": 1 },
     { "kind": "scrub", "axis": "y", "count": 1 },
     { "kind": "scrub", "axis": "y", "count": 150 }
   ]
