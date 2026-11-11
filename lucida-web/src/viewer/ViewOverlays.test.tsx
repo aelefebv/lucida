@@ -16,11 +16,9 @@ afterEach(cleanup);
 
 const LEFT: ViewPane = {
   id: 0, shows: "all", draws: ["a", "b"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, setAside: [],
-  lines: [],
 };
 const RIGHT: ViewPane = {
   id: 3, shows: "all", draws: ["a", "b"], rect: [0.5, 0, 0.5, 1], cameraMode: "slice", active: false, setAside: ["c"],
-  lines: [],
 };
 const SWIPE: Comparison = { a: "a", b: "b", mode: "swipe", divider: 0.5, showing: "a" };
 
