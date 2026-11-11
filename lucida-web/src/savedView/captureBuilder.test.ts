@@ -130,6 +130,7 @@ describe("buildCapture workspace dataset references", () => {
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
       camera_space: () => "null",
+      export_views: () => "null",
       user_transforms: () => "{}",
     };
 
@@ -172,6 +173,7 @@ describe("buildCapture workspace dataset references", () => {
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
       camera_space: () => "null",
+      export_views: () => "null",
       user_transforms: () => "{}",
     };
 
@@ -208,6 +210,7 @@ describe("buildCapture workspace dataset references", () => {
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
       camera_space: () => "null",
+      export_views: () => "null",
       user_transforms: () => "{}",
     };
 
@@ -241,6 +244,7 @@ describe("buildCapture camera space", () => {
       dataset_ids: () => "[]",
       available_layouts: () => "[]",
       camera_space: () => json,
+      export_views: () => "null",
       user_transforms: () => transforms,
     };
   }
@@ -263,6 +267,24 @@ describe("buildCapture camera space", () => {
     transforms = "{}";
     const none = buildCapture({ scene: sceneWithSpace("null") as never, urlByDatasetId: new Map() });
     expect(none.user_transforms).toEqual({});
+  });
+
+  it("records every view after the placement, and none for one view of every dataset", () => {
+    const record = {
+      layout: "rows",
+      active: 0,
+      views: [
+        { camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 300] }, axes: { t: 0 }, datasets: "all" },
+        { camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 300] }, axes: { t: 0 }, datasets: { only: [] } },
+      ],
+    };
+    const scene = { ...sceneWithSpace(JSON.stringify(space)), export_views: () => JSON.stringify(record) };
+    const view = buildCapture({ scene: scene as never, urlByDatasetId: new Map() });
+    expect(view.views).toEqual(record);
+    const keys = Object.keys(JSON.parse(JSON.stringify(view)) as object);
+    expect(keys.slice(-3)).toEqual(["camera_space", "user_transforms", "views"]);
+    const single = buildCapture({ scene: sceneWithSpace("null") as never, urlByDatasetId: new Map() });
+    expect("views" in single && single.views !== undefined).toBe(false);
   });
 
   it("leaves it out while no dataset fixes them", () => {

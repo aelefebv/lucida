@@ -203,6 +203,10 @@ vi.mock("lucida-core", () => {
     camera_space() {
       return "null";
     }
+    export_views() {
+      return "null";
+    }
+    import_views(_json: string) {}
     import_presence(json: string) {
       const presence = JSON.parse(json) as {
         camera?: unknown;

@@ -11,7 +11,7 @@ use crate::placement::{
 use crate::saved_view::SavedView;
 use crate::scene::{
     CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene,
-    member_transform,
+    ViewsRecord, member_transform,
 };
 use crate::view::{AxisPositions, View, ViewId, ViewLayout};
 
@@ -143,21 +143,57 @@ impl WasmScene {
         Ok(())
     }
 
-    /// Export the active view's camera and axis positions, and the display,
-    /// as JSON for presence updates.
+    /// Export the active view's camera and axis positions, the display, and
+    /// every view when there is more than one view of every dataset, as JSON
+    /// for presence updates. A follower shows no comparison, so the views
+    /// carry none.
     pub fn export_presence(&self) -> String {
         #[derive(serde::Serialize)]
         struct Presence<'a> {
             camera: &'a Camera,
             view: &'a AxisPositions,
             display: &'a DisplayState,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            views: Option<ViewsRecord>,
         }
         let p = Presence {
             camera: &self.active().camera,
             view: &self.active().axes,
             display: &self.inner.display,
+            views: self.inner.record_views(false),
         };
         serde_json::to_string(&p).unwrap()
+    }
+
+    /// Every view as a saved view records it, with its comparison, as JSON:
+    /// `null` for one view of every dataset ([`Scene::record_views`]).
+    pub fn export_views(&self) -> String {
+        serde_json::to_string(&self.inner.record_views(true)).unwrap()
+    }
+
+    /// Lay the views out as `{views, camera_space, comparisons}` says
+    /// ([`Scene::import_views`]): `views` a record [`Self::export_views`]
+    /// wrote, or `null` for one view of every dataset; `camera_space` the
+    /// spaces it was recorded in, if they might differ; `comparisons` whether
+    /// its comparisons come back. A record this build cannot read, as from a
+    /// newer one, reads as `null`, as [`SavedView::views`] does. Call it
+    /// before importing the active view's camera and axis positions, so they
+    /// land on the view it made active.
+    pub fn import_views(&mut self, json: &str) -> Result<(), JsError> {
+        #[derive(serde::Deserialize)]
+        struct Import {
+            #[serde(default)]
+            views: Option<serde_json::Value>,
+            #[serde(default)]
+            camera_space: Option<CameraSpace>,
+            #[serde(default)]
+            comparisons: bool,
+        }
+        let p: Import = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        let views: Option<ViewsRecord> = p.views.and_then(|v| serde_json::from_value(v).ok());
+        self.inner
+            .import_views(views.as_ref(), p.camera_space.as_ref(), p.comparisons);
+        Ok(())
     }
 
     /// The spaces the camera's numbers are in, as JSON, for a saved view to

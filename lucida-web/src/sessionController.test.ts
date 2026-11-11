@@ -88,6 +88,7 @@ import { Bridge, type BridgeHandlers, type PresenceState } from "./bridge.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import type { WasmScene } from "lucida-core";
+import type { ViewsRecord } from "./savedView/types.ts";
 
 const MockedBridge = Bridge as unknown as {
   instances: Array<{
@@ -131,6 +132,7 @@ function makeFakeScene() {
     available_layouts: vi.fn(() => "[]"),
     export_presence: vi.fn(() => "{}"),
     export_dataset_presence: vi.fn(() => "{}"),
+    import_views: vi.fn(),
     import_presence: vi.fn(),
     import_dataset_presence: vi.fn(),
     set_viewport: vi.fn(),
@@ -447,6 +449,29 @@ describe("SessionController follow", () => {
     // What it adopted is now its own view, reported for anyone who follows it.
     expect(bridge.sendPresence).toHaveBeenCalled();
     expect(bridge.sendDatasetPresence).toHaveBeenCalled();
+  });
+
+  it("follows a peer's views, each update laying them out before its camera lands", () => {
+    const { controller, handlers, scene } = makeHarness();
+    const views: ViewsRecord = {
+      layout: "columns",
+      active: 1,
+      views: [
+        { camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [400, 600] }, axes: { t: 0 }, datasets: "all" },
+        { camera: { mode: "slice", center: [5, 5], zoom: 2, viewport: [400, 600] }, axes: { t: 1 }, datasets: "all" },
+      ],
+    };
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [{ ...makePresence(2), views }], 7, {});
+
+    controller.follow(2);
+    expect(scene.import_views).toHaveBeenCalledExactlyOnceWith(JSON.stringify({ views, comparisons: false }));
+
+    // The leader goes back to one view, which an update without views says.
+    const peer = makePresence(2);
+    handlers.onPresenceUpdate?.(2, peer.camera, peer.view, peer.display);
+    expect(scene.import_views).toHaveBeenLastCalledWith(JSON.stringify({ views: null, comparisons: false }));
+    const [laidOut, landed] = [scene.import_views.mock.invocationCallOrder, scene.import_presence.mock.invocationCallOrder];
+    expect(laidOut.map((order: number, i: number) => order < landed[i])).toEqual([true, true]);
   });
 
   it("the echo of its own follow adopts nothing a second time", () => {

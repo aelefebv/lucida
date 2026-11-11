@@ -10,7 +10,7 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
     AxisReading, BlendMode, ChannelSettings, Colormap, CutReach, DatasetDisplaySettings,
-    DisplayState, DocumentState, RenderMode, Scene, declared_channels,
+    DisplayState, DocumentState, RenderMode, Scene, ViewsRecord, declared_channels,
 };
 use lucida_core::view::AxisPositions;
 use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
@@ -48,6 +48,9 @@ pub struct ViewApplyResult {
     /// Where the view stands along the axis its slice plane cuts.
     pub cut: AxisReading,
     pub display: DisplayState,
+    /// Every view, for the presence the result is sent as.
+    #[serde(skip)]
+    pub views: Option<ViewsRecord>,
     #[serde(skip)]
     pub break_follow: bool,
 }
@@ -681,6 +684,7 @@ impl ViewerProfileClient {
             &ClientMessage::Presence {
                 camera: scene.active_view().camera.clone(),
                 view: scene.active_view().axes.clone(),
+                views: scene.record_views(false),
                 display: scene.display,
             },
         )
@@ -770,6 +774,7 @@ impl ViewerProfileClient {
             &ClientMessage::Presence {
                 camera: scene.active_view().camera.clone(),
                 view: scene.active_view().axes.clone(),
+                views: scene.record_views(false),
                 display: scene.display,
             },
         )
@@ -1300,6 +1305,7 @@ fn apply_presence_command(
         camera: scene.active_view().camera.clone(),
         view: scene.active_view().axes.clone(),
         cut: scene.cut_reading(scene.active_view().id()),
+        views: scene.record_views(false),
         display: scene.display,
         break_follow: own_presence.following.is_some(),
     })
@@ -1402,7 +1408,8 @@ pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceS
         .camera
         .as_ref()
         .map_or(FITTED_VIEWPORT, Camera::viewport);
-    let mut scene = Scene::new(viewport);
+    let canvas = presence.views.as_ref().and_then(ViewsRecord::canvas);
+    let mut scene = Scene::new(canvas.unwrap_or(viewport));
     if let (Some(order), Some(settings)) = (&presence.dataset_order, &presence.dataset_settings) {
         scene.dataset_order = order.clone();
         scene.dataset_settings = settings.clone();
@@ -1416,6 +1423,10 @@ pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceS
             scene.active_view_mut().camera.sanitize();
             scene.active_view_mut().axes = view.clone();
             scene.display = display.clone();
+            if let Some(views) = &presence.views {
+                // A peer's presence is in this document's spaces already.
+                scene.import_views(Some(views), None, false);
+            }
         }
         // An empty workspace has nothing to frame and keeps the blank camera.
         _ => {
@@ -2022,6 +2033,7 @@ fn presence_message(result: &ViewApplyResult) -> ClientMessage {
         camera: result.camera.clone(),
         view: result.view.clone(),
         display: result.display.clone(),
+        views: result.views.clone(),
     }
 }
 
@@ -2384,6 +2396,7 @@ mod tests {
             })),
             view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
+            views: None,
             following: None,
             cursor: None,
             dataset_order: Some(Vec::new()),

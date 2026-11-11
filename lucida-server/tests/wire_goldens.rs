@@ -44,10 +44,11 @@ use lucida_core::protocol::{
 };
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
-    Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
-    DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, RenderMode,
+    Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment, CompareMode,
+    Comparison, DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, LinkBasis,
+    LinkMode, LinkModes, LinksRecord, RenderMode, Side, ViewRecord, ViewsRecord,
 };
-use lucida_core::view::AxisPositions;
+use lucida_core::view::{AxisPositions, ViewDatasets, ViewLayout};
 use lucida_protocol::codec::{ChunkCodec, ChunkRelayReport, ChunkRelaySetting};
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
@@ -204,14 +205,20 @@ fn assert_no_failures(failures: Vec<String>) {
 
 fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] {
     match msg {
-        ServerMessage::Snapshot { .. } => &["session/server_snapshot.json"],
+        ServerMessage::Snapshot { .. } => &[
+            "session/server_snapshot.json",
+            "session/server_snapshot_views.json",
+        ],
         ServerMessage::CommandBroadcast { .. } => {
             &["session/server_command_broadcast_dataset_opened.json"]
         }
         ServerMessage::Ack { .. } => &["session/server_ack.json"],
         ServerMessage::PeerJoined { .. } => &["session/server_peer_joined.json"],
         ServerMessage::PeerLeft { .. } => &["session/server_peer_left.json"],
-        ServerMessage::PresenceUpdate { .. } => &["session/server_presence_update.json"],
+        ServerMessage::PresenceUpdate { .. } => &[
+            "session/server_presence_update.json",
+            "session/server_presence_update_views.json",
+        ],
         ServerMessage::CursorUpdate { .. } => &["session/server_cursor_update.json"],
         ServerMessage::FollowChanged { .. } => &["session/server_follow_changed.json"],
         ServerMessage::DatasetPresenceUpdate { .. } => {
@@ -264,7 +271,10 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
             "session/client_command_rename_dataset.json",
             "session/client_command_set_user_transform.json",
         ],
-        ClientMessage::Presence { .. } => &["session/client_presence.json"],
+        ClientMessage::Presence { .. } => &[
+            "session/client_presence.json",
+            "session/client_presence_views.json",
+        ],
         ClientMessage::Cursor { .. } => &["session/client_cursor.json"],
         ClientMessage::Follow { .. } => &["session/client_follow.json"],
         ClientMessage::DatasetPresence { .. } => &["session/client_dataset_presence.json"],
@@ -910,6 +920,7 @@ fn peer_presence() -> PresenceState {
         camera: Some(slice_camera()),
         view: Some(shared_view_state()),
         display: Some(shared_display_state()),
+        views: None,
         following: Some(9),
         cursor: Some([412.0, 233.5]),
         dataset_order: Some(vec![DatasetId(SINGLE_DATASET_ID.into())]),
@@ -946,10 +957,82 @@ fn fly_peer_presence() -> PresenceState {
             ..AxisPositions::new()
         }),
         display: Some(DisplayState::default()),
+        views: None,
         following: None,
         cursor: None,
         dataset_order: Some(vec![]),
         dataset_settings: Some(HashMap::new()),
+        identity: None,
+    }
+}
+
+/// The second of two views: a volume at another timepoint.
+fn second_view_state() -> AxisPositions {
+    AxisPositions {
+        t: 1,
+        ..AxisPositions::new()
+    }
+}
+
+/// Required fields of a `ViewsRecord` of two views whose links are recorded
+/// (rooted at the record).
+const VIEWS_REQUIRED: &[&str] = &[
+    "/layout",
+    "/views",
+    "/views/0/camera",
+    "/views/0/camera/mode",
+    "/links/datasets",
+    "/links/basis",
+    "/links/modes",
+];
+
+/// Two views side by side, a slice of one dataset beside a volume of every
+/// dataset, linked in zoom and time, the volume shown alone and steered.
+/// A presence carries no comparison.
+fn presence_views() -> ViewsRecord {
+    let one = DatasetId(SINGLE_DATASET_ID.into());
+    ViewsRecord {
+        layout: ViewLayout::Columns,
+        active: 1,
+        maximized: Some(1),
+        views: vec![
+            ViewRecord {
+                camera: slice_camera(),
+                axes: shared_view_state(),
+                datasets: ViewDatasets::Only(vec![one.clone()]),
+                comparison: None,
+            },
+            ViewRecord {
+                camera: arcball_camera(),
+                axes: second_view_state(),
+                datasets: ViewDatasets::All,
+                comparison: None,
+            },
+        ],
+        links: Some(LinksRecord {
+            datasets: [one, DatasetId("wds-7c21".into())],
+            basis: LinkBasis::Physical,
+            modes: LinkModes {
+                zoom: LinkMode::Linked,
+                t: LinkMode::Relative,
+                ..LinkModes::default()
+            },
+        }),
+    }
+}
+
+/// A peer showing [`presence_views`].
+fn views_peer_presence() -> PresenceState {
+    PresenceState {
+        client_id: 5,
+        camera: Some(arcball_camera()),
+        view: Some(second_view_state()),
+        display: Some(shared_display_state()),
+        views: Some(presence_views()),
+        following: None,
+        cursor: None,
+        dataset_order: None,
+        dataset_settings: None,
         identity: None,
     }
 }
@@ -1496,6 +1579,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 camera: arcball_camera(),
                 view: shared_view_state(),
                 display: shared_display_state(),
+                views: None,
             },
             req(
                 "",
@@ -1516,6 +1600,37 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/camera/far",
                 ],
             ),
+        ),
+        (
+            "session/server_presence_update_views.json",
+            ServerMessage::PresenceUpdate {
+                client_id: 3,
+                camera: arcball_camera(),
+                view: second_view_state(),
+                display: shared_display_state(),
+                views: Some(presence_views()),
+            },
+            {
+                let mut keys = req("", &["/type", "/client_id", "/camera", "/view", "/display"]);
+                keys.extend(req("/views", VIEWS_REQUIRED));
+                keys
+            },
+        ),
+        (
+            "session/server_snapshot_views.json",
+            // A peer showing several views, in an empty document.
+            ServerMessage::Snapshot {
+                seq: 42,
+                document: DocumentState::default(),
+                peers: vec![views_peer_presence()],
+                your_id: 7,
+                generated_availability: HashMap::new(),
+            },
+            {
+                let mut keys = req("", &["/type", "/seq", "/document", "/peers", "/your_id"]);
+                keys.extend(req("/peers/0/views", VIEWS_REQUIRED));
+                keys
+            },
         ),
         (
             "session/server_cursor_update.json",
@@ -2159,11 +2274,26 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
                 camera: slice_camera(),
                 view: shared_view_state(),
                 display: shared_display_state(),
+                views: None,
             },
             req(
                 "",
                 &["/type", "/camera", "/view", "/display", "/camera/mode"],
             ),
+        ),
+        (
+            "session/client_presence_views.json",
+            ClientMessage::Presence {
+                camera: arcball_camera(),
+                view: second_view_state(),
+                display: shared_display_state(),
+                views: Some(presence_views()),
+            },
+            {
+                let mut keys = req("", &["/type", "/camera", "/view", "/display"]);
+                keys.extend(req("/views", VIEWS_REQUIRED));
+                keys
+            },
         ),
         (
             "session/client_cursor.json",
@@ -2687,7 +2817,8 @@ fn enum_vocabulary_matches_golden() {
     assert_no_failures(failures);
 }
 
-const SAVED_VIEW_PAYLOAD_FILES: &[&str] = &["saved-view/payload.json"];
+const SAVED_VIEW_PAYLOAD_FILES: &[&str] =
+    &["saved-view/payload.json", "saved-view/payload_views.json"];
 
 /// Payloads the web viewer wrote before one-channel images opened gray, and
 /// before axis positions were places, each with the view its decoder then
@@ -2758,30 +2889,72 @@ fn payload_saved_view() -> SavedView {
     view
 }
 
+/// [`payload_saved_view`] as the second of two views side by side, a swipe
+/// between the two datasets in it, the views linked in pan and zoom.
+fn payload_views_saved_view() -> SavedView {
+    let one = DatasetId(SINGLE_DATASET_ID.into());
+    let three = DatasetId("wds-7c21".into());
+    let mut view = payload_saved_view();
+    view.views = Some(ViewsRecord {
+        layout: ViewLayout::Columns,
+        active: 1,
+        maximized: None,
+        views: vec![
+            ViewRecord {
+                camera: slice_camera(),
+                axes: AxisPositions {
+                    z: Some(4.0..5.0),
+                    ..AxisPositions::new()
+                },
+                datasets: ViewDatasets::Only(vec![one.clone()]),
+                comparison: None,
+            },
+            ViewRecord {
+                camera: view.camera.clone(),
+                axes: view.view.clone(),
+                datasets: ViewDatasets::Only(vec![one.clone(), three.clone()]),
+                comparison: Some(Comparison {
+                    a: one.clone(),
+                    b: three.clone(),
+                    mode: CompareMode::Swipe,
+                    divider: 0.25,
+                    showing: Side::A,
+                }),
+            },
+        ],
+        links: Some(LinksRecord {
+            datasets: [one, three],
+            basis: LinkBasis::Physical,
+            modes: LinkModes {
+                pan: LinkMode::Linked,
+                zoom: LinkMode::Linked,
+                ..LinkModes::default()
+            },
+        }),
+    });
+    view
+}
+
 #[test]
 fn saved_view_payloads_match_goldens() {
     let mut failures = Vec::new();
-    let view = payload_saved_view();
-    let golden = PayloadGolden {
-        payload: view.to_payload(),
-        view,
-    };
-    let mut required = req("/view", SAVED_VIEW_REQUIRED);
-    required.push("/payload".into());
-    check(
-        SAVED_VIEW_PAYLOAD_FILES[0],
-        &golden,
-        &required,
-        &mut failures,
-    );
-    match lucida_core::saved_view::decode_payload(&golden.payload)
-        .map(serde_json::from_value::<SavedView>)
-    {
-        Ok(Ok(decoded)) if decoded == golden.view => {}
-        other => failures.push(format!(
-            "{}: the payload does not decode to its view: {other:?}",
-            SAVED_VIEW_PAYLOAD_FILES[0]
-        )),
+    let views = [payload_saved_view(), payload_views_saved_view()];
+    for (rel, view) in SAVED_VIEW_PAYLOAD_FILES.iter().zip(views) {
+        let golden = PayloadGolden {
+            payload: view.to_payload(),
+            view,
+        };
+        let mut required = req("/view", SAVED_VIEW_REQUIRED);
+        required.push("/payload".into());
+        check(rel, &golden, &required, &mut failures);
+        match lucida_core::saved_view::decode_payload(&golden.payload)
+            .map(serde_json::from_value::<SavedView>)
+        {
+            Ok(Ok(decoded)) if decoded == golden.view => {}
+            other => failures.push(format!(
+                "{rel}: the payload does not decode to its view: {other:?}"
+            )),
+        }
     }
 
     for rel in RECORDED_PAYLOAD_FILES {

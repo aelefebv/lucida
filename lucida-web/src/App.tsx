@@ -579,7 +579,12 @@ function Viewer({
     nameOf: comparison.nameOf,
     onDocumentChanged: bumpRemoteDocumentVersion,
   });
-  const viewLayout = useMemo(() => viewLayoutActions(engine.scene, engine.loop), [engine]);
+  // A follower sees each change of layout, active view or link, and the URL
+  // and the last view record it, as they do a camera move.
+  const viewLayout = useMemo(
+    () => viewLayoutActions(engine.scene, engine.loop, emitPresenceWithUrl),
+    [engine, emitPresenceWithUrl],
+  );
   const { views: shownViews, layout: viewLayoutName, links: viewLinks } = useSceneView(engine.store);
   // Several views offer each layer a place among them.
   const layerViewPlacement = useMemo((): LayerViewPlacement | undefined => {
@@ -804,7 +809,7 @@ function Viewer({
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
     revealCanvas();
     // Picked by hand, so it may put datasets where it recorded them.
-    userTransforms.restored(await savedViewApplier.apply(view, { restorePlacement: true }));
+    userTransforms.restored(await savedViewApplier.apply(view, { chosen: true }));
     notifySavedViewChange();
     // Remember which saved view is now applied so the sidebar can flag the
     // active row. Set it only after a successful apply.

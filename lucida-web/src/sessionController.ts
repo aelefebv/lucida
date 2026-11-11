@@ -11,6 +11,7 @@ import {
   workspaceSocketUrl,
 } from "./bridge.ts";
 import type { DatasetState } from "./types.ts";
+import type { ViewsRecord } from "./savedView/types.ts";
 import { Axis } from "./axes.ts";
 import {
   resolveDatasetManifest,
@@ -447,8 +448,13 @@ export class SessionController {
     if (viewport) assertCanvasSize(scene, viewport.width, viewport.height, viewport.pixelRatio);
   }
 
-  private importPresence(scene: WasmScene, presenceJson: string): void {
+  /** Adopt a followed peer's views, then its active view's camera, axis
+   *  positions and display. A peer that sent no views shows one view of every
+   *  dataset. A follower shows no comparison. */
+  private importPresence(scene: WasmScene, views: ViewsRecord | undefined, presenceJson: string): void {
     this.assertViewport(scene);
+    const viewsJson = JSON.stringify({ views: views ?? null, comparisons: false });
+    guardedSceneCall("import_views", scene, () => scene.import_views(viewsJson));
     guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
   }
 
@@ -471,10 +477,10 @@ export class SessionController {
   }
 
   /**
-   * Adopt what a followed peer reported: its camera, view and display, and
-   * its dataset order and settings. A part it hasn't reported stays as it is
-   * here. Following, a steer and every update from the followed peer all come
-   * through here, so they adopt the same fields.
+   * Adopt what a followed peer reported: its views, camera, view and display,
+   * and its dataset order and settings. A part it hasn't reported stays as it
+   * is here. Following, a steer and every update from the followed peer all
+   * come through here, so they adopt the same fields.
    *
    * Each adopted part is reported back as this client's own presence, so a
    * peer who follows this client later starts from what it shows.
@@ -489,7 +495,7 @@ export class SessionController {
           view: peer.view,
           display: peer.display,
         });
-        this.importPresence(scene, presenceJson);
+        this.importPresence(scene, peer.views, presenceJson);
         requestRender(this.deps.getLoop(), "follow_presence");
         this.reportPresence(scene);
       } catch (e) {
@@ -1146,14 +1152,14 @@ export class SessionController {
           this.setFollowTarget(null);
         }
       },
-      onPresenceUpdate: (clientId, camera, view, display) => {
+      onPresenceUpdate: (clientId, camera, view, display, views) => {
         const existing = this.peers.get(clientId);
         if (existing) {
           const next = new Map(this.peers);
-          next.set(clientId, { ...existing, camera, view, display });
+          next.set(clientId, { ...existing, camera, view, display, views });
           this.setPeersMap(next);
         }
-        if (this.followTarget === clientId) this.adoptPeer({ camera, view, display });
+        if (this.followTarget === clientId) this.adoptPeer({ camera, view, display, views });
       },
       onCursorUpdate: (clientId, position) => {
         const existing = this.peers.get(clientId);

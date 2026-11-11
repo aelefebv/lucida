@@ -42,6 +42,15 @@ function mockScene(presenceView: unknown) {
     dataset_ids: () => JSON.stringify(["wds-a"]),
     available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
     camera_space: () => "null",
+    export_views: () =>
+      JSON.stringify({
+        layout: "columns",
+        active: 0,
+        views: [
+          { camera: { mode: "slice", center: [1, 2], zoom: 2.0, viewport: [400, 600] }, axes: { t: 0 }, datasets: "all" },
+          { camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [400, 600] }, axes: { t: 0 }, datasets: { only: [] } },
+        ],
+      }),
     user_transforms: () => JSON.stringify({ "ds-a": { translation: [1, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] } }),
   } as never;
 }
@@ -54,6 +63,13 @@ describe("buildAnnotationView", () => {
     // It still references the workspace-local dataset by id.
     expect(view!.dataset_order).toEqual(["wds-a"]);
     expect(view!.active_layouts).toEqual({ "wds-a": "source" });
+  });
+
+  it("leaves the other views out, since opening a pin steers the active view alone", () => {
+    const view = buildAnnotationView(mockScene({ t: 0 }));
+    expect(view).not.toBeNull();
+    expect("views" in view!).toBe(false);
+    expect(view!.camera).toEqual({ mode: "slice", center: [1, 2], zoom: 2.0, viewport: [800, 600] });
   });
 
   it("leaves placement by hand out, so opening the pin never moves a dataset", () => {

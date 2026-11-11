@@ -9,6 +9,7 @@ mod placement;
 mod scale_bar;
 mod types;
 mod views;
+mod views_record;
 
 pub(crate) use channel_links::ChannelChange;
 pub use channel_links::{ChannelPair, PairedBy};
@@ -19,13 +20,17 @@ pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 pub use link_notices::{LinkNotice, ViewLinkNotices};
 use links::ViewLinks;
-pub use links::{Alike, LinkBasis, LinkMode, LinkProperty, LinksState, PropertyLink, Unlinkable};
+pub use links::{
+    Alike, LinkBasis, LinkMode, LinkModes, LinkProperty, LinksRecord, LinksState, PropertyLink,
+    Unlinkable,
+};
 pub use scale_bar::{Arm, Measure, ScaleBar};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
     RenderMode, declared_channels,
 };
+pub use views_record::{ViewRecord, ViewsRecord};
 
 use std::collections::HashMap;
 
