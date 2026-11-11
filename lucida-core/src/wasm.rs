@@ -504,9 +504,35 @@ impl WasmScene {
         self.active().id().0
     }
 
-    /// Every view of the scene, by id.
+    /// Every view on the canvas, by id: all of them, or the maximized one
+    /// alone.
     pub fn view_ids(&self) -> Vec<u32> {
-        self.inner.views().iter().map(|view| view.id().0).collect()
+        self.inner.shown_views().map(|view| view.id().0).collect()
+    }
+
+    /// The view shown alone across the canvas, if one is.
+    pub fn maximized_view(&self) -> Option<u32> {
+        self.inner.maximized_view().map(|view| view.0)
+    }
+
+    /// What `view` shows: `"all"`, or `{"only": [ids]}`; `"null"` for an
+    /// unknown view.
+    pub fn view_datasets(&self, view: u32) -> String {
+        match self.inner.view(ViewId(view)) {
+            Some(view) => serde_json::to_string(&view.datasets).unwrap_or_default(),
+            None => "null".to_string(),
+        }
+    }
+
+    /// The datasets `view` draws, in layer order, as a JSON array of ids.
+    pub fn drawn_datasets(&self, view: u32) -> String {
+        let ids: Vec<&DatasetId> = self
+            .inner
+            .dataset_order
+            .iter()
+            .filter(|id| self.inner.draws(ViewId(view), id))
+            .collect();
+        serde_json::to_string(&ids).unwrap_or_default()
     }
 
     /// Where `view` draws, as `[x, y, width, height]` fractions of the
@@ -882,12 +908,16 @@ impl WasmScene {
     /// marker tracks the volume. Returns an empty `Vec` when the point is
     /// behind the camera or the dataset has no anchorable member, which the
     /// overlay uses to hide a pin that swings behind the volume.
-    pub fn project_annotation(&self, dataset_id: &str, x: f64, y: f64, z: f64) -> Vec<f64> {
+    pub fn project_annotation(
+        &self,
+        view: u32,
+        dataset_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
-        match self
-            .inner
-            .project_annotation(self.active().id(), &id, x, y, z)
-        {
+        match self.inner.project_annotation(ViewId(view), &id, x, y, z) {
             Some([sx, sy]) => vec![sx, sy],
             None => Vec::new(),
         }

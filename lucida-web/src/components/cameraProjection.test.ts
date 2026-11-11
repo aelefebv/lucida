@@ -111,10 +111,10 @@ describe("makeProjectAnnotationToCss (3D per-vertex marker projection)", () => {
   it("converts the physical-pixel projection to CSS px via dpr", () => {
     setDpr(2);
     const scene = {
-      project_annotation: (_ds: string, _x: number, _y: number, _z: number) =>
+      project_annotation: (_view: number, _ds: string, _x: number, _y: number, _z: number) =>
         new Float64Array([200, 300]),
     } as unknown as WasmScene;
-    const project = makeProjectAnnotationToCss(scene, "wds-1");
+    const project = makeProjectAnnotationToCss(scene, 0, "wds-1");
     expect(project([10, 20], 3)).toEqual([100, 150]);
   });
 
@@ -122,11 +122,11 @@ describe("makeProjectAnnotationToCss (3D per-vertex marker projection)", () => {
     const scene = {
       project_annotation: () => new Float64Array([]),
     } as unknown as WasmScene;
-    const project = makeProjectAnnotationToCss(scene, "wds-1");
+    const project = makeProjectAnnotationToCss(scene, 0, "wds-1");
     expect(project([10, 20], 3)).toBeNull();
   });
 
-  it("passes the dataset id and full (x, y, z) point through to the scene", () => {
+  it("passes the view, the dataset id and the full (x, y, z) point through to the scene", () => {
     const calls: unknown[][] = [];
     const scene = {
       project_annotation: (...args: unknown[]) => {
@@ -134,7 +134,7 @@ describe("makeProjectAnnotationToCss (3D per-vertex marker projection)", () => {
         return new Float64Array([0, 0]);
       },
     } as unknown as WasmScene;
-    makeProjectAnnotationToCss(scene, "wds-9")([7, 8], 9);
-    expect(calls).toEqual([["wds-9", 7, 8, 9]]);
+    makeProjectAnnotationToCss(scene, 2, "wds-9")([7, 8], 9);
+    expect(calls).toEqual([[2, "wds-9", 7, 8, 9]]);
   });
 });
