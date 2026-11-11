@@ -128,6 +128,13 @@ vi.mock("lucida-core", () => {
       return JSON.stringify(this.doc.annotations?.[id] ?? []);
     }
     z() { return this.view.z; }
+    z_place() { return this.view.z + 0.5; }
+    grid_count(axis: string) {
+      if (axis !== "z") return 1;
+      const shapes = Object.values(this.doc.manifests ?? {}) as { images?: { multiscale: { levels: { shape: number[] }[] } }[] }[];
+      return Math.max(1, ...shapes.map((m) => m.images?.[0]?.multiscale.levels[0]?.shape[2] ?? 1));
+    }
+    cut_extent() { return this.grid_count("z"); }
     t() { return this.view.t; }
     resolved_layers() {
       return JSON.stringify(Object.keys(this.doc.manifests ?? {}).map((id) => ({
@@ -172,7 +179,7 @@ vi.mock("lucida-core", () => {
     export_presence() {
       return JSON.stringify({
         camera: this.camera,
-        view: { z_range: { start: this.view.z, end: this.view.z + 1 }, t: this.view.t },
+        view: { z: { start: this.view.z, end: this.view.z + 1 }, t: this.view.t },
         display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
       });
     }
@@ -193,11 +200,12 @@ vi.mock("lucida-core", () => {
     import_presence(json: string) {
       const presence = JSON.parse(json) as {
         camera?: unknown;
-        view?: { z_range: { start: number }; t: number };
+        view?: { z?: { start: number }; z_range?: { start: number }; t: number };
       };
       if (presence.camera) this.camera = presence.camera;
       if (presence.view) {
-        this.view.z = presence.view.z_range.start;
+        const z = presence.view.z ?? presence.view.z_range;
+        if (z) this.view.z = z.start;
         this.view.t = presence.view.t;
       }
       this.epochCounts.view++;
@@ -639,7 +647,7 @@ describe("App wiring: annotation-view restore fan-out", () => {
     // The deep-link hook runs off the post-snapshot document version bump;
     // the mount helper already flushed it. The restore must have applied the
     // captured view to the scene...
-    expect(scene.commands).toContainEqual({ type: "set_z_range", start: 1, end: 2 });
+    expect(scene.view.z).toBe(1);
     // ...and fired the composed restore intent (settings re-read + immediate
     // frame + residency trail) exactly once.
     const restoreCalls = vi
@@ -647,7 +655,7 @@ describe("App wiring: annotation-view restore fan-out", () => {
       .mock.calls.filter(([, source]) => source === "annotation_view_restore");
     expect(restoreCalls).toHaveLength(1);
     // Peers hear the restored camera and the restored layer display.
-    expect(JSON.parse(bridge.sendPresence.mock.lastCall![0] as string).view.z_range.start).toBe(1);
+    expect(JSON.parse(bridge.sendPresence.mock.lastCall![0] as string).view.z.start).toBe(1);
     expect(bridge.sendDatasetPresence).toHaveBeenCalled();
   });
 });
@@ -888,7 +896,7 @@ describe("App wiring: the shell", () => {
     });
 
     await act(async () => {
-      bridge.handlers.onPresenceUpdate?.(7, peer.camera, { z_range: { start: 2, end: 3 }, t: 0 }, peer.display);
+      bridge.handlers.onPresenceUpdate?.(7, peer.camera, { z: { start: 2, end: 3 }, t: 0 }, peer.display);
     });
 
     // The import wrote the scene alone; the scrubber reads it from there.
@@ -1024,7 +1032,7 @@ describe("App wiring: a navigation ends a follow", () => {
   /** The leader moves on: the view this client chose must stay. */
   async function leaderMoves(bridge: { handlers: BridgeHandlers }) {
     await act(async () => {
-      bridge.handlers.onPresenceUpdate?.(7, leader.camera, { z_range: { start: 2, end: 3 }, t: 0 }, leader.display);
+      bridge.handlers.onPresenceUpdate?.(7, leader.camera, { z: { start: 2, end: 3 }, t: 0 }, leader.display);
     });
   }
 

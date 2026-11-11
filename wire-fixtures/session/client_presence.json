@@ -13,11 +13,12 @@
     ]
   },
   "view": {
-    "z_range": {
-      "start": 10,
-      "end": 14
+    "z": {
+      "start": 10.0,
+      "end": 14.0
     },
-    "t": 2
+    "t": 2,
+    "y": -6.5
   },
   "display": {
     "contrast_min": 120.0,

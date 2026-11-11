@@ -39,7 +39,14 @@ pub use payload::{PayloadError, decode_payload, encode_payload};
 /// drops a version 1 view's `c: 0` and `multi_channel: false`, which meant
 /// "solo channel 0", so only the version tells such a payload from a
 /// version 2 composite.
-pub const SAVED_VIEW_VERSION: u32 = 2;
+///
+/// Version 3 made every axis position a place in the scene frame. A
+/// version 2 view's `y` and `x` named whole units of the frame, which read
+/// as the places in their middles, and its `z_range` named planes, which
+/// read as the places of the planes of the dataset that fixed the frame.
+/// Fields added later are optional, so they extend version 3 without a new
+/// version: a view that leaves one out reads as one written before it.
+pub const SAVED_VIEW_VERSION: u32 = 3;
 
 /// Capture record for a "saved view": the user's complete view of one or
 /// more datasets at a moment in time. Encoded into the URL hash by
@@ -161,6 +168,14 @@ struct SavedViewWire {
 impl From<SavedViewWire> for SavedView {
     fn from(wire: SavedViewWire) -> Self {
         let mut view = wire.view;
+        if wire.v < 3 {
+            view.place_legacy_units();
+        }
+        // Planes recorded with the frame they were saved in name its places
+        // now. Without one, the restoring scene names them in its own.
+        if let Some(space) = &wire.camera_space {
+            view.place_legacy_z(&space.frame);
+        }
         let mut dataset_settings = wire.dataset_settings;
         if let Some(legacy) = view.take_legacy_channels() {
             // A captured entry lists every channel of its layer, so its
@@ -262,12 +277,13 @@ impl SavedView {
         camera
     }
 
-    /// This view's selectors in `scene`'s spaces: its side-view axis positions
-    /// carried from the spaces it was saved in should they differ.
+    /// This view's selectors in `scene`'s spaces: its axis positions carried
+    /// from the spaces it was saved in should they differ.
     pub fn view_in(&self, scene: &Scene) -> AxisPositions {
         let mut view = self.view.clone();
-        if let Some(from) = &self.camera_space {
-            scene.carry_axes(&mut view, from);
+        match &self.camera_space {
+            Some(from) => scene.carry_axes(&mut view, from),
+            None => scene.place_legacy_axes(&mut view),
         }
         view
     }
@@ -384,7 +400,7 @@ mod tests {
         );
         v.dataset_order.push(DatasetId("ds-aaaa".into()));
         v.view.t = 7;
-        v.view.set_z_range(10..15);
+        v.view.z = Some(10.0..15.0);
         v.display.contrast_min = 100.0;
         v.display.contrast_max = 5000.0;
         v.display.gamma = 1.5;
@@ -462,10 +478,25 @@ mod tests {
     }
 
     #[test]
+    fn a_version_2_view_reads_its_positions_as_places() {
+        // Saved from a scene whose first dataset's Z samples are twice as
+        // long as its X ones.
+        let json = r#"{"v":2,"camera":{"mode":"slice","center":[0,0],"zoom":1,"viewport":[8,6]},"view":{"z_range":{"start":5,"end":6},"t":1,"y":7,"x":0},"display":{"contrast_min":0,"contrast_max":1,"gamma":1},"camera_space":{"frame":{"spacing":[1.0,1.0,2.0],"origin":[0.0,0.0,0.0]},"world":{"extent":64.0,"top":64.0}}}"#;
+        let view: SavedView = serde_json::from_str(json).unwrap();
+        assert_eq!(view.view.z, Some(10.0..12.0));
+        assert_eq!((view.view.y, view.view.x), (Some(7.5), Some(0.5)));
+        assert_eq!(view.view.legacy_z_range, None);
+        // Without the frame it was saved in, its planes wait for the scene.
+        let unframed = json.replace(r#","camera_space":{"frame":{"spacing":[1.0,1.0,2.0],"origin":[0.0,0.0,0.0]},"world":{"extent":64.0,"top":64.0}}"#, "");
+        let view: SavedView = serde_json::from_str(&unframed).unwrap();
+        assert_eq!((view.view.z, view.view.legacy_z_range), (None, Some(5..6)));
+    }
+
+    #[test]
     fn version_serialized_as_v_field() {
         let v = SavedView::empty([800, 600]);
         let json = serde_json::to_string(&v).unwrap();
-        assert!(json.contains("\"v\":2"));
+        assert!(json.contains("\"v\":3"));
     }
 
     fn legacy_view(view: &str) -> SavedView {

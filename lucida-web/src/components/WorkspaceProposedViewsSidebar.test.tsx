@@ -61,6 +61,7 @@ function baseProps() {
   return {
     workspaceId: "ws-1",
     getCurrentSavedView: () => emptyView(),
+    position: { z: 0, t: 0 },
     onOpenSavedView: vi.fn(),
     loadedDatasetNames: [] as string[],
     activeLayoutName: null,

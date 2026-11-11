@@ -5,8 +5,8 @@ use lucida_content::{DatasetId, EntityId, SpatialAxis};
 
 use crate::camera::{Camera, Framing, VisibleRegion};
 use crate::placement::{
-    Affine, CameraSpace, LineUp, SceneFrame, SpaceMap, TileCells, UserTransform, WorldSpace,
-    boxes_overlap, member_cube_to_frame,
+    Affine, CameraSpace, LineUp, SceneFrame, SpaceMap, UserTransform, WorldSpace, boxes_overlap,
+    member_cube_to_frame,
 };
 use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
@@ -138,9 +138,12 @@ impl Scene {
         }
     }
 
-    /// Carry side-view axis positions, recorded in `from`, into this scene's
-    /// spaces, so they cut the planes they cut there.
+    /// Carry axis positions, recorded in `from`, into this scene's spaces,
+    /// so they cut the places they cut there. A slab recorded before
+    /// positions were places names the planes of the dataset that fixed
+    /// `from`'s frame.
     pub fn carry_axes(&self, axes: &mut AxisPositions, from: &CameraSpace) {
+        axes.place_legacy_z(&from.frame);
         if let Some(map) = self.map_from(from) {
             axes.map_cut_positions(&map.scene);
         }
@@ -165,7 +168,7 @@ impl Scene {
                 }
             }
             moved |= view.camera != before;
-            // A side view's axis positions are places in the scene frame too.
+            // Axis positions are places in the scene frame too.
             let axes_before = view.axes.clone();
             view.axes.map_cut_positions(&map.scene);
             axes_moved |= view.axes != axes_before;
@@ -228,67 +231,25 @@ impl Scene {
             .reduce(union)
     }
 
-    /// The map a side view's axis position reads back through into
-    /// `dataset_id`'s planes: its placement, or for a collection its
-    /// placement's scale alone ([`TileCells::cut_placement`]), since there
-    /// the position is measured from each tile's own first plane. `None` for
-    /// a dataset the scene doesn't hold.
-    pub(crate) fn cut_placement(&self, dataset_id: &DatasetId) -> Option<Affine> {
-        let to_scene = self.placement(dataset_id)?;
-        Some(match self.derived.get(dataset_id)?.tile_cells {
-            Some(_) => TileCells::cut_placement(&to_scene),
-            None => to_scene,
-        })
-    }
-
-    /// The places along `axis` where a side view's axis position cuts
-    /// `dataset_id`, as `(min, max)`: its extent in the scene frame, or for
-    /// a collection a tile's own extent from its first plane. A collection's
-    /// tiles share the first one's footprint, as the renderer draws them.
-    /// `None` with no member to place.
+    /// The places along `axis` where a cut meets `dataset_id`, as `(min,
+    /// max)`: its extent in the scene frame, or for a collection a tile's own
+    /// extent from where the collection is placed, since a cut reads every
+    /// tile from its own first plane. A collection's tiles share the first
+    /// one's footprint, as the renderer draws them. `None` with no member to
+    /// place.
     pub(crate) fn cut_span(&self, dataset_id: &DatasetId, axis: SpatialAxis) -> Option<(f64, f64)> {
         if self.derived.get(dataset_id)?.tile_cells.is_none() {
             return self.scene_extent(dataset_id, axis);
         }
         let planes = LayerExtent::of(self.document.manifests.get(dataset_id)?).along(axis);
-        let scale = self.placement(dataset_id)?.scale[axis.xyz()].abs();
-        Some((0.0, planes as f64 * scale))
-    }
-
-    /// The places along `axis` where a side view cuts the datasets `view`
-    /// shows, as `(min, max)`, or `None` with nothing shown.
-    fn shown_cut_span(&self, view: ViewId, axis: SpatialAxis) -> Option<(f64, f64)> {
-        self.shown_dataset_ids(view)
-            .filter_map(|id| self.cut_span(id, axis))
-            .reduce(union)
-    }
-
-    /// How many axis positions `view` steps through cutting `axis`, at least
-    /// one. Z counts the planes of the deepest layer it shows, since each
-    /// layer steps through its own. A side view's position is a place in the
-    /// scene frame, so datasets over one region cut the same plane, or in a
-    /// collection a place from each tile's own edge ([`Self::cut_span`]). It
-    /// counts the frame's whole units up to the far edge of what it shows.
-    pub fn cut_extent(&self, view: ViewId, axis: SpatialAxis) -> u32 {
-        if axis.is_z() {
-            return self
-                .shown_dataset_ids(view)
-                .filter_map(|id| self.document.manifests.get(id))
-                .map(|manifest| LayerExtent::of(manifest).z)
-                .max()
-                .unwrap_or(1);
-        }
-        // An edge a rounding error puts just past a whole unit stays on it.
-        self.shown_cut_span(view, axis).map_or(1, |(_, max)| {
-            (max - max.abs() * 1e-12).ceil().clamp(1.0, u32::MAX as f64) as u32
-        })
-    }
-
-    /// The axis position in the middle of what `view` shows along `axis`.
-    pub(crate) fn cut_middle(&self, view: ViewId, axis: SpatialAxis) -> u32 {
-        self.shown_cut_span(view, axis).map_or(0, |(min, max)| {
-            ((min + max) / 2.0).floor().clamp(0.0, u32::MAX as f64) as u32
-        })
+        let to_scene = self.placement(dataset_id)?;
+        let a = axis.xyz();
+        let ends = [0.0, f64::from(planes)].map(|plane| {
+            let mut at = [0.0; 3];
+            at[a] = plane;
+            to_scene.apply(at)[a]
+        });
+        Some((ends[0].min(ends[1]), ends[0].max(ends[1])))
     }
 
     /// Whether `dataset_id` declares physical lengths, so it lines up with
@@ -402,16 +363,17 @@ impl Scene {
     /// frustum test is a shift by its layout position. `None` for a dataset
     /// with no image, or an unknown view.
     pub fn visible_region(&self, view: ViewId, dataset_id: &DatasetId) -> Option<VisibleRegion> {
+        let id = view;
         let view = self.view(view)?;
         let member = self.derived.get(dataset_id)?.members.first()?;
         let level0 = member.levels.first()?;
         let placed = self.placed(dataset_id)?;
         // A layer shallower than the view's slab plans its nearest plane.
-        let z_range = self.layer_z_range(&view.axes, dataset_id);
+        let z_range = self.layer_cut(id, dataset_id, SlicePlane::Xy);
         Some(match &view.camera {
             Camera::Slice(slice) => slice.visible_region(
                 &placed.to_scene,
-                &self.layer_cut(&view.axes, dataset_id, slice.plane),
+                &self.layer_cut(id, dataset_id, slice.plane),
             ),
             Camera::Arcball(_) | Camera::Fly(_) => {
                 let cube = member_cube_to_frame([0.0, 0.0], level0.shape)
@@ -601,11 +563,13 @@ mod tests {
             }
             .into(),
         );
-        // The middle of the region along Y, in the coarse dataset's samples.
-        assert_eq!(scene.active_view().axes.y, Some(32));
+        // The middle of the region along Y, on a grid of the fine dataset's
+        // samples, a quarter of a coarse one each.
+        let y = scene.active_view().axes.y.unwrap();
+        assert!((y - 32.125).abs() < 1e-9, "{y}");
         let plane = crate::slice_plane::SlicePlane::Xz;
         let [coarse, fine] = ["coarse", "fine"]
-            .map(|id| scene.layer_cut(&scene.active_view().axes, &DatasetId::from(id), plane));
+            .map(|id| scene.layer_cut(scene.active_view().id(), &DatasetId::from(id), plane));
         // Coarse sample 32 spans 64 to 66 micrometers, which fine samples
         // 128 to 131 cover; the fine plane is one of them.
         assert_eq!(coarse, 32..33);
@@ -618,10 +582,9 @@ mod tests {
         });
         assert!(close([a.min[0], a.min[1], 0.0], [b.min[0], b.min[1], 0.0]));
         assert!(close([a.max[0], a.max[1], 0.0], [b.max[0], b.max[1], 0.0]));
-        assert_eq!(
-            scene.cut_extent(scene.active_view().id(), lucida_content::SpatialAxis::Y),
-            64
-        );
+        let grid = scene.cut_grid(scene.active_view().id(), lucida_content::SpatialAxis::Y);
+        assert_eq!((grid.min, grid.count), (0.0, 256));
+        assert!((grid.step - 0.25).abs() < 1e-12, "{grid:?}");
     }
 
     #[test]
@@ -1313,7 +1276,7 @@ mod tests {
                 .collect()
         };
         let (cut, before) = (
-            scene.layer_cut(&scene.active_view().axes, &b, SlicePlane::Xz),
+            scene.layer_cut(scene.active_view().id(), &b, SlicePlane::Xz),
             side(&scene),
         );
 
@@ -1324,7 +1287,7 @@ mod tests {
         assert_eq!(scene.active_view().slice_plane(), SlicePlane::Xz);
         assert_same_region(side(&scene), before);
         assert_eq!(
-            scene.layer_cut(&scene.active_view().axes, &b, SlicePlane::Xz),
+            scene.layer_cut(scene.active_view().id(), &b, SlicePlane::Xz),
             cut
         );
     }
@@ -1438,8 +1401,11 @@ mod tests {
         let (mut scene, tiles) = six_tiles(SlicePlane::Xz);
         let view = scene.active_view().id();
         // The axis position steps through a tile's own rows, from its middle.
-        assert_eq!(scene.cut_extent(view, lucida_content::SpatialAxis::Y), 32);
-        assert_eq!(scene.active_view().axes.y, Some(16));
+        assert_eq!(
+            scene.cut_grid(view, lucida_content::SpatialAxis::Y).count,
+            32
+        );
+        assert_eq!(scene.active_view().axes.y, Some(16.5));
         let layer = scene.resolved_layer(view, &tiles).unwrap();
         assert_eq!((layer.y, layer.y_reach), (16, CutReach::Through));
 

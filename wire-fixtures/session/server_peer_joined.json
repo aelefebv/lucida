@@ -16,10 +16,6 @@
       ]
     },
     "view": {
-      "z_range": {
-        "start": 0,
-        "end": 1
-      },
       "t": 0
     },
     "display": {

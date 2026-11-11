@@ -1002,6 +1002,7 @@ function Viewer({
           currentUserEmail={authSession.principal.email}
           canEdit={canEditWorkspace}
           getCurrentSavedView={savedViewSync.captureBuilder}
+          position={{ z: dims.z, t: dims.t }}
           onOpenSavedView={handleOpenWorkspaceSavedView}
           loadedDatasetNames={loadedDatasetNames}
           activeLayoutName={activeLayoutName}

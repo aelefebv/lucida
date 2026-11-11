@@ -34,22 +34,22 @@ export function useDimensions({
 }: Params) {
   const { z, t, viewMode, cameraMode, layers, slicePlane, cutIndex } = useSceneView(sceneStore);
 
-  // Slider ranges are the union across all datasets, and the scene clamps
-  // them into each smaller layer. `datasetsVersion` re-renders on every Map
+  // The T slider is the union across all datasets, and the scene clamps it
+  // into each shorter layer. `datasetsVersion` re-renders on every Map
   // mutation, so reading the ref here is current.
-  const cut = cutAxis(slicePlane);
-  let dimZ = 1, dimT = 1;
+  let dimT = 1;
   void datasetsVersion;
   // eslint-disable-next-line react-hooks/refs
   for (const ds of datasetsRef.current.values()) {
     const shape = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
-    dimZ = Math.max(dimZ, shape[Axis.Z]);
     dimT = Math.max(dimT, shape[Axis.T]);
   }
-  // A side view's position is a place in the scene frame, which the scene
-  // measures across what is visible.
+  // A spatial position is a place in the scene frame, on a grid the scene
+  // lays over what is visible at the finest spacing among the layers.
   // eslint-disable-next-line react-hooks/refs
-  const dimCut = cut === "z" ? dimZ : (wasmSceneRef.current?.cut_extent() ?? 1);
+  const dimZ = wasmSceneRef.current?.grid_count("z") ?? 1;
+  // eslint-disable-next-line react-hooks/refs
+  const dimCut = wasmSceneRef.current?.cut_extent() ?? 1;
 
   // Saved-view clamping needs T/C counts, which the scene can't supply. An
   // unloaded dataset returns `{}`, leaving every axis unclamped.
@@ -77,31 +77,17 @@ export function useDimensions({
     [datasetsRef],
   );
 
-  // Clamp z/t when the union shrinks, so the scene never selects a plane or
-  // timepoint no open dataset has.
+  // Clamp t when the union shrinks, so the scene never selects a timepoint no
+  // open dataset has. A spatial place stays where it is: a layer it misses
+  // says it is outside the cut.
   useEffect(() => {
     const scene = wasmSceneRef.current;
-    if (!scene) return;
-    let clamped = false;
-    if (scene.z() >= dimZ) {
-      applyViewportCommand(scene, { type: "set_z", z: dimZ - 1 });
-      clamped = true;
-    }
-    if (scene.t() >= dimT) {
-      applyViewportCommand(scene, { type: "set_t", t: dimT - 1 });
-      clamped = true;
-    }
-    if (cut !== "z" && scene.cut_index(scene.active_view()) >= dimCut) {
-      const last = dimCut - 1;
-      applyViewportCommand(scene, cut === "y" ? { type: "set_y", y: last } : { type: "set_x", x: last });
-      clamped = true;
-    }
-    if (clamped) {
-      requestRender(loopRef.current, "selector_clamp");
-      bridgeCallbacksRef.current.emitPresence();
-    }
+    if (!scene || scene.t() < dimT) return;
+    applyViewportCommand(scene, { type: "set_t", t: dimT - 1 });
+    requestRender(loopRef.current, "selector_clamp");
+    bridgeCallbacksRef.current.emitPresence();
     // A one-shot reaction to the union shrinking, not a continuous sync.
-  }, [dimZ, dimT, dimCut]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dimT]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleViewModeToggle = useCallback(() => {
     const scene = wasmSceneRef.current;

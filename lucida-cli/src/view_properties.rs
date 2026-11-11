@@ -11,6 +11,10 @@ use lucida_core::view_properties::{
     assert_same_css_size, capture, join, restore,
 };
 
+use lucida_content::SpatialAxis;
+use lucida_core::command::DocumentCommand;
+use lucida_core::scene::Scene;
+
 use crate::montage::{build_cell_view, plan_montage};
 
 /// `lucida viewer overview` for a window the size of `vp`, shown on a page at
@@ -30,11 +34,14 @@ fn overview(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
 fn montage(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
     let dims = f.dims();
     let id = f.id();
+    let mut scene = Scene::new(vp.css);
+    scene.apply(DocumentCommand::DatasetOpened(f.opened.clone()).into());
+    let z_planes = scene.plane_grid(&id, SpatialAxis::Z).unwrap();
     plan_montage(dims, 1, 16, 4)
         .cells
         .iter()
         .map(|cell| {
-            let view = build_cell_view(&id.0, cell, vp.css, None, dims[1], &[]);
+            let view = build_cell_view(&id.0, cell, z_planes, vp.css, None, dims[1], &[]);
             Produced::framing(cell.label.clone(), restore(&view, f, vp, dpr))
         })
         .collect()

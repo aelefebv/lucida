@@ -168,8 +168,10 @@ impl WasmScene {
     /// Import another client's camera + view + display (for follow mode).
     /// The local viewport size is preserved; see [`Scene::import_presence`].
     /// A stored view's camera comes with the `camera_space` it was saved in,
-    /// and is carried from it into this scene's spaces first. A follow
-    /// target's camera needs none: the two scenes share one document.
+    /// and is carried from it into this scene's spaces first, and with its
+    /// version `v`, since one written before version 3 named whole units
+    /// where its axis positions now name places. A follow target's camera
+    /// needs neither: the two scenes share one document and one build.
     pub fn import_presence(&mut self, json: &str) -> Result<(), JsError> {
         #[derive(serde::Deserialize)]
         struct Presence {
@@ -178,9 +180,14 @@ impl WasmScene {
             display: DisplayState,
             #[serde(default)]
             camera_space: Option<CameraSpace>,
+            #[serde(default)]
+            v: Option<u32>,
         }
         let p: Presence = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
         let (mut camera, mut view) = (p.camera, p.view);
+        if p.v.is_some_and(|v| v < 3) {
+            view.place_legacy_units();
+        }
         if let Some(from) = &p.camera_space {
             self.inner.carry_camera(&mut camera, from);
             self.inner.carry_axes(&mut view, from);
@@ -542,8 +549,44 @@ impl WasmScene {
         self.inner.display.gamma
     }
 
+    /// The position of the active view's grid along `axis`, `"z"`, `"y"` or
+    /// `"x"`, that holds `place`, a place in the scene frame.
+    pub fn grid_index(&self, axis: &str, place: f64) -> Result<u32, JsError> {
+        let axis = match axis {
+            "z" => lucida_content::SpatialAxis::Z,
+            "y" => lucida_content::SpatialAxis::Y,
+            "x" => lucida_content::SpatialAxis::X,
+            other => return Err(JsError::new(&format!("unknown axis {other}"))),
+        };
+        Ok(self
+            .inner
+            .cut_grid(self.active().id(), axis)
+            .index_of(place))
+    }
+
+    /// How many positions the active view's grid along `axis`, `"z"`, `"y"`
+    /// or `"x"`, holds; 1 for an unknown axis.
+    pub fn grid_count(&self, axis: &str) -> u32 {
+        let axis = match axis {
+            "z" => lucida_content::SpatialAxis::Z,
+            "y" => lucida_content::SpatialAxis::Y,
+            "x" => lucida_content::SpatialAxis::X,
+            _ => return 1,
+        };
+        self.inner.cut_grid(self.active().id(), axis).count
+    }
+
+    /// The place along Z the active view cuts, in the scene frame: the
+    /// middle of its slab.
+    pub fn z_place(&self) -> f64 {
+        self.inner
+            .cut_place(self.active().id(), lucida_content::SpatialAxis::Z)
+    }
+
+    /// The active view's position on its Z grid.
     pub fn z(&self) -> u32 {
-        self.active().axes.z_range.start
+        self.inner
+            .axis_index(self.active().id(), lucida_content::SpatialAxis::Z)
     }
 
     pub fn t(&self) -> u32 {
@@ -559,18 +602,20 @@ impl WasmScene {
             .to_string()
     }
 
-    /// `view`'s axis position along its slice plane's cut axis, before any
-    /// layer clamps it; 0 for an unknown view.
+    /// `view`'s position on the grid along its slice plane's cut axis; 0
+    /// for an unknown view.
     pub fn cut_index(&self, view: u32) -> u32 {
-        self.inner.view(ViewId(view)).map_or(0, View::cut_index)
+        self.inner.cut_index(ViewId(view))
     }
 
-    /// How many positions the active view's cut axis steps through: Z's
-    /// planes for an XY view, scene-frame units across what it shows for a
-    /// side view.
+    /// How many positions the active view's cut axis steps through: its grid
+    /// at the finest spacing among the layers it shows, over all of them
+    /// ([`Scene::cut_grid`]).
     pub fn cut_extent(&self) -> u32 {
         let view = self.active();
-        self.inner.cut_extent(view.id(), view.slice_plane().cut())
+        self.inner
+            .cut_grid(view.id(), view.slice_plane().cut())
+            .count
     }
 
     pub fn zoom(&self, view: u32) -> f64 {

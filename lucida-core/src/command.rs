@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::{
     DatasetId, DatasetKind, DatasetManifest, EntityId, EntityKind, LayoutId, LayoutSpec,
+    SpatialAxis,
 };
 use lucida_protocol::DatasetOpened;
 
@@ -291,9 +292,12 @@ pub enum ViewportCommand {
         delta: f64,
     },
     // View state
+    /// Stand at position `z` of the view's Z grid
+    /// ([`crate::scene::Scene::cut_grid`]), as one cut.
     SetZ {
         z: u32,
     },
+    /// Stand across positions `start..end` of the view's Z grid, a slab.
     SetZRange {
         start: u32,
         end: u32,
@@ -301,11 +305,11 @@ pub enum ViewportCommand {
     SetT {
         t: u32,
     },
-    /// The plane an XZ view cuts along Y.
+    /// Stand at position `y` of the view's Y grid, which an XZ view cuts.
     SetY {
         y: u32,
     },
-    /// The plane a YZ view cuts along X.
+    /// Stand at position `x` of the view's X grid, which a YZ view cuts.
     SetX {
         x: u32,
     },
@@ -1092,19 +1096,19 @@ impl Scene {
                 }
             }
             ViewportCommand::SetZ { z } => {
-                self.active_view_mut().axes.set_z(z);
+                self.set_cut_position(self.active_view().id(), SpatialAxis::Z, z);
             }
             ViewportCommand::SetZRange { start, end } => {
-                self.active_view_mut().axes.set_z_range(start..end);
+                self.set_z_positions(self.active_view().id(), start..end);
             }
             ViewportCommand::SetT { t } => {
                 self.active_view_mut().axes.t = t;
             }
             ViewportCommand::SetY { y } => {
-                self.active_view_mut().axes.y = Some(y);
+                self.set_cut_position(self.active_view().id(), SpatialAxis::Y, y);
             }
             ViewportCommand::SetX { x } => {
-                self.active_view_mut().axes.x = Some(x);
+                self.set_cut_position(self.active_view().id(), SpatialAxis::X, x);
             }
             ViewportCommand::SetSlicePlane { plane } => {
                 self.set_slice_plane(plane);
@@ -1484,10 +1488,15 @@ mod tests {
     }
 
     #[test]
-    fn apply_set_z_updates_view() {
+    fn apply_set_z_stands_at_the_grid_position() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetZ { z: 42 }.into());
-        assert_eq!(scene.active_view().axes.z_range, 42..43);
+        // A view showing nothing steps one unit at a time from the origin.
+        assert_eq!(scene.active_view().axes.z, Some(42.0..43.0));
+        assert_eq!(
+            scene.axis_index(scene.active_view().id(), SpatialAxis::Z),
+            0
+        );
     }
 
     #[test]

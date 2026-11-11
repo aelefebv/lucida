@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 use crate::camera::{Camera, Framing};
 use crate::framing::{FitBounds, PlaneBox, WorldBox};
 use crate::saved_view::SavedView;
+use crate::scene::CutGrid;
 use crate::scene::{DatasetDisplaySettings, RenderMode, Scene};
 use crate::view::AxisPositions;
 use lucida_content::DatasetId;
+use lucida_content::SpatialAxis;
 
 /// The spatial + dimensional extent of the dataset a view is exploring,
 /// read off a [`Scene`] by [`ViewExtent::of`].
@@ -40,6 +42,10 @@ pub struct ViewExtent {
     pub fit_framing: Framing,
     /// Number of Z slices in the dataset.
     pub z_count: u32,
+    /// Where the dataset's Z planes lie in the scene frame, one position
+    /// each, so a Z step moves the view's place by one plane.
+    #[serde(skip)]
+    pub z_grid: CutGrid,
     /// Number of timepoints.
     pub t_count: u32,
     /// Number of channels.
@@ -80,6 +86,7 @@ impl ViewExtent {
             .shape;
         let mut visible = scene.shown_dataset_ids(view);
         let alone = visible.next() == Some(dataset_id) && visible.next().is_none();
+        let z_grid = scene.plane_grid(dataset_id, SpatialAxis::Z)?;
         Some(ViewExtent {
             plane: bounds.plane,
             world: bounds.world,
@@ -89,10 +96,22 @@ impl ViewExtent {
                 Framing::Placed
             },
             z_count: z as u32,
+            z_grid,
             t_count: t as u32,
             c_count: c as u32,
             dataset_id: Some(dataset_id.clone()),
         })
+    }
+
+    /// The plane of the dataset `view` stands on along Z: the position its
+    /// place holds, or for a view recorded before positions were places, the
+    /// plane it named.
+    pub fn z_index(&self, view: &SavedView) -> u32 {
+        match (view.view.place(SpatialAxis::Z), &view.view.legacy_z_range) {
+            (Some(place), _) => self.z_grid.index_of(place),
+            (None, Some(planes)) => planes.start,
+            (None, None) => 0,
+        }
     }
 
     /// The box in both spaces, for [`Camera::fit`].
@@ -139,7 +158,7 @@ pub fn home_view(scene: &Scene, dataset_id: &DatasetId, viewport: [u32; 2]) -> O
     // range on a volume); a flat dataset collapses to z 0..1 anyway.
     let z0 = extent.z_count / 2;
     view.view = AxisPositions {
-        z_range: z0..z0 + 1,
+        z: Some(extent.z_grid.cell(z0)),
         ..AxisPositions::new()
     };
     Some(view)
@@ -398,13 +417,13 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
             // Step the *start* of the current slab and collapse to a single
             // slice at the destination. i64 math so a negative step from slice 0
             // is caught by the range check rather than underflowing.
-            let z0 = view.view.z_range.start as i64 + *d as i64;
+            let z0 = i64::from(extent.z_index(view)) + *d as i64;
             let last = extent.z_count as i64 - 1;
             if z0 < 0 || z0 > last {
                 return None;
             }
-            let z0 = z0 as u32;
-            child.view.z_range = z0..z0 + 1;
+            child.view.z = Some(extent.z_grid.cell(z0 as u32));
+            child.view.legacy_z_range = None;
         }
         ViewTransform::ElevationDelta(deg) => match &mut child.camera {
             Camera::Arcball(a) => {
@@ -629,6 +648,10 @@ pub struct ExplorationNode {
     /// Human-readable trail of move labels taken to reach this node.
     #[serde(default)]
     pub breadcrumb: Vec<String>,
+    /// The plane of the dataset `view` stands on along Z, as the cells carry
+    /// theirs.
+    #[serde(default)]
+    pub z: u32,
     /// The current saved view.
     pub view: SavedView,
 }
@@ -709,7 +732,7 @@ impl ExplorationSidecar {
                 label: c.label,
                 // Destination indices, read off the child view so every surface
                 // gets the same orientation without re-deriving it.
-                z: c.view.view.z_range.start,
+                z: extent.z_index(&c.view),
                 t: c.view.view.t,
                 c: extent.solo_in(&c.view),
                 view: c.view,
@@ -725,6 +748,7 @@ impl ExplorationSidecar {
                 handle: view_handle(current),
                 depth,
                 breadcrumb,
+                z: extent.z_index(current),
                 view: current.clone(),
             },
             extent: extent.clone(),
@@ -799,6 +823,11 @@ mod tests {
             world: WorldBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
             fit_framing: Framing::Framed,
             z_count: 40,
+            z_grid: CutGrid {
+                min: 0.0,
+                step: 1.0,
+                count: 40,
+            },
             t_count: 5,
             c_count: 2,
             dataset_id: None,
@@ -973,30 +1002,30 @@ mod tests {
     #[test]
     fn apply_stepz_forward() {
         let mut v = slice_view();
-        v.view.z_range = 10..11;
+        v.view.z = Some(10.0..11.0);
         let child = apply(&v, &ViewTransform::StepZ(1), &extent_3d()).unwrap();
-        assert_eq!(child.view.z_range, 11..12);
+        assert_eq!(child.view.z, Some(11.0..12.0));
     }
 
     #[test]
     fn apply_stepz_back() {
         let mut v = slice_view();
-        v.view.z_range = 10..11;
+        v.view.z = Some(10.0..11.0);
         let child = apply(&v, &ViewTransform::StepZ(-1), &extent_3d()).unwrap();
-        assert_eq!(child.view.z_range, 9..10);
+        assert_eq!(child.view.z, Some(9.0..10.0));
     }
 
     #[test]
     fn apply_stepz_below_zero_is_none() {
         let mut v = slice_view();
-        v.view.z_range = 0..1;
+        v.view.z = Some(0.0..1.0);
         assert!(apply(&v, &ViewTransform::StepZ(-1), &extent_3d()).is_none());
     }
 
     #[test]
     fn apply_stepz_past_last_is_none() {
         let mut v = slice_view();
-        v.view.z_range = 39..40; // last slice (z_count = 40)
+        v.view.z = Some(39.0..40.0); // last slice (z_count = 40)
         assert!(apply(&v, &ViewTransform::StepZ(1), &extent_3d()).is_none());
     }
 
@@ -1264,7 +1293,7 @@ mod tests {
         assert!(matches!(v.camera, Camera::Slice(_)));
         // Force a settings entry to exist (the Home view already adds one).
         assert!(!v.dataset_settings.is_empty());
-        v.view.z_range = 0..1;
+        v.view.z = Some(0.0..1.0);
         assert!(
             apply(
                 &v,
@@ -1329,6 +1358,11 @@ mod tests {
             world: WorldBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
             fit_framing: Framing::Framed,
             z_count: 40,
+            z_grid: CutGrid {
+                min: 0.0,
+                step: 1.0,
+                count: 40,
+            },
             t_count: 5,
             c_count: 3,
             dataset_id: None,
@@ -1342,7 +1376,7 @@ mod tests {
         // are Arcball-only). Mid-stack/mid-t/mid-c so each dimensional step is in
         // range both ways.
         let mut v = soloed(slice_view(), Some(1)); // c_count = 3 -> 1 is interior
-        v.view.z_range = 10..11;
+        v.view.z = Some(10.0..11.0);
         v.view.t = 2; // t_count = 5
         let kids = children(&v, &extent_rich());
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
@@ -1366,7 +1400,7 @@ mod tests {
         // render (projection), then dimensional steps (StepZ +/-, StepT +/-,
         // StepC +/-).
         let mut v = arcball_view();
-        v.view.z_range = 10..11;
+        v.view.z = Some(10.0..11.0);
         v.view.t = 2; // t_count = 5
         // c_count = 3 -> 1 is interior. The solo needs a layer entry, which
         // also offers the projection toggle.
@@ -1564,7 +1598,7 @@ mod tests {
     #[test]
     fn sidecar_build_shape() {
         let mut v = arcball_view();
-        v.view.z_range = 10..11;
+        v.view.z = Some(10.0..11.0);
         let side =
             ExplorationSidecar::build(&v, &extent_3d(), 2, vec!["Home (fit dataset)".into()]);
         assert_eq!(side.v, EXPLORATION_SIDECAR_VERSION);
@@ -1602,12 +1636,12 @@ mod tests {
         // Each cell's z/t/c are the destination indices of its child view, so a
         // reader can orient on any surface without digging into `view.view`.
         let mut v = soloed(arcball_view(), Some(1)); // c_count = 2
-        v.view.z_range = 10..11;
+        v.view.z = Some(10.0..11.0);
         v.view.t = 2; // t_count = 5
         let extent = extent_3d();
         let side = ExplorationSidecar::build(&v, &extent, 0, Vec::new());
         for cell in &side.cells {
-            assert_eq!(cell.z, cell.view.view.z_range.start);
+            assert_eq!(f64::from(cell.z), cell.view.view.z.as_ref().unwrap().start);
             assert_eq!(cell.t, cell.view.view.t);
             assert_eq!(cell.c, solo_of(&cell.view));
         }
@@ -1672,6 +1706,11 @@ mod tests {
             world: WorldBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
             fit_framing: Framing::Framed,
             z_count: 0,
+            z_grid: CutGrid {
+                min: 0.0,
+                step: 1.0,
+                count: 1,
+            },
             t_count: 0,
             c_count: 0,
             dataset_id: None,
@@ -1743,7 +1782,7 @@ mod tests {
         // dataset_order names the dataset so it renders.
         assert_eq!(view.dataset_order, vec![DatasetId("wds-1".to_string())]);
         // Mid-stack single slice (340 / 2 = 170).
-        assert_eq!(view.view.z_range, 170..171);
+        assert_eq!(view.view.z, Some(170.0..171.0));
         // Dataset is made visible: auto-contrast on + default settings present.
         assert_eq!(
             view.auto_contrast.get(&DatasetId("wds-1".to_string())),
@@ -1763,7 +1802,7 @@ mod tests {
             "a flat image (z_count <= 1) should open in a 2D Slice Home"
         );
         // A flat dataset has a single slice at z 0.
-        assert_eq!(view.view.z_range, 0..1);
+        assert_eq!(view.view.z, Some(0.0..1.0));
         assert_eq!(view.dataset_order, vec![DatasetId("wds-2".to_string())]);
     }
 
@@ -1832,7 +1871,7 @@ mod tests {
     fn explore_uses_a_given_view_as_the_current_node() {
         let scene = scene_of("wds-1", [1, 1, 40, 80, 100]);
         let mut v = arcball_view();
-        v.view.z_range = 10..11;
+        v.view.z = Some(10.0..11.0);
         let sidecar = explore(
             &scene,
             &DatasetId("wds-1".into()),

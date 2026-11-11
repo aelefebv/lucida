@@ -46,7 +46,8 @@ interface ExplorationCell {
 /** `WasmScene.explore`'s JSON when it is not an error envelope. */
 interface ExplorationSidecar {
   v: number;
-  current: { handle: string; view: SavedView };
+  /** The current view, and the plane of the dataset it stands on along Z. */
+  current: { handle: string; z: number; view: SavedView };
   cells: ExplorationCell[];
 }
 
@@ -408,7 +409,7 @@ export function ExplorationPanel({
     if (breadcrumbRef.current.length === 0 && cam.mode === "arcball" && cam.distance > 0) {
       homeDistanceRef.current = cam.distance;
     }
-    setHereLabel(describeView(sidecar.current.view, datasetIdRef.current, ds, homeDistanceRef.current));
+    setHereLabel(describeView(sidecar.current.view, sidecar.current.z, datasetIdRef.current, ds, homeDistanceRef.current));
   }, [explore]);
 
   useEffect(() => {
@@ -716,7 +717,7 @@ function BookmarkDialog({
  *  The camera part is the only on-screen sign of an orbit or zoom when there are
  *  no thumbnails. T and C show when their count is above 1, so a time series
  *  doesn't read as flat 2D. Without `homeDistance` the raw distance is shown. */
-function describeView(view: SavedView, datasetId: string | null, dims: Dims, homeDistance?: number): string {
+function describeView(view: SavedView, z: number, datasetId: string | null, dims: Dims, homeDistance?: number): string {
   const [tCount, cCount, zCount] = dims;
   const parts: string[] = [];
 
@@ -738,7 +739,6 @@ function describeView(view: SavedView, datasetId: string | null, dims: Dims, hom
     parts.push(`zoom ${cam.zoom.toFixed(1)}x`);
   }
 
-  const z = view.view?.z_range?.start ?? 0;
   if (zCount > 1) parts.push(positionLabel("Z", z, zCount));
   const t = view.view?.t ?? 0;
   if (tCount > 1) parts.push(positionLabel("T", t, tCount));

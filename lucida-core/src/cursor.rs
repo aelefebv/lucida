@@ -9,6 +9,7 @@ use crate::placement::Affine;
 use crate::scene::Scene;
 use crate::slice_plane::SlicePlane;
 use crate::view::ViewId;
+use lucida_content::SpatialAxis;
 
 /// The one peer palette, in 8-bit sRGB. The page reads it through
 /// [`peer_palette_css`] for the labels it draws beside each cursor, so a
@@ -43,8 +44,9 @@ pub struct PeerInput {
     pub mode: String,
     #[serde(default)]
     pub camera: Option<Camera>,
+    /// The place along Z the peer's view cuts, in the scene frame.
     #[serde(default)]
-    pub view_z: Option<u32>,
+    pub view_z: Option<f64>,
     #[serde(default)]
     pub label_only: bool,
 }
@@ -207,8 +209,8 @@ fn make_ray(start: [f32; 3], end: [f32; 3], marker: [f32; 3], r: f32, g: f32, b:
 /// camera's plane box. A cursor crosses between the modes through it, so a
 /// slice cursor lands where the volume draws the same point.
 struct CursorBox {
-    /// `[x, y, z]` corner and extent of the plane box: scene-frame X and Y,
-    /// and planes in Z.
+    /// `[x, y, z]` corner and extent of the plane box in the scene frame:
+    /// the box of what the view shows across, and its Z grid in depth.
     plane_min: [f64; 3],
     plane_size: [f64; 3],
     model: [f64; 16],
@@ -219,7 +221,7 @@ impl CursorBox {
     /// The box of everything `view` shows, or the unit cube in both spaces
     /// when it shows nothing.
     fn of(scene: &Scene, view: ViewId) -> Self {
-        let (plane_min, plane_size, unit_to_world) = match scene.visible_bounds(view) {
+        let (mut plane_min, mut plane_size, unit_to_world) = match scene.visible_bounds(view) {
             Some(bounds) => (
                 bounds.plane.min,
                 extent(bounds.plane.min, bounds.plane.max),
@@ -228,8 +230,23 @@ impl CursorBox {
                     offset: bounds.world.min,
                 },
             ),
-            None => ([0.0; 3], [1.0; 3], Affine::IDENTITY),
+            None => return Self::unit(),
         };
+        // Depth in places, as the views' axis positions are.
+        let grid = scene.cut_grid(view, SpatialAxis::Z);
+        plane_min[2] = grid.min;
+        plane_size[2] = grid.step * f64::from(grid.count);
+        CursorBox {
+            plane_min,
+            plane_size,
+            model: matrix_f64(&unit_to_world),
+            inv_model: matrix_f64(&unit_to_world.inverse()),
+        }
+    }
+
+    /// The unit cube in both spaces, for a view showing nothing.
+    fn unit() -> Self {
+        let (plane_min, plane_size, unit_to_world) = ([0.0; 3], [1.0; 3], Affine::IDENTITY);
         CursorBox {
             plane_min,
             plane_size,
@@ -488,8 +505,8 @@ pub fn compute_peer_cursors(
             let ro_unit = transform_point_f64(ro_world, inv_m);
             let rd_unit = normalize3(transform_dir_f64(rd_world, inv_m));
 
-            let local_z = local.axes.z_range.start;
-            let z_unit = cursor_box.plane_to_unit([0.0, 0.0, local_z as f64 + 0.5])[2];
+            let local_z = scene.cut_place(view, SpatialAxis::Z);
+            let z_unit = cursor_box.plane_to_unit([0.0, 0.0, local_z])[2];
 
             if let Some((x_unit, y_unit)) = ray_z_intersect(ro_unit, rd_unit, z_unit) {
                 let [x_voxel, y_voxel] = cursor_box.unit_to_plane(x_unit, y_unit);
@@ -525,16 +542,18 @@ pub fn compute_peer_cursors(
             }
 
             // Peer's cursor is in the scene frame (x, y). Get their Z from their view.
-            let peer_z = peer.view_z.unwrap_or(0) as f64;
+            let peer_z = peer
+                .view_z
+                .unwrap_or(cursor_box.plane_min[2] + cursor_box.plane_size[2] / 2.0);
             let x = cursor[0];
             let y = cursor[1];
 
             // Ray endpoints: vertical line extending 50% past dataset on each side
-            let depth = cursor_box.plane_size[2];
+            let (top, depth) = (cursor_box.plane_min[2], cursor_box.plane_size[2]);
             let overshoot = depth * 0.5;
-            let start = cursor_box.plane_to_world([x, y, -overshoot]);
-            let end = cursor_box.plane_to_world([x, y, depth + overshoot]);
-            let marker = cursor_box.plane_to_world([x, y, peer_z + 0.5]);
+            let start = cursor_box.plane_to_world([x, y, top - overshoot]);
+            let end = cursor_box.plane_to_world([x, y, top + depth + overshoot]);
+            let marker = cursor_box.plane_to_world([x, y, peer_z]);
 
             if !peer.label_only {
                 output.gpu.push(make_ray(start, end, marker, r, g, b));
@@ -795,7 +814,7 @@ mod tests {
     #[test]
     fn peer_3d_to_local_2d_center_screen() {
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.active_view_mut().axes.set_z(50);
+        scene.apply(crate::command::ViewportCommand::SetZ { z: 50 }.into());
 
         let peers = vec![peer_with_camera(
             2,
@@ -829,7 +848,7 @@ mod tests {
     fn peer_2d_to_local_3d_produces_ray() {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
         let mut p = peer(2, Some([150.0, 100.0]), "slice");
-        p.view_z = Some(50);
+        p.view_z = Some(50.5);
         let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
@@ -842,7 +861,7 @@ mod tests {
     fn peer_2d_to_local_3d_marker_between_endpoints() {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
         let mut p = peer(2, Some([150.0, 100.0]), "slice");
-        p.view_z = Some(50);
+        p.view_z = Some(50.5);
         let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         let gpu = &result.gpu[0];
         let start_z = gpu[2];
@@ -952,7 +971,7 @@ mod tests {
     fn fly_peer_to_local_2d_produces_crosshair() {
         // Fly peer viewed from Slice local: should produce crosshair (3D→2D)
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.active_view_mut().axes.set_z(50);
+        scene.apply(crate::command::ViewportCommand::SetZ { z: 50 }.into());
         let fly_cam = Fly::new([800, 600]);
         let peers = vec![peer_with_camera(2, Some([0.5, 0.5]), Camera::Fly(fly_cam))];
         let result =
@@ -967,7 +986,7 @@ mod tests {
         // Slice peer viewed from Fly local: should produce a ray (2D→3D)
         let scene = scene_fly_with_shape([800, 600], [100, 200, 300]);
         let mut p = peer(2, Some([150.0, 100.0]), "slice");
-        p.view_z = Some(50);
+        p.view_z = Some(50.5);
         let result = compute_peer_cursors(&scene, scene.active_view().id(), &[p], 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
@@ -1014,7 +1033,7 @@ mod tests {
     fn peer_3d_to_local_2d_out_of_bounds_emits_label() {
         // Peer cursor ray intersects Z-plane outside volume → no GPU crosshair, but label emitted
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.active_view_mut().axes.set_z(50);
+        scene.apply(crate::command::ViewportCommand::SetZ { z: 50 }.into());
 
         // Camera looking far off to the side so ray hits Z-plane outside volume bounds
         let mut cam = Arcball::new([800, 600]);
@@ -1038,7 +1057,7 @@ mod tests {
     fn peer_3d_to_local_2d_in_bounds_emits_both() {
         // In-bounds case: both GPU crosshair and label should be emitted (no regression)
         let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        scene.active_view_mut().axes.set_z(50);
+        scene.apply(crate::command::ViewportCommand::SetZ { z: 50 }.into());
 
         let peers = vec![peer_with_camera(
             2,

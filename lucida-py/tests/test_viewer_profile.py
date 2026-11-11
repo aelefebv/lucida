@@ -99,12 +99,13 @@ def test_a_new_profile_seeds_from_the_workspace_default_saved_view(tmp_path):
 def test_view_indices_are_checked_against_the_dataset(tmp_path):
     ws, server = workspace(tmp_path)
 
-    assert ws.view.slice("z", 49)["view"]["z_range"] == {"start": 49, "end": 50}
+    # Planes twice as deep as an X sample is wide, each eight units of the frame.
+    assert ws.view.slice("z", 49)["view"]["z"] == {"start": 392.0, "end": 400.0}
     with pytest.raises(LucidaError) as error:
         ws.view.slice("z", 50)
     assert error.value.kind == "config"
     assert "50 Z value(s)" in error.value.message
-    assert stored_view(server)["view"]["z_range"] == {"start": 49, "end": 50}
+    assert stored_view(server)["view"]["z"] == {"start": 392.0, "end": 400.0}
 
 
 def test_3d_cameras_rotate_and_a_2d_pan_is_refused_on_them(tmp_path):

@@ -1,4 +1,5 @@
 mod comparison;
+mod cut_grid;
 mod layers;
 mod links;
 mod placement;
@@ -7,6 +8,7 @@ mod types;
 mod views;
 
 pub use comparison::{CompareMode, Comparison, Side};
+pub use cut_grid::CutGrid;
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 use links::ViewLinks;
@@ -1229,6 +1231,7 @@ impl Scene {
     /// not invalidate consumers' caches but a real remote camera move does.
     pub fn import_presence(&mut self, camera: Camera, axes: AxisPositions, display: DisplayState) {
         let mut axes = axes;
+        self.place_legacy_axes(&mut axes);
         if let Some(legacy) = axes.take_legacy_channels()
             && self.adopt_legacy_channels(legacy)
         {
@@ -2908,7 +2911,7 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let plan_z0 = scene.chunk_plan(scene.active_view().id());
-        scene.active_view_mut().axes.set_slice("z", 100).unwrap();
+        apply_vp(&mut scene, crate::command::ViewportCommand::SetZ { z: 100 });
         let plan_z100 = scene.chunk_plan(scene.active_view().id());
 
         assert_eq!(plan_z0[0].z, 0);
@@ -2927,7 +2930,10 @@ mod tests {
             5,
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        scene.active_view_mut().axes.set_z_range(0..128);
+        apply_vp(
+            &mut scene,
+            crate::command::ViewportCommand::SetZRange { start: 0, end: 128 },
+        );
         let plan = scene.chunk_plan(scene.active_view().id());
         let z_values: Vec<u32> = plan.iter().map(|c| c.z).collect();
         assert!(z_values.contains(&0));
@@ -2951,7 +2957,7 @@ mod tests {
     #[test]
     fn scene_serialization_round_trip() {
         let mut scene = Scene::new([800, 600]);
-        scene.active_view_mut().axes.set_z(5);
+        scene.active_view_mut().axes.z = Some(5.0..6.0);
         scene.active_view_mut().axes.t = 2;
 
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
@@ -2962,7 +2968,7 @@ mod tests {
         // Rebuild derived state after deserialization
         parsed.rebuild_derived();
 
-        assert_eq!(parsed.active_view().axes.z_range, 5..6);
+        assert_eq!(parsed.active_view().axes.z, Some(5.0..6.0));
         assert_eq!(parsed.active_view().axes.t, 2);
         assert_eq!(parsed.document.manifests.len(), 1);
         assert!(
@@ -4806,7 +4812,7 @@ mod tests {
             },
         );
         assert_eq!(scene.active_view().slice_plane(), SlicePlane::Xz);
-        assert_eq!(scene.active_view().axes.y, Some(256));
+        assert_eq!(scene.active_view().axes.y, Some(256.5));
         assert!(scene.epochs.view > epochs.view);
         assert!(scene.epochs.selection > epochs.selection);
         assert_eq!(scene.active_view().camera.framing(), Framing::Framed);
@@ -4832,7 +4838,7 @@ mod tests {
         // Scrubbing moves the cut along Y; the plane survives a trip to 3D.
         apply_vp(&mut scene, SetY { y: 400 });
         assert_eq!(
-            scene.layer_cut(&scene.active_view().axes, &ds, SlicePlane::Xz),
+            scene.layer_cut(scene.active_view().id(), &ds, SlicePlane::Xz),
             400..401
         );
         apply_vp(&mut scene, SetMode3D);
@@ -4854,7 +4860,7 @@ mod tests {
                 .max,
             [512.0, 512.0, 128.0]
         );
-        assert_eq!(scene.active_view().axes.y, Some(400));
+        assert_eq!(scene.active_view().axes.y, Some(400.5));
     }
 
     #[test]

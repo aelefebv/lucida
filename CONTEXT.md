@@ -54,8 +54,13 @@ shard. Not unique alone, since one key can be resident in both residency tiers.
 
 **Axis position**:
 Where a view stands on the Z, T, or C axis, or on the Y or X axis a side view
-cuts. People see it counted from 1, as `Z 5` or `Z 5/40`, while the wire,
-URLs, and CLI flags carry the 0-based index.
+cuts. Along Z, Y and X it is a place in the scene frame, so one position cuts
+the same place in every layer, and each layer reads its own plane there; a
+layer the place misses is outside the cut. The view steps through a grid of
+positions at the finest spacing among the layers it shows, over all of them.
+People see a position counted from 1 on that grid, as `Z 5` or `Z 5/40`;
+commands and CLI flags carry the 0-based position, and saved views carry the
+place. T is a timepoint index.
 _Avoid_: position (unqualified; an entity's position is its place in a layout)
 
 **Level**:
@@ -326,8 +331,9 @@ axes it names are on screen, Z always drawn down, and the third is cut at an
 axis position. An `xz` or `yz` view is a side view: it shows Z as the scene
 frame places it, at its physical spacing, and cuts Y or X at a place in the
 scene frame, so datasets over one region cut the same plane. A side view of a
-collection cuts every tile at one place from the tile's own edge, and draws
-each tile's cut in its own cell of the grid, as tall as the tile is deep.
+collection reads the place from where the collection is placed and cuts every
+tile there from the tile's own edge, drawing each tile's cut in its own cell
+of the grid, as tall as the tile is deep.
 _Avoid_: orientation, section (unqualified)
 
 **Comparison**:

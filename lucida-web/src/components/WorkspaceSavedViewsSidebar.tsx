@@ -31,6 +31,7 @@ import { SearchField, TextField } from "../ui/TextField.tsx";
 import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import {
   defaultWorkspaceSavedViewName,
+  type ViewPosition,
   useWorkspaceSavedViews,
   type WorkspaceSavedView,
   type WorkspaceSavedViewVisibility,
@@ -52,6 +53,8 @@ export interface WorkspaceSavedViewsSidebarProps {
   currentUserEmail: string | null;
   canEdit: boolean;
   getCurrentSavedView: () => SavedView | null;
+  /** Where the viewer stands now, which a suggested name ends with. */
+  position: ViewPosition;
   onOpenSavedView: (view: SavedView, savedViewId: string) => void | Promise<void>;
   loadedDatasetNames: readonly string[];
   activeLayoutName?: string | null;
@@ -80,6 +83,7 @@ export function WorkspaceSavedViewsSidebar({
   currentUserEmail,
   canEdit,
   getCurrentSavedView,
+  position,
   onOpenSavedView,
   loadedDatasetNames,
   activeLayoutName,
@@ -446,12 +450,8 @@ export function WorkspaceSavedViewsSidebar({
   // suggested name reflects the position at the moment of saving.
   const makeDefaultName = useCallback(
     () =>
-      defaultWorkspaceSavedViewName(
-        loadedDatasetNames,
-        activeLayoutName ?? null,
-        getCurrentSavedView()?.view,
-      ),
-    [loadedDatasetNames, activeLayoutName, getCurrentSavedView],
+      defaultWorkspaceSavedViewName(loadedDatasetNames, activeLayoutName ?? null, position),
+    [loadedDatasetNames, activeLayoutName, position],
   );
 
   if (!visible) return null;

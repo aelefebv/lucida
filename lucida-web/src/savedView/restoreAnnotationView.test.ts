@@ -35,7 +35,7 @@ function makeScene(opts: {
   const loadedIds = opts.loadedIds ?? Object.keys(shapes);
   const presence = {
     camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] } as Camera,
-    view: { z_range: { start: 0, end: 1 }, t: 0 },
+    view: { t: 0 } as Record<string, unknown>,
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   };
   const scene = {
@@ -61,6 +61,7 @@ function makeScene(opts: {
     calls,
     getMode: () => cameraMode,
     getPresenceCamera: () => presence.camera,
+    getPresenceView: () => presence.view as Record<string, unknown>,
   };
 }
 
@@ -88,7 +89,7 @@ function viewWith(overrides: Partial<SavedView> = {}): SavedView {
     datasets: [],
     active_layouts: {},
     camera: sliceCamera(),
-    view: { z_range: { start: 5, end: 6 }, t: 2 },
+    view: { z: { start: 5, end: 6 }, t: 2 },
     display: { contrast_min: 100, contrast_max: 5000, gamma: 1.7 },
     dataset_order: [],
     dataset_settings: {},
@@ -101,9 +102,8 @@ const DS = "wds-1";
 const typesOf = (calls: Array<Record<string, unknown>>) => calls.map((c) => c.type);
 
 describe("restoreAnnotationView (light tier)", () => {
-  it("restores the captured camera, z/t/c, and display", () => {
-    const { scene, calls, getPresenceCamera } = makeScene({
-      // Deep enough that the captured z-slab (5..6) fits without clamping.
+  it("restores the captured camera, axis positions, t and display", () => {
+    const { scene, calls, getPresenceCamera, getPresenceView } = makeScene({
       volumeShapes: { [DS]: new Uint32Array([100, 512, 512]) },
     });
     const view = viewWith({ camera: sliceCamera([123, 456], 8) });
@@ -114,12 +114,11 @@ describe("restoreAnnotationView (light tier)", () => {
     const contrast = calls.find((c) => c.type === "set_contrast");
     expect(contrast).toMatchObject({ min: 100, max: 5000 });
     expect(calls.find((c) => c.type === "set_gamma")).toMatchObject({ gamma: 1.7 });
-    // z/t/c restored unclamped, since the slab fits.
-    expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 2 });
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 5, end: 6 });
-    // Camera restored via import_presence (the merged presence carries it).
+    // Camera and positions go to the scene together, the places as captured.
     expect(getPresenceCamera()).toMatchObject({ mode: "slice", center: [123, 456], zoom: 8 });
-    expect(result.applied).toEqual({ zStart: 5, zEnd: 6, t: 2 });
+    expect(getPresenceView()).toEqual({ z: { start: 5, end: 6 }, t: 2 });
+    expect(calls.find((c) => c.type === "set_z_range")).toBeUndefined();
+    expect(result.applied).toEqual({ t: 2 });
     expect(result.notice).toBeNull();
   });
 
@@ -150,7 +149,7 @@ describe("restoreAnnotationView (light tier)", () => {
     });
     const view = viewWith({
       camera: arcballCamera(),
-      view: { z_range: { start: 0, end: 1 }, t: 0 },
+      view: { z: { start: 0, end: 1 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: DS });
@@ -162,7 +161,6 @@ describe("restoreAnnotationView (light tier)", () => {
     // camera is never applied while the scene is still in slice mode).
     expect(order.indexOf("set_mode_arcball")).toBeGreaterThanOrEqual(0);
     expect(order.indexOf("set_mode_arcball")).toBeLessThan(order.indexOf("set_contrast"));
-    expect(order.indexOf("set_mode_arcball")).toBeLessThan(order.indexOf("set_z_range"));
   });
 
   it("switches 3D->2D (arcball live, captured slice) and reports viewMode 2d", () => {
@@ -225,53 +223,43 @@ describe("restoreAnnotationView (light tier)", () => {
     expect(emitted).not.toContain("set_dataset_contrast");
   });
 
-  it("clamps the captured z/t/c to the pin's dataset extents + reports a notice", () => {
-    // Shallow dataset (Z=4), deep captured slab (z 50..52), t/c out of range.
-    const { scene, calls } = makeScene({
+  it("clamps the captured t to the pin's dataset and says so, leaving places as they are", () => {
+    // A place past a shallow dataset stays: the dataset says it is outside the cut.
+    const { scene, getPresenceView } = makeScene({
       volumeShapes: { [DS]: new Uint32Array([4, 256, 256]) },
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 50, end: 52 }, t: 99 },
+      view: { z: { start: 50, end: 52 }, t: 99 },
     });
 
     const result = restoreAnnotationView({
       scene,
       view,
       datasetId: DS,
-      // T/C extents for the pin's dataset: 3 timepoints, 2 channels.
       dimensionExtentsFor: (id) => (id === DS ? { t: 3 } : {}),
     });
 
-    const zr = calls.find((c) => c.type === "set_z_range") as { start: number; end: number };
-    expect(zr.end).toBeLessThanOrEqual(4);
-    expect(zr.start).toBeLessThan(zr.end);
-    expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 2 }); // clamped to 3-1
-    expect(result.notice).toBeTruthy();
-    // Names every adjusted axis.
-    expect(result.notice).toContain("Z");
-    expect(result.notice).toContain("T");
+    expect(getPresenceView()).toEqual({ z: { start: 50, end: 52 }, t: 2 });
     expect(result.applied.t).toBe(2);
+    expect(result.notice).toBe("T adjusted to fit this dataset");
   });
 
-  it("clamps against the PIN's dataset only — a co-loaded shallow neighbor can't crush it", () => {
-    // The clamp scans only the pin's dataset, so a valid deep slab survives a
-    // shallow neighbor.
-    const { scene, calls } = makeScene({
-      volumeShapes: {
-        [DS]: new Uint32Array([340, 512, 512]),
-        "wds-shallow": new Uint32Array([1, 512, 512]),
-      },
-    });
-    const view = viewWith({
-      camera: sliceCamera(),
-      view: { z_range: { start: 200, end: 205 }, t: 0 },
-    });
+  it("hands the scene a view written before positions were places with its version", () => {
+    const { scene } = makeScene({ volumeShapes: { [DS]: new Uint32Array([100, 512, 512]) } });
+    const imported: string[] = [];
+    const importPresence = scene.import_presence.bind(scene);
+    scene.import_presence = (json: string) => {
+      imported.push(json);
+      importPresence(json);
+    };
+    const view = viewWith({ v: 2, view: { z_range: { start: 7, end: 8 }, t: 0, y: 3 } });
 
-    const result = restoreAnnotationView({ scene, view, datasetId: DS });
+    restoreAnnotationView({ scene, view, datasetId: DS });
 
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 200, end: 205 });
-    expect(result.notice).toBeNull();
+    const sent = JSON.parse(imported[0]) as { v: number; view: Record<string, unknown> };
+    expect(sent.v).toBe(2);
+    expect(sent.view).toEqual({ z_range: { start: 7, end: 8 }, t: 0, y: 3 });
   });
 
   it("viewModeForCamera maps slice->2d and arcball/fly->3d", () => {
@@ -311,125 +299,23 @@ describe("restoreAnnotationView (light tier)", () => {
 });
 
 // When the pin's dataset can't be resolved (no selection, as from the Mentions
-// inbox), the caller passes `datasetId: undefined` and restore must pass the
-// captured z/t/c through, not clamp them against the `[1,1,1]` sentinel that
-// `dataset_volume_shape("")` returns.
-describe("restoreAnnotationView — null-selection / inbox path (no clamp-collapse)", () => {
-  it("avc-empty-z: a deep single-plane capture passes through (no datasetId, no collapse)", () => {
-    // A deep dataset is loaded, but the pin's dataset is unresolved.
-    const { scene, calls } = makeScene({
-      volumeShapes: { "wds-deep": new Uint32Array([340, 512, 512]) },
-    });
-    const view = viewWith({
-      camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0 },
-    });
-
-    const result = restoreAnnotationView({ scene, view, datasetId: undefined });
-
-    // The captured deep plane survives, not collapsed to [0,1].
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 119, end: 120 });
-    expect(result.applied).toMatchObject({ zStart: 119, zEnd: 120 });
-    // No spurious "Z adjusted" notice.
-    expect(result.notice).toBeNull();
-  });
-
-  it("avc-empty-slab: a thick deep slab passes through unclamped (no datasetId)", () => {
-    const { scene, calls } = makeScene({
-      volumeShapes: { "wds-deep": new Uint32Array([340, 512, 512]) },
-    });
-    const view = viewWith({
-      camera: sliceCamera(),
-      view: { z_range: { start: 50, end: 80 }, t: 0 },
-    });
-
-    const result = restoreAnnotationView({ scene, view, datasetId: undefined });
-
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 50, end: 80 });
-    expect(result.notice).toBeNull();
-  });
-
-  it("avc-empty-tc: Z passes through and t/c pass through (no datasetId, no resolver)", () => {
-    const { scene, calls } = makeScene({
+// inbox), the caller passes `datasetId: undefined` and restore passes the
+// captured t through rather than clamp it against an unknown dataset.
+describe("restoreAnnotationView — null-selection / inbox path", () => {
+  it("passes the captured places and t through without a datasetId", () => {
+    const { scene, getPresenceView } = makeScene({
       volumeShapes: { "wds-deep": new Uint32Array([340, 4, 6]) },
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 200, end: 210 }, t: 3 },
+      view: { z: { start: 200, end: 210 }, t: 3 },
     });
 
-    const result = restoreAnnotationView({ scene, view, datasetId: undefined });
-
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 200, end: 210 });
-    expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 3 });
-    expect(result.notice).toBeNull();
-  });
-
-  it("treats explicit null datasetId the same as undefined (no clamp)", () => {
-    const { scene, calls } = makeScene({
-      volumeShapes: { "wds-deep": new Uint32Array([340, 512, 512]) },
-    });
-    const view = viewWith({
-      camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0 },
-    });
-
-    const result = restoreAnnotationView({ scene, view, datasetId: null });
-
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 119, end: 120 });
-    expect(result.notice).toBeNull();
-  });
-
-  it("avc-control-correct-id: a resolved pin dataset still preserves a deep slab (fix keeps the happy path)", () => {
-    const { scene, calls } = makeScene({
-      volumeShapes: { "wds-deep": new Uint32Array([340, 512, 512]) },
-    });
-    const view = viewWith({
-      camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0 },
-    });
-
-    const result = restoreAnnotationView({ scene, view, datasetId: "wds-deep" });
-
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 119, end: 120 });
-    expect(result.notice).toBeNull();
-  });
-
-  it("avc-coloaded-ok: a co-loaded shallow neighbor can't crush the pin's deep slab (invariant 2 holds)", () => {
-    const { scene, calls } = makeScene({
-      volumeShapes: {
-        "wds-deep": new Uint32Array([340, 512, 512]),
-        "wds-2d": new Uint32Array([1, 1024, 1024]),
-      },
-    });
-    const view = viewWith({
-      camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0 },
-    });
-
-    // Clamp targets only the pin's dataset, never the shallow neighbor.
-    const result = restoreAnnotationView({ scene, view, datasetId: "wds-deep" });
-
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 119, end: 120 });
-    expect(result.notice).toBeNull();
-  });
-
-  it("a RESOLVED but genuinely shallow pin dataset still clamps + notices (clamp not lost)", () => {
-    // Skipping when unresolved must not also skip when the dataset is resolved
-    // and the capture overshoots it.
-    const { scene, calls } = makeScene({
-      volumeShapes: { "wds-shallow": new Uint32Array([4, 256, 256]) },
-    });
-    const view = viewWith({
-      camera: sliceCamera(),
-      view: { z_range: { start: 50, end: 52 }, t: 0 },
-    });
-
-    const result = restoreAnnotationView({ scene, view, datasetId: "wds-shallow" });
-
-    const zr = calls.find((c) => c.type === "set_z_range") as { start: number; end: number };
-    expect(zr.end).toBeLessThanOrEqual(4);
-    expect(result.notice).toContain("Z");
+    for (const datasetId of [undefined, null]) {
+      const result = restoreAnnotationView({ scene, view, datasetId });
+      expect(getPresenceView()).toEqual({ z: { start: 200, end: 210 }, t: 3 });
+      expect(result.notice).toBeNull();
+    }
   });
 });
 
@@ -469,7 +355,7 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 5, end: 6 }, t: 0 },
+      view: { z: { start: 5, end: 6 }, t: 0 },
       dataset_order: [DS],
       dataset_settings: {
         [DS]: datasetSettings({
@@ -515,7 +401,7 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 5, end: 6 }, t: 0 },
+      view: { z: { start: 5, end: 6 }, t: 0 },
       dataset_order: [DS, "wds-loaded-2", "wds-not-loaded"],
       dataset_settings: {
         [DS]: datasetSettings({ channel_settings: [channel({ colormap: "red" })] }),
@@ -599,7 +485,7 @@ describe("restoreAnnotationView — hardening (Fix 3): a bad captured camera deg
     });
     const view = viewWith({
       camera: sliceCamera([1, 2], 3),
-      view: { z_range: { start: 5, end: 6 }, t: 1 },
+      view: { z: { start: 5, end: 6 }, t: 1 },
     });
 
     // Must not throw out of the navigate handler.
@@ -608,10 +494,8 @@ describe("restoreAnnotationView — hardening (Fix 3): a bad captured camera deg
       result = restoreAnnotationView({ scene, view, datasetId: DS });
     }).not.toThrow();
 
-    // Display and z/t/c still applied.
+    // The display still applied; positions went with the rejected camera.
     expect(typesOf(calls)).toContain("set_contrast");
-    expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 5, end: 6 });
-    expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 1 });
-    expect(result.applied).toMatchObject({ zStart: 5, zEnd: 6, t: 1 });
+    expect(result.applied).toEqual({ t: 1 });
   });
 });

@@ -124,8 +124,10 @@ impl PyScene {
         }
     }
 
+    /// The active view's position on its Z grid.
     fn z(&self) -> u32 {
-        self.inner.active_view().axes.z_range.start
+        let view = self.inner.active_view().id();
+        self.inner.axis_index(view, lucida_content::SpatialAxis::Z)
     }
 
     fn t(&self) -> u32 {

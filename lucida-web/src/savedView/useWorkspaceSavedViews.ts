@@ -12,7 +12,7 @@ import {
   type WorkspaceSavedViewVisibility,
 } from "../workspaceApi.ts";
 import { positionLabel } from "../axes.ts";
-import type { SavedView, ViewState } from "./types.ts";
+import type { SavedView } from "./types.ts";
 
 export type {
   WorkspaceSavedView,
@@ -248,7 +248,7 @@ export function useWorkspaceSavedViews({
 export function defaultWorkspaceSavedViewName(
   datasetNames: readonly string[],
   activeLayoutName: string | null,
-  view?: Pick<ViewState, "z_range" | "t"> | null,
+  position?: ViewPosition | null,
 ): string {
   if (datasetNames.length === 0) return "Untitled";
   let base = datasetNames.filter((name) => name.trim().length > 0).join(", ");
@@ -259,20 +259,24 @@ export function defaultWorkspaceSavedViewName(
   // Two views of the same dataset and layout differ only by position, so
   // append it. Z always appears; T and C only off their first position, as in
   // the URL encoder's defaults.
-  const position = positionSuffix(view);
+  const suffix = positionSuffix(position);
   // Truncate the name, not the position that tells views apart.
-  if (position.length > 0) {
-    return `${truncate(base, 60 - position.length - 3)} — ${position}`;
+  if (suffix.length > 0) {
+    return `${truncate(base, 60 - suffix.length - 3)} — ${suffix}`;
   }
   return truncate(base, 60);
 }
 
-function positionSuffix(
-  view?: Pick<ViewState, "z_range" | "t"> | null,
-): string {
-  if (!view) return "";
-  const parts = [positionLabel("Z", view.z_range.start)];
-  if (view.t !== 0) parts.push(positionLabel("T", view.t));
+/** Where a view stands, as positions of its grids from 0. */
+export interface ViewPosition {
+  z: number;
+  t: number;
+}
+
+function positionSuffix(position?: ViewPosition | null): string {
+  if (!position) return "";
+  const parts = [positionLabel("Z", position.z)];
+  if (position.t !== 0) parts.push(positionLabel("T", position.t));
   return parts.join(" · ");
 }
 
