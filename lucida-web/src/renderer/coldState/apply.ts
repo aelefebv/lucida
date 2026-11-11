@@ -233,8 +233,8 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   // hidden channel, another slice axis, or a chunk shape no resident level
   // uses. Nothing routes to them now, so nothing would sample them again.
   // Their chunks are reported lost, so the page resends what a recreated pool
-  // needs. The other mode's pools belong to its own cold state, and go when
-  // the page releases them.
+  // needs. The other mode's pools belong to its own cold state, and go once
+  // no view draws the dataset in that mode (`releaseUndrawnPools`).
   const referenced = new Set(groups.keys());
   postFreedPools(ctx, msg.datasetId, mode, referenced);
   if (mode === "volume") removeVolumeAtlasesForDataset(ctx, msg.datasetId, referenced);
