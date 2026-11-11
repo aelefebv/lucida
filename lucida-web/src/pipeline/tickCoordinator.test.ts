@@ -45,6 +45,7 @@ function createMockCpuCache(): CpuCache {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
     tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
+    holdsWhole: vi.fn(() => false),
     getDeliverable: vi.fn(function* () {}),
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
@@ -2032,6 +2033,17 @@ describe("views of one dataset in two modes", () => {
     const requests = (submit.mock.calls[0][0] as RequestPlan).requests.filter((req) => req.lane === "detail");
     const key = requests[0].chunkKey;
     expect(requests.filter((req) => req.chunkKey === key).map((req) => req.mode).sort()).toEqual(["slice", "volume"]);
+  });
+
+  it("puts the active view first in a dataset's lanes only while a gesture runs", () => {
+    const leading = (gesture: boolean) => {
+      const { ctx } = makeTwoModes();
+      const planFn = vi.fn(plan);
+      new TickCoordinator(new Uploader(), planFn).planAndFetch({ ...ctx, gesture }, emptyMinimap);
+      return planFn.mock.calls[0][0].leadingView;
+    };
+    expect(leading(false)).toBeUndefined();
+    expect(leading(true)).toBe(0);
   });
 
   it("plans a slice view whose cut the dataset's placement tilts from the volume pools, with no label", () => {

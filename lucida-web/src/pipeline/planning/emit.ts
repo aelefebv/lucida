@@ -176,12 +176,23 @@ export class LaneRequests {
   private readonly requests: ChunkRequest[] = [];
   /** Each request's in-lane key, lower first. */
   private readonly keys: number[] = [];
+  /** Whether each request leads its band: see {@link lead}. */
+  private readonly leading: boolean[] = [];
   private highestBand = -Infinity;
 
   push(req: ChunkRequest, key: number): void {
     this.requests.push(req);
     this.keys.push(key);
+    this.leading.push(false);
     if (req.priority > this.highestBand) this.highestBand = req.priority;
+  }
+
+  /**
+   * The requests pushed since there were `count` go before the rest of their
+   * bands, whatever their keys: the view under a gesture's.
+   */
+  lead(count: number): void {
+    for (let i = count; i < this.leading.length; i++) this.leading[i] = true;
   }
 
   /** How many requests have been pushed. */
@@ -203,21 +214,30 @@ export class LaneRequests {
    * Place each request within its band by where its key falls between the
    * band's least and greatest, then sort into the planner's request order.
    * Equal keys get equal priorities, so the identity tiebreak still applies.
+   * A band that holds leading requests gives them the first part of its
+   * span, under half, and the rest the second half, each spread by its keys.
    */
   finish(): ChunkRequest[] {
-    const range = new Map<number, [number, number]>();
+    const range = new Map<string, [number, number]>();
+    const split = new Map<number, number>();
+    const group = (i: number): string => `${this.requests[i].priority}|${this.leading[i] ? 1 : 0}`;
     for (let i = 0; i < this.requests.length; i++) {
       const band = this.requests[i].priority;
+      split.set(band, (split.get(band) ?? 0) | (this.leading[i] ? 1 : 2));
       const key = this.keys[i];
-      const seen = range.get(band);
-      if (seen === undefined) range.set(band, [key, key]);
+      const seen = range.get(group(i));
+      if (seen === undefined) range.set(group(i), [key, key]);
       else if (key < seen[0]) seen[0] = key;
       else if (key > seen[1]) seen[1] = key;
     }
     for (let i = 0; i < this.requests.length; i++) {
       const req = this.requests[i];
-      const [least, greatest] = range.get(req.priority)!;
-      if (greatest > least) req.priority += (IN_LANE_SPAN * (this.keys[i] - least)) / (greatest - least);
+      const [least, greatest] = range.get(group(i))!;
+      const halves = split.get(req.priority) === 3;
+      const start = halves && !this.leading[i] ? IN_LANE_SPAN / 2 : 0;
+      const width = halves ? (this.leading[i] ? 0.99 : 1) * (IN_LANE_SPAN / 2) : IN_LANE_SPAN;
+      req.priority += start;
+      if (greatest > least) req.priority += (width * (this.keys[i] - least)) / (greatest - least);
     }
     return this.requests.sort(compareChunkRequests);
   }

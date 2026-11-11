@@ -60,6 +60,13 @@ export interface MinimapOverlayData {
   staticDirty: boolean;
 }
 
+/**
+ * How long after its last input a gesture still runs: past the planner's
+ * coalescing window, so the plan the gesture's last move triggers is made
+ * while the gesture still counts.
+ */
+export const GESTURE_HOLD_MS = 500;
+
 /** Minimum interval between residency-triggered renders (ms). Interactive renders are immediate. */
 export const RESIDENCY_RENDER_INTERVAL_MS = 33;
 
@@ -115,6 +122,11 @@ export interface TickContext {
   marchStepScale: number;
   /** Bands the volume path draws a frame in; 1 draws it whole. */
   bands: number;
+  /**
+   * Whether a gesture runs in the active view: a pan, zoom, orbit or step
+   * along the cut landed within {@link GESTURE_HOLD_MS}.
+   */
+  gesture?: boolean;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
 }

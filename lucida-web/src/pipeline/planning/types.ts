@@ -153,6 +153,12 @@ export interface PlanningSnapshot {
    */
   views: ViewSnapshot[];
   /**
+   * The view under a gesture, while one runs and several views share the
+   * dataset. Its requests come first in each lane, so the view being moved
+   * fetches and draws before the others, within the room admission gives it.
+   */
+  leadingView?: number;
+  /**
    * Minimap chunks not yet on the GPU minimap atlas, keyed by
    * `EntitySnapshot.imageId`. An empty map means no minimap requests
    * this tick.
