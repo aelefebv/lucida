@@ -7,7 +7,7 @@
  * The chain is the serial history of the one row the run finished on. It
  * starts at run start, not at the first recorded row, so a run that was mostly
  * pre-instrument boot cannot report full coverage: the `unrecorded prefix`
- * segment is part of the chain and can never be blamed for a stall.
+ * segment is part of the chain and can never be blamed for the run.
  */
 
 import type { TraceRow, TraceRun, TraceServerRow } from "../types.ts";

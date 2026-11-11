@@ -18,6 +18,7 @@ import { summariseTiming } from "./renderTiming.ts";
 import { RULESET, RULESET_VERSION } from "./ruleset.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
+  SEVERITY_RANK,
   type FindingObservation,
   type FindingSeverity,
   type NextStep,
@@ -208,7 +209,7 @@ export interface ProvisionalReading {
   rows: ProvisionalRows;
   limiter: ProvisionalLimiter | null;
   render: ProvisionalRender | null;
-  /** Ranked as the verdict ranks its findings: stalls and saturation before notes, then by share, then by time. */
+  /** Ranked as the verdict ranks its findings: by severity, then by share, then by time. */
   findings: ProvisionalFinding[];
   topFinding: ProvisionalFinding | null;
   /** One sentence, opening with the word provisional. */
@@ -491,7 +492,7 @@ function rankFindings(
     render.busyMs >= RULESET.share.floorMs
   ) {
     raw.push({
-      severity: "stall",
+      severity: "bound",
       rule: RULESET.share.id,
       subject: RENDER_FRAME,
       observed: {
@@ -506,10 +507,9 @@ function rankFindings(
     });
   }
 
-  const weight = (finding: ProvisionalFinding): number => (finding.severity === "note" ? 0 : 1);
   return raw.sort(
     (a, b) =>
-      weight(b) - weight(a) ||
+      SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
       (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
       (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
   );
@@ -559,8 +559,8 @@ function buildStatement(
     );
   }
   return (
-    `provisional — ${span}, ${lead.subject} held ${observed.ms} ms ` +
-    `(${observed.sharePct}% of the window); ${page}`
+    `provisional — ${span}, bound by ${lead.subject}: it held ${observed.ms} ms, ` +
+    `${observed.sharePct}% of the window; ${page}`
   );
 }
 

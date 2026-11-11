@@ -75,7 +75,7 @@ describe("compareTraces", () => {
     expect(comparison.verdictChanged).toBe(true);
     const rightOnly = comparison.findings.filter((finding) => finding.status === "right-only");
     expect(rightOnly.length).toBeGreaterThan(0);
-    expect(rightOnly.some((finding) => finding.right?.severity === "stall")).toBe(true);
+    expect(rightOnly.some((finding) => finding.right?.severity === "bound")).toBe(true);
     for (const finding of rightOnly) {
       expect(finding.left).toBeNull();
       expect(finding.delta).toBeNull();
@@ -297,12 +297,12 @@ describe("renderComparison", () => {
     expect(text).toContain("right     remote-cold");
     expect(text).not.toContain("NOT COMPARABLE");
     expect(text).toContain("wall      330 → 4120 ms (+3790");
-    expect(text).toContain("verdict clear → stall");
+    expect(text).toContain("verdict clear → bound");
     expect(text).toContain("PHASES");
     expect(text).toMatch(/browser\.wire\s+n 120→60 \(-60\)/);
     expect(text).toMatch(/server\.permit-wait\s+right only/);
     expect(text).toContain("FINDINGS");
-    expect(text).toMatch(/\n {3}right {5}STALL/);
+    expect(text).toMatch(/\n {3}right {5}BOUND/);
     expect(text).toContain("lucida trace show local-healthy --phases");
     expect(text).toContain("lucida trace show remote-cold --phases");
   });

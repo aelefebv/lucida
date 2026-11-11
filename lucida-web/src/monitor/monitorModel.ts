@@ -52,7 +52,7 @@ export interface MonitorDrill {
 
 export interface MonitorCallout {
   id: string;
-  tone: "verdict" | "stall" | "saturated" | "steady-state" | "note";
+  tone: "verdict" | "fail" | "saturated" | "steady-state" | "bound" | "note";
   /** The phase, limiter or segment the callout is about. */
   subject: string;
   headline: string;
@@ -402,12 +402,13 @@ function phaseNumbers(phase: PhaseRollup): MonitorNumber[] {
 
 /**
  * One tone per severity, listed rather than derived, so a severity added to
- * the derivation cannot quietly land in the stall colour.
+ * the derivation cannot quietly land in the failure colour.
  */
 const CALLOUT_TONES: Record<FindingSeverity, MonitorCallout["tone"]> = {
-  stall: "stall",
+  fail: "fail",
   saturated: "saturated",
   "steady-state": "steady-state",
+  bound: "bound",
   note: "note",
 };
 

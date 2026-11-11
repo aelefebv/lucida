@@ -3,7 +3,7 @@
  * document.
  *
  * The agent text and the monitor's cards both render from this one object, so
- * they cannot disagree about which phase stalled or how much of the run was
+ * they cannot disagree about which phase bound the run or how much of it was
  * measured. Pure, with no browser and no clock of its own, so the whole
  * ruleset can be tested over fixture runs.
  */
@@ -50,6 +50,7 @@ import {
 } from "./steadyState.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
+  SEVERITY_RANK,
   type AggregateCandidate,
   type Attribution,
   type Confidence,
@@ -691,7 +692,7 @@ function observedErrors(errors: PageError[]): ObservedError[] {
 }
 
 /**
- * The GPU lost its device or reported an error. A stall that leads every
+ * The GPU lost its device or reported an error. A failure that leads every
  * other, because the frames around it are unproven whatever the phases say.
  * The point events count them, and the recorded errors say what the GPU said.
  */
@@ -701,7 +702,7 @@ function gpuErrorFinding(events: TracePointEvent[], errors: PageError[]): RawFin
   for (const event of events) breakdown[event.reason] = (breakdown[event.reason] ?? 0) + 1;
   const said = errors.filter((error) => error.source === "gpu");
   return {
-    severity: "stall",
+    severity: "fail",
     rule: RULESET.gpuError.id,
     subject: "GPU device",
     observed: { n: events.length, breakdown, ...(said.length > 0 ? { errors: observedErrors(said) } : {}) },
@@ -711,14 +712,14 @@ function gpuErrorFinding(events: TracePointEvent[], errors: PageError[]): RawFin
 
 /**
  * The page or a worker threw, left a rejection unhandled, or logged an
- * error. A stall like a GPU error: the handler that threw dropped its work,
+ * error. A failure like a GPU error: the handler that threw dropped its work,
  * and the view can settle without it. GPU errors are the rule above's.
  */
 function pageErrorFinding(errors: PageError[]): RawFinding | null {
   const raised = errors.filter((error) => error.source !== "gpu");
   if (raised.length < RULESET.pageError.minErrors) return null;
   return {
-    severity: "stall",
+    severity: "fail",
     rule: RULESET.pageError.id,
     subject: "page errors",
     observed: { n: raised.reduce((sum, error) => sum + error.count, 0), errors: observedErrors(raised) },
@@ -730,7 +731,7 @@ function pageErrorFinding(errors: PageError[]): RawFinding | null {
 function blankFrameFinding(frame: FrameReading | null): RawFinding | null {
   if (!frame?.flatColour) return null;
   return {
-    severity: "stall",
+    severity: "fail",
     rule: RULESET.blankFrame.id,
     subject: "settled frame",
     observed: { colour: frame.flatColour, width: frame.width, height: frame.height },
@@ -746,7 +747,7 @@ function pageScrollFinding(reading: PageScrollReading | null): RawFinding | null
     reading.scrollWidth > reading.viewportWidth || reading.scrollHeight > reading.viewportHeight;
   if (!scrolled && !overflows) return null;
   return {
-    severity: "stall",
+    severity: "fail",
     rule: RULESET.pageScroll.id,
     subject: "page scroll",
     observed: { scroll: { ...reading } },
@@ -768,7 +769,7 @@ function chromeFindings(reading: ChromeReading | null): RawFinding[] {
         part.bottom > viewportHeight + slack,
     )
     .map((part) => ({
-      severity: "stall" as const,
+      severity: "fail" as const,
       rule: RULESET.chrome.id,
       subject: part.part,
       observed: { chrome: { ...part, viewportWidth, viewportHeight } },
@@ -778,7 +779,7 @@ function chromeFindings(reading: ChromeReading | null): RawFinding[] {
 
 /**
  * The uploader cut a feedback loop: it held chunks the renderer kept handing
- * back. A stall, because the view settled without data it asked for.
+ * back. A failure, because the view settled without data it asked for.
  */
 function heldFinding(held: TracePointEvent[]): RawFinding | null {
   if (held.length < RULESET.held.minChunks) return null;
@@ -789,7 +790,7 @@ function heldFinding(held: TracePointEvent[]): RawFinding | null {
     chunks.set(`${entityId}/${chunkKey}`, { entityId, chunkKey, reason: event.reason });
   }
   return {
-    severity: "stall",
+    severity: "fail",
     rule: RULESET.held.id,
     subject: "renderer residency",
     observed: { chunks: chunks.size, held: [...chunks.values()] },
@@ -814,7 +815,7 @@ function lagFinding(input: FindingsInput): RawFinding | null {
         : null;
   if (!breach) return null;
   return {
-    severity: input.softwareAdapter ? "note" : "stall",
+    severity: input.softwareAdapter ? "note" : "fail",
     rule: rule.id,
     subject: LAG_SUBJECT,
     observed: { stat: breach.stat, ms: breach.ms, n: timing.samples },
@@ -829,32 +830,21 @@ function lagFinding(input: FindingsInput): RawFinding | null {
 const LAG_SUBJECT = "input-to-frame";
 
 /**
- * The stall `rule` names, or — on a cold open, for a phase a frame dispatch
- * bounds — the first-paint note. The finding keeps the measuring rule's
- * threshold and takes the first-paint rule's id and rationale.
+ * What `rule` reads a breach as, or — on a cold open, for a phase a frame
+ * dispatch bounds — the first-paint note. The finding keeps the measuring
+ * rule's threshold and takes the first-paint rule's id and rationale.
  */
 function readBreach(
   input: FindingsInput,
   phase: string,
   rule: { id: string; why: string },
+  severity: "fail" | "bound",
 ): { severity: Finding["severity"]; rule: string; why: string } {
   if (input.coldOpen && RULESET.firstPaint.phases.includes(phase)) {
     return { severity: "note", rule: RULESET.firstPaint.id, why: RULESET.firstPaint.why };
   }
-  return { severity: "stall", rule: rule.id, why: rule.why };
+  return { severity, rule: rule.id, why: rule.why };
 }
-
-/**
- * Which findings outrank which. A stall or a saturation is about the run, so
- * it leads; a steady-state finding is about the interval after it, so it
- * follows; a note is worth a line rather than blame, so it comes last.
- */
-const SEVERITY_RANK: Record<Finding["severity"], number> = {
-  stall: 2,
-  saturated: 2,
-  "steady-state": 1,
-  note: 0,
-};
 
 /** The findings that are not about the critical path, so never carry its attribution. */
 const OFF_PATH_RULES = new Set([
@@ -871,7 +861,7 @@ function rankFindings(input: FindingsInput): Finding[] {
   const raw: RawFinding[] = [];
 
   for (const breach of input.breaches) {
-    const reading = readBreach(input, breach.phase.id, breach.widened?.rule ?? breach.rule);
+    const reading = readBreach(input, breach.phase.id, breach.widened?.rule ?? breach.rule, "fail");
     raw.push({
       severity: reading.severity,
       rule: reading.rule,
@@ -902,7 +892,7 @@ function rankFindings(input: FindingsInput): Finding[] {
         threshold: { kind: "backlog", value: RULESET.backlog.maxEtaS, why: RULESET.backlog.why },
       });
     } else if (isPinned(limiter)) {
-      // Pinned but not backlogged is worth a line rather than a stall: a run can
+      // Pinned but not backlogged is worth a line rather than blame: a run can
       // have two chokepoints, and a report naming only the loudest teaches the
       // reader the other one is fine.
       raw.push({
@@ -925,8 +915,8 @@ function rankFindings(input: FindingsInput): Finding[] {
   }
 
   for (const segment of input.path.segments) {
-    // An unrecorded prefix large enough to hide the answer is a note, never a
-    // stall: nothing measured that stretch, so nothing can be blamed for it.
+    // An unrecorded prefix large enough to hide the answer is a note, never
+    // bound: nothing measured that stretch, so nothing can be blamed for it.
     // But a reader deciding whether to trust the chain has to be told the chain
     // is led by a hole.
     if (segment.label === UNRECORDED_PREFIX) {
@@ -945,7 +935,7 @@ function rankFindings(input: FindingsInput): Finding[] {
     // how much of the chain it holds.
     if (segment.class === "unrecorded" || segment.class === "queue") continue;
     if (!passesShare(segment.ms, segment.sharePct)) continue;
-    const reading = readBreach(input, segment.label, RULESET.share);
+    const reading = readBreach(input, segment.label, RULESET.share, "bound");
     raw.push({
       severity: reading.severity,
       rule: reading.rule,
@@ -966,7 +956,7 @@ function rankFindings(input: FindingsInput): Finding[] {
     if (candidate === frameTime?.frame) continue;
     if (!passesShare(candidate.busyMs, candidate.sharePct)) continue;
     raw.push({
-      severity: "stall",
+      severity: "bound",
       rule: RULESET.share.id,
       subject: candidate.phase,
       observed: {
@@ -982,7 +972,7 @@ function rankFindings(input: FindingsInput): Finding[] {
 
   if (frameTime?.slow) {
     raw.push({
-      severity: "stall",
+      severity: "fail",
       rule: RULESET.interaction.id,
       subject: frameTime.frame.phase,
       observed: {
@@ -1021,7 +1011,7 @@ function rankFindings(input: FindingsInput): Finding[] {
     .sort(
       (a, b) =>
         SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
-        // A GPU error leads the stalls, since it can explain the rest, and a
+        // A GPU error leads the failures, since it can explain the rest, and a
         // page error can explain all but that. A blank frame follows them,
         // since either can be its cause. A held chunk comes next: a slow phase
         // cost time, while a held chunk is data the view settled without. A
@@ -1080,7 +1070,7 @@ function comparativeFindings(
     const ratio = phase.p95Ms / before.p95Ms;
     if (ratio <= RULESET.compare.minRatio) continue;
     out.push({
-      severity: "stall",
+      severity: "fail",
       rule: RULESET.compare.id,
       subject: phase.id,
       observed: {
@@ -1107,17 +1097,28 @@ function buildVerdict(
   const caveat = coverage.incomplete ? " [coverage incomplete — see gaps]" : "";
   const lead = findings.find((finding) => finding.severity !== "note");
 
-  if (!lead) {
+  // A bound finding fails nothing, so it is the verdict only on a run that
+  // ended without a failure; one that never settled says that instead.
+  if (!lead || lead.severity === "bound") {
     const slowest = [...path.segments]
       .filter((segment) => segment.class !== "unrecorded")
       .sort((a, b) => b.ms - a.ms)[0];
-    const tail = slowest
-      ? `slowest recorded segment was ${slowest.label} at ${slowest.ms} ms (${slowest.sharePct}% of the chain)`
-      : "no recorded segment to rank";
+    const tail = lead
+      ? describeBound(lead)
+      : slowest
+        ? `slowest recorded segment was ${slowest.label} at ${slowest.ms} ms (${slowest.sharePct}% of the chain)`
+        : "no recorded segment to rank";
     if (run.header.endReason !== "quiescent" && run.header.endReason !== "explicit") {
       return {
         kind: "unsettled",
-        text: `no threshold crossed, but the run ended as ${endedAs(run.header)} rather than settling — every total below is a lower bound; ${tail}${caveat}`,
+        text: `${lead ? "" : "no threshold crossed, but "}the run ended as ${endedAs(run.header)} rather than settling — every total below is a lower bound; ${tail}${caveat}`,
+        confidence: attribution.confidence,
+      };
+    }
+    if (lead) {
+      return {
+        kind: "bound",
+        text: `${tail}, and nothing failed${caveat}`,
         confidence: attribution.confidence,
       };
     }
@@ -1172,7 +1173,7 @@ function buildVerdict(
 
   if (lead.rule === RULESET.gpuError.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text: `${describeGpuErrors(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
@@ -1180,7 +1181,7 @@ function buildVerdict(
 
   if (lead.rule === RULESET.pageError.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text: `${describePageErrors(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
@@ -1188,7 +1189,7 @@ function buildVerdict(
 
   if (lead.rule === RULESET.blankFrame.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text: `${describeBlankFrame(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
@@ -1196,7 +1197,7 @@ function buildVerdict(
 
   if (lead.rule === RULESET.held.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text: `${describeHeld(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
@@ -1204,7 +1205,7 @@ function buildVerdict(
 
   if (lead.rule === RULESET.pageScroll.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text: `${describePageScroll(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
@@ -1212,7 +1213,7 @@ function buildVerdict(
 
   if (lead.rule === RULESET.chrome.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text: `${describeChrome(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
@@ -1220,7 +1221,7 @@ function buildVerdict(
 
   if (lead.rule === RULESET.lag.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text: `${describeLag(run, lead, lag)}${caveat}`,
       confidence: attribution.confidence,
     };
@@ -1230,7 +1231,7 @@ function buildVerdict(
   // measured it.
   if (lead.rule === RULESET.interaction.id) {
     return {
-      kind: "stall",
+      kind: "fail",
       text:
         `${run.header.cause?.source ?? "input"} ran at ${lead.observed.stat} ${lead.observed.ms} ms ` +
         `per main-thread frame, over the ${lead.threshold.value} ms ceiling for an interaction run${caveat}`,
@@ -1238,18 +1239,16 @@ function buildVerdict(
     };
   }
 
-  const share =
-    lead.observed.sharePct != null
-      ? ` (${lead.observed.sharePct}% of the ${lead.observed.shareOf ?? "run"})`
-      : "";
-  const amount = lead.observed.stat
-    ? `${lead.observed.stat} ${lead.observed.ms} ms`
-    : `${lead.observed.ms} ms`;
   return {
-    kind: "stall",
-    text: `${lead.subject} ${lead.observed.stat ? "ran" : "held"} ${amount}${share}${caveat}`,
+    kind: "fail",
+    text: `${lead.subject} ran ${lead.observed.stat} ${lead.observed.ms} ms${caveat}`,
     confidence: attribution.confidence,
   };
+}
+
+/** A bound finding as a phrase: the phase, and how much of the chain or the run it held. */
+function describeBound(finding: Finding): string {
+  return `bound by ${finding.subject}: it held ${finding.observed.ms} ms, ${finding.observed.sharePct}% of the ${finding.observed.shareOf ?? "run"}`;
 }
 
 /** A lag finding as one sentence, with the longest long task when there was one, the first place to look for why. */
@@ -1347,7 +1346,7 @@ function describeFirstPaint(finding: Finding): string {
     : `held ${observed.ms} ms (${observed.sharePct}% of the chain) on the first paint of a cold open`;
   return (
     `no stall — ${finding.subject} ${amount}; the frame that first drew the chunks also compiled ` +
-    `the render pipelines, so this is first paint rather than a stall; an interaction run after ` +
+    `the render pipelines, so this is first paint rather than a failure; an interaction run after ` +
     `settle confirms a regression`
   );
 }

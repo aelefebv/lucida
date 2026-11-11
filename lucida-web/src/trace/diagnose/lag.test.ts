@@ -118,7 +118,7 @@ describe("the lag rule", () => {
     const doc = diagnoseRun(run);
     const lag = doc.findings.find((finding) => finding.rule === RULESET.lag.id)!;
     expect(lag).toMatchObject({
-      severity: "stall",
+      severity: "fail",
       subject: "input-to-frame",
       observed: { stat: "p95", ms: 140, n: 30 },
       threshold: { kind: "absolute", value: RULESET.lag.p95.ceilMs, why: RULESET.lag.p95.why },
