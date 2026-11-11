@@ -8,6 +8,7 @@ use std::ops::Range;
 use lucida_content::{DatasetId, SpatialAxis};
 use serde::Serialize;
 
+use super::placement::plane_span;
 use super::{LayerExtent, Scene};
 use crate::view::{AxisPositions, ViewId};
 
@@ -122,7 +123,7 @@ impl Scene {
         let mut layers: Vec<(f64, (f64, f64), u32)> = self
             .shown_dataset_ids(view)
             .filter_map(|id| {
-                let spacing = self.placement(id)?.scale[a].abs();
+                let spacing = self.placement(id)?.step_along(a);
                 let span = self.cut_span(id, axis)?;
                 let planes = LayerExtent::of(self.document.manifests.get(id)?).along(axis);
                 (spacing.is_finite() && spacing > 0.0).then_some((spacing, span, planes))
@@ -159,16 +160,27 @@ impl Scene {
     pub fn plane_grid(&self, dataset_id: &DatasetId, axis: SpatialAxis) -> Option<CutGrid> {
         let a = axis.xyz();
         let to_scene = self.placement(dataset_id)?;
+        let step = to_scene.step_along(a);
         let planes = LayerExtent::of(self.document.manifests.get(dataset_id)?).along(axis);
-        let ends = [0.0, f64::from(planes)].map(|plane| {
-            let mut at = [0.0; 3];
-            at[a] = plane;
-            to_scene.apply(at)[a]
-        });
+        if let Some((min, _)) = plane_span(&to_scene, a, planes) {
+            return Some(CutGrid {
+                min,
+                step,
+                count: planes,
+            });
+        }
+        // A dataset turned off the axis has no planes across it, so a view
+        // of it alone steps through its extent at its sample's reach.
+        let (min, max) = self.scene_extent(dataset_id, axis)?;
+        let steps = if step > 0.0 {
+            ((max - min) / step).ceil()
+        } else {
+            1.0
+        };
         Some(CutGrid {
-            min: ends[0].min(ends[1]),
-            step: to_scene.scale[a].abs(),
-            count: planes,
+            min,
+            step,
+            count: steps.clamp(1.0, f64::from(u32::MAX)) as u32,
         })
     }
 

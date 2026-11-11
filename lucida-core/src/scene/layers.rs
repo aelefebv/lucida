@@ -165,10 +165,10 @@ impl LayerExtent {
     }
 
     /// The planes of this layer a cut along Z across the places `z` reads,
-    /// through `to_scene`: those whose middles lie in the range, or with
-    /// none, the plane holding its middle, so a layer coarser than one
-    /// position still shows a plane. Unclamped, so a range past the layer
-    /// names planes it lacks.
+    /// through `to_scene`, which keeps Z: those whose middles lie in the
+    /// range, or with none, the plane holding its middle, so a layer coarser
+    /// than one position still shows a plane. Unclamped, so a range past the
+    /// layer names planes it lacks.
     fn z_planes(&self, z: &Range<f64>, to_scene: &Affine) -> Range<i64> {
         let at = |place: f64| to_scene.inverse().apply([0.0, 0.0, place])[2];
         let (start, end) = (at(z.start), at(z.end));
@@ -184,8 +184,8 @@ impl LayerExtent {
     }
 
     /// The plane of this layer a place along `axis` reads through
-    /// `to_scene`. Unclamped, so a place past the layer names a plane it
-    /// lacks.
+    /// `to_scene`, which keeps the axis. Unclamped, so a place past the layer
+    /// names a plane it lacks.
     fn plane_at(&self, place: f64, axis: SpatialAxis, to_scene: &Affine) -> i64 {
         let a = axis.xyz();
         let mut at = [0.0; 3];
@@ -230,15 +230,34 @@ pub(crate) struct ViewCuts {
     pub depth: u32,
 }
 
+/// How a cut at `places` across a scene axis meets a layer whose placement
+/// turns it off that axis, from `span`, where the layer lies along the axis:
+/// its planes don't lie across the axis, so where it lies is all there is to
+/// go by.
+fn reach_in_scene(span: (f64, f64), places: &Range<f64>) -> CutReach {
+    let meets = if places.end > places.start {
+        places.start < span.1 && places.end > span.0
+    } else {
+        span.0 <= places.start && places.start < span.1
+    };
+    if meets {
+        CutReach::Through
+    } else {
+        CutReach::Outside
+    }
+}
+
 /// What one layer shows with `settings` where `cuts` cut it and at
 /// timepoint `t`, set aside or not by the view's comparison. `to_scene` is
 /// the layer's placement, which each place reads its planes back through.
+/// `turned` is where the layer lies along each scene axis its placement
+/// turns it off, `[x, y, z]`, and `None` on each axis it keeps.
 fn resolve(
     dataset_id: &DatasetId,
     manifest: &DatasetManifest,
     settings: &DatasetDisplaySettings,
     (cuts, t): (&ViewCuts, u32),
-    to_scene: &Affine,
+    (to_scene, turned): (&Affine, [Option<(f64, f64)>; 3]),
     outside_comparison: bool,
 ) -> ResolvedLayer {
     let extent = LayerExtent::of(manifest);
@@ -285,9 +304,18 @@ fn resolve(
         t: extent.clamp_t(t),
         y: extent.clamp(SpatialAxis::Y, y),
         x: extent.clamp(SpatialAxis::X, x),
-        z_reach: extent.reach_z(&z_planes, cuts.depth),
-        y_reach: extent.reach(SpatialAxis::Y, &(y..y + 1)),
-        x_reach: extent.reach(SpatialAxis::X, &(x..x + 1)),
+        z_reach: match turned[2] {
+            Some(span) => reach_in_scene(span, &cuts.z),
+            None => extent.reach_z(&z_planes, cuts.depth),
+        },
+        y_reach: match turned[1] {
+            Some(span) => reach_in_scene(span, &(cuts.y..cuts.y)),
+            None => extent.reach(SpatialAxis::Y, &(y..y + 1)),
+        },
+        x_reach: match turned[0] {
+            Some(span) => reach_in_scene(span, &(cuts.x..cuts.x)),
+            None => extent.reach(SpatialAxis::X, &(x..x + 1)),
+        },
     }
 }
 
@@ -330,12 +358,13 @@ impl Scene {
                 &seeded
             }
         };
+        let (to_scene, turned) = self.placement_and_turns(dataset_id);
         Some(resolve(
             dataset_id,
             manifest,
             settings,
             (cuts, shown.axes.t),
-            &self.placement(dataset_id).unwrap_or(Affine::IDENTITY),
+            (&to_scene, turned),
             shown.sets_aside(dataset_id),
         ))
     }
@@ -392,16 +421,32 @@ impl Scene {
                     };
                 }
                 // A saved view records no comparison, so it sets nothing aside.
+                let (to_scene, turned) = self.placement_and_turns(id);
                 Some(resolve(
                     id,
                     manifest,
                     &settings,
                     (&cuts, axes.t),
-                    &self.placement(id).unwrap_or(Affine::IDENTITY),
+                    (&to_scene, turned),
                     false,
                 ))
             })
             .collect()
+    }
+
+    /// `dataset_id`'s placement, and where it lies along each scene axis
+    /// the placement turns it off, `[x, y, z]`, `None` on each it keeps: what
+    /// a layer's cuts are read through.
+    fn placement_and_turns(&self, dataset_id: &DatasetId) -> (Affine, [Option<(f64, f64)>; 3]) {
+        let to_scene = self.placement(dataset_id).unwrap_or(Affine::IDENTITY);
+        let turned = [SpatialAxis::X, SpatialAxis::Y, SpatialAxis::Z].map(|axis| {
+            if to_scene.keeps_axis(axis.xyz()) {
+                None
+            } else {
+                self.scene_extent(dataset_id, axis)
+            }
+        });
+        (to_scene, turned)
     }
 
     pub(super) fn layer_ids(&self) -> impl Iterator<Item = &DatasetId> {

@@ -469,10 +469,7 @@ mod tests {
         let mut v = AxisPositions::new();
         v.z = Some(4.0..6.0);
         v.y = Some(9.5);
-        v.map_cut_positions(&Affine {
-            scale: [1.0, 2.0, -0.5],
-            offset: [0.0, 1.0, 10.0],
-        });
+        v.map_cut_positions(&Affine::axis_aligned([1.0, 2.0, -0.5], [0.0, 1.0, 10.0]));
         assert_eq!(v.z, Some(7.0..8.0));
         assert_eq!(v.y, Some(20.0));
         assert_eq!(v.x, None);

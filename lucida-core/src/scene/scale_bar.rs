@@ -81,15 +81,20 @@ impl Scene {
             Some(_) => Measure::Length,
             None => Measure::Samples,
         };
-        // What one unit of the camera's space measures along each of the
-        // dataset's axes, in meters or samples. Its placement carries any
-        // scale a person gave it, so the reading follows that scale.
+        // What one unit of the camera's space measures along each of its
+        // axes, in meters or samples: the step through the dataset's samples
+        // a unit along the axis makes, measured. Its placement carries any
+        // scale or turn a person gave it, so the reading follows them.
         let per_unit = |frame_to_space: &crate::placement::Affine| -> Option<[f64; 3]> {
+            let back = frame_to_space.inverse();
             let mut out = [0.0; 3];
             for (i, value) in out.iter_mut().enumerate() {
-                let scale = frame_to_space.scale[i].abs();
-                let sample = sample_meters.map_or(1.0, |m| m[i]);
-                *value = sample / scale;
+                let step = back.column(i);
+                let sample = sample_meters.unwrap_or([1.0; 3]);
+                *value = (0..3)
+                    .map(|k| (step[k] * sample[k]).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
                 if !value.is_finite() || *value <= 0.0 {
                     return None;
                 }

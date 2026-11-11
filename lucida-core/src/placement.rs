@@ -18,72 +18,163 @@ use serde::{Deserialize, Serialize};
 use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
 
-/// A per-axis scale and offset, `[x, y, z]`: `offset + point * scale`. Every
-/// placement is axis-aligned, so this is all of one.
+/// A map of `[x, y, z]` points: `linear * point + offset`. `linear` is by
+/// rows, so `linear[r][c]` is how far output axis `r` moves per unit along
+/// input axis `c`. A dataset's placement can turn it as well as stretch and
+/// move it, so nothing that maps between a frame and the scene may read one
+/// axis as one axis.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Affine {
-    pub scale: [f64; 3],
+    pub linear: [[f64; 3]; 3],
     pub offset: [f64; 3],
 }
 
+const NO_TURN: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// Below this an entry off the diagonal counts as none.
+const ALIGNED_EPSILON: f64 = 1e-12;
+
 impl Affine {
     pub const IDENTITY: Affine = Affine {
-        scale: [1.0; 3],
+        linear: NO_TURN,
         offset: [0.0; 3],
     };
 
-    pub fn apply(&self, point: [f64; 3]) -> [f64; 3] {
-        std::array::from_fn(|i| self.offset[i] + point[i] * self.scale[i])
+    /// The map that stretches each axis by `scale` and then moves by
+    /// `offset`, turning nothing.
+    pub fn axis_aligned(scale: [f64; 3], offset: [f64; 3]) -> Affine {
+        let mut linear = [[0.0; 3]; 3];
+        for (i, row) in linear.iter_mut().enumerate() {
+            row[i] = scale[i];
+        }
+        Affine { linear, offset }
     }
 
-    /// The map back. An axis with no extent maps everything to its offset, so
-    /// its inverse sends the axis to zero rather than to infinity.
+    pub fn apply(&self, point: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|r| self.offset[r] + self.apply_vector_row(r, point))
+    }
+
+    /// Where a displacement goes, the offset left out.
+    pub fn apply_vector(&self, vector: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|r| self.apply_vector_row(r, vector))
+    }
+
+    fn apply_vector_row(&self, r: usize, v: [f64; 3]) -> f64 {
+        self.linear[r][0] * v[0] + self.linear[r][1] * v[1] + self.linear[r][2] * v[2]
+    }
+
+    /// Whether every input axis maps onto the output axis of the same index.
+    pub fn is_axis_aligned(&self) -> bool {
+        (0..3).all(|r| (0..3).all(|c| r == c || self.linear[r][c].abs() < ALIGNED_EPSILON))
+    }
+
+    /// Whether axis `a` maps onto axis `a` and nothing else maps onto it, so
+    /// a plane across `a` maps to a plane across `a`. A turn about `a` keeps
+    /// it; a turn about any other axis tilts it.
+    pub fn keeps_axis(&self, a: usize) -> bool {
+        (0..3).all(|j| {
+            j == a
+                || (self.linear[a][j].abs() < ALIGNED_EPSILON
+                    && self.linear[j][a].abs() < ALIGNED_EPSILON)
+        })
+    }
+
+    /// Where a unit step along input axis `c` goes.
+    pub fn column(&self, c: usize) -> [f64; 3] {
+        std::array::from_fn(|r| self.linear[r][c])
+    }
+
+    /// The map back. An axis-aligned map with an axis of no extent maps
+    /// everything on it to its offset, so its inverse sends the axis to zero
+    /// rather than to infinity. A map that turns comes only from placements,
+    /// which keep every axis, so it always has an inverse.
     pub fn inverse(&self) -> Affine {
-        let scale: [f64; 3] = std::array::from_fn(|i| {
-            if self.scale[i].abs() > 1e-300 {
-                1.0 / self.scale[i]
-            } else {
-                0.0
-            }
-        });
-        Affine {
-            scale,
-            offset: std::array::from_fn(|i| -self.offset[i] * scale[i]),
+        if self.is_axis_aligned() {
+            let scale: [f64; 3] = std::array::from_fn(|i| {
+                let s = self.linear[i][i];
+                if s.abs() > 1e-300 { 1.0 / s } else { 0.0 }
+            });
+            return Affine::axis_aligned(
+                scale,
+                std::array::from_fn(|i| -self.offset[i] * scale[i]),
+            );
         }
+        let m = &self.linear;
+        let cofactor = |r: usize, c: usize| {
+            let (r0, r1) = ((r + 1) % 3, (r + 2) % 3);
+            let (c0, c1) = ((c + 1) % 3, (c + 2) % 3);
+            m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
+        };
+        let det = m[0][0] * cofactor(0, 0) + m[0][1] * cofactor(0, 1) + m[0][2] * cofactor(0, 2);
+        let inv_det = if det.abs() > 1e-300 { 1.0 / det } else { 0.0 };
+        // The inverse is the transposed cofactors over the determinant.
+        let linear: [[f64; 3]; 3] =
+            std::array::from_fn(|r| std::array::from_fn(|c| cofactor(c, r) * inv_det));
+        let back = Affine {
+            linear,
+            offset: [0.0; 3],
+        };
+        let offset = back.apply_vector(self.offset).map(|v| -v);
+        Affine { linear, offset }
     }
 
     /// This map followed by `outer`.
     pub fn then(&self, outer: &Affine) -> Affine {
+        let linear: [[f64; 3]; 3] = std::array::from_fn(|r| {
+            std::array::from_fn(|c| (0..3).map(|k| outer.linear[r][k] * self.linear[k][c]).sum())
+        });
         Affine {
-            scale: std::array::from_fn(|i| self.scale[i] * outer.scale[i]),
-            offset: std::array::from_fn(|i| self.offset[i] * outer.scale[i] + outer.offset[i]),
+            linear,
+            offset: outer.apply(self.offset),
         }
     }
 
-    /// How far one frame sample reaches in the plane: the smaller of its X
-    /// and Y extents. A slice zoom times this is device pixels per sample, so
-    /// a dataset with finer samples than the scene frame's calls for a
-    /// coarser level, as it should. The smaller extent is the densest axis, the one a
-    /// volume view measures too, so the level chosen errs coarse.
+    /// How far one frame sample reaches in the plane: the shorter of the
+    /// lengths an X step and a Y step map to. A slice zoom times this is
+    /// device pixels per sample, so a dataset with finer samples than the
+    /// scene frame's calls for a coarser level, as it should. The shorter
+    /// step is the densest axis, the one a volume view measures too, so the
+    /// level chosen errs coarse.
     pub fn plane_sample(&self) -> f64 {
-        self.scale[0].abs().min(self.scale[1].abs())
+        norm(self.column(0)).min(norm(self.column(1)))
     }
 
     /// How long a length of one along X is once mapped. A map between two
     /// scene frames, or two world spaces, stretches every axis alike, since
     /// each of those spaces measures all three axes in one length.
     pub fn length_scale(&self) -> f64 {
-        self.scale[0].abs()
+        norm(self.column(0))
     }
 
-    /// The box `[min, max]` maps to, sorted per axis since a scale can flip it.
+    /// How far along output axis `a` one sample's step reaches: the
+    /// distance along `a` that moves a point one sample through the input,
+    /// whichever way the map turns it. An axis-aligned map steps by its
+    /// scale on that axis.
+    pub fn step_along(&self, a: usize) -> f64 {
+        let back = norm(self.inverse().column(a));
+        if back > 1e-300 { 1.0 / back } else { 0.0 }
+    }
+
+    /// The box `[min, max]` maps to: the smallest box, per axis, around all
+    /// eight of its corners, since a map can turn or flip it.
     pub fn apply_box(&self, min: [f64; 3], max: [f64; 3]) -> ([f64; 3], [f64; 3]) {
-        let a = self.apply(min);
-        let b = self.apply(max);
-        (
-            std::array::from_fn(|i| a[i].min(b[i])),
-            std::array::from_fn(|i| a[i].max(b[i])),
-        )
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for corner in 0..8 {
+            let point: [f64; 3] = std::array::from_fn(|i| {
+                if corner & (1 << i) == 0 {
+                    min[i]
+                } else {
+                    max[i]
+                }
+            });
+            let mapped = self.apply(point);
+            for i in 0..3 {
+                lo[i] = lo[i].min(mapped[i]);
+                hi[i] = hi[i].max(mapped[i]);
+            }
+        }
+        (lo, hi)
     }
 
     /// Both directions as column-major `f32` matrices, as the renderer and
@@ -94,14 +185,24 @@ impl Affine {
             inv_model: matrix(&self.inverse()),
         }
     }
+
+    /// This map as a column-major 4x4 matrix.
+    pub fn matrix_f64(&self) -> [f64; 16] {
+        let m = &self.linear;
+        let o = &self.offset;
+        [
+            m[0][0], m[1][0], m[2][0], 0.0, m[0][1], m[1][1], m[2][1], 0.0, m[0][2], m[1][2],
+            m[2][2], 0.0, o[0], o[1], o[2], 1.0,
+        ]
+    }
+}
+
+fn norm(v: [f64; 3]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 fn matrix(a: &Affine) -> [f32; 16] {
-    let [sx, sy, sz] = a.scale.map(|v| v as f32);
-    let [ox, oy, oz] = a.offset.map(|v| v as f32);
-    [
-        sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, ox, oy, oz, 1.0,
-    ]
+    a.matrix_f64().map(|v| v as f32)
 }
 
 /// What a dataset's source declares about its frame, independent of every
@@ -152,6 +253,13 @@ impl DeclaredFrame {
             origin,
             meters,
         }
+    }
+
+    /// One sample's extent along `[x, y, z]`, in meters when the frame
+    /// measures physical lengths and in declared numbers otherwise: the
+    /// lengths a turn of the dataset compares.
+    fn sample_extent(&self) -> [f64; 3] {
+        self.sample_meters().unwrap_or(self.spacing)
     }
 
     /// One sample's length in meters along `[x, y, z]`, when the frame
@@ -222,21 +330,37 @@ impl UserTransform {
     }
 
     /// The map this transform makes of `frame`'s samples, ahead of the
-    /// frame's declared placement.
+    /// frame's declared placement. The scale and the turn act on the
+    /// samples' physical extents, so a turned dataset whose samples are
+    /// longer on one axis keeps its true shape.
     pub fn in_frame(&self, frame: &DeclaredFrame) -> Affine {
+        let extent = frame.sample_extent();
+        let turn = rotation_matrix(self.rotation);
         Affine {
-            scale: self.scale,
+            linear: std::array::from_fn(|r| {
+                std::array::from_fn(|c| turn[r][c] * self.scale[c] * extent[c] / extent[r])
+            }),
             offset: std::array::from_fn(|i| self.translation[i] / frame.spacing[i]),
         }
     }
 
-    /// The transform whose map of `frame`'s samples is `in_frame`, the
-    /// inverse of [`Self::in_frame`] with this transform's rotation.
+    /// The transform with this one's rotation whose map of `frame`'s samples
+    /// is `in_frame`, as near as a scale along the dataset's own axes comes:
+    /// the inverse of [`Self::in_frame`].
     fn with_frame_map(&self, frame: &DeclaredFrame, in_frame: &Affine) -> UserTransform {
+        let extent = frame.sample_extent();
+        let turn = rotation_matrix(self.rotation);
+        // The turn's inverse is its transpose, which undoes it on the
+        // physical extents and leaves the scale on the diagonal.
+        let scale = std::array::from_fn(|c| {
+            (0..3)
+                .map(|k| turn[k][c] * extent[k] * in_frame.linear[k][c] / extent[c])
+                .sum()
+        });
         UserTransform {
             translation: std::array::from_fn(|i| in_frame.offset[i] * frame.spacing[i]),
             rotation: self.rotation,
-            scale: in_frame.scale,
+            scale,
         }
     }
 
@@ -252,6 +376,33 @@ impl UserTransform {
         let placed = self.in_frame(frame).then(declared).then(map);
         self.with_frame_map(frame, &placed.then(&declared.inverse()))
     }
+}
+
+/// The turn a quaternion `[x, y, z, w]` makes, by rows. It is scaled to a
+/// unit quaternion first; one with no length turns nothing.
+fn rotation_matrix(q: [f64; 4]) -> [[f64; 3]; 3] {
+    let length = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if !(length.is_finite() && length > 0.0) {
+        return NO_TURN;
+    }
+    let [x, y, z, w] = q.map(|v| v / length);
+    [
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+        ],
+        [
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+        ],
+        [
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
+    ]
 }
 
 /// A level's `[x, y, z]` sample extent. A scale that can't measure anything,
@@ -298,13 +449,13 @@ impl SceneFrame {
             _ => ([1.0; 3], [1.0; 3]),
         };
         let unit = reference.spacing[0] * reference_to_common[0];
-        Affine {
-            scale: std::array::from_fn(|i| frame.spacing[i] * to_common[i] / unit),
-            offset: std::array::from_fn(|i| {
+        Affine::axis_aligned(
+            std::array::from_fn(|i| frame.spacing[i] * to_common[i] / unit),
+            std::array::from_fn(|i| {
                 (frame.origin[i] * to_common[i] - reference.origin[i] * reference_to_common[i])
                     / unit
             }),
-        }
+        )
     }
 
     /// Where `place`, along axis `a` of this frame, lies in physical space,
@@ -359,10 +510,7 @@ impl WorldSpace {
     /// The map from the scene frame into world space.
     pub fn from_scene(&self) -> Affine {
         let inv = 1.0 / self.extent;
-        Affine {
-            scale: [inv, -inv, inv],
-            offset: [0.0, self.top * inv, 0.0],
-        }
+        Affine::axis_aligned([inv, -inv, inv], [0.0, self.top * inv, 0.0])
     }
 }
 
@@ -435,10 +583,7 @@ pub fn boxes_overlap(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3])) -> bool {
 /// row.
 pub fn member_cube_to_frame(position: [f64; 2], shape: [u64; 5]) -> Affine {
     let [w, h, d] = [shape[4] as f64, shape[3] as f64, shape[2] as f64];
-    Affine {
-        scale: [w, -h, d],
-        offset: [position[0], position[1] + h, 0.0],
-    }
+    Affine::axis_aligned([w, -h, d], [position[0], position[1] + h, 0.0])
 }
 
 /// How a side view lays out the tiles of a collection.
@@ -504,6 +649,11 @@ mod tests {
         }
     }
 
+    /// The stretch an axis-aligned map makes on each axis.
+    fn diagonal(a: &Affine) -> [f64; 3] {
+        std::array::from_fn(|i| a.linear[i][i])
+    }
+
     fn close(a: [f64; 3], b: [f64; 3]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
     }
@@ -513,7 +663,7 @@ mod tests {
         let reference = frame([0.5, 0.5, 2.0], [10.0, 20.0, 30.0], Some(1e-6));
         let placed = SceneFrame::new(reference.clone()).place(&reference);
         assert_eq!(placed.offset, [0.0; 3]);
-        assert!(close(placed.scale, [1.0, 1.0, 4.0]));
+        assert!(close(diagonal(&placed), [1.0, 1.0, 4.0]));
     }
 
     #[test]
@@ -541,23 +691,120 @@ mod tests {
         let reference = frame([1.0; 3], [0.0; 3], Some(1e-6));
         let bare = frame([2.0, 2.0, 2.0], [4.0, 0.0, 0.0], None);
         let placed = SceneFrame::new(reference).place(&bare);
-        assert!(close(placed.scale, [2.0; 3]));
+        assert!(close(diagonal(&placed), [2.0; 3]));
         assert!(close(placed.offset, [4.0, 0.0, 0.0]));
     }
 
     #[test]
     fn affines_compose_and_invert() {
-        let a = Affine {
-            scale: [2.0, -3.0, 0.5],
-            offset: [1.0, 2.0, 3.0],
-        };
-        let b = Affine {
-            scale: [0.25, 4.0, -1.0],
-            offset: [-5.0, 0.0, 7.0],
-        };
+        let a = Affine::axis_aligned([2.0, -3.0, 0.5], [1.0, 2.0, 3.0]);
+        let b = Affine::axis_aligned([0.25, 4.0, -1.0], [-5.0, 0.0, 7.0]);
         let p = [3.0, -1.5, 8.0];
         assert!(close(a.then(&b).apply(p), b.apply(a.apply(p))));
         assert!(close(a.inverse().apply(a.apply(p)), p));
+    }
+
+    /// A turn of `radians` about `axis` (0, 1 or 2) as a unit quaternion.
+    fn turn(axis: usize, radians: f64) -> [f64; 4] {
+        let mut q = [0.0, 0.0, 0.0, (radians / 2.0).cos()];
+        q[axis] = (radians / 2.0).sin();
+        q
+    }
+
+    #[test]
+    fn affines_that_turn_compose_and_invert() {
+        let turned = UserTransform {
+            translation: [3.0, -2.0, 1.0],
+            rotation: turn(1, 0.7),
+            scale: [2.0, 0.5, 1.5],
+        }
+        .in_frame(&frame([1.0, 2.0, 3.0], [0.0; 3], None));
+        let other = Affine::axis_aligned([0.25, 4.0, -1.0], [-5.0, 0.0, 7.0]);
+        let p = [3.0, -1.5, 8.0];
+        assert!(!turned.is_axis_aligned());
+        assert!(close(
+            turned.then(&other).apply(p),
+            other.apply(turned.apply(p))
+        ));
+        assert!(close(
+            other.then(&turned).apply(p),
+            turned.apply(other.apply(p))
+        ));
+        assert!(close(turned.inverse().apply(turned.apply(p)), p));
+    }
+
+    #[test]
+    fn a_turned_box_spans_all_its_corners() {
+        let quarter = UserTransform {
+            rotation: turn(2, std::f64::consts::FRAC_PI_4),
+            ..UserTransform::IDENTITY
+        }
+        .in_frame(&frame([1.0; 3], [0.0; 3], None));
+        let (min, max) = quarter.apply_box([0.0; 3], [2.0, 2.0, 1.0]);
+        let r = 2.0 * std::f64::consts::FRAC_1_SQRT_2;
+        assert!(close(min, [-r, 0.0, 0.0]), "{min:?}");
+        assert!(close(max, [r, 2.0 * r, 1.0]), "{max:?}");
+    }
+
+    #[test]
+    fn a_turn_keeps_its_own_axis_and_tilts_the_others() {
+        let about_z = UserTransform {
+            rotation: turn(2, 0.3),
+            ..UserTransform::IDENTITY
+        }
+        .in_frame(&frame([1.0; 3], [0.0; 3], None));
+        assert!(about_z.keeps_axis(2));
+        assert!(!about_z.keeps_axis(0) && !about_z.keeps_axis(1));
+        assert!(Affine::axis_aligned([2.0, -1.0, 3.0], [1.0; 3]).keeps_axis(0));
+    }
+
+    #[test]
+    fn a_turn_acts_on_the_samples_physical_extents() {
+        // Samples twice as long in Y as in X, turned a quarter about Z.
+        let own = frame([1.0, 2.0, 1.0], [0.0; 3], Some(1e-6));
+        let quarter = UserTransform {
+            rotation: turn(2, std::f64::consts::FRAC_PI_2),
+            ..UserTransform::IDENTITY
+        }
+        .in_frame(&own);
+        // One X sample, one micrometer, turns onto Y: half a Y sample.
+        assert!(
+            close(quarter.column(0), [0.0, 0.5, 0.0]),
+            "{:?}",
+            quarter.column(0)
+        );
+        // One Y sample, two micrometers, turns onto minus X: two X samples.
+        assert!(
+            close(quarter.column(1), [-2.0, 0.0, 0.0]),
+            "{:?}",
+            quarter.column(1)
+        );
+        // Along Z it still steps a sample, and along Y half of one.
+        assert!((quarter.step_along(2) - 1.0).abs() < 1e-12);
+        assert!((quarter.step_along(1) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_scene_map_after_a_turned_user_transform_keeps_the_turn() {
+        let reference = frame([1.0; 3], [0.0; 3], Some(1e-6));
+        let own = frame([0.5, 0.5, 2.0], [0.0; 3], Some(1e-6));
+        let declared = SceneFrame::new(reference).place(&own);
+        let from = UserTransform {
+            translation: [1.0, 2.0, 0.0],
+            rotation: turn(2, 0.4),
+            scale: [1.5, 1.5, 1.0],
+        };
+        // Twice the size about scene point (3, 4, 0), then 5 across.
+        let map = Affine::axis_aligned([2.0, 2.0, 1.0], [-3.0 + 5.0, -4.0, 0.0]);
+        let after = from.then_in_scene(&own, &declared, &map);
+        let p = [7.0, 9.0, 3.0];
+        let expected = map.apply(from.in_frame(&own).then(&declared).apply(p));
+        assert!(close(
+            after.in_frame(&own).then(&declared).apply(p),
+            expected
+        ));
+        assert_eq!(after.rotation, from.rotation);
+        assert!(close(after.scale, [3.0, 3.0, 1.0]));
     }
 
     #[test]
@@ -607,7 +854,7 @@ mod tests {
         assert!(close(map.world.apply(world(&from)), world(&to)));
         // Both world spaces point Y up, so the map stretches every axis alike.
         let k = map.world.length_scale();
-        assert!(map.world.scale.iter().all(|s| (s - k).abs() < 1e-12));
+        assert!(diagonal(&map.world).iter().all(|s| (s - k).abs() < 1e-12));
         let same = from.map_to(&from);
         assert!(close(same.world.apply([1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]));
     }
@@ -641,7 +888,7 @@ mod tests {
         // The first sample moves by the translation, in micrometers here.
         assert!(close(placed.apply([0.0; 3]), [14.0, -2.0, 6.0]));
         // A sample spans twice its declared extent in X and Y.
-        assert!(close(placed.scale, [1.0, 1.0, 2.0]));
+        assert!(close(diagonal(&placed), [1.0, 1.0, 2.0]));
         assert!(close(
             UserTransform::IDENTITY
                 .in_frame(&own)
@@ -662,10 +909,7 @@ mod tests {
             ..UserTransform::IDENTITY
         };
         // Twice the size about scene point (10, 20, 0), then 3 across.
-        let map = Affine {
-            scale: [2.0, 2.0, 1.0],
-            offset: [-10.0 + 3.0, -20.0, 0.0],
-        };
+        let map = Affine::axis_aligned([2.0, 2.0, 1.0], [-10.0 + 3.0, -20.0, 0.0]);
         let after = from.then_in_scene(&own, &declared, &map);
         let p = [7.0, 9.0, 3.0];
         let expected = map.apply(from.in_frame(&own).then(&declared).apply(p));
