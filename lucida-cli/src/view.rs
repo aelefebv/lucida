@@ -9,8 +9,9 @@ use lucida_core::command::ViewportCommand;
 use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
-    AxisReading, BlendMode, ChannelSettings, Colormap, CutReach, DatasetDisplaySettings,
-    DisplayState, DocumentState, RenderMode, Scene, ViewsRecord, declared_channels,
+    AxisReading, BlendMode, ChannelSettings, Colormap, CompareMode, CutReach,
+    DatasetDisplaySettings, DisplayState, DocumentState, RenderMode, Scene, ViewsRecord,
+    declared_channels,
 };
 use lucida_core::view::{AxisPositions, ViewDatasets, ViewLayout};
 use lucida_core::viewer_profile::{
@@ -258,10 +259,16 @@ pub struct DebugStateResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DebugViewerState {
+    /// The active view's camera and axis positions.
     pub camera: Camera,
     pub view: AxisPositions,
     pub display: DisplayState,
     pub dataset_order: Vec<String>,
+    /// Every view, in the form a saved view records them.
+    pub views: ViewsRecord,
+    /// How the two views of a layout of two link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<LinksReading>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -482,6 +489,21 @@ pub enum ViewChange {
     /// Show the view at this place alone across the canvas, or every view
     /// again with `None`.
     Maximize(Option<usize>),
+    /// Compare `a` with `b` in the request's view, shown as `shown` says.
+    Compare {
+        a: String,
+        b: String,
+        shown: CompareShown,
+    },
+}
+
+/// How a comparison shows its pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompareShown {
+    /// Split at this fraction of the view's width.
+    Swipe(f64),
+    /// In turn, flipping this many times a second, or waiting to be flipped.
+    Blink(Option<f64>),
 }
 
 /// A change, and the view it acts in, which becomes the active view first as
@@ -510,6 +532,10 @@ impl ViewRequest {
                 .iter()
                 .map(|selector| resolve_dataset_id(&stored.scene.document, selector))
                 .collect::<Result<Vec<_>, _>>()?,
+            ViewChange::Compare { a, b, .. } => vec![
+                resolve_dataset_id(&stored.scene.document, a)?,
+                resolve_dataset_id(&stored.scene.document, b)?,
+            ],
             _ => Vec::new(),
         };
         let view = self.view;
@@ -533,6 +559,21 @@ impl ViewRequest {
                 let view = shown.map(|index| stored.view_id(index)).transpose()?;
                 stored.apply(ViewportCommand::MaximizeView { view })
             }),
+            ViewChange::Compare { shown, .. } => steer(stored, view).and_then(|()| {
+                let [a, b] = [ids[0].clone(), ids[1].clone()];
+                let (mode, then) = match *shown {
+                    CompareShown::Swipe(at) => (
+                        CompareMode::Swipe,
+                        Some(ViewportCommand::SetComparisonDivider { at }),
+                    ),
+                    CompareShown::Blink(rate) => (
+                        CompareMode::Blink,
+                        rate.map(|rate| ViewportCommand::SetBlinkRate { rate: Some(rate) }),
+                    ),
+                };
+                stored.apply(ViewportCommand::Compare { a, b, mode })?;
+                then.map_or(Ok(()), |command| stored.apply(command))
+            }),
         };
         applied.map_err(profile_command_error)
     }
@@ -552,6 +593,7 @@ impl ViewRequest {
             ViewChange::Show { .. } => "view show",
             ViewChange::Activate => "view active",
             ViewChange::Maximize(_) => "view maximize",
+            ViewChange::Compare { .. } => "view compare",
         }
     }
 }
@@ -1253,13 +1295,17 @@ pub fn format_debug_state_human(output: &DebugStateOutput) -> String {
         format!("Camera: {}", format_camera(&output.result.viewer.camera)),
         format!("View: {}", format_view(&output.result.viewer.view)),
         format!("Display: {}", format_display(&output.result.viewer.display)),
-        format!(
-            "Datasets: {}  Peers: {}  Generated datasets: {}",
-            output.result.datasets.len(),
-            output.result.peers.len(),
-            output.result.generated_availability.len()
-        ),
     ];
+    lines.extend(format_views(
+        &output.result.viewer.views,
+        output.result.viewer.links.as_ref(),
+    ));
+    lines.extend([format!(
+        "Datasets: {}  Peers: {}  Generated datasets: {}",
+        output.result.datasets.len(),
+        output.result.peers.len(),
+        output.result.generated_availability.len()
+    )]);
     for dataset in &output.result.datasets {
         let layout = dataset.active_layout_id.as_deref().unwrap_or("default");
         lines.push(format!(
@@ -1378,9 +1424,29 @@ fn format_views(views: &ViewsRecord, links: Option<&LinksReading>) -> Option<Str
                 .collect::<Vec<_>>()
                 .join(", "),
         };
+        let compares = view.comparison.as_ref().map(|c| match c.mode {
+            CompareMode::Swipe => format!(
+                ", comparing {} | {} split at {:.2}",
+                c.a.0, c.b.0, c.divider
+            ),
+            CompareMode::Blink => {
+                let shown = match c.showing {
+                    lucida_core::scene::Side::A => &c.a,
+                    lucida_core::scene::Side::B => &c.b,
+                };
+                let rate = c
+                    .rate
+                    .map_or_else(|| "still".to_string(), |rate| format!("{rate}/s"));
+                format!(
+                    ", blinking {} and {}, showing {} ({rate})",
+                    c.a.0, c.b.0, shown.0
+                )
+            }
+        });
         lines.push(format!(
-            "  view {at}: {} shows {shows}",
-            format_camera(&view.camera)
+            "  view {at}: {} shows {shows}{}",
+            format_camera(&view.camera),
+            compares.unwrap_or_default()
         ));
     }
     if let Some(links) = links {
@@ -2073,6 +2139,8 @@ fn debug_state_result(
                 .iter()
                 .map(|dataset_id| dataset_id.0.clone())
                 .collect(),
+            views: scene.views_record(true),
+            links: ProfileScene::from(scene.clone()).links(),
         },
         datasets: debug_dataset_states(snapshot, scene),
         peers: peer_list_result(snapshot).peers,
@@ -2545,6 +2613,12 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::MoveDatasetToView { .. } => "view move-dataset",
         ViewportCommand::MaximizeView { .. } => "view maximize",
         ViewportCommand::SetViewLink { .. } => "view link",
+        ViewportCommand::Compare { .. } => "view compare",
+        ViewportCommand::EndComparison => "view compare --end",
+        ViewportCommand::SetComparisonMode { .. } => "view compare mode",
+        ViewportCommand::SetComparisonDivider { .. } => "view compare --swipe",
+        ViewportCommand::FlipComparison => "view compare flip",
+        ViewportCommand::SetBlinkRate { .. } => "view compare --blink",
         ViewportCommand::Pan { .. } => "view pan",
         ViewportCommand::ZoomBy { .. } => "view zoom",
         ViewportCommand::SetCenter { .. } => "view center",
@@ -3321,8 +3395,60 @@ mod tests {
 
         assert_eq!(value["diagnostic_kind"], "workspace_scene_state");
         assert!(value["viewer"]["camera"].is_object());
+        assert_eq!(value["viewer"]["views"]["layout"], "single");
+        assert!(value["viewer"].get("links").is_none());
         assert!(value["datasets"].as_array().unwrap().len() >= 2);
         assert!(!value["caveats"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn debug_state_reports_every_view_and_how_two_link() {
+        let snapshot = display_snapshot();
+        let layout = ViewRequest {
+            view: None,
+            change: ViewChange::Layout {
+                layout: ViewLayout::Columns,
+                datasets: vec!["wds-test".into(), "wds-other".into()],
+            },
+        };
+        let laid_out = apply_presence_command(&snapshot, layout, None).unwrap();
+        let mut presence = presence(7, [0.0, 0.0]);
+        presence.camera = Some(laid_out.camera.clone());
+        presence.views = laid_out.presence_views.clone();
+        let snapshot = WorkspaceSnapshot {
+            peers: vec![presence],
+            ..snapshot
+        };
+        let scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
+        let source = DiagnosticViewSource {
+            kind: DiagnosticViewSourceKind::Peer,
+            client_id: Some(7),
+            profile: None,
+            user_email: None,
+            seed_source: None,
+        };
+        let result = debug_state_result(&snapshot, source, &scene);
+        assert_eq!(result.viewer.views.layout, ViewLayout::Columns);
+        assert!(result.viewer.links.is_some());
+    }
+
+    #[test]
+    fn a_pair_that_does_not_line_up_is_refused_with_why() {
+        let request = ViewRequest {
+            view: None,
+            change: ViewChange::Compare {
+                a: "wds-test".into(),
+                b: "wds-other".into(),
+                shown: CompareShown::Swipe(0.4),
+            },
+        };
+        let error = apply_presence_command(&display_snapshot(), request, None).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Config);
+        assert!(
+            error.message.contains("no physical scale"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

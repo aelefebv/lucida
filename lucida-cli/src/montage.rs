@@ -325,6 +325,17 @@ pub fn with_scale_bar_param(url: &str, shown: bool) -> String {
     with_query_param(url, "scale_bar", if shown { "1" } else { "0" })
 }
 
+/// Ask a viewer page to hold still what would run on its own, a running
+/// blink, so it settles and shows the side its comparison records.
+pub fn with_still_param(url: &str) -> String {
+    with_query_param(url, "still", "1")
+}
+
+/// Ask the capture surface to draw four-up's plane lines over the views.
+pub fn with_plane_lines_param(url: &str) -> String {
+    with_query_param(url, "plane_lines", "1")
+}
+
 /// Add `key=value` to a viewer URL's query string, keeping any `#view=…`
 /// fragment after it.
 fn with_query_param(url: &str, key: &str, value: &str) -> String {

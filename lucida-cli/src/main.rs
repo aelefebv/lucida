@@ -86,7 +86,7 @@ use crate::saved_view::{
 };
 use crate::status::{ServerClient, StatusReport, format_status_human};
 use crate::view::{
-    DatasetDisplayCommand, DatasetPresenceOutput, DebugStateOutput, PeerCursorOutput,
+    CompareShown, DatasetDisplayCommand, DatasetPresenceOutput, DebugStateOutput, PeerCursorOutput,
     PeerFollowOutput, PeerListOutput, PeerWorkspaceClient, ViewApplyOutput, ViewChange,
     ViewRequest, ViewWorkspaceClient, ViewerProfileClient, ViewerProfileOutput, ViewerSourceOutput,
     format_dataset_presence_human, format_debug_state_human, format_diagnostic_source,
@@ -747,12 +747,8 @@ enum ViewCommand {
         layout: ViewLayoutValue,
         /// Workspace-local dataset ids or unambiguous names
         datasets: Vec<String>,
-        /// Then capture the canvas to this PNG, and each view beside it as
-        /// `<stem>-view-<N>.png`, as `viewer screenshot --each-view` does
-        #[arg(long, value_name = "PNG")]
-        screenshot: Option<String>,
         #[command(flatten)]
-        capture: CaptureArgs,
+        then: ThenCapture,
     },
     /// Show datasets in the view --view names: moved there and out of every
     /// other view, or with --keep as well as wherever they show
@@ -787,6 +783,34 @@ enum ViewCommand {
     Link {
         property: LinkPropertyValue,
         mode: LinkModeValue,
+    },
+    /// Compare two datasets that line up, in one view
+    ///
+    /// Splits the view by a divider, A left of it and B right (--swipe, the
+    /// default, at a fraction of the view's width), or shows them in turn
+    /// (--blink, A first, flipping HZ times a second when given: 1, 2 or 4).
+    /// Every other dataset the view shows is set aside while they compare.
+    /// Two datasets line up when each declares length units or was placed by
+    /// hand (`dataset transform`), and they overlap. A capture of a blink shows
+    /// A. --end stops comparing.
+    Compare {
+        /// Left of the divider, and what a blink shows first
+        #[arg(required_unless_present = "end")]
+        a: Option<String>,
+        /// Right of the divider
+        #[arg(required_unless_present = "end")]
+        b: Option<String>,
+        /// Split the view at this fraction of its width, from 0 to 1
+        #[arg(long, value_name = "FRACTION", conflicts_with_all = ["blink", "end"])]
+        swipe: Option<f64>,
+        /// Show them in turn, flipping HZ times a second when given
+        #[arg(long, value_name = "HZ", num_args = 0..=1, conflicts_with = "end")]
+        blink: Option<Option<f64>>,
+        /// Stop comparing in the view
+        #[arg(long, conflicts_with_all = ["a", "b"])]
+        end: bool,
+        #[command(flatten)]
+        then: ThenCapture,
     },
 }
 
@@ -830,20 +854,42 @@ impl ViewCommand {
                     mode: (*mode).into(),
                 })
             }
+            ViewCommand::Compare { end: true, .. } => {
+                ViewChange::Command(ViewportCommand::EndComparison)
+            }
+            ViewCommand::Compare {
+                a: Some(a),
+                b: Some(b),
+                swipe,
+                blink,
+                ..
+            } => ViewChange::Compare {
+                a: a.clone(),
+                b: b.clone(),
+                shown: match (swipe, blink) {
+                    (_, Some(rate)) => CompareShown::Blink(*rate),
+                    (Some(at), None) => CompareShown::Swipe(*at),
+                    (None, None) => CompareShown::Swipe(0.5),
+                },
+            },
+            ViewCommand::Compare { .. } => {
+                return Err(CliError::config(
+                    "`view compare` names two datasets, or stops comparing with --end",
+                ));
+            }
             plain => ViewChange::Command(plain.viewport_command()?),
         })
     }
 
     /// Where `view layout --screenshot` writes, and how it renders.
     fn screenshot(&self) -> Option<(&str, &CaptureArgs)> {
-        match self {
-            ViewCommand::Layout {
-                screenshot: Some(output),
-                capture,
-                ..
-            } => Some((output.as_str(), capture)),
-            _ => None,
-        }
+        let then = match self {
+            ViewCommand::Layout { then, .. } | ViewCommand::Compare { then, .. } => then,
+            _ => return None,
+        };
+        then.screenshot
+            .as_deref()
+            .map(|output| (output, &then.capture))
     }
 
     fn viewport_command(&self) -> Result<ViewportCommand, CliError> {
@@ -896,7 +942,8 @@ impl ViewCommand {
             | ViewCommand::Show { .. }
             | ViewCommand::Active { .. }
             | ViewCommand::Maximize { .. }
-            | ViewCommand::Link { .. } => {
+            | ViewCommand::Link { .. }
+            | ViewCommand::Compare { .. } => {
                 unreachable!("ViewCommand::change maps the commands that name views")
             }
         })
@@ -984,6 +1031,10 @@ struct CaptureArgs {
     /// Leave each view's scale bar out of the capture
     #[arg(long)]
     no_scale_bar: bool,
+    /// Draw four-up's plane lines over the views, as the viewer page does. A
+    /// capture of one view or of the canvas leaves them out otherwise
+    #[arg(long)]
+    plane_lines: bool,
 }
 
 impl CaptureArgs {
@@ -993,8 +1044,20 @@ impl CaptureArgs {
             height: self.height,
             device_pixel_ratio: self.device_pixel_ratio,
             scale_bar: !self.no_scale_bar,
+            plane_lines: self.plane_lines,
         }
     }
+}
+
+/// A capture a view change takes once it is stored.
+#[derive(clap::Args, Debug, Clone)]
+struct ThenCapture {
+    /// Then capture the canvas to this PNG, and each view beside it as
+    /// `<stem>-view-<N>.png`, as `viewer screenshot --each-view` does
+    #[arg(long, value_name = "PNG")]
+    screenshot: Option<String>,
+    #[command(flatten)]
+    capture: CaptureArgs,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -5114,6 +5177,7 @@ fn capture_options(width: u32, height: u32, scale_bar: bool) -> CaptureOptions {
         height,
         device_pixel_ratio: viewport.device_scale_factor,
         scale_bar,
+        plane_lines: false,
     }
 }
 
@@ -6183,6 +6247,62 @@ mod tests {
             "--each-view",
         ]);
         assert!(refused.is_err());
+    }
+
+    #[test]
+    fn view_compare_sets_a_swipe_a_blink_or_ends() {
+        let change = |args: &[&str]| {
+            let mut argv = vec!["view", "compare"];
+            argv.extend_from_slice(args);
+            let Command::View { command, .. } = parse(&argv).command else {
+                panic!("expected view compare");
+            };
+            command.change()
+        };
+        let shown = |args: &[&str]| match change(args).unwrap() {
+            ViewChange::Compare { shown, .. } => shown,
+            other => panic!("expected a comparison, got {other:?}"),
+        };
+        assert_eq!(shown(&["a", "b"]), CompareShown::Swipe(0.5));
+        assert_eq!(
+            shown(&["a", "b", "--swipe", "0.4"]),
+            CompareShown::Swipe(0.4)
+        );
+        assert_eq!(shown(&["a", "b", "--blink"]), CompareShown::Blink(None));
+        assert_eq!(
+            shown(&["a", "b", "--blink", "2"]),
+            CompareShown::Blink(Some(2.0))
+        );
+        assert!(matches!(
+            change(&["--end"]).unwrap(),
+            ViewChange::Command(ViewportCommand::EndComparison)
+        ));
+
+        let captured = parse(&[
+            "view",
+            "compare",
+            "a",
+            "b",
+            "--screenshot",
+            "s.png",
+            "--plane-lines",
+        ]);
+        let Command::View { command, .. } = captured.command else {
+            panic!("expected view compare");
+        };
+        let (path, capture) = command.screenshot().unwrap();
+        assert_eq!(path, "s.png");
+        assert!(capture.options().plane_lines);
+
+        for refused in [
+            &["view", "compare", "a"][..],
+            &["view", "compare", "a", "b", "--swipe", "0.4", "--blink"],
+            &["view", "compare", "a", "b", "--end"],
+        ] {
+            let mut argv = vec!["lucida"];
+            argv.extend_from_slice(refused);
+            assert!(Cli::try_parse_from(argv).is_err(), "{refused:?}");
+        }
     }
 
     #[test]

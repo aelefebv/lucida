@@ -511,6 +511,11 @@ impl WasmScene {
         self.inner.flip_comparison();
     }
 
+    /// Run a blink at `rate` flips a second, or hold it with `undefined`.
+    pub fn set_blink_rate(&mut self, rate: Option<f64>) {
+        self.inner.set_blink_rate(rate);
+    }
+
     /// What of `view`'s width `dataset_id` shows under its comparison, as
     /// `[from, to]` fractions from its left edge ([`Comparison::span`]).
     /// Empty without a comparison, which leaves the dataset everywhere, and

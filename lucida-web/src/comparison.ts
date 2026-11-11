@@ -21,6 +21,8 @@ export interface Comparison {
   readonly divider: number;
   /** What a blink shows. */
   readonly showing: "a" | "b";
+  /** Flips a second while a blink runs, absent while it waits to be flipped. */
+  readonly rate?: number;
 }
 
 /** Whether two datasets line up in physical space, from `Scene::line_up`. */
@@ -42,6 +44,7 @@ export type ComparisonScene = Pick<
   | "set_comparison_mode"
   | "set_comparison_divider"
   | "flip_comparison"
+  | "set_blink_rate"
 >;
 
 export function readComparison(scene: Pick<WasmScene, "comparison">): Comparison | null {
@@ -141,6 +144,8 @@ export interface ComparisonActions {
   setMode(mode: CompareMode): void;
   setDivider(at: number): void;
   flip(): void;
+  /** Run a blink at `rate` flips a second, or hold it with null. */
+  setBlinkRate(rate: number | null): void;
 }
 
 export function comparisonActions(
@@ -170,5 +175,6 @@ export function comparisonActions(
     setMode: (mode) => write((s) => s.set_comparison_mode(mode)),
     setDivider: (at) => write((s) => s.set_comparison_divider(at)),
     flip: () => write((s) => s.flip_comparison()),
+    setBlinkRate: (rate) => write((s) => s.set_blink_rate(rate ?? undefined)),
   };
 }

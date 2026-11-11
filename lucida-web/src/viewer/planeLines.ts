@@ -10,6 +10,7 @@
  */
 import { useEffect } from "react";
 import type { WasmScene } from "lucida-core";
+import { isCaptureSurface } from "../captureSurface.ts";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import type { SceneStore } from "../sceneStore.ts";
 import { isViewPane } from "./viewPane.ts";
@@ -36,6 +37,18 @@ interface Read {
 }
 
 const NO_LINES: readonly PlaneLine[] = [];
+
+/**
+ * The query parameter a capture sets to `1` to draw the plane lines, which
+ * the capture surface otherwise leaves out with everything over the canvas.
+ */
+export const PLANE_LINES_PARAM = "plane_lines";
+
+/** Whether this page is a capture that asked for the plane lines. */
+export function planeLinesCaptured(search?: string): boolean {
+  const raw = search ?? (typeof window === "undefined" ? "" : window.location.search);
+  return isCaptureSurface(raw) && new URLSearchParams(raw).get(PLANE_LINES_PARAM) === "1";
+}
 
 /** Whether `line` spans its view top to bottom, so a drag moves it across. */
 export function isUpright(line: PlaneLine): boolean {
