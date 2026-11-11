@@ -670,7 +670,7 @@ describe("the trace seam", () => {
       });
       // The viewers' own constants, so the driver's pixels are the page's.
       expect(seam.inputScale.orbitRadiansPerPixel).toBe(0.005);
-      expect(seam.inputScale.sliceZoomInPerNotch).toBe(1.1);
+      expect(seam.inputScale.wheelZoomPerPixel).toBeCloseTo(Math.log(1.1) / 100, 15);
       expect(seam.scrub("t", 3)).toEqual({ applied: true, reason: null });
       expect(seam.plane("xz")).toEqual({ applied: true, reason: null });
       expect(seam.plane("zz" as never)).toEqual({ applied: false, reason: "a slice plane is xy, xz or yz, not zz" });

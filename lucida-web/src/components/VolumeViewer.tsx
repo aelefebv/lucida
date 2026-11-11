@@ -1,6 +1,6 @@
 /** 3D volume viewer. WebGPU rendering runs in a worker via RenderClient. */
 import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { ORBIT_RADIANS_PER_PIXEL, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
+import { ORBIT_RADIANS_PER_PIXEL } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
 import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
@@ -18,6 +18,7 @@ import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToScreenPx, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
+import { wheelZoom } from "../input/wheel.ts";
 import { frameClock } from "../frameClock.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CameraMode } from "../sceneStore.ts";
@@ -526,9 +527,11 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
   const onArcballWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      const delta = e.deltaY * VOLUME_ZOOM_PER_WHEEL_DELTA;
+      const factor = wheelZoom(e);
+      if (factor === 1) return;
       breakFollow();
-      applyViewportCommand(scene, { type: "arcball_zoom", delta });
+      // The camera comes in by the factor, so what it shows grows by it, as a slice view's does.
+      applyViewportCommand(scene, { type: "arcball_zoom", delta: 1 / factor - 1 });
       emitPresence();
       loopRef.current?.markInput("zoom", e.timeStamp);
       setLowRes();
@@ -540,9 +543,8 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
   const onFlyWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      // Scroll up (negative deltaY) = faster, scroll down = slower
-      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
-      scene.fly_adjust_speed(factor);
+      // The wheel scales the speed by the factor it zooms by elsewhere, up faster.
+      scene.fly_adjust_speed(wheelZoom(e));
     },
     [scene],
   );

@@ -10,6 +10,7 @@ import { createMinimapState, tickMinimap } from "../minimapPath.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { MinimapOverlayData, TickContext } from "../renderLoopTypes.ts";
 import { datasetId, fixture, loadWasm, manifest, openedScene, type ViewFixture } from "../viewProperties.ts";
+import { wheelZoom } from "../input/wheel.ts";
 import { projectToCanvas, sliceLocalToUnit, sliceUnitDepth, transformPoint } from "./minimapMath.ts";
 import {
   MinimapNavigator,
@@ -22,6 +23,9 @@ import {
 
 const MINIMAP_SIZE = 200;
 const CANVAS_CSS: [number, number] = [800, 600];
+/** What one mouse notch zooms by, in and out, as the main view reads it. */
+const NOTCH_IN = wheelZoom({ deltaY: -100, deltaMode: 0, ctrlKey: false });
+const NOTCH_OUT = wheelZoom({ deltaY: 100, deltaMode: 0, ctrlKey: false });
 
 function mainCanvas(): HTMLCanvasElement {
   return { clientWidth: CANVAS_CSS[0], clientHeight: CANVAS_CSS[1] } as unknown as HTMLCanvasElement;
@@ -217,8 +221,8 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       };
       const before = onScreen();
       const zoom = scene.zoom(scene.active_view());
-      expect(navigator.wheelAt(...css(frame, sceneToMinimap(frame, frame.members[0], ...spot)!), -100, 7)).toBe(true);
-      expect(scene.zoom(scene.active_view())).toBeGreaterThan(zoom);
+      expect(navigator.wheelAt(...css(frame, sceneToMinimap(frame, frame.members[0], ...spot)!), NOTCH_IN, 7)).toBe(true);
+      expect(scene.zoom(scene.active_view()) / zoom).toBeCloseTo(1.1, 9);
       expectNear(onScreen(), before, 0.05 * scene.zoom(scene.active_view()));
       expect(loop.markInput).toHaveBeenCalledWith("zoom", 7);
     });
@@ -278,6 +282,21 @@ describe.each([1, 2])("minimap input at device pixel ratio %i", (ratio) => {
       const [w, h] = [CANVAS_CSS[0] * ratio, CANVAS_CSS[1] * ratio];
       expectNear(scene.project_to_screen(...picked!.world), [w / 2, h / 2], 1);
       expect(loop.markInput).toHaveBeenCalledWith("pan", 3);
+    });
+
+    it("zooms by a wheel notch as far as the slice view does, and back out", () => {
+      vi.useFakeTimers();
+      const { scene, navigator, loop } = setup();
+      const zoom = scene.zoom(scene.active_view());
+      expect(navigator.wheelAt(100, 100, NOTCH_IN, 4)).toBe(true);
+      expect(scene.zoom(scene.active_view()) / zoom).toBeCloseTo(1.1, 9);
+      expect(loop.setRenderScale).toHaveBeenLastCalledWith(0.5);
+      expect(navigator.wheelAt(100, 100, NOTCH_OUT, 5)).toBe(true);
+      expect(scene.zoom(scene.active_view()) / zoom).toBeCloseTo(1, 9);
+      expect(loop.markInput).toHaveBeenCalledWith("zoom", 5);
+      expect(navigator.wheelAt(100, 100, 1, 6)).toBe(false);
+      vi.runAllTimers();
+      expect(loop.setRenderScale).toHaveBeenLastCalledWith(1);
     });
 
     it("leaves the target alone on a click off the data", () => {

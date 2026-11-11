@@ -13,7 +13,6 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { MinimapOverlayData } from "../renderLoopTypes.ts";
 import type { InputKind } from "../trace/types.ts";
 import { exceedsPressSlop } from "./annotationInteraction.ts";
-import { SLICE_ZOOM_IN_PER_NOTCH, SLICE_ZOOM_OUT_PER_NOTCH, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
 import {
   canvasRay,
   projectToCanvas,
@@ -353,21 +352,21 @@ export class MinimapNavigator {
     if (press && !press.member) this.restoreScale(SCALE_RESTORE_DELAY_MS);
   }
 
-  /** A wheel event over a point. Returns whether it moved the view. */
-  wheelAt(x: number, y: number, deltaY: number, atMs?: number): boolean {
+  /** A wheel event over a point, as the factor `wheelZoom` reads from it.
+   * Returns whether it moved the view. */
+  wheelAt(x: number, y: number, factor: number, atMs?: number): boolean {
     const target = this.target();
-    if (!target || deltaY === 0) return false;
+    if (!target || factor === 1) return false;
     const { scene, frame } = target;
     if (frame.mode === "volume") {
       this.lowerScale();
-      this.steer(() => applyViewportCommand(scene, { type: "arcball_zoom", delta: deltaY * VOLUME_ZOOM_PER_WHEEL_DELTA }), "zoom", atMs);
+      this.steer(() => applyViewportCommand(scene, { type: "arcball_zoom", delta: 1 / factor - 1 }), "zoom", atMs);
       this.restoreScale(GESTURE_RESTORE_DELAY_MS);
       return true;
     }
     const pick = this.pick(frame, x, y);
     if (!pick) return false;
     const [px, py] = pick.scene;
-    const factor = deltaY > 0 ? SLICE_ZOOM_OUT_PER_NOTCH : SLICE_ZOOM_IN_PER_NOTCH;
     this.steer(() => {
       const before = scene.zoom(scene.active_view());
       const [cx, cy] = scene.center(scene.active_view());
