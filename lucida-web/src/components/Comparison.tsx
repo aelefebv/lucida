@@ -2,7 +2,7 @@
  * The controls of a view's comparison: a bar over the view to switch between
  * swipe and blink, blink by key or at a rate, and stop; and the divider a
  * swipe is dragged by. Each acts on the active view, which a press in the
- * view's controls makes their view first (`viewer/ViewComparisons.tsx`).
+ * view's controls makes their view first (`viewer/ViewOverlays.tsx`).
  */
 import { useEffect, useRef, useState } from "react";
 import { Slider, SliderThumb, SliderTrack } from "react-aria-components";

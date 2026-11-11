@@ -28,9 +28,8 @@ import type { DatasetState } from "../types.ts";
 import { useEngineParts } from "./engineParts.ts";
 import { useViewerLoop } from "./useViewerLoop.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
-import { ViewComparisons } from "./ViewComparisons.tsx";
+import { ViewOverlays } from "./ViewOverlays.tsx";
 import { comparisonActions } from "../comparison.ts";
-import { WithheldNotice } from "./WithheldNotice.tsx";
 import type { ViewPane } from "../sceneStore.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
 
@@ -241,12 +240,6 @@ export function CanvasLayers({
             surface={surface}
           />
         )}
-        <WithheldNotice
-          withheld={pane.withheld}
-          views={views}
-          nameOf={nameOf}
-          coverage={settles.find((settle) => settle.view === pane.id)}
-        />
       </>
     );
   };
@@ -256,12 +249,13 @@ export function CanvasLayers({
         {paneContent}
       </ViewPanes>
       {hasDatasets && (
-        <ViewComparisons
+        <ViewOverlays
           views={views}
           store={engine.store}
           actions={comparison}
           nameOf={nameOf}
           activate={viewLayout.activate}
+          coverageOf={(view) => settles.find((settle) => settle.view === view)}
         />
       )}
       {viewers && panesRoot && (

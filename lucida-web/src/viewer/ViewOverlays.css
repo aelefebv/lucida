@@ -1,0 +1,32 @@
+/* Over the view panes; only the compare bar and the divider take the pointer. */
+.lc-view-overlays {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.lc-view-overlay {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The view's top, clear on both sides of the room the tool palette takes at
+   the canvas's top left, which a view at the canvas's edge reaches under.
+   The bottom of the stage holds the other floating controls. */
+.lc-view-overlay-top {
+  position: absolute;
+  top: var(--lc-space-2);
+  left: calc(var(--lc-control-h) * 2 + var(--lc-space-4));
+  right: calc(var(--lc-control-h) * 2 + var(--lc-space-4));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--lc-space-2);
+  pointer-events: none;
+}
+
+.lc-view-comparison-bar {
+  max-width: 100%;
+  pointer-events: auto;
+}

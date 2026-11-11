@@ -1652,7 +1652,7 @@ const MINIMAP_RECT_PROBE: &str = r#"(() => {
 /// the capture surface lays it out at no size. Another view's comparison
 /// keeps a divider of its own.
 const SWIPE_DIVIDER_PROBE: &str = r#"(() => {
-  const divider = document.querySelector('.lc-view-comparison[data-active] .lc-swipe-divider');
+  const divider = document.querySelector('.lc-view-overlay[data-active] .lc-swipe-divider');
   if (!divider) return null;
   const rect = divider.getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) return null;
@@ -1662,7 +1662,7 @@ const SWIPE_DIVIDER_PROBE: &str = r#"(() => {
 /// The span the active view's divider slides along: the view's rectangle,
 /// which a divider's place is a fraction of.
 const SWIPE_TRACK_PROBE: &str = r#"(() => {
-  const track = document.querySelector('.lc-view-comparison[data-active] .lc-swipe');
+  const track = document.querySelector('.lc-view-overlay[data-active] .lc-swipe');
   if (!track) return null;
   const rect = track.getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) return null;
