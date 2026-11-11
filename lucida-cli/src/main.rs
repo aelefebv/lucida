@@ -600,6 +600,9 @@ enum DatasetCommand {
         /// Also write a JSON sidecar at <out>.json
         #[arg(long)]
         json: bool,
+        /// Leave each view's scale bar out of the capture
+        #[arg(long)]
+        no_scale_bar: bool,
         /// Seconds to wait for the workspace snapshot and each render
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -637,6 +640,9 @@ enum DatasetCommand {
         /// Also write the JSON sidecar at <out>.json (or <dataset>.json)
         #[arg(long)]
         json: bool,
+        /// Leave each view's scale bar out of the capture
+        #[arg(long)]
+        no_scale_bar: bool,
         /// Seconds to wait for the workspace snapshot and each render
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
@@ -1117,6 +1123,9 @@ enum ViewerCommand {
         /// Browser viewport height in pixels
         #[arg(long, default_value_t = 800)]
         height: u32,
+        /// Leave each view's scale bar out of the capture
+        #[arg(long)]
+        no_scale_bar: bool,
         /// Seconds to wait for workspace state and browser render
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -1134,6 +1143,9 @@ enum ViewerCommand {
         /// Browser viewport height in pixels
         #[arg(long, default_value_t = 800)]
         height: u32,
+        /// Leave each view's scale bar out of the capture
+        #[arg(long)]
+        no_scale_bar: bool,
         /// Seconds to wait for workspace state and browser render
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -2422,6 +2434,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 cols,
                 cell_px,
                 json,
+                no_scale_bar,
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
@@ -2518,7 +2531,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     }));
                     // Capture through the chrome-free render surface; the sidecar
                     // keeps the clean interactive URL above for drill-in.
-                    urls.push(montage::with_render_param(&url));
+                    urls.push(montage::with_scale_bar_param(
+                        &montage::with_render_param(&url),
+                        !*no_scale_bar,
+                    ));
                 }
 
                 let labels: Vec<String> =
@@ -2571,6 +2587,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 out,
                 cell_px,
                 json,
+                no_scale_bar,
                 timeout_seconds,
             } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
@@ -2651,6 +2668,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         &sidecar,
                         token.as_ref(),
                         *cell_px,
+                        !*no_scale_bar,
                         wait,
                     )
                     .await
@@ -3441,6 +3459,7 @@ async fn emit_viewer_command(
             from_peer,
             width,
             height,
+            no_scale_bar,
             timeout_seconds: screenshot_timeout_seconds,
         } => {
             let wait = Duration::from_secs(screenshot_timeout_seconds.unwrap_or(timeout_seconds));
@@ -3449,8 +3468,15 @@ async fn emit_viewer_command(
                     .source_state(&workspace, profile, *from_peer, None, wait)
                     .await?;
                 let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture_viewer_screenshot(
+                    &url,
+                    token.as_ref(),
+                    output_path,
+                    (*width, *height),
+                    !*no_scale_bar,
+                    wait,
+                )
+                .await?;
                 let source = result.source.clone();
                 let payload = serde_json::json!({
                     "server": server,
@@ -3471,8 +3497,15 @@ async fn emit_viewer_command(
             } else {
                 let result = view_client.state(&workspace, profile, wait).await?;
                 let url = viewer_profile_web_url(&target, profile)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture_viewer_screenshot(
+                    &url,
+                    token.as_ref(),
+                    output_path,
+                    (*width, *height),
+                    !*no_scale_bar,
+                    wait,
+                )
+                .await?;
                 let payload = serde_json::json!({
                     "server": server,
                     "workspace": workspace,
@@ -3493,6 +3526,7 @@ async fn emit_viewer_command(
             from_peer,
             width,
             height,
+            no_scale_bar,
             timeout_seconds: screenshot_timeout_seconds,
         } => {
             let wait = Duration::from_secs(screenshot_timeout_seconds.unwrap_or(timeout_seconds));
@@ -3507,8 +3541,15 @@ async fn emit_viewer_command(
                     )
                     .await?;
                 let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture_viewer_screenshot(
+                    &url,
+                    token.as_ref(),
+                    output_path,
+                    (*width, *height),
+                    !*no_scale_bar,
+                    wait,
+                )
+                .await?;
                 let source = result.source.clone();
                 let payload = serde_json::json!({
                     "server": server,
@@ -3531,8 +3572,15 @@ async fn emit_viewer_command(
                     .overview(&workspace, profile, [*width, *height], wait)
                     .await?;
                 let url = viewer_profile_web_url(&target, profile)?;
-                capture_viewer_screenshot(&url, token.as_ref(), output_path, *width, *height, wait)
-                    .await?;
+                capture_viewer_screenshot(
+                    &url,
+                    token.as_ref(),
+                    output_path,
+                    (*width, *height),
+                    !*no_scale_bar,
+                    wait,
+                )
+                .await?;
                 let payload = serde_json::json!({
                     "server": server,
                     "workspace": workspace,
@@ -4643,13 +4691,13 @@ async fn render_explore_contact_sheet(
     sidecar: &ExplorationSidecar,
     token: Option<&EffectiveToken>,
     cell_px: u32,
+    scale_bar: bool,
     wait: Duration,
 ) -> Result<Vec<u8>, CliError> {
     let mut urls: Vec<String> = Vec::with_capacity(sidecar.cells.len());
     for cell in &sidecar.cells {
-        urls.push(montage::with_render_param(&viewer_inline_view_web_url(
-            target, &cell.view,
-        )?));
+        let url = montage::with_render_param(&viewer_inline_view_web_url(target, &cell.view)?);
+        urls.push(montage::with_scale_bar_param(&url, scale_bar));
     }
     let labels: Vec<String> = sidecar.cells.iter().map(|c| c.label.clone()).collect();
     let cols = ((sidecar.cells.len() as f64).sqrt().ceil() as u32).clamp(1, 4);
@@ -4673,8 +4721,8 @@ async fn capture_viewer_screenshot(
     url: &str,
     token: Option<&EffectiveToken>,
     output_path: &str,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
+    scale_bar: bool,
     wait: Duration,
 ) -> Result<(), CliError> {
     if width == 0 || height == 0 {
@@ -4682,9 +4730,10 @@ async fn capture_viewer_screenshot(
             "viewer screenshot width and height must be positive",
         ));
     }
+    let url = montage::with_scale_bar_param(url, scale_bar);
 
     browser::with_browser(capture_viewport(width, height), wait, async |browser| {
-        let mut page = browser.open_page(url, token, wait).await?;
+        let mut page = browser.open_page(&url, token, wait).await?;
         let png = page.screenshot_png(wait).await?;
         if let Some(parent) = Path::new(output_path).parent()
             && !parent.as_os_str().is_empty()
@@ -5499,6 +5548,7 @@ mod tests {
             "--cell-px",
             "256",
             "--json",
+            "--no-scale-bar",
             "--timeout-seconds",
             "15",
         ]);
@@ -5514,6 +5564,7 @@ mod tests {
                         out,
                         cell_px,
                         json,
+                        no_scale_bar,
                         timeout_seconds,
                     },
             } => {
@@ -5524,6 +5575,7 @@ mod tests {
                 assert_eq!(out.as_deref(), Some("kids.png"));
                 assert_eq!(cell_px, 256);
                 assert!(json);
+                assert!(no_scale_bar);
                 assert_eq!(timeout_seconds, 15);
             }
             _ => panic!("expected dataset explore"),
@@ -5545,6 +5597,7 @@ mod tests {
                         out,
                         cell_px,
                         json,
+                        no_scale_bar,
                         timeout_seconds,
                     },
             } => {
@@ -5555,6 +5608,7 @@ mod tests {
                 assert!(out.is_none());
                 assert_eq!(cell_px, 320);
                 assert!(!json);
+                assert!(!no_scale_bar);
                 assert_eq!(timeout_seconds, 30);
             }
             _ => panic!("expected dataset explore"),
@@ -6143,6 +6197,7 @@ mod tests {
                         from_peer,
                         width,
                         height,
+                        no_scale_bar,
                         timeout_seconds,
                     },
                 ..
@@ -6151,6 +6206,7 @@ mod tests {
                 assert_eq!(from_peer, Some(9));
                 assert_eq!(width, 900);
                 assert_eq!(height, 700);
+                assert!(!no_scale_bar);
                 assert_eq!(timeout_seconds, Some(60));
             }
             _ => panic!("expected viewer screenshot"),

@@ -27,6 +27,8 @@ import type { CanvasSize } from "../shell/CanvasStage.tsx";
 import type { DatasetState } from "../types.ts";
 import { useEngineParts } from "./engineParts.ts";
 import { useViewerLoop } from "./useViewerLoop.ts";
+import { ScaleBar } from "./ScaleBar.tsx";
+import { useScaleBarShown } from "./scaleBar.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
 import { WithheldNotice } from "./WithheldNotice.tsx";
 import type { ViewPane } from "../sceneStore.ts";
@@ -94,6 +96,7 @@ export function CanvasLayers({
   const { viewMode, z, t, layers, views, maximized } = useSceneView(engine.store);
   // Each view's settle and coverage, with several views.
   const settles = useSyncExternalStore(viewSettleSignal.subscribe, viewSettleSignal.get);
+  const scaleBars = useScaleBarShown();
 
   // A finger's long press stands for both a right-click and a hover.
   const readoutRef = useRef<PixelReadoutHandle>(null);
@@ -244,6 +247,7 @@ export function CanvasLayers({
           nameOf={nameOf}
           coverage={settles.find((settle) => settle.view === pane.id)}
         />
+        {scaleBars && viewers && <ScaleBar scene={viewers.scene} surface={surface} />}
       </>
     );
   };

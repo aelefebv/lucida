@@ -1,12 +1,14 @@
 mod comparison;
 mod layers;
 mod placement;
+mod scale_bar;
 mod types;
 mod views;
 
 pub use comparison::{CompareMode, Comparison, Side};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
+pub use scale_bar::{Arm, Measure, ScaleBar};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
