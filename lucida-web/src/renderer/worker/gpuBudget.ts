@@ -5,12 +5,15 @@
  *
  * Chunk pools start one row or layer deep and grow while the total has room,
  * so slots the planner no longer wants stay resident as fallback for as long
- * as nothing else needs the bytes. When the total is reached:
+ * as nothing else needs the bytes. So do the pools of a dataset no view
+ * plans, its label pools among them. When the total is reached:
  *
  *   1. a full pool takes the slot of one of its own chunks the planner
  *      doesn't want (`findEvictionSlot`);
  *   2. a pool holding only wanted chunks may grow by taking bytes back from
- *      other pools, which shrink to the layers their wanted chunks need;
+ *      other holders: first what datasets no view plans hold, whose label
+ *      pools go whole, then other pools' fallback, each pool shrinking to
+ *      the layers its wanted chunks need;
  *   3. otherwise it evicts its farthest wanted chunk for a nearer one, and
  *      refuses the rest (`atlas-policy`), so the view covers less and the
  *      readout shows the total at its budget.
@@ -32,6 +35,7 @@ import { poolCapBytes } from "../atlasSizing.ts";
 import { bytesPerTexel } from "../dataTypeUtil.ts";
 import {
   labelVolumePoolBytes,
+  removeLabelVolumePool,
   shrinkVolumeAtlas,
   volumeAtlasBytes,
   volumeExtentFor,
@@ -41,6 +45,7 @@ import {
 } from "../volume/atlas.ts";
 import {
   labelSlicePoolBytes,
+  removeLabelSlicePool,
   shrinkSliceAtlas,
   sliceAtlasBytes,
   sliceRowBytes,
@@ -164,7 +169,8 @@ export function measureGpuCapacity(ctx: WorkerCtx, memory: GpuMemoryReport = mea
   const state = ctx.state;
   const pools: GpuPoolCapacity[] = [];
   const limits = getDeviceLimits(ctx.device);
-  const reservedBytes = memory.bytes - memory.chunkBytes;
+  let reservedBytes = memory.bytes - memory.chunkBytes;
+  for (const spare of unplannedLabelPools(state)) reservedBytes -= spare.bytes;
   if (state.volumeAtlases.size + state.sliceAtlases.size === 0) {
     return { budgetBytes: state.gpuTotalBytes, reservedBytes, pools, limits };
   }
@@ -247,7 +253,7 @@ export function handleGpuOutOfMemory(ctx: WorkerCtx): boolean {
 }
 
 /** A chunk pool that could shrink, and by how much. */
-interface Spare {
+interface PoolSpare {
   poolKey: string;
   atlas: AtlasState | SliceAtlasState;
   kind: "volume" | "slice";
@@ -258,15 +264,49 @@ interface Spare {
   minSteps: number;
 }
 
+/** A label pool of a dataset no view plans. It holds one form whole, so it goes whole. */
+interface LabelSpare {
+  poolKey: string;
+  kind: "label";
+  mode: PoolMode;
+  datasetId: string;
+  bytes: number;
+}
+
+type Spare = PoolSpare | LabelSpare;
+
+function spareBytes(spare: Spare): number {
+  return spare.kind === "label" ? spare.bytes : (spare.steps - spare.minSteps) * spare.stepBytes;
+}
+
+function spareDataset(spare: Spare): string {
+  return spare.kind === "label" ? spare.datasetId : spare.atlas.datasetId;
+}
+
+/** The label pools of datasets no view plans: each gives its bytes back whole. */
+function* unplannedLabelPools(state: RendererState): Generator<LabelSpare> {
+  const unplanned = state.unplannedDatasets;
+  for (const [poolKey, pool] of state.labelSlicePools) {
+    if (!unplanned.has(pool.datasetId)) continue;
+    yield { poolKey, kind: "label", mode: "slice", datasetId: pool.datasetId, bytes: labelSlicePoolBytes(pool) };
+  }
+  for (const [poolKey, pool] of state.labelVolumePools) {
+    if (!unplanned.has(pool.datasetId)) continue;
+    yield { poolKey, kind: "label", mode: "volume", datasetId: pool.datasetId, bytes: labelVolumePoolBytes(pool) };
+  }
+}
+
 /**
- * Shrink chunk pools other than `except` until `needed` bytes are free or
- * none can give more: the pool with the most to spare first, each down to the
- * rows or layers its wanted chunks need. What a pool drops is reported
- * evicted, since it went to make room.
+ * Take bytes back from holders other than `except` until `needed` bytes are
+ * free or none can give more. What datasets no view plans hold goes before
+ * the fallback of a dataset on screen, and within each the holder with the
+ * most to spare goes first. A chunk pool shrinks to the rows or layers its
+ * wanted chunks need, and an unplanned dataset's label pool goes whole.
+ * What a holder drops is reported evicted, since it went to make room.
  */
 function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | SliceAtlasState): void {
   const state = ctx.state;
-  const spares: Spare[] = [];
+  const spares: Spare[] = [...unplannedLabelPools(state)];
   for (const [poolKey, atlas] of state.volumeAtlases) {
     if (atlas === except) continue;
     const spare = spareOf(poolKey, atlas, "volume");
@@ -277,11 +317,18 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
     const spare = spareOf(poolKey, atlas, "slice");
     if (spare) spares.push(spare);
   }
-  spares.sort((a, b) => (b.steps - b.minSteps) * b.stepBytes - (a.steps - a.minSteps) * a.stepBytes);
+  const unplanned = (spare: Spare) => (state.unplannedDatasets.has(spareDataset(spare)) ? 1 : 0);
+  spares.sort((a, b) => unplanned(b) - unplanned(a) || spareBytes(b) - spareBytes(a));
 
   const touched = new Map<string, { datasetId: string; mode: PoolMode }>();
   for (const spare of spares) {
     if (needed <= 0) break;
+    if (spare.kind === "label") {
+      if (spare.mode === "slice") removeLabelSlicePool(ctx, spare.poolKey, "evicted");
+      else removeLabelVolumePool(ctx, spare.poolKey, "evicted");
+      needed -= spare.bytes;
+      continue;
+    }
     let freeSteps = Math.min(spare.steps - spare.minSteps, Math.ceil(needed / spare.stepBytes));
     const tier = chunkPoolTier(spare.poolKey);
     let dropped: string[];
@@ -313,7 +360,7 @@ function spareOf(
   poolKey: string,
   atlas: AtlasState | SliceAtlasState,
   kind: "volume" | "slice",
-): Spare | null {
+): PoolSpare | null {
   const tier = chunkPoolTier(poolKey);
   let wanted = 0;
   for (const key of atlas.slots.keys()) {

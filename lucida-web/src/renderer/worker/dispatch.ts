@@ -165,6 +165,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
 
     case "coldState":
+      // A cold state from the page, full, selection or delta, means a view
+      // plans the dataset again. Re-applying a retained one, as for failed
+      // chunks below, does not.
+      ctx.state.unplannedDatasets.delete(msg.datasetId);
       releaseUndrawnViews(ctx, msg.datasetId, msg.drawnViews);
       ctx.state.currentColdState = msg;
       ctx.state.currentEpochs = msg.epochs;
@@ -180,6 +184,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "coldStateSelection":
       // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
+      ctx.state.unplannedDatasets.delete(msg.datasetId);
       applyColdStateSelection(ctx, msg);
       ctx.postWantedSet(msg.datasetId, undefined, msg.view);
       postGpuMemoryIfChanged(ctx);
@@ -188,6 +193,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "coldStateDelta":
       // Posted even when the delta was a no-op, matching the full and
       // selection paths.
+      ctx.state.unplannedDatasets.delete(msg.datasetId);
       releaseUndrawnViews(ctx, msg.datasetId, msg.drawnViews);
       applyColdStateDelta(ctx, msg);
       ctx.postWantedSet(msg.datasetId, undefined, msg.view);
@@ -206,8 +212,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     }
 
     case "datasetUnplanned":
-      // Nothing on the GPU changes, and nothing of the dataset is missing.
+      // Nothing on the GPU changes, and nothing of the dataset is missing,
+      // but its label pools no longer take from what admission may use.
       wantNothingOf(ctx, msg.datasetId);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "removeLayerResources":

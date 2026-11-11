@@ -499,10 +499,10 @@ export function getOrCreateLabelVolumePool(
   return pool;
 }
 
-/** The bytes a label volume pool's texture and indirection hold. */
+/** The bytes a label volume pool holds on the GPU: everything {@link destroyLabelVolumePool} frees. */
 export function labelVolumePoolBytes(pool: LabelVolumePool): number {
   return pool.slotsX * pool.chunkX * pool.slotsY * pool.chunkY * pool.slotsZ * pool.chunkZ * LABEL_VOLUME_BYTES_PER_VOXEL
-    + pool.indirectionData.length * 4;
+    + pool.indirectionData.length * 4 + (pool.descBuffer?.size ?? 0) + (pool.labelColorBuffer?.size ?? 0);
 }
 
 /**

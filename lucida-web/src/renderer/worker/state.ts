@@ -106,6 +106,12 @@ export interface RendererState {
    * over the intensity volume.
    */
   labelVolumePools: Map<string, LabelVolumePool>;
+  /**
+   * Datasets no view plans, from `datasetUnplanned` until the page sends a
+   * cold state for one of their views. Re-applying a retained cold state, for
+   * a failed-chunk list or a new device, leaves a dataset here.
+   */
+  unplannedDatasets: Set<string>;
 
   /** Per view, memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
   rayHits: Map<number, Map<string, [number, number, number]>>;
@@ -191,6 +197,7 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     sliceAtlases: new Map(),
     labelSlicePools: new Map(),
     labelVolumePools: new Map(),
+    unplannedDatasets: new Set(),
     rayHits: new Map(),
     cameraUVs: new Map(),
     currentEpochs: null,

@@ -35,6 +35,7 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
     state.draws.delete(datasetViewKey(id, draw.view));
   }
   state.failedByDataset.delete(id);
+  state.unplannedDatasets.delete(id);
 
   // These maps would otherwise grow for the worker's whole lifetime.
   for (const [memberId, dsId] of state.memberToDataset) {

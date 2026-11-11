@@ -229,7 +229,27 @@ describe("a dataset no view plans", () => {
 
     expect(pool.slots.size).toBe(1);
     expect(drawOf(ctx.state, "ds1", 0)!.wanted.size).toBe(0);
-    expect(posts).toEqual([]);
+    expect(residency(posts)).toEqual([]);
+  });
+
+  it("keeps its label pools, and a cold state that plans it again finds them as they were", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    await dispatchMessage(ctx, sliceWithLabel(0, 0));
+    await dispatchMessage(ctx, labelPlane(0));
+    const pool = ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 0))!;
+    posts.length = 0;
+
+    await dispatchMessage(ctx, { type: "datasetUnplanned", datasetId: "ds1" });
+    // A failed-chunk list re-applies the retained cold state, which plans nothing.
+    await dispatchMessage(ctx, { type: "failedChunks", datasetId: "ds1", images: [] });
+    expect(ctx.state.unplannedDatasets.has("ds1")).toBe(true);
+    await dispatchMessage(ctx, sliceWithLabel(0, 0));
+
+    expect(ctx.state.unplannedDatasets.has("ds1")).toBe(false);
+    expect([...ctx.state.labelSlicePools]).toEqual([[labelSlicePoolKey("label", 0, 0), pool]]);
+    expect((pool.texture as unknown as MockTexture).destroyed).toBe(false);
+    expect(residency(posts)).toEqual([]);
   });
 });
 
@@ -553,15 +573,19 @@ describe("the GPU memory report", () => {
       slots: new Map([["m|k", 0]]),
       views: new Map([[0, { indirectionData: new Uint32Array(16) }], [1, { indirectionData: new Uint32Array(16) }]]),
     } as unknown as SliceAtlasState);
-    state.labelSlicePools.set("b", { width: 100, height: 50 } as never);
-
+    // A label pool counts its texture, its cells' indirection, and the
+    // descriptor and palette its draw built.
+    state.labelSlicePools.set("b", {
+      width: 100, height: 50, indirection: new Uint32Array(8), descBuffer: { size: 256 }, labelColorBuffer: { size: 16 },
+    } as never);
+    const labelBytes = 100 * 50 * 4 + 8 * 4 + 256 + 16;
 
     expect(measureGpuMemory(state)).toEqual({
       budgetBytes: 256 * 1024 * 1024,
-      bytes: 4 * 64 * 2 * 32 * 2 + 2 * 16 * 4 + 100 * 50 * 4,
+      bytes: 4 * 64 * 2 * 32 * 2 + 2 * 16 * 4 + labelBytes,
       chunkBytes: 4 * 64 * 2 * 32 * 2 + 2 * 16 * 4,
       indirectionBytes: 2 * 16 * 4,
-      labelBytes: 100 * 50 * 4,
+      labelBytes,
 
       targetBytes: 0,
       minimapBytes: 0,
