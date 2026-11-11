@@ -23,8 +23,8 @@ export interface LinkPopoverProps {
 /**
  * How the two views follow each other, one property at a time, and what
  * they compare in. A property the cameras don't share keeps its mode for
- * when they do and says why it waits; one that can't link at all can't be
- * set.
+ * when they do and says why it waits; with a view showing nothing, none
+ * can be set.
  */
 export function LinkPopover({ links, onChange }: LinkPopoverProps) {
   const anyLinked = links.properties.some((link) => link.mode !== "off" && !link.unlinkable);
@@ -35,7 +35,7 @@ export function LinkPopover({ links, onChange }: LinkPopoverProps) {
       trigger={<IconButton icon={anyLinked ? LinkSimpleIcon : LinkSimpleBreakIcon} size="sm" label="Link views" />}
     >
       <div className="lc-link-popover">
-        {links.basis && <p className="lc-link-basis">{basisNote(links.basis)}</p>}
+        {links.basis && <p className="lc-link-basis">{basisNote(links.basis, links.alike)}</p>}
         {links.properties.map((link) => (
           <LinkRow key={link.property} link={link} onChange={onChange} />
         ))}
@@ -45,7 +45,7 @@ export function LinkPopover({ links, onChange }: LinkPopoverProps) {
 }
 
 function LinkRow({ link, onChange }: { link: PropertyLink; onChange: LinkPopoverProps["onChange"] }) {
-  const settable = link.unlinkable !== "empty" && link.unlinkable !== "not_yet";
+  const settable = link.unlinkable !== "empty";
   return (
     <div className="lc-link-row" data-link-property={link.property}>
       <SegmentedControl
