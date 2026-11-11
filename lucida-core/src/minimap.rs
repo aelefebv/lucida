@@ -13,8 +13,7 @@ use crate::mat4::{look_at, mul4, orthographic};
 /// One member as the minimap frames it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MinimapMember {
-    /// Column-major scale+translate world matrix: `[0]/[5]/[10]` scale,
-    /// `[12]/[13]/[14]` translate.
+    /// Column-major world matrix of the member's unit cube.
     pub model: [f32; 16],
     /// Whether the owning dataset is shown.
     pub visible: bool,
@@ -102,16 +101,16 @@ pub fn top_down_view(bounds: Aabb, viewport: [u32; 2]) -> ([f64; 16], [f64; 3]) 
     (mul4(orthographic(half_w, half_h, near, far), view), eye)
 }
 
-/// Expand `bounds` by the world-space box of one scale+translate matrix
-/// (column-major: `mat[0]/[5]/[10]` = scale, `mat[12]/[13]/[14]` = translate).
+/// Expand `bounds` by where a column-major model matrix takes the unit
+/// cube: all eight corners, since the model can turn the cube.
 fn accumulate_box(mat: &[f32; 16], bounds: &mut Aabb) {
-    let sx = mat[0] as f64;
-    let sy = mat[5] as f64;
-    let sz = mat[10] as f64;
-    let tx = mat[12] as f64;
-    let ty = mat[13] as f64;
-    let tz = mat[14] as f64;
-    bounds.add_box([tx, ty, tz], [tx + sx, ty + sy, tz + sz]);
+    let m = mat.map(f64::from);
+    for corner in 0..8 {
+        let p: [f64; 3] = std::array::from_fn(|i| f64::from(corner >> i & 1));
+        bounds.add_point(std::array::from_fn(|r| {
+            m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r]
+        }));
+    }
 }
 
 #[cfg(test)]

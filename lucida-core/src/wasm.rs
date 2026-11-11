@@ -230,11 +230,15 @@ impl WasmScene {
     /// Where `dataset_id`'s frame sits in the scene frame the slice camera
     /// views, as `[offset_x, offset_y, offset_z, scale_x, scale_y, scale_z]`:
     /// a frame point `p` lands at `offset + p * scale`. Empty for a dataset
-    /// the scene doesn't hold.
+    /// the scene doesn't hold, and for one its placement turns, which a
+    /// scale and an offset can't say.
     pub fn dataset_placement(&self, dataset_id: &str) -> Vec<f64> {
         match self.inner.placement(&DatasetId(dataset_id.to_string())) {
-            Some(placed) => placed.offset.into_iter().chain(placed.scale).collect(),
-            None => Vec::new(),
+            Some(placed) if placed.is_axis_aligned() => {
+                let scale: [f64; 3] = std::array::from_fn(|i| placed.linear[i][i]);
+                placed.offset.into_iter().chain(scale).collect()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -301,7 +305,7 @@ impl WasmScene {
             .user_transform_after(
                 &DatasetId(dataset_id.to_string()),
                 &from,
-                &Affine { scale, offset },
+                &Affine::axis_aligned(scale, offset),
             )
             .map(|after| serde_json::to_string(&after).unwrap())
             .unwrap_or_default())

@@ -69,14 +69,17 @@ impl SlicePlane {
     }
 
     /// How far one sample of a frame `frame_to_scene` places reaches on
-    /// screen: the smaller of its extents along the two axes this plane
-    /// draws. A slice zoom times this is device pixels per sample, measured
-    /// on the densest axis so the level chosen errs coarse, as
-    /// [`Affine::plane_sample`] does for XY.
+    /// screen: the shorter of the lengths a step along the frame's two axes
+    /// this plane draws maps to. A slice zoom times this is device pixels per
+    /// sample, measured on the densest axis so the level chosen errs coarse,
+    /// as [`Affine::plane_sample`] does for XY.
     pub fn sample_extent(self, frame_to_scene: &Affine) -> f64 {
         let [across, down, _] = self.axes();
-        let scale = |axis: SpatialAxis| frame_to_scene.scale[axis.xyz()].abs();
-        scale(across).min(scale(down))
+        let reach = |axis: SpatialAxis| {
+            let step = frame_to_scene.column(axis.xyz());
+            (step[0] * step[0] + step[1] * step[1] + step[2] * step[2]).sqrt()
+        };
+        reach(across).min(reach(down))
     }
 }
 
@@ -150,10 +153,7 @@ mod tests {
 
     #[test]
     fn a_plane_measures_a_sample_on_the_densest_axis_it_draws() {
-        let placed = Affine {
-            scale: [0.5, 2.0, 4.0],
-            offset: [0.0; 3],
-        };
+        let placed = Affine::axis_aligned([0.5, 2.0, 4.0], [0.0; 3]);
         assert_eq!(SlicePlane::Xy.sample_extent(&placed), 0.5);
         assert_eq!(SlicePlane::Xz.sample_extent(&placed), 0.5);
         assert_eq!(SlicePlane::Yz.sample_extent(&placed), 2.0);

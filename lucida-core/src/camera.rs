@@ -719,8 +719,9 @@ impl Slice {
 
     /// What this view shows of a dataset that `frame_to_scene` places, in
     /// the dataset's own frame, since planning works in a dataset's samples:
-    /// the screen's bounds read back through the placement on the two axes
-    /// on screen, and `planes`, the dataset's own planes along the cut axis.
+    /// the box around the screen's bounds read back through the placement on
+    /// the two axes on screen, and `planes`, the dataset's own planes along
+    /// the cut axis, which the placement keeps, so its planes lie across it.
     pub fn visible_region(&self, frame_to_scene: &Affine, planes: &Range<u32>) -> VisibleRegion {
         let [across, down, cut] = self.plane.axes().map(SpatialAxis::xyz);
         let [u0, v0, u1, v1] = self.world_bounds();
@@ -839,8 +840,10 @@ fn model_matrices_f64(volume_transform: Option<&VolumeTransform>) -> ([f64; 16],
 /// unit at the surface being resolved, and divided again by the densest
 /// axis's samples per world unit it gives pixels per sample there. The
 /// densest axis is the conservative choice. It reports the smallest spacing,
-/// so the level chosen from it errs coarse. `shape` is `[z, y, x]`. The model
-/// matrix is axis-aligned, so its diagonal holds the per-axis world extents.
+/// so the level chosen from it errs coarse. `shape` is `[z, y, x]`. Each of
+/// the model matrix's first three columns is where the cube's edge along that
+/// axis goes, so its length is the axis's world extent however the model
+/// turns it.
 fn pixels_per_sample_from_eye(
     pixels_per_world_at_unit_distance: f64,
     eye: [f64; 3],
@@ -858,10 +861,16 @@ fn pixels_per_sample_from_eye(
 
 /// Level-0 samples per world unit along the volume's densest axis.
 fn densest_samples_per_world(model: &[f64; 16], shape: [u32; 3]) -> f64 {
+    let edge = |c: usize| {
+        let column = &model[4 * c..4 * c + 3];
+        (column[0] * column[0] + column[1] * column[1] + column[2] * column[2])
+            .sqrt()
+            .max(1e-12)
+    };
     let samples_per_world = [
-        shape[2] as f64 / model[0].abs().max(1e-12),
-        shape[1] as f64 / model[5].abs().max(1e-12),
-        shape[0] as f64 / model[10].abs().max(1e-12),
+        shape[2] as f64 / edge(0),
+        shape[1] as f64 / edge(1),
+        shape[0] as f64 / edge(2),
     ];
     samples_per_world.into_iter().fold(0.0, f64::max).max(1e-12)
 }
@@ -2080,6 +2089,26 @@ pub(crate) fn ray_aabb_hit(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_turned_volume_reads_the_same_densest_axis() {
+        let shape = [16, 64, 256];
+        let unturned = crate::placement::Affine::axis_aligned([0.5, 0.25, 0.125], [0.0; 3]);
+        // The same box turned a sixth of a turn about Y.
+        let (s, c) = (std::f64::consts::FRAC_PI_3).sin_cos();
+        let turned = crate::placement::Affine {
+            linear: [
+                [0.5 * c, 0.0, 0.125 * s],
+                [0.0, 0.25, 0.0],
+                [-0.5 * s, 0.0, 0.125 * c],
+            ],
+            offset: [1.0, 2.0, 3.0],
+        };
+        let densest =
+            |a: &crate::placement::Affine| densest_samples_per_world(&a.matrix_f64(), shape);
+        assert!((densest(&turned) - densest(&unturned)).abs() < 1e-9);
+        assert!((densest(&unturned) - 512.0).abs() < 1e-9);
+    }
+
     /// A slice fit box over a 2D rect.
     fn vox2(min: [f64; 2], max: [f64; 2]) -> PlaneBox {
         PlaneBox::new([min[0], min[1], 0.0], [max[0], max[1], 0.0])
@@ -2388,10 +2417,7 @@ mod tests {
         // An XZ view 200 world units tall over Z drawn at twice its samples.
         let mut cam = slice([100.0, 50.0], 1.0, [200, 200]);
         cam.plane = SlicePlane::Xz;
-        let placed = Affine {
-            scale: [1.0, 1.0, 2.0],
-            offset: [0.0; 3],
-        };
+        let placed = Affine::axis_aligned([1.0, 1.0, 2.0], [0.0; 3]);
         let region = cam.visible_region(&placed, &(7..8));
         assert_eq!(region.cut_axis, SpatialAxis::Y);
         assert_eq!(region.xy_bounds, [0.0, 7.0, 200.0, 8.0]);

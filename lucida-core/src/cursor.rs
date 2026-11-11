@@ -225,10 +225,7 @@ impl CursorBox {
             Some(bounds) => (
                 bounds.plane.min,
                 extent(bounds.plane.min, bounds.plane.max),
-                Affine {
-                    scale: extent(bounds.world.min, bounds.world.max),
-                    offset: bounds.world.min,
-                },
+                Affine::axis_aligned(extent(bounds.world.min, bounds.world.max), bounds.world.min),
             ),
             None => return Self::unit(),
         };
@@ -239,8 +236,8 @@ impl CursorBox {
         CursorBox {
             plane_min,
             plane_size,
-            model: matrix_f64(&unit_to_world),
-            inv_model: matrix_f64(&unit_to_world.inverse()),
+            model: unit_to_world.matrix_f64(),
+            inv_model: unit_to_world.inverse().matrix_f64(),
         }
     }
 
@@ -250,8 +247,8 @@ impl CursorBox {
         CursorBox {
             plane_min,
             plane_size,
-            model: matrix_f64(&unit_to_world),
-            inv_model: matrix_f64(&unit_to_world.inverse()),
+            model: unit_to_world.matrix_f64(),
+            inv_model: unit_to_world.inverse().matrix_f64(),
         }
     }
 
@@ -286,14 +283,6 @@ fn extent(min: [f64; 3], max: [f64; 3]) -> [f64; 3] {
         let e = max[i] - min[i];
         if e > 0.0 { e } else { 1.0 }
     })
-}
-
-fn matrix_f64(a: &Affine) -> [f64; 16] {
-    let [sx, sy, sz] = a.scale;
-    let [ox, oy, oz] = a.offset;
-    [
-        sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, ox, oy, oz, 1.0,
-    ]
 }
 
 /// Compute peer cursor geometry for the GPU and screen positions for labels,

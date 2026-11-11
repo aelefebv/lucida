@@ -967,11 +967,14 @@ impl Scene {
         screen_x: f64,
         screen_y: f64,
     ) -> Option<crate::ray::RayHit> {
+        let plane = self.view(view)?.slice_plane();
+        let cut_place = self.cut_place(view, plane.cut());
         let view = self.view(view)?;
         let derived = self.derived.get(dataset_id)?;
         let placed = self.placed(dataset_id)?;
         let world_ray = view.camera.unproject_ray(screen_x, screen_y);
         let is_2d = matches!(view.camera, Camera::Slice(_));
+        let to_frame = placed.to_scene.inverse();
         let mut closest: Option<crate::ray::RayHit> = None;
 
         for member in &derived.members {
@@ -980,22 +983,23 @@ impl Scene {
             }
 
             let hit_result = if is_2d {
-                // Slice mode: the ray stands at a point of the slice plane,
-                // which the member's placed box holds or doesn't.
-                let Some((min, max)) =
-                    slice_box(view.slice_plane(), &placed.to_scene, derived, member)
-                else {
-                    continue;
-                };
-
+                // Slice mode: the ray stands at a point of the slice plane.
+                // Read back into the dataset's frame, where the member is a
+                // box whichever way its placement turns it, the point lies
+                // in the member on the two axes on screen or doesn't.
                 let rx = world_ray.origin[0];
                 let ry = world_ray.origin[1];
-
-                if rx >= min[0] && rx <= max[0] && ry >= min[1] && ry <= max[1] {
-                    Some(([rx, ry, 0.0], 0.0))
-                } else {
-                    None
-                }
+                let [across, down, cut] = plane.axes().map(SpatialAxis::xyz);
+                let mut at = [0.0; 3];
+                (at[across], at[down], at[cut]) = (rx, ry, cut_place);
+                let in_frame = to_frame.apply(at);
+                let Some(level0) = member.levels.first() else {
+                    continue;
+                };
+                let extent = [level0.shape[4], level0.shape[3], level0.shape[2]].map(|n| n as f64);
+                let lo = plane.frame_point(derived.plane_position(plane, member));
+                let inside = |a: usize| in_frame[a] >= lo[a] && in_frame[a] <= lo[a] + extent[a];
+                (inside(across) && inside(down)).then_some(([rx, ry, 0.0], 0.0))
             } else {
                 // 3D mode: use rendering transform to match camera space.
                 let transform = member_transform(&placed.to_world, member);

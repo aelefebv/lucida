@@ -14,6 +14,22 @@ use crate::view::{AxisPositions, View, ViewId};
 
 use super::{DatasetDerivedState, LayerExtent, MemberState, Scene};
 
+/// Where a dataset `to_scene` places has its first and last planes along
+/// axis `a` of `planes`, as `(min, max)` along that axis of the scene frame.
+/// `None` when the placement turns the dataset off the axis, so its planes
+/// don't lie across it.
+pub(crate) fn plane_span(to_scene: &Affine, a: usize, planes: u32) -> Option<(f64, f64)> {
+    if !to_scene.keeps_axis(a) {
+        return None;
+    }
+    let ends = [0.0, f64::from(planes)].map(|plane| {
+        let mut at = [0.0; 3];
+        at[a] = plane;
+        to_scene.apply(at)[a]
+    });
+    Some((ends[0].min(ends[1]), ends[0].max(ends[1])))
+}
+
 impl Scene {
     /// The scene frame, fixed by the first dataset in the document with an
     /// image. Document order is the same for every client and on every load,
@@ -104,9 +120,10 @@ impl Scene {
         let mut extent = 0.0_f64;
         let mut top = 0.0_f64;
         for derived in self.derived.values() {
-            let scale = scene.place(&derived.frame).scale;
-            let size: [f64; 3] =
-                std::array::from_fn(|i| derived.max_member_shape[i] * scale[i].abs());
+            let (min, max) = scene
+                .place(&derived.frame)
+                .apply_box([0.0; 3], derived.max_member_shape);
+            let size: [f64; 3] = std::array::from_fn(|i| max[i] - min[i]);
             extent = extent.max(size[0]).max(size[1]).max(size[2]);
             top = top.max(size[1]);
         }
@@ -243,13 +260,11 @@ impl Scene {
         }
         let planes = LayerExtent::of(self.document.manifests.get(dataset_id)?).along(axis);
         let to_scene = self.placement(dataset_id)?;
-        let a = axis.xyz();
-        let ends = [0.0, f64::from(planes)].map(|plane| {
-            let mut at = [0.0; 3];
-            at[a] = plane;
-            to_scene.apply(at)[a]
-        });
-        Some((ends[0].min(ends[1]), ends[0].max(ends[1])))
+        match plane_span(&to_scene, axis.xyz(), planes) {
+            Some(span) => Some(span),
+            // Turned off the axis, no tile has planes across it to read.
+            None => self.scene_extent(dataset_id, axis),
+        }
     }
 
     /// Whether `dataset_id` declares physical lengths, so it lines up with
@@ -471,7 +486,7 @@ mod tests {
     use crate::framing::PlaneBox;
     use crate::placement::{Affine, LineUp, UserTransform};
     use crate::saved_view::SavedView;
-    use crate::scene::{FrameTarget, Scene};
+    use crate::scene::{CutReach, FrameTarget, Scene};
 
     /// A single image of `shape` `[z, y, x]` samples, each `spacing` long in
     /// `unit`, its origin at `origin`. All three are `[z, y, x]`.
@@ -827,6 +842,80 @@ mod tests {
         );
     }
 
+    /// Turn `id` by `rotation` by hand. A scene takes no command that turns
+    /// a dataset yet, so this writes the record a turn would.
+    fn turn_by_hand(scene: &mut Scene, id: &str, rotation: [f64; 4]) {
+        scene.document.user_transforms.insert(
+            DatasetId::from(id),
+            UserTransform {
+                rotation,
+                ..UserTransform::IDENTITY
+            },
+        );
+        scene.dataset_moved();
+    }
+
+    /// A turn of `radians` about `axis` (0, 1 or 2) as a unit quaternion.
+    fn turn(axis: usize, radians: f64) -> [f64; 4] {
+        let mut q = [0.0, 0.0, 0.0, (radians / 2.0).cos()];
+        q[axis] = (radians / 2.0).sin();
+        q
+    }
+
+    #[test]
+    fn a_turned_dataset_spans_its_turned_corners_and_picks_within_its_own_box() {
+        let mut scene = Scene::new([800, 600]);
+        open(
+            &mut scene,
+            "a",
+            [8, 64, 64],
+            [1.0; 3],
+            [0.0; 3],
+            Some("micrometer"),
+        );
+        turn_by_hand(&mut scene, "a", turn(2, std::f64::consts::FRAC_PI_4));
+        let view = scene.active_view().id();
+        let bounds = scene.dataset_plane_bounds(view, "a").unwrap();
+        let r = 64.0 * std::f64::consts::FRAC_1_SQRT_2;
+        assert!(close(bounds.min, [-r, 0.0, 0.0]), "{bounds:?}");
+        assert!(close(bounds.max, [r, 2.0 * r, 8.0]), "{bounds:?}");
+
+        assert!(scene.frame(&FrameTarget::Visible, [800, 600]));
+        let a = DatasetId::from("a");
+        let pick = |scene: &Scene, at: [f64; 2]| {
+            let camera = &scene.view(view).unwrap().camera;
+            let [x, y] = camera.project_to_screen([at[0], at[1], 0.0]).unwrap();
+            scene.ray_pick(view, &a, x, y).is_some()
+        };
+        // Inside the turned square, and inside its box but past the square.
+        assert!(pick(&scene, [0.0, 45.0]));
+        assert!(!pick(&scene, [40.0, 5.0]));
+    }
+
+    #[test]
+    fn a_cut_meets_a_dataset_turned_off_its_axis_where_the_dataset_lies() {
+        let mut scene = Scene::new([800, 600]);
+        open(
+            &mut scene,
+            "flat",
+            [8, 64, 64],
+            [1.0; 3],
+            [0.0; 3],
+            Some("micrometer"),
+        );
+        // A quarter about X stands its 64 rows up along Z.
+        turn_by_hand(&mut scene, "flat", turn(0, std::f64::consts::FRAC_PI_2));
+        let view = scene.active_view().id();
+        let flat = DatasetId::from("flat");
+        let reach_at = |scene: &mut Scene, z: f64| {
+            scene.active_view_mut().axes.z = Some(z..z + 1.0);
+            scene.resolved_layer(view, &flat).unwrap().z_reach
+        };
+        // Its own planes stop at 8, but it lies across Z from 0 to 64.
+        assert_eq!(reach_at(&mut scene, 30.0), CutReach::Through);
+        assert_eq!(reach_at(&mut scene, 70.0), CutReach::Outside);
+    }
+
     #[test]
     fn a_user_transform_moves_and_scales_a_dataset_on_its_declared_placement() {
         let mut scene = Scene::new([800, 600]);
@@ -1010,10 +1099,7 @@ mod tests {
         place_by_hand(&mut scene, "b", [1_000.0, 0.0, 0.0], [1.5; 3]);
         let from = *scene.user_transform(&b).unwrap();
         // Twice the size about scene point (20, 10), then 4 down.
-        let map = Affine {
-            scale: [2.0, 2.0, 2.0],
-            offset: [-20.0, -10.0 + 4.0, 0.0],
-        };
+        let map = Affine::axis_aligned([2.0, 2.0, 2.0], [-20.0, -10.0 + 4.0, 0.0]);
         let p = [100.0, 30.0, 4.0];
         let expected = map.apply(scene.placement(&b).unwrap().apply(p));
         let after = scene.user_transform_after(&b, &from, &map).unwrap();
