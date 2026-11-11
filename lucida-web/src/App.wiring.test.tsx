@@ -159,6 +159,7 @@ vi.mock("lucida-core", () => {
     view_camera_mode() { return this.mode; }
     view_mode() { return this.mode === "slice" ? "slice" : "volume"; }
     withheld() { return "[]"; }
+    scale_bar() { return "null"; }
     set_aside() { return "[]"; }
     view_comparison() { return "null"; }
     slice_plane() { return "xy"; }

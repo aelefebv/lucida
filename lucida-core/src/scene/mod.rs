@@ -2,6 +2,7 @@ mod comparison;
 mod layers;
 mod links;
 mod placement;
+mod scale_bar;
 mod types;
 mod views;
 
@@ -10,6 +11,7 @@ pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 use links::ViewLinks;
 pub use links::{LinkBasis, LinkMode, LinkProperty, LinksState, PropertyLink, Unlinkable};
+pub use scale_bar::{Arm, Measure, ScaleBar};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,

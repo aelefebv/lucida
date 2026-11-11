@@ -140,6 +140,13 @@ impl DeclaredFrame {
     pub fn has_physical_scale(&self) -> bool {
         self.meters.is_some()
     }
+
+    /// One sample's length in meters along `[x, y, z]`, when the frame
+    /// measures physical lengths.
+    pub fn sample_meters(&self) -> Option<[f64; 3]> {
+        let meters = self.meters?;
+        Some(std::array::from_fn(|i| self.spacing[i] * meters[i]))
+    }
 }
 
 /// Where a person put a dataset by hand, on top of where its declared frame
