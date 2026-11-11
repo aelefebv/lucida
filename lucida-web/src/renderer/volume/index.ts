@@ -14,6 +14,7 @@ export {
   getOrCreateLabelVolumePool,
   getOrCreateVolumePool,
   growVolumeAtlas,
+  volumeRows,
   removeLabelVolumePool,
   removeLabelVolumePoolsForDataset,
   removeVolumeAtlasesForDataset,

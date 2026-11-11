@@ -2,7 +2,7 @@
 import { isAxisAlignedQuad, quadEdgeLengths, type SliceQuad } from "./sliceQuad.ts";
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
-import type { BlendMode } from "./layerCompositor.ts";
+import { LAYER_BLENDS, type BlendMode } from "./layerCompositor.ts";
 import type { PassTiming } from "./passTiming.ts";
 import { DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
 import { requireCompiled } from "./pipelineCompile.ts";
@@ -399,20 +399,7 @@ export class SliceRenderer {
     // exact blend states (premultiplied output), so draws sharing a target
     // combine like separate layers of that mode. Outside its footprint a
     // member writes transparent, which every mode leaves unchanged.
-    const blends: Record<BlendMode, GPUBlendState> = {
-      alpha: {
-        color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-        alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-      },
-      additive: {
-        color: { srcFactor: "one", dstFactor: "one", operation: "add" },
-        alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
-      },
-      max: {
-        color: { srcFactor: "one", dstFactor: "one", operation: "max" },
-        alpha: { srcFactor: "one", dstFactor: "one", operation: "max" },
-      },
-    };
+    const blends = LAYER_BLENDS;
     const makePipelines = (layout: GPUPipelineLayout, vertex: string, fragment: string) =>
       Promise.all((["alpha", "additive", "max"] as const).map((mode) => device.createRenderPipelineAsync({
         layout,

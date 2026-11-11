@@ -851,7 +851,7 @@ impl Scene {
         // The region is in the dataset's frame, where the view places members.
         let region = self.visible_region(id, dataset_id)?;
         let placed = self.placed(dataset_id)?;
-        let plane = placing_plane(view);
+        let plane = placing_plane(view, &placed.to_scene);
         let mut plans = Vec::new();
         for member in &derived.members {
             if member.levels.is_empty() {

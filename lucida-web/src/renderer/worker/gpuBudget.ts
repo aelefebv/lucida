@@ -34,7 +34,9 @@ import {
   labelVolumePoolBytes,
   shrinkVolumeAtlas,
   volumeAtlasBytes,
-  volumeLayerBytes,
+  volumeExtentFor,
+  volumeRowBytes,
+  volumeRows,
   type AtlasState,
 } from "../volume/atlas.ts";
 import {
@@ -250,9 +252,9 @@ interface Spare {
   atlas: AtlasState | SliceAtlasState;
   kind: "volume" | "slice";
   stepBytes: number;
-  /** Rows or layers now. */
+  /** Rows now. */
   steps: number;
-  /** The fewest rows or layers that still hold every chunk the planner wants. */
+  /** The fewest rows that still hold every chunk the planner wants. */
   minSteps: number;
 }
 
@@ -280,11 +282,17 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
   const touched = new Map<string, { datasetId: string; mode: PoolMode }>();
   for (const spare of spares) {
     if (needed <= 0) break;
-    const freeSteps = Math.min(spare.steps - spare.minSteps, Math.ceil(needed / spare.stepBytes));
+    let freeSteps = Math.min(spare.steps - spare.minSteps, Math.ceil(needed / spare.stepBytes));
     const tier = chunkPoolTier(spare.poolKey);
     let dropped: string[];
     if (spare.kind === "volume") {
       const atlas = spare.atlas as AtlasState;
+      // Past its first layer a pool gives back whole layers: as many as
+      // free what is needed, short of the rows its wanted chunks need.
+      const rows = spare.steps - freeSteps;
+      const kept = rows > atlas.slotsY ? Math.floor(rows / atlas.slotsY) * atlas.slotsY : rows;
+      freeSteps = spare.steps - Math.max(spare.minSteps, kept);
+      if (freeSteps <= 0) continue;
       const keep = rankSlotsToKeep(volumeEvictionParams(state, atlas, tier)).map((slot) => slot.key);
       dropped = shrinkVolumeAtlas(ctx.device, atlas, spare.steps - freeSteps, keep);
     } else {
@@ -312,12 +320,21 @@ function spareOf(
     const parsed = parseCompositeKey(key);
     if (parsed && anyViewWants(atlas, parsed.memberId, tier, parsed.chunkKey)) wanted++;
   }
+  // Both kinds give back rows: a slice pool's, and a volume pool's in its
+  // first layer and whole layers past it.
   const volume = kind === "volume" ? (atlas as AtlasState) : null;
   const slice = kind === "slice" ? (atlas as SliceAtlasState) : null;
-  const steps = volume ? volume.slotsZ : slice!.slotsY;
-  const stepSlots = volume ? volume.slotsX * volume.slotsY : slice!.slotsX;
-  const minSteps = Math.max(1, Math.ceil(wanted / stepSlots));
+  const steps = volume ? volumeRows(volume) : slice!.slotsY;
+  const stepSlots = volume ? volume.slotsX : slice!.slotsX;
+  const wantedSteps = Math.max(1, Math.ceil(wanted / stepSlots));
+  const minSteps = volume ? extentRows(volume, wantedSteps) : wantedSteps;
   if (minSteps >= steps) return null;
-  const stepBytes = volume ? volumeLayerBytes(volume) : sliceRowBytes(slice!);
+  const stepBytes = volume ? volumeRowBytes(volume) : sliceRowBytes(slice!);
   return { poolKey, atlas, kind, stepBytes, steps, minSteps };
+}
+
+/** The rows a volume pool holds once sized to hold `rows` rows. */
+function extentRows(atlas: AtlasState, rows: number): number {
+  const { rowsY, slotsZ } = volumeExtentFor(atlas, rows);
+  return rowsY + (slotsZ - 1) * atlas.slotsY;
 }

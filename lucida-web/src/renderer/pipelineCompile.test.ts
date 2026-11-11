@@ -131,6 +131,22 @@ describe.each<[string, (device: GPUDevice) => Compiles, number]>([
   });
 });
 
+describe("the volume renderer's tilted cuts", () => {
+  it("compile on first ask, once, apart from the main pipeline", async () => {
+    const { device, pending } = makeDevice();
+    const volumes = new VolumeRenderer(device);
+    pending[0].resolve(pipeline("volume"));
+    await volumes.compiled;
+    expect(pending).toHaveLength(1);
+
+    const cuts = volumes.compileCuts();
+    expect(volumes.compileCuts()).toBe(cuts);
+    expect(pending).toHaveLength(4);
+    for (const cut of pending.slice(1)) cut.resolve(pipeline("cut"));
+    await expect(cuts).resolves.toBeUndefined();
+  });
+});
+
 describe("drawing before the compile", () => {
   it("names the renderer instead of handing WebGPU a missing pipeline", () => {
     expect(() => requireCompiled(null, "slice renderer")).toThrow(
