@@ -695,6 +695,12 @@ impl WasmScene {
         serde_json::to_string(&self.inner.withheld(ViewId(view))).unwrap_or_default()
     }
 
+    /// What `view`'s scale bar shows, as a JSON `ScaleBar`, or `"null"` when
+    /// it shows none.
+    pub fn scale_bar(&self, view: u32) -> String {
+        serde_json::to_string(&self.inner.scale_bar(ViewId(view))).unwrap_or_default()
+    }
+
     /// Query the scene for geometric information about all entities in a
     /// dataset, as `view` sees them. `"null"` for an unknown view or dataset.
     pub fn view_query(&self, view: u32, dataset_id: &str) -> String {

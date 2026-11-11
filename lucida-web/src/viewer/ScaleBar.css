@@ -1,0 +1,68 @@
+/* Every offset inside is a whole CSS pixel, as are the bar's corner and
+   its arms' lengths (ScaleBar.tsx), so the arms' edges stay sharp at any
+   whole pixel ratio. The mark spans both label rows: its
+   top meets the down arm's label, its bottom line the across arm's. */
+.lc-scale-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  grid-template-areas:
+    "mark down"
+    "mark across"
+    "note note";
+  align-items: end;
+  column-gap: var(--lc-space-2);
+  padding: 6px var(--lc-space-2);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-float);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.lc-scale-bar[hidden],
+.lc-scale-bar > [hidden] {
+  display: none;
+}
+
+.lc-scale-bar-mark {
+  grid-area: mark;
+  box-sizing: border-box;
+}
+
+.lc-scale-bar-mark[data-shape="bar"] {
+  height: 3px;
+  background: currentColor;
+}
+
+/* The arms share the corner, and each is as long as its border-box side. */
+.lc-scale-bar-mark[data-shape="corner"] {
+  border-bottom: 3px solid;
+  border-left: 3px solid;
+}
+
+.lc-scale-bar-label[data-arm="down"] {
+  grid-area: down;
+  align-self: start;
+}
+
+/* Centered on the across line: half the line height less half the line,
+   and a pixel higher, since the line keeps room below the digits for
+   descenders. */
+.lc-scale-bar-label[data-arm="across"] {
+  grid-area: across;
+  margin-bottom: -5px;
+}
+
+.lc-scale-bar-note {
+  grid-area: note;
+  margin-top: 6px;
+  color: var(--lc-text-muted);
+}

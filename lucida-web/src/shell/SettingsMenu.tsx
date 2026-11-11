@@ -14,6 +14,7 @@ import { Popover } from "../ui/Popover.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { Select } from "../ui/Select.tsx";
 import { Switch } from "../ui/Switch.tsx";
+import { scaleBarPreference } from "../viewer/scaleBar.ts";
 import "./SettingsMenu.css";
 
 /** The settings in a popover off the top bar. */
@@ -30,7 +31,7 @@ export function SettingsMenu() {
 }
 
 /**
- * Appearance, the cards over the canvas, and developer tools. Each control
+ * Appearance, what shows over the canvas, and developer tools. Each control
  * writes its preference as it changes, so the change shows at once and
  * survives a reload.
  */
@@ -40,6 +41,7 @@ export function SettingsPanel() {
   const [density, setDensity] = usePreference(densityPreference);
   const [canvas, setCanvas] = usePreference(canvasBackgroundPreference);
   const [developerTools, setDeveloperTools] = usePreference(developerToolsPreference);
+  const [scaleBar, setScaleBar] = usePreference(scaleBarPreference);
   const accentLabelId = useId();
 
   return (
@@ -90,6 +92,7 @@ export function SettingsPanel() {
       />
       <div className="lc-settings-divider" role="presentation" />
       <h2 className="lc-settings-heading">View</h2>
+      <Switch label="Scale bar" isSelected={scaleBar} onChange={setScaleBar} />
       <CanvasCardSwitches />
       <div className="lc-settings-divider" role="presentation" />
       <Switch
