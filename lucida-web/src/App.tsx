@@ -580,7 +580,7 @@ function Viewer({
     onDocumentChanged: bumpRemoteDocumentVersion,
   });
   const viewLayout = useMemo(() => viewLayoutActions(engine.scene, engine.loop), [engine]);
-  const { views: shownViews, layout: viewLayoutName } = useSceneView(engine.store);
+  const { views: shownViews, layout: viewLayoutName, links: viewLinks } = useSceneView(engine.store);
   // Several views offer each layer a place among them.
   const layerViewPlacement = useMemo((): LayerViewPlacement | undefined => {
     if (shownViews.length < 2) return undefined;
@@ -966,6 +966,7 @@ function Viewer({
       split={viewLayoutName !== "single"}
       stacked={phone}
       onSplitToggle={toggleSplit}
+      links={viewLinks ? { links: viewLinks, onChange: viewLayout.link } : undefined}
       slicePlane={dims.slicePlane}
       onSlicePlaneChange={dims.handleSlicePlaneChange}
       dimZ={dims.dimZ}

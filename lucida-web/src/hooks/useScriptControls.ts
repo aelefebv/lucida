@@ -18,6 +18,7 @@ import { lineUpReason, type CompareMode, type ComparisonActions } from "../compa
 import type { ResolvedLayers } from "../resolvedLayers.ts";
 import type { SavedView } from "../savedView/types.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
+import { unlinkableReason } from "../viewLinks.ts";
 import {
   awaitDatasetOpen,
   comparisonPair,
@@ -270,6 +271,17 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
           if (!keep) ids.forEach((id) => viewLayout.move(views[at], id));
           else if (ids.length > 0) viewLayout.add(views[at], ids);
         });
+        return { applied: true, reason: null };
+      },
+      link: async (property, mode) => {
+        const links = viewLayout.links();
+        if (links === null) return { applied: false, reason: "a link joins two views, and the page shows one" };
+        const unlinkable = links.properties.find((link) => link.property === property)?.unlinkable;
+        // A property the cameras don't share yet keeps its mode for when they do.
+        if (unlinkable === "empty" || unlinkable === "not_yet") {
+          return { applied: false, reason: unlinkableReason(property, unlinkable) };
+        }
+        viewLayout.link(property, mode);
         return { applied: true, reason: null };
       },
     });

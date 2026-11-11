@@ -13,6 +13,7 @@ import { useShortcut, type KeyCombo } from "../ui/shortcuts.ts";
 import { useCommand } from "../ui/commands.ts";
 import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { AxisScrubber } from "./AxisScrubber.tsx";
+import { LinkPopover, type LinkPopoverProps } from "./LinkPopover.tsx";
 import "./DimensionBar.css";
 
 const MODE_KEYS: readonly KeyCombo[] = ["M"];
@@ -46,6 +47,8 @@ export interface DimensionBarProps {
   stacked: boolean;
   /** Divide the canvas into two views, or show one again. */
   onSplitToggle: () => void;
+  /** How the two views link, while two views divide the canvas. */
+  links?: LinkPopoverProps;
   /** The plane the 2D view cuts. Its choice shows only in 2D, and only with depth to cut. */
   slicePlane: SlicePlane;
   onSlicePlaneChange: (plane: SlicePlane) => void;
@@ -78,6 +81,7 @@ export function DimensionBar({
   split,
   stacked,
   onSplitToggle,
+  links,
   slicePlane,
   onSlicePlaneChange,
   dimZ,
@@ -197,6 +201,7 @@ export function DimensionBar({
           isSelected={split}
           onSelectedChange={onSplitToggle}
         />
+        {split && links && <LinkPopover {...links} />}
         {viewMode === "3d" && <CameraPopover mode={cameraMode} onToggle={onCameraModeToggle} clipDepth={clipDepth} />}
         {showPlane && (
           <SegmentedControl

@@ -114,6 +114,35 @@ describe("DimensionBar", () => {
     expect(screen.getByTestId("state").textContent).not.toContain("split");
   });
 
+  it("offers the view links only while two views divide the canvas", () => {
+    const links = { links: { basis: "physical" as const, properties: [] }, onChange: vi.fn() };
+    const bar = (split: boolean) => (
+      <DimensionBar
+        viewMode="2d"
+        onViewModeToggle={() => {}}
+        split={split}
+        stacked={false}
+        onSplitToggle={() => {}}
+        links={links}
+        slicePlane="xy"
+        onSlicePlaneChange={() => {}}
+        dimZ={1}
+        cut={0}
+        dimCut={1}
+        onCutChange={() => {}}
+        t={0}
+        dimT={1}
+        onTChange={() => {}}
+        cameraMode="arcball"
+        onCameraModeToggle={() => {}}
+      />
+    );
+    const { rerender } = render(bar(true));
+    expect(screen.getByRole("button", { name: "Link views" })).toBeTruthy();
+    rerender(bar(false));
+    expect(screen.queryByRole("button", { name: "Link views" })).toBeNull();
+  });
+
   it("offers the clip plane in the camera popover when there is a volume to clip", async () => {
     const depth = { read: () => 0, write: vi.fn() };
     render(

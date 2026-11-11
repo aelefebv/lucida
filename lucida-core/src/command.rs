@@ -9,7 +9,7 @@ use lucida_protocol::DatasetOpened;
 
 use crate::camera::{Camera, Framing};
 use crate::placement::UserTransform;
-use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
+use crate::scene::{BlendMode, Colormap, LinkMode, LinkProperty, RenderMode, Scene};
 use crate::slice_plane::SlicePlane;
 use crate::view::{ViewDatasets, ViewId, ViewLayout};
 
@@ -204,6 +204,11 @@ pub enum ViewportCommand {
     MaximizeView {
         #[serde(default)]
         view: Option<ViewId>,
+    },
+    /// Link `property` between the two views in `mode`.
+    SetViewLink {
+        property: LinkProperty,
+        mode: LinkMode,
     },
     // 2D camera
     Pan {
@@ -451,6 +456,10 @@ enum ViewportScope {
     /// which is active and what each shows. A change bumps `epochs.view` and
     /// `epochs.selection`, since every view's camera and layers may follow.
     Views,
+    /// Mutates how the views link, and the view a new link brings to the
+    /// active one. A change bumps `epochs.links`, and a view it moved bumps
+    /// `epochs.view` or `epochs.selection`.
+    Links,
 }
 
 impl ViewportCommand {
@@ -505,6 +514,7 @@ impl ViewportCommand {
             | ViewportCommand::SetViewDatasets { .. }
             | ViewportCommand::MoveDatasetToView { .. }
             | ViewportCommand::MaximizeView { .. } => ViewportScope::Views,
+            ViewportCommand::SetViewLink { .. } => ViewportScope::Links,
         }
     }
 
@@ -564,7 +574,8 @@ impl ViewportCommand {
             | ViewportCommand::SetActiveView { .. }
             | ViewportCommand::SetViewDatasets { .. }
             | ViewportCommand::MoveDatasetToView { .. }
-            | ViewportCommand::MaximizeView { .. } => true,
+            | ViewportCommand::MaximizeView { .. }
+            | ViewportCommand::SetViewLink { .. } => true,
             ViewportCommand::Pan { dx, dy } | ViewportCommand::Pan3D { dx, dy } => {
                 dx.is_finite() && dy.is_finite()
             }
@@ -615,7 +626,28 @@ impl ViewportCommand {
 
 impl Scene {
     pub fn apply(&mut self, cmd: Command) {
+        let leader = self.link_leader(&cmd);
+        let epochs = self.epochs.clone();
         self.apply_command(cmd);
+        // A command that changes what a view shows can give the views a new
+        // pair of datasets to link, which starts the links again. Otherwise
+        // the other view follows whatever the command moved in the active
+        // one, a fit to new content as well as a steer.
+        let links = self.epochs.links;
+        let mut followed = self.refresh_links();
+        if self.epochs.links == links
+            && let Some((id, camera, axes)) = leader
+            && self.active_view().id() == id
+        {
+            followed = self.follow_links(id, &camera, &axes);
+        }
+        // One move of the epoch says the views moved, whichever moved first.
+        if followed.camera && self.epochs.view == epochs.view {
+            self.epochs.view += 1;
+        }
+        if followed.axes && self.epochs.selection == epochs.selection {
+            self.epochs.selection += 1;
+        }
         // With one view, its holding is all there is and draws nothing new.
         if self.refresh_holders() && self.views().len() > 1 {
             self.epochs.selection += 1;
@@ -880,6 +912,23 @@ impl Scene {
                     self.epochs.selection += 1;
                 }
             }
+            ViewportScope::Links => {
+                let links_before = self.links();
+                let views_before = self.views().to_vec();
+                self.mutate_viewport(cmd);
+                if self.links() != links_before {
+                    self.epochs.links += 1;
+                }
+                let views = || self.views().iter().zip(&views_before);
+                let moved = views().any(|(now, before)| now.camera != before.camera);
+                let stepped = views().any(|(now, before)| now.axes != before.axes);
+                if moved {
+                    self.epochs.view += 1;
+                }
+                if stepped {
+                    self.epochs.selection += 1;
+                }
+            }
             ViewportScope::DatasetDisplay => {
                 let visible_before = matches!(cmd, ViewportCommand::SetDatasetVisible { .. })
                     .then(|| self.visible_set());
@@ -918,6 +967,9 @@ impl Scene {
             }
             ViewportCommand::MaximizeView { view } => {
                 self.set_maximized(view);
+            }
+            ViewportCommand::SetViewLink { property, mode } => {
+                self.set_link(property, mode);
             }
             ViewportCommand::SetMode3D => {
                 self.set_mode_3d();
@@ -3602,6 +3654,7 @@ mod tests {
             selection: 4,
             annotation: 6,
             comparison: 7,
+            links: 8,
         };
         let json = serde_json::to_string(&epochs).unwrap();
         let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();

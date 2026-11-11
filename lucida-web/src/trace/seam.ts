@@ -41,6 +41,7 @@ import {
   type ViewSignature,
 } from "./steps.ts";
 import { INPUT_SCALE, type InputScale } from "../components/inputScale.ts";
+import { isLinkMode, isLinkProperty } from "../viewLinks.ts";
 import { requestAdapterWithRetry, type AdapterRetry } from "../renderer/requestAdapter.ts";
 import type { SavedView } from "../savedView/types.ts";
 import {
@@ -355,6 +356,12 @@ export interface LucidaTraceSeam {
    */
   views(layout: string, show?: string[][], keep?: boolean): Promise<StepOutcome>;
   /**
+   * A scripted link: link `property` between the two views, `"pan"`,
+   * `"zoom"`, `"orientation"`, `"z"` or `"t"`, in `mode`, `"linked"`,
+   * `"relative"` or `"off"`.
+   */
+  link(property: string, mode: string): Promise<StepOutcome>;
+  /**
    * Close the run in progress without exporting: the *Stop & analyse* path.
    *
    * A driver that gave up on a run that never settled passes `"timeout"`:
@@ -552,6 +559,15 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       const urls = Array.isArray(show) && show.every((urls) => Array.isArray(urls) && urls.every((url) => typeof url === "string"));
       if (!urls) return refused("a layout shows a list of source URLs for each view");
       return controls.views(layout, show, keep === true);
+    },
+    link: async (property: string, mode: string) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (!isLinkProperty(property)) {
+        return refused(`a link is of pan, zoom, orientation, z or t, not ${property}`);
+      }
+      if (!isLinkMode(mode)) return refused(`a link is linked, relative or off, not ${mode}`);
+      return controls.link(property, mode);
     },
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),

@@ -276,6 +276,17 @@ How the canvas divides among the views: one view across it, two side by side,
 or two stacked.
 _Avoid_: layout (unqualified; a collection's arrangement of entities)
 
+**Link**:
+How one of two views follows the other, one property at a time: pan, zoom,
+3D orientation, and the Z and T axis positions. A *linked* property takes the
+steered view's value, a *relative* one keeps the offset it had when linked,
+and one that is off stays put. Each view links by its top visible dataset.
+Two that declare physical units compare in the scene frame, the *physical
+basis*; any others compare in their own samples, the *voxel basis*. Two views
+over one region link pan, zoom, orientation and T by default, and two at one
+scale but apart link zoom and orientation and keep their own centers.
+_Avoid_: sync (unqualified)
+
 **Holder**:
 The view whose form one kind of a dataset's GPU pools holds: its slice pools
 hold one slice cut and its volume pools the whole volume, each at one

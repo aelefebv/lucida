@@ -654,6 +654,10 @@ describe("the trace seam", () => {
         calls.push(["views", layout, show, keep]);
         return Promise.resolve({ applied: true, reason: null });
       },
+      link: (property, mode) => {
+        calls.push(["link", property, mode]);
+        return Promise.resolve({ applied: true, reason: null });
+      },
     });
     try {
       expect(seam.view()).toBe(view);
@@ -679,6 +683,7 @@ describe("the trace seam", () => {
       await expect(seam.removeDataset("/data/b.zarr")).resolves.toEqual({ applied: true, reason: null });
       await expect(seam.swipe(0.25)).resolves.toEqual({ applied: true, reason: null });
       await expect(seam.blink("/data/b.zarr")).resolves.toEqual({ applied: true, reason: null });
+      await expect(seam.link("zoom", "relative")).resolves.toEqual({ applied: true, reason: null });
       expect(calls).toEqual([
         ["scrub", "t", 3],
         ["plane", "xz"],
@@ -691,6 +696,7 @@ describe("the trace seam", () => {
         ["remove", "/data/b.zarr"],
         ["swipe", 0.25, null],
         ["blink", "/data/b.zarr"],
+        ["link", "zoom", "relative"],
       ]);
     } finally {
       setScriptControls(null);
@@ -723,6 +729,7 @@ describe("the trace seam", () => {
       swipe: () => Promise.resolve({ applied: true, reason: null }),
       blink: () => Promise.resolve({ applied: true, reason: null }),
       views: () => Promise.resolve({ applied: true, reason: null }),
+      link: () => Promise.resolve({ applied: true, reason: null }),
     });
     try {
       // The arguments arrive over the DevTools protocol, so the seam checks
@@ -739,6 +746,14 @@ describe("the trace seam", () => {
       await expect(seam.removeDataset("")).resolves.toEqual({
         applied: false,
         reason: "a dataset is named by its source URL",
+      });
+      await expect(seam.link("hue", "linked")).resolves.toEqual({
+        applied: false,
+        reason: "a link is of pan, zoom, orientation, z or t, not hue",
+      });
+      await expect(seam.link("pan", "on")).resolves.toEqual({
+        applied: false,
+        reason: "a link is linked, relative or off, not on",
       });
       expect(seam.scrub("q" as never, 1)).toEqual({ applied: false, reason: "no selector is called q" });
       expect(seam.select({} as never)).toEqual({

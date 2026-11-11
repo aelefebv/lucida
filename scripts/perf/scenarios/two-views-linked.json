@@ -1,0 +1,12 @@
+{
+  "description": "two slice views of datasets over one region side by side, so pan and zoom link by default; zoom the left view in by 4, then drag across it for 3 s at a person's pace, so the right view follows every move; to set against pan-sustained in one view, the drag is half as long, since each view is half as wide",
+  "requires": ["physical", "volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "add", "url": "dataset:physical-volume-coarse" },
+    { "kind": "views", "layout": "columns", "show": [[], ["dataset:physical-volume-coarse"]] },
+    { "kind": "target", "view": 0 },
+    { "kind": "zoom", "factor": 4 },
+    { "kind": "pan", "dx": -600, "dy": -150, "durationMs": 3000 }
+  ]
+}
