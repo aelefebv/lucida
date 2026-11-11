@@ -5,7 +5,8 @@ import {
   CompassIcon,
   InfoIcon,
 } from "@phosphor-icons/react";
-import { LayerPanel } from "./components/LayerPanel.tsx";
+import { LayerPanel, type LayerViewPlacement } from "./components/LayerPanel.tsx";
+import { useSceneView } from "./hooks/useSceneView.ts";
 import { ComparisonBar, SwipeDivider } from "./components/Comparison.tsx";
 import { setAsideNote } from "./comparison.ts";
 import { Minimap } from "./components/Minimap.tsx";
@@ -566,6 +567,20 @@ function Viewer({
 
   const comparison = useComparison(engine, layers.layerInfos);
   const viewLayout = useMemo(() => viewLayoutActions(engine.scene, engine.loop), [engine]);
+  const { views: shownViews, layout: viewLayoutName } = useSceneView(engine.store);
+  // Several views offer each layer a place among them.
+  const layerViewPlacement = useMemo((): LayerViewPlacement | undefined => {
+    if (shownViews.length < 2) return undefined;
+    return {
+      count: shownViews.length,
+      moveTo: (id, index) => viewLayout.move(shownViews[index].id, id),
+      showEverywhere: viewLayout.showEverywhere,
+    };
+  }, [shownViews, viewLayout]);
+  const toggleSplit = useCallback(() => {
+    // A phone stacks its two views; a wider screen sets them side by side.
+    viewLayout.setLayout(viewLayoutName !== "single" ? "single" : phone ? "rows" : "columns");
+  }, [viewLayout, viewLayoutName, phone]);
 
   const requestDatasetHealth = useCallback(
     () => liveBridge
@@ -911,6 +926,7 @@ function Viewer({
       onAddData={() => setAddDataOpen(true)}
       comparisonBlocker={comparison.blocker}
       onCompare={comparison.compareWith}
+      viewPlacement={layerViewPlacement}
       layoutRegistry={layoutRegistry}
       sendCommand={bridge.sendCommand}
       onLayoutChange={() => {
@@ -930,6 +946,9 @@ function Viewer({
     <DimensionBar
       viewMode={dims.viewMode}
       onViewModeToggle={dims.handleViewModeToggle}
+      split={viewLayoutName !== "single"}
+      stacked={phone}
+      onSplitToggle={toggleSplit}
       slicePlane={dims.slicePlane}
       onSlicePlaneChange={dims.handleSlicePlaneChange}
       dimZ={dims.dimZ}

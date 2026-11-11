@@ -140,7 +140,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   const ownShapeAt = (point: ClientPoint, tolerance: number): string | null => {
     const scene = wasmSceneRef.current;
     if (!scene) return null;
-    const project = makeProjectAnnotationToCss(scene, datasetId);
+    const project = makeProjectAnnotationToCss(scene, surface.view, datasetId);
     const rect = element.getBoundingClientRect();
     const shapes = [];
     for (const pin of annotationsRef.current) {
@@ -240,7 +240,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       if (scene) {
         // `null` means the vertex is behind the camera or the dataset has no
         // anchorable member. A line or box shares one depth `z` across vertices.
-        const project = makeProjectAnnotationToCss(scene, datasetIdRef.current);
+        const project = makeProjectAnnotationToCss(scene, surface.view, datasetIdRef.current);
         // pointermove positions a dot being moved; reprojecting its stale
         // stored position would snap it back every frame. An orbit doesn't move
         // the pin, so its dot keeps reprojecting.
@@ -291,7 +291,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       }
     };
     return frameClock.subscribe(tick);
-  }, [wasmSceneRef, element, annotationsRef]);
+  }, [wasmSceneRef, surface.view, element, annotationsRef]);
 
   /** A right-click on a marker opens the canvas menu on it. A finger's long
    * press is timed by the gesture instead, so its native menu is only

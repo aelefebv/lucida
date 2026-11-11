@@ -2276,6 +2276,8 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::SetViewLayout { .. } => "view layout",
         ViewportCommand::SetActiveView { .. } => "view active",
         ViewportCommand::SetViewDatasets { .. } => "view datasets",
+        ViewportCommand::MoveDatasetToView { .. } => "view move-dataset",
+        ViewportCommand::MaximizeView { .. } => "view maximize",
         ViewportCommand::Pan { .. } => "view pan",
         ViewportCommand::ZoomBy { .. } => "view zoom",
         ViewportCommand::SetCenter { .. } => "view center",

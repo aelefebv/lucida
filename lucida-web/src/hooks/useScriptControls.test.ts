@@ -79,7 +79,10 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
     datasetHealth: () => Promise.resolve([]),
     captureView: () => null,
     comparison: fakeComparison().actions,
-    viewLayout: { layout: () => "single", views: () => [0], setLayout: vi.fn(), activate: vi.fn(), show: vi.fn() },
+    viewLayout: {
+      layout: () => "single", views: () => [0], setLayout: vi.fn(), activate: vi.fn(),
+      show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), maximize: vi.fn(),
+    },
     selectedDatasetId: null,
     datasetsRef: { current: datasets },
     ...overrides,
@@ -245,7 +248,10 @@ describe("useScriptControls", () => {
   it("divides the canvas and shows each view the datasets its URLs name", async () => {
     const [a, b] = ["/data/a.zarr", "/data/b.zarr"].map((url) => normalize_dataset_url(url));
     const datasets = new Map<string, DatasetState>([["wds-a", dataset("wds-a")], ["wds-b", dataset("wds-b")]]);
-    const viewLayout = { layout: () => "columns" as const, views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(), show: vi.fn() };
+    const viewLayout = {
+      layout: () => "columns" as const, views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(),
+      show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), maximize: vi.fn(),
+    };
     const given = inputs({
       viewLayout,
       datasetsRef: { current: datasets },
@@ -258,7 +264,7 @@ describe("useScriptControls", () => {
     await expect(scriptControls()!.views("columns", [["/data/a.zarr"], ["/data/b.zarr"]]))
       .resolves.toEqual({ applied: true, reason: null });
     expect(viewLayout.setLayout).toHaveBeenCalledWith("columns");
-    expect(viewLayout.show.mock.calls).toEqual([[0, ["wds-a"]], [1, ["wds-b"]]]);
+    expect(viewLayout.move.mock.calls).toEqual([[0, "wds-a"], [1, "wds-b"]]);
     await expect(scriptControls()!.views("columns", [["/data/c.zarr"]])).resolves.toEqual({
       applied: false,
       reason: `no dataset opened from ${normalize_dataset_url("/data/c.zarr")} is open`,

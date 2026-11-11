@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { DATASET_DRAG_TYPE } from "../viewer/viewPane.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -206,6 +207,30 @@ describe("LayerPanel layer row", () => {
     menu = await openMenu("More for layer second.zarr");
     await userEvent.click(within(menu).getByRole("menuitem", { name: "Remove" }));
     expect(props.onRemoveLayer).toHaveBeenCalledWith("wds-2");
+  });
+});
+
+describe("LayerPanel with several views", () => {
+  it("moves a layer into a view or shows it in both, and lets it drag onto one", async () => {
+    const viewPlacement = { count: 2, moveTo: vi.fn(), showEverywhere: vi.fn() };
+    render(<LayerPanel {...baseProps({ viewPlacement })} />);
+    let menu = await openMenu("More for layer original.zarr");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Move to view 2" }));
+    expect(viewPlacement.moveTo).toHaveBeenCalledWith("wds-1", 1);
+    menu = await openMenu("More for layer original.zarr");
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Show in both views" }));
+    expect(viewPlacement.showEverywhere).toHaveBeenCalledWith("wds-1");
+
+    const setData = vi.fn();
+    fireEvent.dragStart(screen.getByTitle("Drag original.zarr onto a view"), { dataTransfer: { setData } });
+    expect(setData).toHaveBeenCalledWith(DATASET_DRAG_TYPE, "wds-1");
+  });
+
+  it("offers no view and no drag with one view", async () => {
+    render(<LayerPanel {...baseProps()} />);
+    const menu = await openMenu("More for layer original.zarr");
+    expect(within(menu).queryByRole("menuitem", { name: /Move to view/ })).toBeNull();
+    expect(screen.queryByTitle("Drag original.zarr onto a view")).toBeNull();
   });
 });
 
