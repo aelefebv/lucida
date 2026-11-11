@@ -13,7 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ChunkResidencyMessage, WorkerToMainMessage } from "../workerProtocol.ts";
 import { getOrCreateVolumePool, growVolumePoolWithin, volumeLayerBytes, type AtlasState } from "../volume/atlas.ts";
-import { getOrCreateSlicePool, holdSliceSlot, shrinkSliceAtlas } from "../slice/atlas.ts";
+import { getOrCreateLabelSlicePool, getOrCreateSlicePool, holdSliceSlot, shrinkSliceAtlas } from "../slice/atlas.ts";
 import { handleLabelVolumeChunkData } from "../volume/upload.ts";
 import { handleMinimapUploadOverviewChunks, MINIMAP_OVERVIEW_SHARE, removeMinimapResources } from "../minimapHandlers.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
@@ -26,7 +26,7 @@ import {
   viewFrameTarget,
   viewLayerTargets,
 } from "./viewResources.ts";
-import { grantGrowth, handleGpuOutOfMemory, measureGpuMemory } from "./gpuBudget.ts";
+import { grantGrowth, handleGpuOutOfMemory, measureGpuCapacity, measureGpuMemory } from "./gpuBudget.ts";
 import { wantNothingOf } from "../coldState/apply.ts";
 
 const MIB = 1024 * 1024;
@@ -198,6 +198,110 @@ describe("a dataset no view plans", () => {
     expect(hidden.atlas.slotsZ).toBe(1);
     expect(lost(posts).flatMap((m) => m.keys)).toHaveLength(64);
     expect(lost(posts).every((m) => m.memberId === "imgB" && m.reason === "evicted")).toBe(true);
+  });
+
+  /**
+   * ds1 on screen: a pool wanting all it holds, and one wanting two chunks
+   * of its four layers. ds2 holds a label volume pool of one layer's bytes,
+   * with one chunk in it, and the total is spent.
+   */
+  function withHiddenLabel() {
+    const made = makeCtx();
+    const { ctx } = made;
+    const shown = heldPool(ctx, "ds1:ch0:32x32x32:detail", "imgA", 1);
+    const fallback = heldPool(ctx, "ds1:ch1:32x32x32:detail", "imgB", 4);
+    want(ctx, "imgA", shown.keys);
+    want(ctx, "imgB", [fallback.keys[200], fallback.keys[250]]);
+    ctx.state.draws.set("ds2|0", fakeDraw({ datasetId: "ds2" }));
+    handleLabelVolumeChunkData(ctx, {
+      type: "labelVolumeChunkData",
+      epochs: EPOCHS,
+      memberId: "label",
+      datasetId: "ds2",
+      chunks: [{ data: new Uint32Array(64 * 64 * 64).buffer, dataType: "uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
+      level: 0, t: 0, c: 0,
+      levelWidth: 128, levelHeight: 128, levelDepth: 64, chunkX: 64, chunkY: 64, chunkZ: 64,
+    });
+    const label = [...ctx.state.labelVolumePools.values()][0];
+    expect(measureGpuMemory(ctx.state).labelBytes).toBeGreaterThanOrEqual(volumeLayerBytes(shown.atlas));
+    ctx.state.gpuTotalBytes = measureGpuMemory(ctx.state).bytes;
+    made.posts.length = 0;
+    return { ...made, shown, fallback, label };
+  }
+
+  it("keeps its label pools while nothing needs the room, and leaves them out of what admission counts as taken", () => {
+    const { ctx, posts, label } = withHiddenLabel();
+    const takenBefore = measureGpuCapacity(ctx).reservedBytes;
+
+    wantNothingOf(ctx, "ds2");
+
+    expect([...ctx.state.labelVolumePools.values()]).toEqual([label]);
+    expect(lost(posts)).toEqual([]);
+    expect(measureGpuCapacity(ctx).reservedBytes).toBe(takenBefore - measureGpuMemory(ctx.state).labelBytes);
+  });
+
+  it("gives its label pools up whole, before the fallback of a dataset on screen", () => {
+    const { ctx, posts, shown, fallback, label } = withHiddenLabel();
+    wantNothingOf(ctx, "ds2");
+
+    expect(grantGrowth(ctx, shown.atlas, volumeLayerBytes(shown.atlas), 1, true)).toBe(1);
+
+    expect(ctx.state.labelVolumePools.size).toBe(0);
+    expect(vi.mocked(label.texture.destroy)).toHaveBeenCalled();
+    expect(lost(posts)).toEqual([expect.objectContaining({ memberId: "label", keys: ["0/0/0/0/0/0"], reason: "evicted" })]);
+    expect(fallback.atlas.slotsZ).toBe(4);
+    expect(measureGpuMemory(ctx.state).labelBytes).toBe(0);
+  });
+
+  it("but a planned dataset's label pool stays, and the fallback goes", () => {
+    const { ctx, shown, fallback, label } = withHiddenLabel();
+
+    expect(grantGrowth(ctx, shown.atlas, volumeLayerBytes(shown.atlas), 1, true)).toBe(1);
+
+    expect([...ctx.state.labelVolumePools.values()]).toEqual([label]);
+    expect(fallback.atlas.slotsZ).toBe(3);
+  });
+
+  it("gives up a label slice pool whole too, and takes the rest from the fallback", () => {
+    const { ctx, posts } = makeCtx();
+    const shown = heldPool(ctx, "ds1:ch0:32x32x32:detail", "imgA", 1);
+    const fallback = heldPool(ctx, "ds1:ch1:32x32x32:detail", "imgB", 4);
+    want(ctx, "imgA", shown.keys);
+    want(ctx, "imgB", [fallback.keys[200], fallback.keys[250]]);
+    ctx.state.draws.set("ds2|0", fakeDraw({ datasetId: "ds2" }));
+    // A quarter of a layer's bytes, so a layer of fallback goes after it.
+    const label = getOrCreateLabelSlicePool(ctx, "label", "ds2", 0, 3, 512, 512, 256, 256)!;
+    label.keys.set(0, "0/0/0/0/0");
+    ctx.state.gpuTotalBytes = measureGpuMemory(ctx.state).bytes;
+    wantNothingOf(ctx, "ds2");
+
+    expect(grantGrowth(ctx, shown.atlas, volumeLayerBytes(shown.atlas), 1, true)).toBe(1);
+
+    expect(ctx.state.labelSlicePools.size).toBe(0);
+    expect(lost(posts)).toContainEqual(expect.objectContaining({
+      memberId: "label", viewMode: "slice", keys: ["0/0/0/0/0"], reason: "evicted", cut: { axis: "z", plane: 3 },
+    }));
+    expect(fallback.atlas.slotsZ).toBe(3);
+  });
+
+  it("goes before the fallback of a dataset on screen, its chunk pools too", () => {
+    const { ctx, posts } = makeCtx();
+    const shown = heldPool(ctx, "ds1:ch0:32x32x32:detail", "imgA", 1);
+    // Three layers of fallback on screen against two held by a hidden dataset.
+    const fallback = heldPool(ctx, "ds1:ch1:32x32x32:detail", "imgB", 4);
+    const hiddenDraw = fakeDraw({ datasetId: "ds2" });
+    ctx.state.draws.set("ds2|0", hiddenDraw);
+    const hidden = heldPool(ctx, "ds2:ch0:32x32x32:detail", "imgC", 3, hiddenDraw);
+    want(ctx, "imgA", shown.keys);
+    want(ctx, "imgB", fallback.keys.slice(0, 2));
+    ctx.state.gpuTotalBytes = measureGpuMemory(ctx.state).bytes;
+    wantNothingOf(ctx, "ds2");
+
+    expect(grantGrowth(ctx, shown.atlas, volumeLayerBytes(shown.atlas), 1, true)).toBe(1);
+
+    expect(hidden.atlas.slotsZ).toBe(2);
+    expect(fallback.atlas.slotsZ).toBe(4);
+    expect(lost(posts).every((m) => m.memberId === "imgC")).toBe(true);
   });
 });
 
