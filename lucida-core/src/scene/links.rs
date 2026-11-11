@@ -1632,4 +1632,24 @@ mod tests {
         steer(&mut scene, first, ViewportCommand::SetT { t: 1 });
         assert_eq!(scene.epochs.selection, before.selection + 1);
     }
+
+    #[test]
+    fn home_carries_through_the_links_as_a_steer_does() {
+        let mut scene = one_place();
+        let [first, second] = views(&scene);
+        let framed = slice(&scene, first);
+        steer(
+            &mut scene,
+            first,
+            ViewportCommand::Pan {
+                dx: 200.0,
+                dy: 50.0,
+            },
+        );
+        steer(&mut scene, first, ViewportCommand::ZoomBy { factor: 4.0 });
+        assert_eq!(slice(&scene, second), slice(&scene, first));
+        assert!(scene.home([800, 600]));
+        assert_eq!(slice(&scene, first), framed);
+        assert_eq!(slice(&scene, second), framed);
+    }
 }

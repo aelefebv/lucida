@@ -272,6 +272,23 @@ impl Camera {
         }
     }
 
+    /// Turn back to where a new camera of this family looks from and leave
+    /// it framed, for the scene to fit to what its view shows: a slice
+    /// camera keeps its plane and how it draws it, a volume camera faces the
+    /// way a new one does. Clipping and the field of view are settings, not
+    /// pose, and stay.
+    pub fn home(&mut self) {
+        match self {
+            Camera::Slice(_) => {}
+            Camera::Arcball(a) => {
+                let start = Arcball::new(a.viewport);
+                a.set_angles(start.theta, start.phi);
+            }
+            Camera::Fly(f) => f.orientation = Fly::new(f.viewport).orientation,
+        }
+        self.set_framing(Framing::Framed);
+    }
+
     /// Whether this is a volume camera (arcball or fly), as against the slice
     /// camera. The two families work in different spaces.
     pub fn is_volume(&self) -> bool {
