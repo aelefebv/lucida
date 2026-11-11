@@ -40,6 +40,7 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
     indirectionBuf: {} as GPUBuffer,
     indirectionData: new Uint32Array([0]),
     slots: new Map(),
+    planesByChunk: new Map(),
     slotGridIdx: new Int32Array(1),
     freeSlots: [],
     totalSlots: 1,
@@ -54,7 +55,6 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
     axis: "z",
     t: 0,
     c: 0,
-    slotLevelZ: new Int32Array(1).fill(-1),
     indirectionDirty: false,
   };
 }

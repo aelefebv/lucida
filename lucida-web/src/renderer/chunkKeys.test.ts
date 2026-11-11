@@ -4,6 +4,7 @@ import {
   parsePlaneChunkKey,
   planeChunkKey,
   makeCompositeKey,
+  makeSliceSlotKey,
   parseCompositeKey,
 } from "./chunkKeys.ts";
 
@@ -60,6 +61,7 @@ describe("parseCompositeKey", () => {
     expect(parseCompositeKey(composite)).toEqual({
       memberId: "memberA",
       chunkKey: "0/1/2/3/4/5",
+      plane: null,
     });
   });
 
@@ -68,19 +70,17 @@ describe("parseCompositeKey", () => {
     expect(parseCompositeKey(composite)).toEqual({
       memberId: "img1:ch0",
       chunkKey: "2/5/1/3/4/7",
+      plane: null,
     });
+  });
+
+  it("round-trips a slice slot key with its plane", () => {
+    const key = makeSliceSlotKey("img1:ch0", "2/5/1/3/4/7", 12);
+    expect(key).toBe("img1:ch0|2/5/1/3/4/7|12");
+    expect(parseCompositeKey(key)).toEqual({ memberId: "img1:ch0", chunkKey: "2/5/1/3/4/7", plane: 12 });
   });
 
   it("returns null when separator is absent", () => {
     expect(parseCompositeKey("nopipehere")).toBeNull();
-  });
-
-  it("splits on the first | so chunk keys containing | (if any) are preserved", () => {
-    // chunkKey shouldn't contain | in practice, but the helper splits
-    // on the first pipe, leaving the rest in chunkKey.
-    expect(parseCompositeKey("mem|a|b|c")).toEqual({
-      memberId: "mem",
-      chunkKey: "a|b|c",
-    });
   });
 });

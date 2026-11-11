@@ -244,9 +244,11 @@ describe("computeWantedSet", () => {
 
   it("slice mode - a resident chunk cut from another plane of it is missing, and a stale plane", () => {
     const coldState = makeColdState({ viewMode: "slice" });
+    // Each chunk of FOUR held at the plane of the same index in `planes`.
+    const planesAt = (planes: number[]) => new Map(FOUR.map((key, slot) => [vk("img:ch0", key), new Map([[planes[slot], slot]])]));
     const atlas: AtlasSnapshot = {
-      slots: new Map(FOUR.map((key, slot) => [vk("img:ch0", key), slot])),
-      slotLevelZ: [10, 10, 10, 10],
+      slots: new Map(),
+      planesByChunk: planesAt([10, 10, 10, 10]),
       entityMetas: new Map([["img:ch0", [LEVEL0_SECTION]]]),
       z: 10,
     };
@@ -260,7 +262,7 @@ describe("computeWantedSet", () => {
     // Plane 11 is in the same chunk along Z, so every key still matches.
     atlas.z = 11;
     expect(chunks(run().missing).map((m) => m.chunkKey)).toEqual(FOUR);
-    atlas.slotLevelZ = [11, 11, 10, 10];
+    atlas.planesByChunk = planesAt([11, 11, 10, 10]);
     expect(chunks(run().missing).map((m) => m.chunkKey)).toEqual(FOUR.slice(2));
     expect(run().stalePlanes).toEqual(FOUR.slice(2).map((chunkKey) => ({ memberId: "img:ch0", tier: "detail", chunkKey })));
   });
@@ -268,7 +270,7 @@ describe("computeWantedSet", () => {
   it("names no stale plane for a wanted chunk with no slot", () => {
     const coldState = makeColdState({ viewMode: "slice" });
     const sliceAtlases = new Map<string, AtlasSnapshot>([["ds-0:ch0:32x32", {
-      slots: new Map(), slotLevelZ: [], entityMetas: new Map([["img:ch0", [LEVEL0_SECTION]]]), z: 0,
+      slots: new Map(), planesByChunk: new Map(), entityMetas: new Map([["img:ch0", [LEVEL0_SECTION]]]), z: 0,
     }]]);
 
     const result = computeWantedSet(

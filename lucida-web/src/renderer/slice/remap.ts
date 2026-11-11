@@ -36,9 +36,9 @@ export function remapSliceIndirection(
     sliceAxis: atlas.axis,
     targetChunkZFor: (memberId, level) =>
       computeTargetChunkZ(atlas.entityZInfo.get(memberId)?.get(level), currentZ),
-    holdsCurrentPlane: (memberId, level, slotIndex) => {
-      const plane = computeTargetPlane(atlas.entityZInfo.get(memberId)?.get(level), currentZ);
-      return plane === null || atlas.slotLevelZ[slotIndex] === plane;
+    holdsCurrentPlane: (memberId, level, plane) => {
+      const target = computeTargetPlane(atlas.entityZInfo.get(memberId)?.get(level), currentZ);
+      return target === null || plane === target;
     },
   });
   atlas.indirectionDirty = true;

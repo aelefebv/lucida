@@ -57,11 +57,12 @@ export interface RemapParams {
    */
   targetChunkZFor: ((memberId: string, level: number) => number | null) | null;
   /**
-   * Slice mode: whether a slot holds the plane the current Z maps to at its
-   * level. A slot that fails keeps its key but stays unmapped, so the shader
-   * never draws the previous plane while the re-cut one is on its way.
+   * Slice mode: whether a slot cut from `plane` (its slot key's) holds the
+   * plane the current Z maps to at its level. A slot that fails stays
+   * resident but unmapped, so the shader never draws the previous plane
+   * while the re-cut one is on its way.
    */
-  holdsCurrentPlane?: (memberId: string, level: number, slotIndex: number) => boolean;
+  holdsCurrentPlane?: (memberId: string, level: number, plane: number | null) => boolean;
   /**
    * memberId → wanted chunk keys the source failed for good. Each one's cell
    * reads {@link INDIRECTION_FAILED} unless a resident slot holds it.
@@ -97,7 +98,7 @@ export function remapSharedIndirection(params: RemapParams): void {
     if (!meta) continue;
     if (
       params.holdsCurrentPlane &&
-      !params.holdsCurrentPlane(parsedComp.memberId, chunk.level, slotIndex)
+      !params.holdsCurrentPlane(parsedComp.memberId, chunk.level, parsedComp.plane)
     ) {
       continue;
     }

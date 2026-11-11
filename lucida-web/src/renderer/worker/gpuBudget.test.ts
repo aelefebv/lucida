@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ChunkResidencyMessage, WorkerToMainMessage } from "../workerProtocol.ts";
 import { getOrCreateVolumePool, growVolumePoolWithin, volumeLayerBytes, type AtlasState } from "../volume/atlas.ts";
+import { getOrCreateSlicePool, holdSliceSlot, shrinkSliceAtlas } from "../slice/atlas.ts";
 import { handleLabelVolumeChunkData } from "../volume/upload.ts";
 import { handleMinimapUploadOverviewChunks, MINIMAP_OVERVIEW_SHARE, removeMinimapResources } from "../minimapHandlers.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
@@ -261,5 +262,32 @@ describe("holders outside the pools", () => {
     upload("m1", 1);
     expect(measureGpuMemory(ctx.state)).toMatchObject({ minimapBytes: overview, overviewsRefused: 0 });
     removeMinimapResources(ctx, "m1");
+  });
+});
+
+describe("a slice pool that shrinks", () => {
+  it("keeps the planes it holds of each chunk in step with its slots", () => {
+    const { ctx } = makeCtx();
+    const atlas = getOrCreateSlicePool(ctx, "ds1:ch0:32x32:detail", "ds1", 32, 32, 0, 0, 0, "u16");
+    atlas.slotsY = 2;
+    atlas.totalSlots = atlas.slotsX * 2;
+    atlas.slotGridIdx = new Int32Array(atlas.totalSlots).fill(-1);
+    atlas.freeSlots = [];
+    // Two planes of one chunk, one of them in the row that goes.
+    const row = atlas.slotsX;
+    holdSliceSlot(atlas, "imgA", "0/0/0/0/0/0", 3, 0);
+    holdSliceSlot(atlas, "imgA", "0/0/0/0/0/0", 9, row);
+    holdSliceSlot(atlas, "imgA", "0/0/0/0/0/1", 3, row + 1);
+
+    const dropped = shrinkSliceAtlas(ctx.device, atlas, 1, ["imgA|0/0/0/0/0/0|9", "imgA|0/0/0/0/0/0|3"]);
+
+    expect(dropped).toEqual(["imgA|0/0/0/0/0/1|3"]);
+    const planes = atlas.planesByChunk.get("imgA|0/0/0/0/0/0")!;
+    expect([...planes.keys()].sort((a, b) => a - b)).toEqual([3, 9]);
+    for (const [plane, slot] of planes) {
+      expect(slot).toBeLessThan(row);
+      expect(atlas.slots.get(`imgA|0/0/0/0/0/0|${plane}`)).toBe(slot);
+    }
+    expect(atlas.planesByChunk.has("imgA|0/0/0/0/0/1")).toBe(false);
   });
 });
