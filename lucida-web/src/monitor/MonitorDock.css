@@ -323,7 +323,7 @@
   border-left-color: var(--lc-accent);
 }
 
-.monitor-callout-stall {
+.monitor-callout-fail {
   border-left-color: var(--lc-danger);
 }
 
@@ -333,6 +333,10 @@
 
 .monitor-callout-steady-state {
   border-left-color: var(--lc-success);
+}
+
+.monitor-callout-bound {
+  border-left-color: var(--lc-info);
 }
 
 .monitor-callout-note {
@@ -399,8 +403,8 @@
   border-left: 3px solid var(--lc-border-strong);
 }
 
-.monitor-provisional-stall {
-  border-left-color: var(--lc-danger);
+.monitor-provisional-bound {
+  border-left-color: var(--lc-info);
 }
 
 .monitor-provisional-saturated {

@@ -27,7 +27,7 @@ export interface LiveCounter {
   value: string;
   /**
    * What the number counts, so it is never read as a rate or a verdict. Not
-   * `note` — that word belongs to a finding that is not a stall, and the two
+   * `note` — that word belongs to a finding that fails nothing, and the two
    * would sit on the same surface.
    */
   meaning: string;

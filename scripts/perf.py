@@ -1518,9 +1518,10 @@ class Change:
         return f"{self.label} {self.before} -> {self.after}{share}"
 
 
-# Only these outcomes regress a verdict. A stall verdict means a finding
-# crossed its threshold, and on one unchanged build that came and went on one
-# run in three to five of a cell, so it shows in the verdict column unflagged.
+# Only these outcomes regress a verdict. A bound or failing verdict means a
+# finding crossed its threshold, and on one unchanged build that came and went
+# on one run in three to five of a cell, so it shows in the verdict column
+# unflagged.
 UNSETTLED = frozenset({"unsettled", "error", "no verdict"})
 
 
@@ -1903,7 +1904,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--cli", type=Path, metavar="PATH", help="run this built lucida CLI instead of building one")
     parser.add_argument(
-        "--gate", action="store_true", help="fail a run that stalls or never settles, as `lucida trace --gate` does"
+        "--gate",
+        action="store_true",
+        help="fail a run that never settles or ends on a failing verdict, as `lucida trace --gate` does",
     )
     parser.add_argument("--bundle", action="store_true", help="also write each run's bundle beside its run file")
     parser.add_argument("--list", action="store_true", help="list datasets, scenarios and suites, then exit")

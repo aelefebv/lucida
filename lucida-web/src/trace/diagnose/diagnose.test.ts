@@ -5,7 +5,7 @@
  * not external behaviour; what the document says about a run is.
  *
  * Two cases exist to keep a prototype finding from coming back and are named
- * for it: a share threshold with no absolute floor reported a stall on a
+ * for it: a share threshold with no absolute floor blamed a phase for a
  * healthy 368 ms open, and a critical path starting at the first recorded row
  * reported `100% accounted` for a run that was 87% pre-instrument boot.
  */
@@ -28,10 +28,12 @@ import {
   makeRun,
   makeTick,
   quietRun,
+  refetchLoopSteadyState,
   saturatedReopen,
   sendHeavyIdleRun,
   slowPresentInteraction,
   uninstrumentedPrefixOpen,
+  uploadBoundOpen,
 } from "./fixtures.ts";
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
 import { renderDiagnostic } from "./renderText.ts";
@@ -55,7 +57,7 @@ import {
 const MS = 1_000;
 
 describe("thresholds", () => {
-  it("does not report a stall on a healthy sub-400 ms open", () => {
+  it("finds nothing on a healthy sub-400 ms open", () => {
     const doc = diagnoseRun(healthyLocalOpen());
 
     expect(doc.verdict.kind).toBe("clear");
@@ -65,7 +67,7 @@ describe("thresholds", () => {
   it("fires the relative share rule only above both 30% and 250 ms", () => {
     const healthy = diagnoseRun(healthyLocalOpen());
     // The healthy run's wire segment is the majority of its critical path and
-    // is still not a stall: it is nowhere near the absolute floor.
+    // still bounds nothing: it is nowhere near the absolute floor.
     const wire = healthy.criticalPath.segments.find((s) => s.label === "browser.wire");
     expect(wire).toBeDefined();
     expect(wire!.sharePct).toBeGreaterThanOrEqual(RULESET.share.minPct);
@@ -109,7 +111,7 @@ describe("thresholds", () => {
     ).toBe(false);
   });
 
-  it("still stalls on a slow decoder once the worker reports its own time", () => {
+  it("still fails a slow decoder once the worker reports its own time", () => {
     const decodeCeilMs = RULESET.absolute.find((rule) => rule.phase === "browser.decode")!.ceilMs;
     const doc = diagnoseRun(decodeOpen({ roundTripUs: 90 * MS, workUs: 80 * MS }));
 
@@ -118,8 +120,8 @@ describe("thresholds", () => {
     expect(decode!.p95Ms).toBeGreaterThan(decodeCeilMs);
     const finding = doc.findings.find((f) => f.subject === "browser.decode");
     expect(finding?.rule).toBe("compute.decode");
-    expect(finding?.severity).toBe("stall");
-    expect(doc.verdict.kind).toBe("stall");
+    expect(finding?.severity).toBe("fail");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("browser.decode");
   });
 
@@ -158,13 +160,13 @@ describe("thresholds", () => {
     expect(segments.find((s) => s.label === "browser.upload")).toMatchObject({ class: "compute", ms: 10 });
   });
 
-  it("still stalls on a slow delivery once the view wanted the chunk", () => {
+  it("still fails a slow delivery once the view wanted the chunk", () => {
     const doc = diagnoseRun(prefetchedZoom({ uploadUs: 400 * MS, unwantedUs: 100 * MS }));
 
     const upload = doc.phases.find((phase) => phase.id === "browser.upload");
     expect(upload?.p95Ms).toBe(300);
-    expect(doc.findings.some((f) => f.subject === "browser.upload" && f.severity === "stall")).toBe(true);
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.findings.some((f) => f.subject === "browser.upload" && f.severity === "fail")).toBe(true);
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("browser.upload");
   });
 
@@ -253,6 +255,66 @@ describe("thresholds", () => {
   });
 });
 
+describe("a phase that bound the run", () => {
+  it("reads a settled run whose upload held most of the chain as bound by upload, not as a failure", () => {
+    const doc = diagnoseRun(uploadBoundOpen());
+
+    const [lead] = doc.findings;
+    expect(lead).toMatchObject({ severity: "bound", rule: RULESET.share.id, subject: "browser.upload" });
+    expect(lead.observed.ms).toBe(300);
+    expect(lead.attribution?.cause).toBe("browser.upload");
+    expect(doc.verdict.kind).toBe("bound");
+    expect(doc.verdict.text).toMatch(
+      /^bound by browser\.upload: it held 300 ms, \d+% of the chain, and nothing failed$/,
+    );
+    expect(doc.run.endedAs).toBe("quiescent");
+    const text = renderDiagnostic(doc).text;
+    expect(text).toMatch(/\n {2}1 {2}BOUND +browser\.upload /);
+    expect(text).not.toMatch(/stall/i);
+  });
+
+  it("lets anything that fails outrank it, so the verdict fails", () => {
+    const run = uploadBoundOpen();
+    run.errors = [
+      {
+        atUs: 120 * MS,
+        pageMs: 2_000,
+        source: "exception",
+        message: "Uncaught TypeError: x is undefined",
+        location: null,
+        count: 1,
+        allowed: null,
+      },
+    ];
+    const doc = diagnoseRun(run);
+
+    expect(doc.findings[0]).toMatchObject({ severity: "fail", rule: RULESET.pageError.id });
+    expect(doc.findings.some((f) => f.severity === "bound" && f.subject === "browser.upload")).toBe(true);
+    expect(doc.verdict.kind).toBe("fail");
+  });
+
+  it("lets a steady-state finding outrank it, and the run's attribution stays on it", () => {
+    const doc = diagnoseRun(uploadBoundOpen(), { steadyState: refetchLoopSteadyState(uploadBoundOpen()) });
+
+    expect(doc.findings[0].severity).toBe("steady-state");
+    expect(doc.verdict.kind).toBe("steady-state");
+    const bound = doc.findings.find((f) => f.severity === "bound");
+    expect(bound?.subject).toBe("browser.upload");
+    expect(bound?.attribution).not.toBeNull();
+  });
+
+  it("reads a run that stalled as stalled, with its reason, rather than as bound", () => {
+    const doc = diagnoseRun(uploadBoundOpen({ endReason: "stalled", stallReason: "server_pending" }));
+
+    expect(doc.findings[0].severity).toBe("bound");
+    expect(doc.verdict.kind).toBe("unsettled");
+    expect(doc.verdict.text).toMatch(
+      /^the run ended as stalled \(server_pending\) rather than settling — every total below is a lower bound; bound by browser\.upload: it held 300 ms/,
+    );
+    expect(doc.run.endedAs).toBe("stalled (server_pending)");
+  });
+});
+
 describe("attribution", () => {
   it("is a back-walk, not a max over phase totals", () => {
     // Two hundred concurrent rows spend 100 ms each on the wire — 20 s of
@@ -319,7 +381,7 @@ describe("attribution", () => {
 
     expect(prefix.class).toBe("unrecorded");
     expect(prefix.ms).toBeGreaterThan(2_000);
-    // A note, never a stall: nothing measured that stretch, so nothing can be
+    // A note, never bound: nothing measured that stretch, so nothing can be
     // blamed for it — but a chain led by a hole is worth a line of its own.
     const onPrefix = doc.findings.filter((f) => f.subject === prefix.label);
     expect(onPrefix.every((f) => f.severity === "note")).toBe(true);
@@ -395,7 +457,7 @@ describe("chunks the uploader held", () => {
     };
   }
 
-  it("leads with a stall that names each held chunk and the renderer's reason, and the verdict says the view settled without them", () => {
+  it("leads with a failure that names each held chunk and the renderer's reason, and the verdict says the view settled without them", () => {
     const run = healthyLocalOpen();
     run.events = [
       held("0/0/0/1/0/0", "wrong-slice", 200 * MS),
@@ -404,12 +466,12 @@ describe("chunks the uploader held", () => {
     ];
     const doc = diagnoseRun(run);
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("0/0/0/1/0/0 (wrong-slice)");
     expect(doc.verdict.text).toContain("the view settled without them");
     const lead = doc.findings[0];
     expect(lead.rule).toBe(RULESET.held.id);
-    expect(lead.severity).toBe("stall");
+    expect(lead.severity).toBe("fail");
     expect(lead.observed.chunks).toBe(2);
     expect(lead.observed.held).toEqual([
       { entityId: "tile-0", chunkKey: "0/0/0/1/0/0", reason: "wrong-slice" },
@@ -429,7 +491,7 @@ describe("GPU errors", () => {
     return { atUs, kind: "gpu-error", reason, chunk: null, levelChange: null };
   }
 
-  it("lead every other stall, held chunks included, and the verdict counts them by kind", () => {
+  it("lead every other failure, held chunks included, and the verdict counts them by kind", () => {
     const run = healthyLocalOpen();
     run.events = [
       gpuError("out-of-memory", 100 * MS),
@@ -448,7 +510,7 @@ describe("GPU errors", () => {
     ];
     const doc = diagnoseRun(run);
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("the GPU reported 3 error(s) (out-of-memory 2, device-lost 1)");
     const [lead, next] = doc.findings;
     expect(lead.rule).toBe(RULESET.gpuError.id);
@@ -476,12 +538,12 @@ describe("errors the page raised", () => {
     };
   }
 
-  it("are a stall that names the first, with its time on the run's clock", () => {
+  it("are a failure that names the first, with its time on the run's clock", () => {
     const run = healthyLocalOpen();
     run.errors = [pageError(), pageError({ atUs: 200 * MS, source: "console", message: "[commands] clash", location: null, count: 2 })];
     const doc = diagnoseRun(run);
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain(
       "the page raised 3 error(s); the first at 120 ms, an uncaught exception: Uncaught TypeError: x is undefined (/assets/index.js:1:20)",
     );
@@ -535,12 +597,12 @@ describe("errors the page raised", () => {
 });
 
 describe("a blank settled frame", () => {
-  it("is a stall that names its colour and size", () => {
+  it("is a failure that names its colour and size", () => {
     const run = healthyLocalOpen();
     run.frame = { width: 2880, height: 1800, flatColour: "#000000", unread: null };
     const doc = diagnoseRun(run);
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("the settled frame was one flat colour, #000000, across all 2880x1800 pixels");
     expect(doc.findings[0]).toMatchObject({
       rule: RULESET.blankFrame.id,
@@ -572,12 +634,12 @@ describe("a page that scrolled or overflows", () => {
     viewportHeight: 844,
   };
 
-  it("is a stall when the page overflows its viewport, as a 100vh body does under a phone's address bar", () => {
+  it("is a failure when the page overflows its viewport, as a 100vh body does under a phone's address bar", () => {
     const run = healthyLocalOpen();
     run.pageScroll = { ...fits, scrollHeight: 924 };
     const doc = diagnoseRun(run);
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("its document is 390x924 CSS pixels in a 390x844 viewport");
     expect(doc.findings[0]).toMatchObject({
       rule: RULESET.pageScroll.id,
@@ -587,12 +649,12 @@ describe("a page that scrolled or overflows", () => {
     expect(renderDiagnostic(doc).text).toContain("scrolled to 0,0, document 390x924 in a 390x844 viewport");
   });
 
-  it("is a stall when the page was scrolled, even with nothing left to scroll", () => {
+  it("is a failure when the page was scrolled, even with nothing left to scroll", () => {
     const run = healthyLocalOpen();
     run.pageScroll = { ...fits, scrollY: 80 };
     const doc = diagnoseRun(run);
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("the page was scrolled to 0,80;");
   });
 
@@ -623,12 +685,12 @@ describe("chrome off the screen", () => {
   const topBar: ChromePart = { part: "top bar", left: 0, top: 0, right: 390, bottom: 52.33 };
   const sheet: ChromePart = { part: "bottom sheet", left: 0, top: 660, right: 390, bottom: 844 };
 
-  it("is a stall when a scroll carried the top bar off the top, as a route that kept the last page's offset does", () => {
+  it("is a failure when a scroll carried the top bar off the top, as a route that kept the last page's offset does", () => {
     const run = healthyLocalOpen();
     run.chrome = phone([{ ...topBar, top: -80, bottom: -27.67 }, sheet]);
     const doc = diagnoseRun(run);
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain(
       "the top bar spans 0,-80 to 390,-27.67 CSS pixels in a 390x844 viewport, so all of it is off the screen",
     );
@@ -642,7 +704,7 @@ describe("chrome off the screen", () => {
     expect(renderDiagnostic(doc).text).toContain("spans 0,-80 to 390,-27.67 in a 390x844 viewport, CSS pixels");
   });
 
-  it("is a stall when the sheet reaches below the viewport, with nothing for the page to scroll", () => {
+  it("is a failure when the sheet reaches below the viewport, with nothing for the page to scroll", () => {
     const run = healthyLocalOpen();
     run.chrome = phone([topBar, { ...sheet, top: 740, bottom: 924 }]);
     const doc = diagnoseRun(run);
@@ -686,7 +748,7 @@ describe("chrome off the screen", () => {
 describe("first paint on a cold open", () => {
   const presentCeiling = RULESET.absolute.find((rule) => rule.phase === "browser.present")!;
 
-  it("reads a present breach on a run opened by content as a first-paint note, not a stall", () => {
+  it("reads a present breach on a run opened by content as a first-paint note, not a failure", () => {
     const doc = diagnoseRun(firstPaintOpen());
 
     expect(doc.findings.filter((finding) => finding.severity !== "note")).toEqual([]);
@@ -737,35 +799,37 @@ describe("first paint on a cold open", () => {
     expect(doc.verdict.text).toMatch(/browser\.upload held 800 ms \(\d+% of the chain\) on the first paint/);
   });
 
-  it("keeps the stall when a dataset is added to a live page, whose cache is warm", () => {
+  it("keeps the failure when a dataset is added to a live page, whose cache is warm", () => {
     const doc = diagnoseRun(firstPaintOpen("present", { warm: true }));
 
     expect(doc.run.cause?.epoch).toBe("content");
     expect(doc.run.warmth).toContain("warm");
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.findings[0].rule).toBe(presentCeiling.id);
     expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id)).toBe(false);
   });
 
-  it("keeps the stall on an interaction run with the same present, for each of the five", () => {
+  it("keeps the failure on an interaction run with the same present, for each of the five", () => {
     for (const input of INPUT_KINDS) {
       const doc = diagnoseRun(slowPresentInteraction(input));
 
       const lead = doc.findings[0];
-      expect(lead.severity, input).toBe("stall");
+      expect(lead.severity, input).toBe("fail");
       expect(lead.rule, input).toBe(presentCeiling.id);
       expect(lead.subject, input).toBe("browser.present");
-      expect(doc.verdict.kind, input).toBe("stall");
+      expect(doc.verdict.kind, input).toBe("fail");
       expect(doc.verdict.text, input).toContain("browser.present ran p95");
       expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id), input).toBe(false);
       expect(doc.next.some((step) => step.why.includes("first paint")), input).toBe(false);
     }
   });
 
-  it("leaves every other ceiling a stall on a cold open", () => {
+  it("leaves every other phase's share as it reads on any run, on a cold open", () => {
     const doc = diagnoseRun(coldRemoteOpen());
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("bound");
+    expect(doc.findings[0]).toMatchObject({ severity: "bound", rule: RULESET.share.id });
+    expect(RULESET.firstPaint.phases).not.toContain(doc.findings[0].subject);
     expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id)).toBe(false);
   });
 });
@@ -806,7 +870,7 @@ describe("the plan ceiling on a cold open", () => {
     const doc = diagnoseRun(widePlanRun(400, 700, open));
 
     const lead = doc.findings[0];
-    expect(lead.severity).toBe("stall");
+    expect(lead.severity).toBe("fail");
     expect(lead.rule).toBe(RULESET.coldPlan.id);
     expect(lead.observed.entities).toBe(700);
     expect(lead.threshold).toEqual({
@@ -820,7 +884,7 @@ describe("the plan ceiling on a cold open", () => {
     const doc = diagnoseRun(widePlanRun(56, 12, open));
 
     expect(doc.findings[0].subject).toBe("browser.plan");
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
   });
 
   it("keeps the flat ceiling on an interaction run and on a warm open", () => {
@@ -845,7 +909,7 @@ describe("interaction runs", () => {
     }
   });
 
-  it("does not call a gesture at a healthy frame rate a stall", () => {
+  it("does not fail a gesture at a healthy frame rate", () => {
     // A drag ticks every frame, so its main-thread share is near total at any
     // frame rate. The ceiling, not share, is the criterion.
     for (const input of INPUT_KINDS) {
@@ -860,7 +924,7 @@ describe("interaction runs", () => {
   it("fails a gesture whose frame time exceeds the ceiling, naming the input", () => {
     const doc = diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS }));
 
-    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.kind).toBe("fail");
     expect(doc.verdict.text).toContain("orbit");
     expect(doc.verdict.text).toContain(`${RULESET.interaction.ceilMs} ms`);
     const lead = doc.findings[0];
@@ -1182,12 +1246,12 @@ describe("a window", () => {
     }
   });
 
-  it("moves the verdict when the window excludes a stall in the second half", () => {
+  it("moves the verdict when the window excludes a failure in the second half", () => {
     const run = lateStallOpen();
     const decodeCeilMs = RULESET.absolute.find((rule) => rule.phase === "browser.decode")!.ceilMs;
 
     const whole = diagnoseRun(run);
-    expect(whole.verdict.kind).toBe("stall");
+    expect(whole.verdict.kind).toBe("fail");
     expect(whole.verdict.text).toContain("browser.decode");
 
     const firstHalf = diagnoseRun(run, { window: { startMs: 0, endMs: 1_000 } });
@@ -1205,7 +1269,7 @@ describe("a window", () => {
     expect(decode!.p95Ms).toBeLessThan(decodeCeilMs);
 
     const secondHalf = diagnoseRun(run, { window: { startMs: 1_000, endMs: 2_000 } });
-    expect(secondHalf.verdict.kind).toBe("stall");
+    expect(secondHalf.verdict.kind).toBe("fail");
     expect(secondHalf.verdict.text).toContain("browser.decode");
     expect(secondHalf.phases.find((phase) => phase.id === "browser.decode")?.n).toBe(40);
   });

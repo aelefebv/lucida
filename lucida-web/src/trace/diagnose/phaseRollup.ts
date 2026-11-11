@@ -355,7 +355,7 @@ function extentOf(samples: PhaseSample[]): PhaseRollup["extent"] {
  * `busyMs` is a **lower bound**. Each reading is charged for at most the
  * interval it covers, so a sparse tick cadence under-reports rather than
  * inventing occupancy — the safe direction, since this number can only be used
- * to claim a stall.
+ * to claim the main thread bound the run.
  */
 export function aggregateCandidates(
   run: TraceRun,
