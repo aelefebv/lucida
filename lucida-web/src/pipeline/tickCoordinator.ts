@@ -1067,10 +1067,9 @@ export class TickCoordinator {
             datasetId: dsId,
             manifest: ctx.datasets.get(dsId)!.manifest,
             t: snapshot.selection.t,
-            z: snapshot.selection.z,
+            cut: snapshot.selection.cut,
             labelSettings: dsSettings?.label_settings,
             mode,
-            cutAxis: snapshot.selection.cut.axis,
           }) : [],
           entities,
           selection: snapshot.selection,
@@ -1131,7 +1130,7 @@ export class TickCoordinator {
       // (labels live outside `manifest.images`/`entities`), so their chunk
       // requests are synthesized here from the label's own geometry and
       // merged into the fetch plan. In `slice` mode the planes around the
-      // label's mapped Z-plane are fetched, as the image's are; in `volume`
+      // label's plane the view cuts are fetched, as the image's are; in `volume`
       // mode the whole label volume (every z-chunk) is fetched for the 3D
       // first-hit surface. Scoped under each label's own image id, so they
       // never perturb intensity-chunk eviction. Each view asks for its own.
@@ -1139,14 +1138,13 @@ export class TickCoordinator {
         datasetId: dsId,
         manifest: ctx.datasets.get(dsId)!.manifest,
         t: view.snapshot.selection.t,
-        z: view.snapshot.selection.z,
+        cut: view.snapshot.selection.cut,
         // Fetch only the labels the render path will draw (visible +
         // eligible), so a hidden label is neither fetched nor drawn.
         labelSettings: dsSettings?.label_settings,
         mode: view.view.mode,
         config: planningConfig,
         cutStep: view.cutStep,
-        cutAxis: view.snapshot.selection.cut.axis,
       }));
       const requestsWithLabels =
         labelRequests.length > 0
@@ -1551,12 +1549,11 @@ export class TickCoordinator {
         datasetId: p.dsId,
         manifest: ctx.datasets.get(p.dsId)!.manifest,
         t: p.selection.t,
-        z: p.selection.z,
+        cut: p.selection.cut,
         labelSettings: p.dsSettings?.label_settings,
         mode,
         config: planningConfig,
         cutStep: p.cutStep,
-        cutAxis: p.selection.cut.axis,
       });
       const requestsWithLabels =
         labelRequests.length > 0
@@ -1581,10 +1578,9 @@ export class TickCoordinator {
           datasetId: p.dsId,
           manifest: ctx.datasets.get(p.dsId)!.manifest,
           t: p.selection.t,
-          z: p.selection.z,
+          cut: p.selection.cut,
           labelSettings: p.dsSettings?.label_settings,
           mode,
-          cutAxis: p.selection.cut.axis,
         }),
         currentT: p.selection.t,
         currentZ: workerCutIndex(p.selection),

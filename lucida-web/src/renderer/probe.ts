@@ -11,7 +11,7 @@
 
 import { quadEdgeLengths, quadUV } from "./sliceQuad.ts";
 import { cutLocalAt } from "./sliceCut.ts";
-import type { SliceRenderMultiPassMessage, VolumeRenderMultiPassMessage } from "./workerProtocol.ts";
+import type { SliceLayerParams, SliceRenderMultiPassMessage, VolumeRenderMultiPassMessage } from "./workerProtocol.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
@@ -143,7 +143,7 @@ export function levelZeroPosition(
 export interface SliceHit {
   memberId: string;
   uv: [number, number];
-  label?: { entityId: string | undefined; dataW: number; dataH: number; chunk?: { t: number; plane: number } };
+  label?: { entityId: string | undefined; dataW: number; dataH: number; chunk?: SliceLayerParams["labelChunk"] };
 }
 
 /** Words per aggregate quad record (`SliceAggregateParams.quads`). */

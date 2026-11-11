@@ -3,13 +3,13 @@
  * (they are kept out of `manifest.images`/`entities`), so label chunks are
  * requested here from the label's own multiscale geometry and merged into
  * the fetch plan. A label draws from one pool covering its full 2D footprint
- * at one level, so slice mode requests every (y, x) chunk of the chosen
- * level's plane. Picking a level whose grid fits a small chunk budget keeps
- * that to a handful.
+ * at one level, so slice mode requests every chunk across the plane of the
+ * chosen level the view cuts. Picking a level whose grid fits a small chunk
+ * budget keeps that to a handful.
  */
 
 import { Axis } from "../../axes.ts";
-import { labelFootprint, labelLevelZ, labelTimeIndex } from "../../renderer/labelLayout.ts";
+import { labelFootprint, labelLevelPlane, labelTimeIndex, type Level0 } from "../../renderer/labelLayout.ts";
 import { labelPaddedVolumeBytes } from "../../renderer/volume/atlas.ts";
 import { isUint32 } from "../../renderer/dataTypeUtil.ts";
 import { pageDeviceBudgets } from "../../deviceBudget.ts";
@@ -21,7 +21,15 @@ import type {
 } from "../../manifestTypes.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
 import { slicePlaneIn, type PlaneInChunks } from "./emit.ts";
-import type { SpatialAxis } from "../../renderer/slicePlane.ts";
+import {
+  fromPlaneFrame,
+  planeAxes,
+  planeCutting,
+  tczyx,
+  type PoolCut,
+  type SliceCut,
+  type SpatialAxis,
+} from "../../renderer/slicePlane.ts";
 import type { LabelForm } from "../../renderer/workerProtocol.ts";
 import type { ChunkRequest } from "./types.ts";
 
@@ -92,12 +100,13 @@ function normalizeLabelOpacity(opacity: number | undefined): number {
  * when none does. The caller then skips the label: drawing nothing beats a
  * truncated or blank overlay, so there is no forced coarsest fallback.
  *
- * Slice mode bounds the 2D footprint and per-plane chunk grid. Volume mode
- * bounds the per-brick dimension, the total chunk count, and the padded atlas
- * bytes, but not the level extent, because the bricked atlas tiles a level
- * across slots.
+ * Slice mode bounds the footprint and chunk grid of the plane the view cuts.
+ * Volume mode bounds the per-brick dimension, the total chunk count, and the
+ * padded atlas bytes, but not the level extent, because the bricked atlas
+ * tiles a level across slots.
  */
 function chooseLabelLevel(levels: LevelGeometry[], caps: ResolvedLabelCaps): number {
+  const [across, down] = planeAxes(planeCutting(caps.cutAxis)).map(tczyx);
   for (let i = 0; i < levels.length; i++) {
     const lvl = levels[i];
     const w = lvl.shape[Axis.X];
@@ -125,9 +134,12 @@ function chooseLabelLevel(levels: LevelGeometry[], caps: ResolvedLabelCaps): num
       const fitsBytes = labelPaddedVolumeBytes(lvl.shape, lvl.chunk_shape) <= caps.maxVolumeBytes;
       if (fitsBytes) return i;
     } else {
-      const gx = grid1D(w, lvl.chunk_shape[Axis.X]);
-      const gy = grid1D(h, lvl.chunk_shape[Axis.Y]);
-      if (w <= caps.maxLevelDim && h <= caps.maxLevelDim && gx * gy <= caps.maxChunksPerPlane) {
+      const planeW = lvl.shape[across];
+      const planeH = lvl.shape[down];
+      if (!(planeW > 0) || !(planeH > 0)) continue;
+      const gu = grid1D(planeW, lvl.chunk_shape[across]);
+      const gv = grid1D(planeH, lvl.chunk_shape[down]);
+      if (planeW <= caps.maxLevelDim && planeH <= caps.maxLevelDim && gu * gv <= caps.maxChunksPerPlane) {
         return i;
       }
     }
@@ -155,6 +167,11 @@ export interface LabelSelectionCaps {
    * must pass the same mode so they agree on the eligible set.
    */
   mode?: "slice" | "volume";
+  /**
+   * The axis a slice-mode view cuts, whose plane the slice caps bound. Fetch
+   * and render must pass the same one. Absent: Z.
+   */
+  cutAxis?: SpatialAxis;
   /** Slice-mode 2D dimension cap (default {@link DEFAULT_MAX_LEVEL_DIM}). */
   maxLevelDim?: number;
   /** Slice-mode per-plane chunk cap (default {@link DEFAULT_MAX_CHUNKS_PER_PLANE}). */
@@ -176,6 +193,7 @@ export interface LabelSelectionCaps {
 /** Label-selection caps with defaults applied. */
 interface ResolvedLabelCaps {
   mode: "slice" | "volume";
+  cutAxis: SpatialAxis;
   maxLevelDim: number;
   maxChunksPerPlane: number;
   maxBrickDim3D: number;
@@ -192,6 +210,7 @@ function resolveLabelCaps(caps?: LabelSelectionCaps): ResolvedLabelCaps {
   const maxTotalVolumeBytes = Math.max(rawTotal, maxVolumeBytes);
   return {
     mode: caps?.mode ?? "slice",
+    cutAxis: caps?.cutAxis ?? "z",
     maxLevelDim: caps?.maxLevelDim ?? DEFAULT_MAX_LEVEL_DIM,
     maxChunksPerPlane: caps?.maxChunksPerPlane ?? DEFAULT_MAX_CHUNKS_PER_PLANE,
     maxBrickDim3D: caps?.maxBrickDim3D ?? DEFAULT_MAX_BRICK_DIM_3D,
@@ -442,8 +461,12 @@ export interface LabelRequestArgs {
   datasetId: string;
   manifest: DatasetManifest;
   t: number;
-  /** Current source full-resolution Z (the 2D slice being viewed). */
-  z: number;
+  /**
+   * Where the slice view cuts the label's source: the axis, and the source's
+   * full-resolution plane along it (`SelectionState.cut`). Absent: the first
+   * XY plane. The volume view cuts nothing, so it leaves this unread.
+   */
+  cut?: SliceCut;
   /**
    * Per-label visibility and opacity (`dataset_settings.label_settings`).
    * Masks are opt-in, so undefined or empty fetches nothing.
@@ -452,8 +475,8 @@ export interface LabelRequestArgs {
   maxLevelDim?: number;
   maxChunksPerPlane?: number;
   /**
-   * `"slice"` (default) requests the one mapped Z-plane. `"volume"` requests
-   * every z-chunk of each chosen level, because the 3D first-hit surface can
+   * `"slice"` (default) requests the one mapped plane. `"volume"` requests
+   * every chunk of each chosen level, because the 3D first-hit surface can
    * stop anywhere along a ray.
    */
   mode?: "slice" | "volume";
@@ -464,31 +487,36 @@ export interface LabelRequestArgs {
    */
   config?: Pick<PlanningConfig, "sliceBandPlanes" | "prefetchLaneOffset">;
   /**
-   * Whether the selection stepped along Z since the previous plan
+   * Whether the selection stepped along the cut since the previous plan
    * (`isCutStep`). The slice view then also prefetches whole each chunk whose
    * plane it draws, so the steps after it cost nothing.
    */
   cutStep?: boolean;
-  /**
-   * The axis the slice view cuts. A label overlay is drawn only on an XY
-   * cut, so a side view fetches none. Absent: Z.
-   */
-  cutAxis?: SpatialAxis;
+}
+
+/** The caps a request's labels are chosen under, so its forms and its fetch pick the same level. */
+function capsOf(args: LabelRequestArgs): LabelSelectionCaps {
+  return {
+    mode: args.mode,
+    maxLevelDim: args.maxLevelDim,
+    maxChunksPerPlane: args.maxChunksPerPlane,
+    cutAxis: args.cut?.axis,
+  };
+}
+
+/** The cut a slice-mode request reads, or none in the volume view. */
+function sliceCutOf(args: LabelRequestArgs): SliceCut | undefined {
+  return args.mode === "volume" ? undefined : (args.cut ?? { axis: "z", index: 0 });
 }
 
 /**
  * Chunk requests for the dataset's visible labels ({@link resolveVisibleLabels}):
- * every (y, x) chunk of the mapped plane in slice mode, each asking for the
+ * every chunk across the plane the slice view cuts, each asking for the
  * plane it draws and fetching a band around it as the image's detail chunks
- * do, and every (z, y, x) chunk of the chosen level, whole, in volume mode.
+ * do, and every chunk of the chosen level, whole, in volume mode.
  */
 export function computeLabelChunkRequests(args: LabelRequestArgs): ChunkRequest[] {
-  if (args.mode !== "volume" && (args.cutAxis ?? "z") !== "z") return [];
-  const resolvedList = resolveVisibleLabels(args.manifest, args.labelSettings, {
-    mode: args.mode,
-    maxLevelDim: args.maxLevelDim,
-    maxChunksPerPlane: args.maxChunksPerPlane,
-  });
+  const resolvedList = resolveVisibleLabels(args.manifest, args.labelSettings, capsOf(args));
   if (resolvedList.length === 0) return [];
 
   const requests: ChunkRequest[] = [];
@@ -499,56 +527,64 @@ export function computeLabelChunkRequests(args: LabelRequestArgs): ChunkRequest[
 }
 
 /**
- * The form each visible label takes in a view: its chunk-T, and on an XY cut
- * the plane of its level. The worker keeps one pool per label and form, so
- * views drawing a label alike share it. The labels and their chunks are the
- * ones {@link computeLabelChunkRequests} asks for.
+ * The form each visible label takes in a view: its chunk-T, and in a slice
+ * view the plane of its level the view cuts. The worker keeps one pool per
+ * label and form, so views drawing a label alike share it. The labels and
+ * their chunks are the ones {@link computeLabelChunkRequests} asks for.
  */
 export function labelFormsFor(args: LabelRequestArgs): LabelForm[] {
-  if (args.mode !== "volume" && (args.cutAxis ?? "z") !== "z") return [];
-  const volume = args.mode === "volume";
-  return resolveVisibleLabels(args.manifest, args.labelSettings, {
-    mode: args.mode,
-    maxLevelDim: args.maxLevelDim,
-    maxChunksPerPlane: args.maxChunksPerPlane,
-  }).map((resolved) => {
-    const at = labelChunkAt(resolved, args.t, volume ? undefined : args.z);
+  const cut = sliceCutOf(args);
+  return resolveVisibleLabels(args.manifest, args.labelSettings, capsOf(args)).map((resolved) => {
+    const { t } = labelChunkAt(resolved, args.t);
     const memberId = resolved.label.image.image_id;
-    return at.plane === null ? { memberId, t: at.t } : { memberId, t: at.t, plane: at.plane };
+    if (cut === undefined) return { memberId, t };
+    const { axis, plane } = labelCutAt(resolved, cut);
+    return { memberId, t, plane, ...(axis !== "z" ? { axis } : {}) };
   });
 }
 
+/** The plane of a label's level a slice view cuts, and the chunk along the cut that holds it. */
+export interface LabelCut extends PoolCut {
+  chunk: number;
+}
+
+/** A resolved label's level-0 geometry and its source's, which its places map between. */
+function level0s(resolved: ResolvedLabel): { source: Level0; label: Level0 } {
+  const source0 = resolved.source.multiscale.levels[0];
+  const label0 = resolved.label.image.multiscale.levels[0];
+  return {
+    source: { shape: source0.shape, scale: source0.scale },
+    label: { shape: label0.shape, scale: label0.scale },
+  };
+}
+
 /**
- * The chunk a label draws from at source timepoint `t`: its chosen level, the
- * label's own chunk-T, and, given a source `z`, the plane slice mode draws
- * and the chunk-Z holding it. The mapping is per label because labels carry
- * their own geometry. Fetch and the failed-chunk marks share it, so both name
- * the same chunks.
+ * The chunk a label draws from at source timepoint `t`: its chosen level and
+ * the label's own chunk-T. The mapping is per label because labels carry
+ * their own geometry. Fetch, render and the failed-chunk marks share it, so
+ * all three name the same chunks.
  */
-export function labelChunkAt(
-  resolved: ResolvedLabel,
-  t: number,
-  z?: number,
-): { level: number; t: number; z: number | null; plane: number | null } {
-  const { label, source, levelIdx } = resolved;
-  const labelLevels = label.image.multiscale.levels;
-  const source0 = source.multiscale.levels[0];
-  const label0 = labelLevels[0];
-  const lvl = labelLevels[levelIdx];
-
-  const src0: { shape: number[]; scale: number[] } = { shape: source0.shape, scale: source0.scale };
-  const lbl0: { shape: number[]; scale: number[] } = { shape: label0.shape, scale: label0.scale };
-
+export function labelChunkAt(resolved: ResolvedLabel, t: number): { level: number; t: number } {
+  const { levelIdx } = resolved;
+  const lvl = resolved.label.image.multiscale.levels[levelIdx];
+  const { source, label } = level0s(resolved);
   // Map source t to the label's own t (a T=1 label stays at t=0 for every
   // source timepoint) so scrubbing time never 404s the overlay away.
-  const labelT = labelTimeIndex(t, src0, lbl0);
   const chunkT = lvl.chunk_shape[Axis.T] || 1;
-  const targetChunkT = Math.floor(labelT / chunkT);
-  if (z === undefined) return { level: levelIdx, t: targetChunkT, z: null, plane: null };
+  return { level: levelIdx, t: Math.floor(labelTimeIndex(t, source, label) / chunkT) };
+}
 
-  const plane = labelLevelZ(z, src0, lbl0, lvl.shape[Axis.Z]);
-  const chunkZ = lvl.chunk_shape[Axis.Z] || 1;
-  return { level: levelIdx, t: targetChunkT, z: Math.floor(plane / chunkZ), plane };
+/**
+ * The plane of a label's chosen level that a slice view's `cut` of its
+ * source draws, and the chunk along the cut holding it, shared as
+ * {@link labelChunkAt} is.
+ */
+export function labelCutAt(resolved: ResolvedLabel, cut: SliceCut): LabelCut {
+  const lvl = resolved.label.image.multiscale.levels[resolved.levelIdx];
+  const { source, label } = level0s(resolved);
+  const along = tczyx(cut.axis);
+  const plane = labelLevelPlane(cut.index, source, label, cut.axis, lvl.shape[along]);
+  return { axis: cut.axis, plane, chunk: Math.floor(plane / (lvl.chunk_shape[along] || 1)) };
 }
 
 /** Append one label's chunk requests to `requests`. */
@@ -559,18 +595,13 @@ function appendLabelChunkRequests(
 ): void {
   const { label, levelIdx } = resolved;
   const lvl = label.image.multiscale.levels[levelIdx];
-  const volume = (args.mode ?? "slice") === "volume";
-  const at = labelChunkAt(resolved, args.t, volume ? undefined : args.z);
-  const targetChunkT = at.t;
-
-  const gy = grid1D(lvl.shape[Axis.Y], lvl.chunk_shape[Axis.Y]);
-  const gx = grid1D(lvl.shape[Axis.X], lvl.chunk_shape[Axis.X]);
+  const targetChunkT = labelChunkAt(resolved, args.t).t;
+  const sliceCut = sliceCutOf(args);
+  const at = sliceCut === undefined ? null : labelCutAt(resolved, sliceCut);
   const c = 0; // labels carry no channel dimension
 
   const pushChunk = (
-    z: number,
-    y: number,
-    x: number,
+    [x, y, z]: [number, number, number],
     slice: PlaneInChunks | null = null,
     lane: "detail" | "prefetch" = "detail",
     priority = 0,
@@ -589,52 +620,48 @@ function appendLabelChunkRequests(
       x,
       lane,
       tier: "detail",
-      mode: volume ? "volume" : "slice",
+      mode: at === null ? "volume" : "slice",
       priority,
       chunkKey: `${levelIdx}/${targetChunkT}/${c}/${z}/${y}/${x}`,
     };
     if (slice) {
       req.plane = slice.plane;
       req.planes = slice.planes;
+      if (slice.axis !== "z") req.planeAxis = slice.axis;
     }
-    // A label overlay draws on an XY cut alone, from its label level's plane.
-    if (!volume && at.plane !== null) req.cut = { axis: "z", plane: at.plane };
+    if (at !== null) req.cut = { axis: at.axis, plane: at.plane };
     requests.push(req);
   };
 
-  if (volume) {
-    // Volume: every z-chunk of the chosen level.
-    const gz = grid1D(lvl.shape[Axis.Z], lvl.chunk_shape[Axis.Z]);
-    for (let z = 0; z < gz; z++) {
-      for (let y = 0; y < gy; y++) {
-        for (let x = 0; x < gx; x++) {
-          pushChunk(z, y, x);
+  const grid = (axis: SpatialAxis): number => grid1D(lvl.shape[tczyx(axis)], lvl.chunk_shape[tczyx(axis)]);
+  if (at === null) {
+    // Volume: every chunk of the chosen level.
+    for (let z = 0; z < grid("z"); z++) {
+      for (let y = 0; y < grid("y"); y++) {
+        for (let x = 0; x < grid("x"); x++) {
+          pushChunk([x, y, z]);
         }
       }
     }
     return;
   }
 
-  // Slice: the single Z-plane the current view needs, and the band around
+  // Slice: every chunk across the plane the view cuts, and the band around
   // it. A label's levels are all stored, never generated, so the server cuts
-  // planes from any of its chunks. A level one plane deep, or one whose band
-  // would cover the chunk, is fetched whole.
+  // planes from any of its chunks. A level one plane deep along the cut, or
+  // one whose band would cover the chunk, is fetched whole.
+  const { axis, plane, chunk } = at;
   const config = args.config ?? DEFAULT_PLANNING_CONFIG;
-  const targetChunkZ = at.z ?? 0;
-  const slice = at.plane === null
-    ? null
-    : slicePlaneIn(at.plane, lvl.shape[Axis.Z], lvl.chunk_shape[Axis.Z], config.sliceBandPlanes);
-  for (let y = 0; y < gy; y++) {
-    for (let x = 0; x < gx; x++) {
-      pushChunk(targetChunkZ, y, x, slice);
-    }
+  const along = tczyx(axis);
+  const slice = slicePlaneIn(plane, lvl.shape[along], lvl.chunk_shape[along], config.sliceBandPlanes, axis);
+  const [across, down] = planeAxes(planeCutting(axis));
+  const cells: Array<[number, number, number]> = [];
+  for (let v = 0; v < grid(down); v++) {
+    for (let u = 0; u < grid(across); u++) cells.push(fromPlaneFrame([u, v, chunk], axis));
   }
-  // After a step along Z the chunks come whole as well, in the prefetch
-  // lane, as the image's do.
+  for (const cell of cells) pushChunk(cell, slice);
+  // After a step along the cut the chunks come whole as well, in the
+  // prefetch lane, as the image's do.
   if (slice === null || !args.cutStep) return;
-  for (let y = 0; y < gy; y++) {
-    for (let x = 0; x < gx; x++) {
-      pushChunk(targetChunkZ, y, x, null, "prefetch", config.prefetchLaneOffset);
-    }
-  }
+  for (const cell of cells) pushChunk(cell, null, "prefetch", config.prefetchLaneOffset);
 }

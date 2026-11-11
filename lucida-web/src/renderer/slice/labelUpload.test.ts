@@ -107,6 +107,33 @@ describe("handleLabelSliceChunkData", () => {
     expect([...ctx.state.labelSlicePools.keys()].sort()).toEqual([KEY, labelSlicePoolKey(MEMBER, 0, 6)]);
   });
 
+  it("keeps a side view's plane in a pool of its own axis, sized across and down that plane", () => {
+    const ctx = makeCtx([]);
+    const post = ctx.post as unknown as ReturnType<typeof vi.fn>;
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    // Plane 0 along Y: 2 across by 4 down, in two chunks down it.
+    const side: LabelSliceChunkDataMessage = {
+      ...labelPlaneMsg(new Uint32Array(4)),
+      chunks: [
+        { data: new Uint32Array([5, 6, 7, 8]).buffer, dataType: "Uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" },
+        { data: new Uint32Array([9, 9, 9, 9]).buffer, dataType: "Uint32", x: 0, y: 1, z: 0, key: "0/0/0/1/0/0" },
+      ],
+      levelHeight: 4,
+      sliceAxis: "y",
+    };
+    post.mockClear();
+
+    handleLabelSliceChunkData(ctx, side);
+
+    const pool = ctx.state.labelSlicePools.get(labelSlicePoolKey(MEMBER, 0, 0, "y"))!;
+    expect(pool).not.toBe(ctx.state.labelSlicePools.get(KEY));
+    expect([pool.axis, pool.width, pool.height, pool.grid]).toEqual(["y", 2, 4, { x: 1, y: 2, z: 1 }]);
+    expect(post.mock.calls.map(([msg]) => msg)).toEqual([{
+      type: "chunkResidency", memberId: MEMBER, viewMode: "slice", tier: "detail", cut: { axis: "y", plane: 0 },
+      change: "held", keys: ["0/0/0/0/0/0", "0/0/0/1/0/0"], reason: undefined,
+    }]);
+  });
+
   it("reports each chunk it writes held, and the one a rewrite of its cell replaces lost", () => {
     const ctx = makeCtx([]);
     const post = ctx.post as unknown as ReturnType<typeof vi.fn>;

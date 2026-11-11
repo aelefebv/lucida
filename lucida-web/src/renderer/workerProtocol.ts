@@ -95,10 +95,12 @@ export interface SliceChunkDataMessage {
 /**
  * A batch of pre-sliced uint32 label planes for one label overlay member,
  * routed to the r32uint label pool and drawn categorically. Each
- * `chunk.data` is one 2D Z-plane of `chunkY*chunkX` ids, cut from the 3D
- * chunk so ~64 KB crosses the wire instead of ~8 MB and a whole label fits
- * one upload budget. `chunk.dataType` is `"Uint32"`; ids are never narrowed
- * to 16 bits. `level`/`t`/`c` are informational; the writer ignores `chunk.z`.
+ * `chunk.data` is one plane of `chunkY*chunkX` ids, cut from the 3D chunk so
+ * ~64 KB crosses the wire instead of ~8 MB and a whole label fits one upload
+ * budget. As for {@link SliceChunkDataMessage}, geometry and chunk
+ * coordinates are in the frame of the plane drawn, so "Z" is the cut axis.
+ * `chunk.dataType` is `"Uint32"`; ids are never narrowed to 16 bits.
+ * `level`/`t`/`c` are informational; the writer ignores `chunk.z`.
  */
 export interface LabelSliceChunkDataMessage {
   type: "labelSliceChunkData";
@@ -119,8 +121,10 @@ export interface LabelSliceChunkDataMessage {
   levelHeight: number;
   chunkX: number;
   chunkY: number;
-  /** The label level's Z plane every chunk was cut at. */
+  /** The plane of the label's level along {@link sliceAxis} every chunk was cut at. */
   plane: number;
+  /** The axis the planes were cut along. Absent: Z. */
+  sliceAxis?: SpatialAxis;
 }
 
 export interface VolumeChunkDataMessage {
@@ -342,10 +346,11 @@ export interface SliceLayerParams {
   /** See {@link VolumeLayerParams.labelColors}. */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
   /**
-   * The plane a label layer draws: its level, chunk-T, chunk-Z, and the
-   * plane within the level. See {@link VolumeLayerParams.labelChunk}.
+   * The plane a label layer draws: its level, chunk-T, and along `axis` the
+   * chunk and the plane of the level. Absent `axis`: Z. See
+   * {@link VolumeLayerParams.labelChunk}.
    */
-  labelChunk?: { level: number; t: number; z: number; plane: number };
+  labelChunk?: { level: number; t: number; z: number; plane: number; axis?: SpatialAxis };
   /**
    * A label layer's extent in its source image's level-0 samples,
    * `[width, height]`: what its quad spans, before placement scales it into
@@ -678,15 +683,17 @@ export interface ColdStateMessage {
 
 /**
  * A label overlay a view draws, in the form it draws it: the label's chunk-T,
- * and on an XY cut the plane of its level. The worker keeps one pool per label
- * and form, shared by every view that draws that form.
+ * and in a slice view the plane of its level it cuts. The worker keeps one
+ * pool per label and form, shared by every view that draws that form.
  */
 export interface LabelForm {
   /** The label overlay's member id, its image id. */
   memberId: string;
   t: number;
-  /** The plane of the label's level an XY cut draws. Absent in a volume view, which draws every plane. */
+  /** The plane of the label's level a slice view draws. Absent in a volume view, which draws every plane. */
   plane?: number;
+  /** The axis {@link plane} lies along: Y or X in a side view. Absent: Z. */
+  axis?: SpatialAxis;
 }
 
 /** The chunks the planner wants for one member in one tier. */
