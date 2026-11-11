@@ -880,6 +880,28 @@ mod tests {
     }
 
     #[test]
+    fn a_volume_view_frames_and_flies_by_the_extent_as_moved() {
+        let mut scene = a_then_b();
+        scene.set_mode_3d();
+        let view = scene.active_view().id();
+        let diagonal = scene.volume_diagonal(view);
+        place_by_hand(&mut scene, "b", [0.0; 3], [4.0; 3]);
+        // Fly speed follows the visible extent, which grows with B.
+        assert!(scene.volume_diagonal(view) > 2.0 * diagonal);
+        assert!(scene.frame(&FrameTarget::Visible, [800, 600]));
+        let b = scene.dataset_world_bounds("b").unwrap();
+        // The fit keeps all of B on screen.
+        for corner in [b.min, b.max] {
+            let [x, y] = scene
+                .active_view()
+                .camera
+                .project_to_screen(corner)
+                .unwrap();
+            assert!((0.0..=800.0).contains(&x) && (0.0..=600.0).contains(&y));
+        }
+    }
+
+    #[test]
     fn the_identity_and_removal_clear_a_user_transform_and_bad_ones_change_nothing() {
         let mut scene = a_then_b();
         let b = DatasetId::from("b");

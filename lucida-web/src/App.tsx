@@ -809,12 +809,13 @@ function Viewer({
   const savedViewApplier = savedViewSync.applier;
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
     revealCanvas();
-    await savedViewApplier.apply(view);
+    // Picked by hand, so it may put datasets where it recorded them.
+    userTransforms.restored(await savedViewApplier.apply(view, { restorePlacement: true }));
     notifySavedViewChange();
     // Remember which saved view is now applied so the sidebar can flag the
     // active row. Set it only after a successful apply.
     setCurrentOpenSavedViewId(savedViewId);
-  }, [savedViewApplier, notifySavedViewChange]);
+  }, [savedViewApplier, notifySavedViewChange, userTransforms]);
 
   // The sidebar reports when the open saved view stops existing (deleted,
   // withdrawn, or rejected); drop the highlight. The id guard keeps a stale

@@ -10,6 +10,8 @@ import {
   setUserTransformCommand,
   type UserTransform,
 } from "../userTransform.ts";
+import type { PlacementChange } from "../savedView/applier.ts";
+import { toast } from "../ui/toastQueue.ts";
 import type { EditHistoryControls } from "./useEditHistory.ts";
 
 /** What places a dataset by hand: the Move and scale tool and the layer's fields. */
@@ -26,6 +28,9 @@ export interface UserTransformActions {
   commit(datasetId: string, from: UserTransform, to: UserTransform): void;
   /** Put `datasetId` back where its metadata places it. */
   reset(datasetId: string): void;
+  /** Make placements a chosen saved view just restored one step undo takes
+   *  back, and say so. Nothing when it changed none. */
+  restored(changes: readonly PlacementChange[]): void;
 }
 
 export function useUserTransforms({
@@ -71,8 +76,8 @@ export function useUserTransforms({
       onDocumentChanged();
       history.record({
         label: `placing ${nameOf(datasetId)}`,
-        redo,
-        undo: setUserTransformCommand(datasetId, from),
+        redo: [redo],
+        undo: [setUserTransformCommand(datasetId, from)],
       });
     };
     return {
@@ -82,6 +87,21 @@ export function useUserTransforms({
       commit,
       reset(datasetId) {
         commit(datasetId, current(datasetId), IDENTITY_USER_TRANSFORM);
+      },
+      restored(changes) {
+        if (changes.length === 0) return;
+        onDocumentChanged();
+        const edit = {
+          label: "restoring the saved positions",
+          redo: changes.map((c) => setUserTransformCommand(c.datasetId, c.to)),
+          undo: changes.map((c) => setUserTransformCommand(c.datasetId, c.from)),
+        };
+        history.record(edit);
+        toast({
+          title: "Restored the positions saved with this view.",
+          description: "Undo to keep the current ones.",
+          action: { label: "Undo", onPress: () => history.undo(edit) },
+        });
       },
     };
   }, [engine, canEdit, sendCommand, history, nameOf, onDocumentChanged]);

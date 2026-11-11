@@ -1,4 +1,4 @@
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { EditHistory, type DocumentEdit } from "../editHistory.ts";
 import type { Engine } from "../engine.ts";
@@ -11,6 +11,8 @@ const REDO_KEYS: readonly KeyCombo[] = ["Mod+Shift+Z", "Mod+Y"];
 export interface EditHistoryControls {
   /** Record a document edit this page just made and sent, for undo. */
   record(edit: DocumentEdit): void;
+  /** Take `edit` back, if it is still the newest edit. */
+  undo(edit: DocumentEdit): void;
 }
 
 /**
@@ -35,7 +37,7 @@ export function useEditHistory({
     (edit: DocumentEdit | null, side: "undo" | "redo") => {
       const scene = engine.scene();
       if (!edit || !scene) return;
-      applyDocumentCommand(scene, edit[side], sendCommand, engine.loop());
+      for (const command of edit[side]) applyDocumentCommand(scene, command, sendCommand, engine.loop());
       onDocumentChanged();
     },
     [engine, sendCommand, onDocumentChanged],
@@ -58,6 +60,11 @@ export function useEditHistory({
     run: () => send(history.takeRedo(), "redo"),
   });
 
-  const record = useCallback((edit: DocumentEdit) => history.record(edit), [history]);
-  return { record };
+  return useMemo(
+    () => ({
+      record: (edit: DocumentEdit) => history.record(edit),
+      undo: (edit: DocumentEdit) => send(history.takeUndo(edit), "undo"),
+    }),
+    [history, send],
+  );
 }

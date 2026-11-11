@@ -1,6 +1,6 @@
 /**
  * Undo and redo of the document edits made on this page. An edit records the
- * command that makes it and the command that takes it back, and undoing one
+ * commands that make it and the commands that take it back, and undoing one
  * sends the second like any other edit, so peers and the stored workspace
  * follow. Only this page's edits are recorded, so undo never takes back a
  * peer's work, and the history ends with the page.
@@ -8,10 +8,10 @@
 import type { DocumentCommand } from "./commands.ts";
 
 export interface DocumentEdit {
-  /** Says what the edit did, e.g. "Move volume.ome.zarr". */
+  /** Says what the edit did, after "Undo" or "Redo", e.g. "placing volume.ome.zarr". */
   label: string;
-  redo: DocumentCommand;
-  undo: DocumentCommand;
+  redo: readonly DocumentCommand[];
+  undo: readonly DocumentCommand[];
 }
 
 export interface EditHistoryState {
@@ -38,8 +38,11 @@ export class EditHistory {
     this.changed();
   }
 
-  /** The edit to take back, moved onto the redo side, or null. */
-  takeUndo(): DocumentEdit | null {
+  /** The edit to take back, moved onto the redo side, or null. With `only`,
+   *  null unless that edit is the newest, so a stale prompt can't take back a
+   *  later one. */
+  takeUndo(only?: DocumentEdit): DocumentEdit | null {
+    if (only && this.done.at(-1) !== only) return null;
     const edit = this.done.pop() ?? null;
     if (edit) {
       this.undone.push(edit);

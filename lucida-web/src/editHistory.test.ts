@@ -3,7 +3,7 @@ import type { DocumentCommand } from "./commands.ts";
 import { EditHistory, type DocumentEdit } from "./editHistory.ts";
 
 const rename = (name: string): DocumentCommand => ({ type: "rename_dataset", id: "ds", name });
-const edit = (from: string, to: string): DocumentEdit => ({ label: `renaming to ${to}`, redo: rename(to), undo: rename(from) });
+const edit = (from: string, to: string): DocumentEdit => ({ label: `renaming to ${to}`, redo: [rename(to)], undo: [rename(from)] });
 
 describe("EditHistory", () => {
   it("takes edits back newest first and makes them again in order", () => {
@@ -12,13 +12,24 @@ describe("EditHistory", () => {
     history.record(edit("b", "c"));
     expect(history.getState().undo?.label).toBe("renaming to c");
 
-    expect(history.takeUndo()?.undo).toEqual(rename("b"));
-    expect(history.takeUndo()?.undo).toEqual(rename("a"));
+    expect(history.takeUndo()?.undo).toEqual([rename("b")]);
+    expect(history.takeUndo()?.undo).toEqual([rename("a")]);
     expect(history.takeUndo()).toBeNull();
     expect(history.getState()).toEqual({ undo: null, redo: edit("a", "b") });
 
-    expect(history.takeRedo()?.redo).toEqual(rename("b"));
+    expect(history.takeRedo()?.redo).toEqual([rename("b")]);
     expect(history.getState().redo?.label).toBe("renaming to c");
+  });
+
+  it("takes back a named edit only while it is the newest", () => {
+    const history = new EditHistory();
+    const first = edit("a", "b");
+    history.record(first);
+    history.record(edit("b", "c"));
+    expect(history.takeUndo(first)).toBeNull();
+    expect(history.getState().undo?.label).toBe("renaming to c");
+    history.takeUndo();
+    expect(history.takeUndo(first)).toBe(first);
   });
 
   it("drops what redo would make again once a new edit is recorded", () => {

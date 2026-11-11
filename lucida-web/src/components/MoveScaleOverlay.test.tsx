@@ -32,6 +32,7 @@ function setup() {
     preview: vi.fn((_id: string, t: UserTransform) => place(t)),
     commit: vi.fn((_id: string, _from: UserTransform, to: UserTransform) => place(to)),
     reset: vi.fn(),
+    restored: vi.fn(),
   };
   const pane = document.createElement("div");
   document.body.appendChild(pane);
