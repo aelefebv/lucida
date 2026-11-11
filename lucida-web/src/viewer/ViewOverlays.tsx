@@ -2,8 +2,8 @@
  * What lies over each view's rectangle beside its pane: four-up's plane
  * lines, the crosshair of the point under the pointer in another view, a
  * comparison's swipe divider across it, and one column at its top holding
- * the compare bar and, below it, the notices that the view covers less than
- * it asks for, of where a link took it past its data, and that the point
+ * the compare bar and, below it, the icon that holds the view's notices
+ * (`ViewNotices`) and the note that the point
  * under the pointer is outside its data. The column keeps them from covering
  * each other, and the bar comes first so a notice coming or going never moves
  * it under the pointer. Home sits in the top right corner, outside the
@@ -21,10 +21,11 @@ import { setAsideNote, type ComparisonActions } from "../comparison.ts";
 import { ComparisonBar, SwipeDivider } from "../components/Comparison.tsx";
 import type { SceneStore, ViewPane } from "../sceneStore.ts";
 import type { ViewLinkNotices } from "../viewLinks.ts";
-import { CoverageNotice, type Coverage } from "./CoverageNotice.tsx";
+import type { Coverage } from "./coverage.ts";
 import { Crosshair, CrosshairOutside } from "./Crosshair.tsx";
 import type { Hover } from "./hover.ts";
-import { LinkNotices } from "./LinkNotices.tsx";
+import { ViewNotices } from "./ViewNotices.tsx";
+import { viewNotices } from "./viewNotices.ts";
 import { ViewPlaneLines } from "./PlaneLines.tsx";
 import type { FourUpPlanes } from "./planeLines.ts";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
@@ -66,8 +67,11 @@ export function ViewOverlays({
       {views.map((pane) => {
         const comparison = comparisons.get(pane.id) ?? null;
         const [x, y, width, height] = pane.rect;
-        const select = () => {
-          if (!pane.active) activate(pane.id);
+        const select = (event: { target: EventTarget | null }) => {
+          // Reading a view's notices steers nothing, and making a view that
+          // follows the other the active one would end the link notices it shows.
+          if (pane.active || (event.target instanceof Element && event.target.closest(".lc-view-notices"))) return;
+          activate(pane.id);
         };
         return (
           <div
@@ -97,15 +101,19 @@ export function ViewOverlays({
                     comparison={comparison}
                     actions={actions}
                     nameOf={nameOf}
-                    setAside={setAsideNote(pane.setAside)}
                     byHand={byHand(comparison.a, comparison.b)}
                     active={pane.active}
                     still={still}
                   />
                 </div>
               )}
-              <CoverageNotice coverage={coverageOf(pane.id)} />
-              <LinkNotices notices={linkNotices?.find((shown) => shown.view === pane.id)?.notices ?? []} />
+              <ViewNotices
+                notices={viewNotices({
+                  coverage: coverageOf(pane.id),
+                  links: linkNotices?.find((shown) => shown.view === pane.id)?.notices ?? [],
+                  setAside: comparison && setAsideNote(pane.setAside),
+                })}
+              />
               {hover && <CrosshairOutside hover={hover} view={pane.id} />}
             </div>
             {home && pane.draws.length > 0 && (

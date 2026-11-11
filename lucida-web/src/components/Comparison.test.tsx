@@ -38,7 +38,6 @@ function bar(comparison: Comparison, controls: ComparisonActions, { active = tru
       comparison={comparison}
       actions={controls}
       nameOf={(id) => id}
-      setAside={null}
       active={active}
       still={still}
     />,

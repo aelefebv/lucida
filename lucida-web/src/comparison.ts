@@ -118,7 +118,7 @@ export function comparisonClip(
 export function setAsideNote(setAside: readonly string[]): string | null {
   const count = setAside.length;
   if (count === 0) return null;
-  return `${count} other ${count === 1 ? "layer" : "layers"} hidden while comparing`;
+  return `${count} other ${count === 1 ? "layer is" : "layers are"} hidden while comparing.`;
 }
 
 /** The pixels two rects share, or null when they share none. */

@@ -47,6 +47,11 @@
   flex: none;
 }
 
+/* An icon with no text, such as a count of one left unsaid, sits centered. */
+.lc-button-label:empty {
+  display: none;
+}
+
 .lc-button[data-focus-visible] {
   outline: 2px solid var(--lc-focus-ring);
   outline-offset: 2px;

@@ -1,0 +1,61 @@
+/* Across the column, as tall as the icon; the list hangs under it out of
+   the column's flow. Only the icon and the list take the pointer. */
+.lc-view-notices {
+  position: relative;
+  align-self: stretch;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* The scale bar's surface, since it lies over the data. */
+.lc-view-notices-icon {
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-float);
+  box-shadow: var(--lc-shadow-1);
+  pointer-events: auto;
+}
+
+/* As the layer panel's data problems, over a surface that keeps it legible
+   on the data under it. As wide as its text, up to the column's width. */
+.lc-view-notices-list {
+  position: absolute;
+  top: calc(100% + var(--lc-space-1));
+  left: 50%;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 100%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  margin: 0;
+  padding: var(--lc-space-2);
+  border: 1px solid var(--lc-border);
+  border-left: 2px solid var(--lc-warning);
+  border-radius: var(--lc-radius);
+  background: linear-gradient(var(--lc-warning-subtle), var(--lc-warning-subtle)), var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+  line-height: 1.4;
+  list-style: none;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+
+.lc-view-notices[data-severity="note"] .lc-view-notices-list {
+  border-left-color: var(--lc-border-strong);
+  background: var(--lc-surface-float);
+}
+
+/* The flex display above would otherwise beat the attribute. */
+.lc-view-notices-list[hidden] {
+  display: none;
+}
