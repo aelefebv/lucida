@@ -163,6 +163,11 @@ jobs:
       # number in the key to discard every entry. Unlike the builds, a pull
       # request saves this cache: the entry is a few megabytes, and a pull
       # request misses main's only on an image main's nightly run has not used.
+      # TEMPORARY, reverted by the next commit: Canonical's DNS is down, so
+      # this run seeds the pull request's cache through a mirror outside it.
+      - name: Point apt at a mirror outside Canonical (temporary)
+        run: echo "http://mirrors.edge.kernel.org/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt
+
       - name: Key the Vulkan driver's packages
         id: vulkan-key
         run: |
