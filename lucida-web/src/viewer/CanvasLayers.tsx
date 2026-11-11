@@ -33,6 +33,7 @@ import { ScaleBar } from "./ScaleBar.tsx";
 import { useScaleBarShown } from "./scaleBar.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
 import { ViewOverlays } from "./ViewOverlays.tsx";
+import { FourUpPlanes, useFollowTile } from "./planeLines.ts";
 import { Hover } from "./hover.ts";
 import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
@@ -105,7 +106,7 @@ export function CanvasLayers({
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
-  const { viewMode, zPlace, t, layers, views, maximized, links } = useSceneView(engine.store);
+  const { viewMode, zPlace, t, layers, views, maximized, links, layout } = useSceneView(engine.store);
   // Each view's settle and coverage, with several views.
   const settles = useSyncExternalStore(viewSettleSignal.subscribe, viewSettleSignal.get);
   const scaleBars = useScaleBarShown();
@@ -142,6 +143,8 @@ export function CanvasLayers({
     remoteDocumentVersion,
   );
   const [panesRoot, setPanesRoot] = useState<HTMLDivElement | null>(null);
+  const planes = useMemo(() => (wasmScene ? new FourUpPlanes(wasmScene, engine.store) : null), [wasmScene, engine.store]);
+  useFollowTile(planes, panesRoot, layout === "four_up");
   const overlays = hasDatasets && selectedDatasetId && wasmScene && canvas
     ? { datasetId: selectedDatasetId }
     : null;
@@ -286,9 +289,10 @@ export function CanvasLayers({
           coverageOf={(view) => settles.find((settle) => settle.view === view)}
           byHand={(a, b) => (wasmScene ? placedByHandNote(readLineUpByHand(wasmScene, a, b), nameOf) : null)}
           linkNotices={links?.notices}
+          planes={planes}
           dragPlane={(view, axis, fraction) => {
-            const index = wasmScene?.plane_line_position(view, axis, fraction) ?? -1;
-            if (index >= 0) onAxisChange(axis, Number(index));
+            const index = planes?.positionAt(view, axis, fraction) ?? null;
+            if (index !== null) onAxisChange(axis, index);
           }}
           hover={hover}
         />
