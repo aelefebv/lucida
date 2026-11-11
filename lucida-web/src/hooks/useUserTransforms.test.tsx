@@ -52,7 +52,7 @@ describe("useUserTransforms", () => {
       "workspace-dataset-id",
       "broadcast",
     );
-    const placed = await applier.apply(view, { restorePlacement: true });
+    const placed = await applier.apply(view, { chosen: true });
     act(() => actions().restored(placed));
     expect(readUserTransform(scene, "b")).toBeNull();
     expect(toastQueue.visibleToasts.map((t) => t.content.title)).toEqual([

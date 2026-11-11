@@ -81,6 +81,7 @@ import {
   type SavedView,
   type SliceCamera,
   type ViewState as WireViewState,
+  type ViewsRecord,
 } from "./savedView/types.ts";
 import { viewModeForCamera } from "./savedView/restoreAnnotationView.ts";
 import { decode, encode } from "./savedView/encoder.ts";
@@ -597,6 +598,34 @@ const expectedFlyPeerPresence = {
 const flyPeerMirror: PresenceState = expectedFlyPeerPresence;
 void flyPeerMirror;
 
+/** Two views side by side, a slice of one dataset beside a volume of every
+ *  dataset, linked in zoom and time, the volume shown alone and steered. */
+const expectedPresenceViews: ViewsRecord = {
+  layout: "columns",
+  active: 1,
+  maximized: 1,
+  views: [
+    { camera: expectedSliceCamera, axes: expectedView, datasets: { only: ["wds-0f3a"] } },
+    { camera: expectedArcballCamera, axes: { t: 1 }, datasets: "all" },
+  ],
+  links: {
+    datasets: ["wds-0f3a", "wds-7c21"],
+    basis: "physical",
+    modes: { pan: "off", zoom: "linked", orientation: "off", z: "off", t: "relative", contrast: "off", colormap: "off" },
+  },
+};
+
+/** A peer showing {@link expectedPresenceViews}. */
+const expectedViewsPeerPresence: PresenceState = {
+  client_id: 5,
+  camera: expectedArcballCamera,
+  view: { t: 1 },
+  display: expectedDisplay,
+  views: expectedPresenceViews,
+  following: null,
+  cursor: null,
+};
+
 /** A peer that has just joined, as the server sends it: placeholder camera,
  *  view and display for readers that predate `camera_reported`. */
 const expectedJoiningPresenceWire = {
@@ -950,6 +979,24 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(viewModeForCamera(pinView!.camera)).toBe("3d");
   });
 
+  const serverSnapshotViews = claimFixture("session/server_snapshot_views.json");
+  it("snapshot: a peer showing several views hands them over with its camera", () => {
+    const raw = serverSnapshotViews.raw();
+    expect(JSON.parse(raw)).toStrictEqual({
+      type: "snapshot",
+      seq: 42,
+      document: { manifests: {}, registered_layouts: {}, active_layout_ids: {}, annotations: {} },
+      peers: [expectedViewsPeerPresence],
+      your_id: 7,
+      generated_availability: {},
+    });
+
+    const onSnapshot = vi.fn();
+    const { ws } = openBridge({ onSnapshot });
+    deliver(ws, raw);
+    expect(onSnapshot.mock.calls[0][2]).toStrictEqual([expectedViewsPeerPresence]);
+  });
+
   const serverCommandBroadcastDatasetOpened = claimFixture("session/server_command_broadcast_dataset_opened.json");
   it("command_broadcast(dataset_opened): the manifest/fetch payload", () => {
     const raw = serverCommandBroadcastDatasetOpened.raw();
@@ -1041,6 +1088,31 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       expectedArcballCamera,
       expectedView,
       expectedDisplay,
+      undefined,
+    );
+  });
+
+  const serverPresenceUpdateViews = claimFixture("session/server_presence_update_views.json");
+  it("presence_update carries every view of a peer showing several", () => {
+    const raw = serverPresenceUpdateViews.raw();
+    expect(JSON.parse(raw)).toStrictEqual({
+      type: "presence_update",
+      client_id: 3,
+      camera: expectedArcballCamera,
+      view: { t: 1 },
+      display: expectedDisplay,
+      views: expectedPresenceViews,
+    });
+
+    const onPresenceUpdate = vi.fn();
+    const { ws } = openBridge({ onPresenceUpdate });
+    deliver(ws, raw);
+    expect(onPresenceUpdate).toHaveBeenCalledWith(
+      3,
+      expectedArcballCamera,
+      { t: 1 },
+      expectedDisplay,
+      expectedPresenceViews,
     );
   });
 
@@ -1662,6 +1734,20 @@ describe("wire goldens: client messages through Bridge senders", () => {
       }),
     );
     expect(lastSent(ws)).toStrictEqual(clientPresence.json());
+  });
+
+  const clientPresenceViews = claimFixture("session/client_presence_views.json");
+  it("sendPresence carries the views with the active view's camera", () => {
+    const { bridge, ws } = openBridge();
+    bridge.sendPresence(
+      JSON.stringify({
+        camera: expectedArcballCamera,
+        view: { t: 1 },
+        display: expectedDisplay,
+        views: expectedPresenceViews,
+      }),
+    );
+    expect(lastSent(ws)).toStrictEqual(clientPresenceViews.json());
   });
 
   const clientCursor = claimFixture("session/client_cursor.json");
@@ -2310,6 +2396,17 @@ describe("wire goldens: saved-view payloads", () => {
     expect(decode(golden.payload)).toEqual(golden.view);
     // A one-channel layer opens gray, so its colormap rides the payload.
     expect(golden.view.dataset_settings["wds-0f3a"].channel_settings![0].colormap).toBe("gray");
+  });
+
+  const savedViewPayloadViews = claimFixture("saved-view/payload_views.json");
+  it("a view of several views makes the payload the core wrote, and reads back with its views", () => {
+    const golden = savedViewPayloadViews.json() as PayloadGolden;
+    expect(encode(golden.view)).toBe(golden.payload);
+    expect(decode(golden.payload)).toEqual(golden.view);
+    const views = golden.view.views!;
+    expect(views.layout).toBe("columns");
+    expect(views.views[views.active].comparison?.mode).toBe("swipe");
+    expect(views.links?.modes.pan).toBe("linked");
   });
 
   const recordedV1 = claimFixture("saved-view/recorded_v1.json");

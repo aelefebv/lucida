@@ -11,7 +11,7 @@ use lucida_content::{DatasetId, LayoutId};
 use crate::camera::Camera;
 use crate::command::{Command, ViewportCommand};
 use crate::saved_view::{SAVED_VIEW_VERSION, SavedView};
-use crate::scene::{DocumentState, FrameTarget, Scene};
+use crate::scene::{DocumentState, FrameTarget, Scene, ViewsRecord};
 
 /// The canvas a view is framed for when no client has reported one.
 pub const FITTED_VIEWPORT: [u32; 2] = [1440, 900];
@@ -31,7 +31,8 @@ impl ProfileScene {
     /// the settings a freshly opened dataset gets, and entries for datasets
     /// the document no longer holds are dropped.
     pub fn open(document: &DocumentState, view: &SavedView) -> Self {
-        let mut scene = Scene::new(view.camera.viewport());
+        let canvas = view.views.as_ref().and_then(ViewsRecord::canvas);
+        let mut scene = Scene::new(canvas.unwrap_or(view.camera.viewport()));
         let active = scene.active_view_mut();
         active.camera = view.camera.clone();
         // A stored camera must not hand the scene a state its own mutators
@@ -45,6 +46,13 @@ impl ProfileScene {
         // The camera's numbers are in the spaces the view was saved in.
         if let Some(from) = &view.camera_space {
             scene.carry_placed_cameras(from);
+        }
+        if let Some(views) = &view.views {
+            scene.import_views(Some(views), view.camera_space.as_ref(), true);
+            // The view's own camera and axis positions are the active view's,
+            // and a restore gives them to it last, as a page does.
+            let (camera, axes) = (view.camera_in(&scene), view.view_in(&scene));
+            scene.import_presence(camera, axes, view.display.clone());
         }
         let auto_contrast = view
             .auto_contrast
@@ -135,6 +143,7 @@ impl ProfileScene {
             // A profile holds how the viewer looks, so a page opening it
             // draws each dataset where the document puts it now.
             user_transforms: None,
+            views: scene.record_views(true),
         }
     }
 
@@ -704,6 +713,36 @@ mod tests {
                 "{after:?} vs {before:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_stored_view_of_several_views_opens_and_stores_them_as_they_were() {
+        use crate::view::{ViewDatasets, ViewLayout};
+        let mut profile = opened();
+        profile
+            .apply(ViewportCommand::SetViewLayout {
+                layout: ViewLayout::Columns,
+            })
+            .unwrap();
+        let second = profile.scene.views()[1].id();
+        profile
+            .apply(ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets: ViewDatasets::All,
+            })
+            .unwrap();
+        profile
+            .apply(ViewportCommand::SetActiveView { view: second })
+            .unwrap();
+        profile.apply(ViewportCommand::SetT { t: 1 }).unwrap();
+        let view = profile.saved_view();
+        let views = view.views.as_ref().expect("two views");
+        assert_eq!((views.layout, views.active), (ViewLayout::Columns, 1));
+        assert_eq!(views.canvas(), Some(FITTED_VIEWPORT));
+
+        let reopened = ProfileScene::open(&document(), &view);
+        assert_eq!(reopened.saved_view(), view);
+        assert_eq!(reopened.scene.active_view().axes.t, 1);
     }
 
     #[test]

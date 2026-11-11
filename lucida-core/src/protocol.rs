@@ -13,7 +13,7 @@ use lucida_protocol::{
 
 use crate::camera::{Camera, Framing, Slice};
 use crate::command::DocumentCommand;
-use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
+use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState, ViewsRecord};
 use crate::view::AxisPositions;
 
 pub type ClientId = u64;
@@ -86,6 +86,10 @@ pub struct PresenceState {
     pub camera: Option<Camera>,
     pub view: Option<AxisPositions>,
     pub display: Option<DisplayState>,
+    /// Every view, when the client shows more than one view of every
+    /// dataset. Arrives with the camera, so a reported camera without it is
+    /// one view of every dataset.
+    pub views: Option<ViewsRecord>,
     /// Who this client is following (`None` = independent).
     pub following: Option<ClientId>,
     pub cursor: Option<[f64; 2]>,
@@ -106,6 +110,7 @@ impl PresenceState {
             camera: None,
             view: None,
             display: None,
+            views: None,
             following: None,
             cursor: None,
             dataset_order: None,
@@ -130,6 +135,8 @@ struct PresenceStateWire {
     display: DisplayState,
     #[serde(default = "reported", skip_serializing_if = "is_reported")]
     camera_reported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    views: Option<ViewsRecord>,
     following: Option<ClientId>,
     cursor: Option<[f64; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,16 +157,22 @@ fn is_reported(reported: &bool) -> bool {
 
 impl From<PresenceStateWire> for PresenceState {
     fn from(wire: PresenceStateWire) -> Self {
-        let (camera, view, display) = if wire.camera_reported {
-            (Some(wire.camera), Some(wire.view), Some(wire.display))
+        let (camera, view, display, views) = if wire.camera_reported {
+            (
+                Some(wire.camera),
+                Some(wire.view),
+                Some(wire.display),
+                wire.views,
+            )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
         Self {
             client_id: wire.client_id,
             camera,
             view,
             display,
+            views,
             following: wire.following,
             cursor: wire.cursor,
             dataset_order: wire.dataset_order,
@@ -192,6 +205,7 @@ impl From<PresenceState> for PresenceStateWire {
             view,
             display,
             camera_reported,
+            views: presence.views.filter(|_| camera_reported),
             following: presence.following,
             cursor: presence.cursor,
             dataset_order: presence.dataset_order,
@@ -212,6 +226,9 @@ pub enum ClientMessage {
         camera: Camera,
         view: AxisPositions,
         display: DisplayState,
+        /// Every view, when there is more than one view of every dataset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        views: Option<ViewsRecord>,
     },
     /// Cursor position update (null = cursor left the canvas).
     Cursor { position: Option<[f64; 2]> },
@@ -567,6 +584,8 @@ pub enum ServerMessage {
         camera: Camera,
         view: AxisPositions,
         display: DisplayState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        views: Option<ViewsRecord>,
     },
     /// A peer's cursor moved (null = cursor left the canvas).
     CursorUpdate {
@@ -1489,6 +1508,7 @@ mod tests {
             camera: Camera::new_2d([800, 600]),
             view: AxisPositions::new(),
             display: DisplayState::default(),
+            views: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"presence\""));
@@ -1527,6 +1547,7 @@ mod tests {
             camera: Some(Camera::new_2d([800, 600])),
             view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
+            views: None,
             following: None,
             cursor: Some([100.0, 200.0]),
             dataset_order: Some(vec![]),
@@ -1550,6 +1571,7 @@ mod tests {
             camera: Some(Camera::new_2d([800, 600])),
             view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
+            views: None,
             following: None,
             cursor: Some([1.0, 2.0]),
             dataset_order: None,
@@ -1727,6 +1749,7 @@ mod tests {
             camera: Some(Camera::Fly(fly)),
             view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
+            views: None,
             following: Some(3),
             cursor: Some([0.5, 0.5]),
             dataset_order: None,
@@ -1763,6 +1786,7 @@ mod tests {
             camera: Camera::Fly(fly),
             view: AxisPositions::new(),
             display: DisplayState::default(),
+            views: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"presence_update\""));
@@ -2091,6 +2115,7 @@ mod tests {
             camera: Camera::Fly(fly),
             view: AxisPositions::new(),
             display: DisplayState::default(),
+            views: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"presence\""));

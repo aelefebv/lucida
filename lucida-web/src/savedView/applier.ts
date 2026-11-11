@@ -6,10 +6,13 @@
 // recipient-local ViewportCommand. Placement is restored only when the caller
 // asks, for a view someone chose to apply: a link, a member's last view, the
 // default view or a viewer profile is restored automatically, and an
-// automatic restore must never undo a move someone else made since. The camera
-// goes last, through `import_presence`, so it
-// lands through one mutator. The in-progress state lets urlSync suppress URL
-// writes while an apply runs.
+// automatic restore must never undo a move someone else made since. A
+// comparison comes back with placement or not at all: whether its pair lines
+// up depends on placement, and it sets aside every other layer its view
+// shows, which only someone who picked the view expects. The views go next to
+// last, through `import_views`, and the active view's camera last, through
+// `import_presence`, so each lands through one mutator. The in-progress state
+// lets urlSync suppress URL writes while an apply runs.
 
 import type { WasmScene } from "lucida-core";
 import type { DocumentCommand, ViewportCommand } from "../commands.ts";
@@ -84,11 +87,12 @@ export interface ApplyResult {
 
 export type ApplyResultListener = (r: ApplyResult) => void;
 
-/** How an `apply()` treats placement by hand. */
+/** What an `apply()` restores beyond what every restore does. */
 export interface ApplyOptions {
-  /** Put each dataset where the view recorded it. Only for a view someone
-   *  chose to apply; every automatic restore leaves the document's placement. */
-  restorePlacement?: boolean;
+  /** Someone picked this view to apply, so it puts each dataset where the view
+   *  recorded it and brings back its comparisons. Every automatic restore
+   *  leaves the document's placement, and shows no comparison. */
+  chosen?: boolean;
 }
 
 /** A dataset an `apply()` placed by hand, from where it was. */
@@ -263,8 +267,8 @@ export class SavedViewApplier {
    * Apply a SavedView to the live scene. Returns when all in-flight
    * commands are dispatched and the camera has been imported. Resolves
    * even on partial dataset-open failure (the loading banner shows the
-   * indicator). Says which datasets it placed by hand, none unless
-   * `restorePlacement` asked it to.
+   * indicator). Says which datasets it placed by hand, none unless the view
+   * was `chosen`.
    */
   async apply(view: SavedView, options: ApplyOptions = {}): Promise<PlacementChange[]> {
     const placed: PlacementChange[] = [];
@@ -362,7 +366,7 @@ export class SavedViewApplier {
         }
       }
 
-      if (options.restorePlacement) {
+      if (options.chosen) {
         placed.push(...this.applyPlacement(sceneAfter, view, requestedSet, loadedAfter));
       }
 
@@ -399,9 +403,10 @@ export class SavedViewApplier {
         this.addWarning(clampNotice(clamped.adjustedAxes));
       }
 
-      // Camera and axis positions last, with an older view's scene-wide
-      // channel mode, which the scene decodes into each layer's solo over the
-      // settings set above.
+      // The views, then the active view's camera and axis positions, with an
+      // older view's scene-wide channel mode, which the scene decodes into
+      // each layer's solo over the settings set above.
+      importViews(sceneAfter, view, options.chosen === true);
       importCameraView(sceneAfter, view, clamped.t, legacyChannelMode(view));
 
       this.emitApplyResult(sceneAfter, view);
@@ -592,6 +597,21 @@ export type LegacyChannelMode = Pick<ViewState, "c" | "multi_channel">;
 export function legacyChannelMode(view: SavedView): LegacyChannelMode | null {
   const { c, multi_channel } = view.view;
   return c === undefined && multi_channel === undefined ? null : { c, multi_channel };
+}
+
+/**
+ * Lay the views out as the saved view recorded them, or as one view of every
+ * dataset when it recorded none, through `import_views`, which carries their
+ * cameras and axis positions from the spaces they were saved in. Comparisons
+ * come back only with `comparisons`.
+ */
+export function importViews(
+  scene: WasmScene,
+  { views, camera_space }: Pick<SavedView, "views" | "camera_space">,
+  comparisons: boolean,
+): void {
+  const json = JSON.stringify({ views: views ?? null, camera_space, comparisons });
+  guardedSceneCall("import_views", scene, () => scene.import_views(json));
 }
 
 /**

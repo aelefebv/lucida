@@ -420,6 +420,7 @@ async fn handle_client_inner(
                             camera,
                             view,
                             display,
+                            views,
                         } => {
                             {
                                 let mut sess = session.lock().await;
@@ -428,6 +429,7 @@ async fn handle_client_inner(
                                     camera.clone(),
                                     view.clone(),
                                     display.clone(),
+                                    views.clone(),
                                 );
                             }
                             let update = ServerMessage::PresenceUpdate {
@@ -435,6 +437,7 @@ async fn handle_client_inner(
                                 camera,
                                 view,
                                 display,
+                                views,
                             };
                             let _ = tx.send(BroadcastItem::PresenceUpdate {
                                 sender: id,

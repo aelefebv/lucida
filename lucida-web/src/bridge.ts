@@ -15,6 +15,7 @@ import { classifyClientMessage, utf8ByteLength } from "./trace/sendAccounting.ts
 import type { ServerTimingBatch } from "./trace/serverRowTable.ts";
 import type { SocketClose } from "./trace/types.ts";
 import type { SpatialAxis } from "./renderer/slicePlane.ts";
+import type { ViewsRecord } from "./savedView/types.ts";
 import type {
   GeneratedChunkStatus,
   WireGeneratedAvailabilityByDataset,
@@ -364,6 +365,9 @@ export interface PresenceState {
   /** Places in the scene frame, as `ViewState` holds them. */
   view?: { z?: { start: number; end: number }; t: number };
   display?: { contrast_min: number; contrast_max: number; gamma: number };
+  /** Every view, when the peer shows more than one view of every dataset.
+   *  Arrives with the camera. */
+  views?: ViewsRecord;
   following: ClientId | null;
   cursor: [number, number] | null;
   /** Order and settings arrive together in one `dataset_presence` message. */
@@ -418,7 +422,13 @@ export interface BridgeHandlers {
   ) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
-  onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: PresenceState["view"], display: PresenceState["display"]) => void;
+  onPresenceUpdate?: (
+    clientId: ClientId,
+    camera: unknown,
+    view: PresenceState["view"],
+    display: PresenceState["display"],
+    views?: ViewsRecord,
+  ) => void;
   onCursorUpdate?: (clientId: ClientId, position: [number, number] | null) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
@@ -773,7 +783,7 @@ export class Bridge {
             this.handlers.onPeerLeft?.(msg.client_id);
             break;
           case "presence_update":
-            this.handlers.onPresenceUpdate?.(msg.client_id, msg.camera, msg.view, msg.display);
+            this.handlers.onPresenceUpdate?.(msg.client_id, msg.camera, msg.view, msg.display, msg.views);
             break;
           case "cursor_update":
             this.handlers.onCursorUpdate?.(msg.client_id, msg.position);
