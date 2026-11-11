@@ -45,6 +45,7 @@ function createMockCpuCache(): CpuCache {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
     tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
+    holdsWhole: vi.fn(() => false),
     getDeliverable: vi.fn(function* () {}),
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),

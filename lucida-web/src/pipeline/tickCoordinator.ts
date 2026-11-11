@@ -402,6 +402,42 @@ function displayStatesEqual(
 interface DatasetRequests {
   dsId: string;
   requests: readonly ChunkRequest[];
+  /** The views that asked for each of its detail and coarse requests, with several views. */
+  viewsOf?: (req: ChunkRequest) => readonly number[];
+}
+
+/**
+ * Which views asked for each of a dataset's detail and coarse requests:
+ * every view its plan lists them under, or the one view that plans it.
+ */
+function viewsAsking(planned: { views: readonly PlannedView[]; result: RequestPlan }): (req: ChunkRequest) => readonly number[] {
+  const own = (req: ChunkRequest): boolean => req.lane === "detail" || req.lane === "coarse";
+  const byView = planned.result.byView;
+  if (!byView) {
+    const only = [planned.views[0].view.id];
+    return (req) => (own(req) ? only : []);
+  }
+  const asking = new Map<string, number[]>();
+  for (const [view, requests] of byView) {
+    for (const req of requests) {
+      const id = requestIdentity(req);
+      const views = asking.get(id);
+      if (views === undefined) asking.set(id, [view]);
+      else if (!views.includes(view)) views.push(view);
+    }
+  }
+  // Admission asks for each request several times, so its views are found once.
+  const ofRequest = new Map<ChunkRequest, readonly number[]>();
+  for (const req of planned.result.requests) {
+    if (own(req)) ofRequest.set(req, asking.get(requestIdentity(req)) ?? []);
+  }
+  return (req) => ofRequest.get(req) ?? [];
+}
+
+/** Each view's area on the canvas, which its share of the budgets is weighed by, with several views. */
+function viewAreas(ctx: TickContext): Map<number, number> {
+  if (ctx.views.length < 2) return new Map();
+  return new Map(ctx.views.map((view) => [view.id, Math.max(0, view.rect[2]) * Math.max(0, view.rect[3])]));
 }
 
 /**
@@ -417,16 +453,19 @@ function admitDatasetPlans(
 ): Admission[] {
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
   return admitPlans(
-    plans.map(({ dsId, requests }) => {
+    plans.map(({ dsId, requests, viewsOf }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
+        heldWhole: (req: ChunkRequest) => ctx.cpuCache.holdsWhole(req),
         slotOf: gpuSlotsFor(manifest, report, gpuTotalBytes),
+        viewsOf,
       };
     }),
     ctx.cpuCache.tierCapacity(),
     gpuChunkRoomBytes(report, gpuTotalBytes),
+    viewAreas(ctx),
   );
 }
 
@@ -810,6 +849,11 @@ export class TickCoordinator {
     const structural = isStructural(causes);
     // The fast paths prove their case against the drawn view alone.
     const fastPathsHold = views.length === 1;
+    // A camera or a cut moving is a gesture, made in the active view. While
+    // one runs, that view's requests lead each lane of a dataset it shares.
+    const leadingView = views.length > 1 && (causes.includes("view") || causes.includes("selection"))
+      ? drawn.id
+      : undefined;
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
     // A selection scrub, minimap chunks no plan asked for, or both: the active
@@ -933,6 +977,7 @@ export class TickCoordinator {
         epochs: currentEpochs,
         views: plannedViewsOfDataset.map((planned) => planned.snapshot),
         minimapPending: minimapPendingFetch,
+        ...(leadingView !== undefined && plannedViewsOfDataset.length > 1 && { leadingView }),
       };
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
@@ -966,7 +1011,11 @@ export class TickCoordinator {
 
     const admissions = this.admit(
       ctx,
-      plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
+      plannedDatasets.map((planned) => ({
+        dsId: planned.dsId,
+        requests: planned.result.requests,
+        viewsOf: views.length > 1 ? viewsAsking(planned) : undefined,
+      })),
     );
     // With several views, how much of what each asks for admission let in.
     const viewCoverage = views.length > 1 ? new Map<number, ViewCoverage>() : null;

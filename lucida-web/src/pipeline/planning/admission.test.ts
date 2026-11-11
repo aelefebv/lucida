@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
-import { admitPlans, chunkBytesFor, type GpuSlot, type PerTier } from "./admission.ts";
+import { admitPlans, chunkBytesFor, fairShares, type GpuSlot, type PerTier } from "./admission.ts";
 import type { ChunkRequest } from "./types.ts";
 
 function request(x: number, overrides: Partial<ChunkRequest> = {}): ChunkRequest {
@@ -138,6 +138,99 @@ describe("admitting against GPU slot pools", () => {
   });
 });
 
+describe("fairShares", () => {
+  it("gives a claim that wants less than its share what it wants, and the rest to the others by weight", () => {
+    const shares = fairShares(new Map([[1, 100], [2, 10], [3, 100]]), new Map([[1, 1], [2, 1], [3, 2]]), 70);
+    expect(shares.get(2)).toBe(10);
+    expect(shares.get(1)).toBeCloseTo(20);
+    expect(shares.get(3)).toBeCloseTo(40);
+  });
+
+  it("gives every claim what it wants when the room holds them all", () => {
+    expect([...fairShares(new Map([[1, 5], [2, 7]]), new Map([[1, 1], [2, 1]]), 100)]).toEqual([[1, 5], [2, 7]]);
+  });
+});
+
+describe("admitting several views into one room", () => {
+  const VOLUME = 1;
+  const SLICE = 2;
+  const quarters = new Map([[VOLUME, 1], [SLICE, 1]]);
+
+  /** A volume view's ten-byte chunks ranking first, and a slice view's one-byte planes behind them. */
+  function twoViews() {
+    const volume = [0, 1, 2, 3, 4, 5, 6, 7].map((x) => request(x, { mode: "volume" }));
+    const slice = [0, 1, 2, 3].map((x) => request(x, { plane: 0, planes: [0, 1], priority: 100 + x }));
+    const of = new Map<ChunkRequest, number>([...volume.map((r) => [r, VOLUME] as const), ...slice.map((r) => [r, SLICE] as const)]);
+    return {
+      volume,
+      slice,
+      plan: {
+        requests: [...volume, ...slice],
+        bytesOf: (req: ChunkRequest) => (req.planes ? 1 : 10),
+        viewsOf: (req: ChunkRequest) => [of.get(req)!],
+      },
+    };
+  }
+
+  it("keeps the view whose requests rank behind from going without when the room cannot hold both", () => {
+    const { plan, slice } = twoViews();
+    const [admission] = admitPlans([plan], { detail: 50, coarse: 0 }, Infinity, quarters);
+    // The slice view wants four bytes, under its half; the volume view takes the rest.
+    expect(admission.admitted.filter((r) => r.mode === "slice")).toEqual(slice);
+    expect(admission.admitted.filter((r) => r.mode === "volume").map((r) => r.x)).toEqual([0, 1, 2, 3]);
+    expect(admission.shortfall.detail).toBe(4);
+  });
+
+  it("admits one view in priority order as before", () => {
+    const { plan, volume } = twoViews();
+    const [admission] = admitPlans([plan], { detail: 50, coarse: 0 }, Infinity, new Map([[VOLUME, 1]]));
+    expect(admission.admitted).toEqual(volume.slice(0, 5));
+  });
+
+  it("weighs each view's share by its area", () => {
+    const left = [0, 1, 2, 3, 4, 5].map((x) => request(x));
+    const right = [0, 1, 2, 3, 4, 5].map((x) => request(x, { entityId: `other-${x}`, priority: 100 + x }));
+    const of = new Map<ChunkRequest, number>([...left.map((r) => [r, 1] as const), ...right.map((r) => [r, 2] as const)]);
+    const plan = { requests: [...left, ...right], bytesOf: TEN_BYTES, viewsOf: (req: ChunkRequest) => [of.get(req)!] };
+    const [admission] = admitPlans([plan], { detail: 80, coarse: 0 }, Infinity, new Map([[1, 3], [2, 1]]));
+    expect(admission.admitted.filter((r) => left.includes(r))).toHaveLength(6);
+    expect(admission.admitted.filter((r) => right.includes(r))).toHaveLength(2);
+  });
+
+  it("divides the GPU room among views as well, when it is what runs short", () => {
+    const { plan } = twoViews();
+    const slotOf = (req: ChunkRequest): GpuSlot =>
+      req.mode === "volume" ? { pool: "volume", slots: 100, slotBytes: 10 } : { pool: "slice", slots: 100, slotBytes: 1 };
+    const [admission] = admitPlans([{ ...plan, slotOf }], { detail: 1_000, coarse: 0 }, 44, quarters);
+    expect(admission.admitted.filter((r) => r.mode === "slice")).toHaveLength(4);
+    expect(admission.admitted.filter((r) => r.mode === "volume")).toHaveLength(4);
+  });
+
+  it("hands what the shares leave to the requests next in priority order", () => {
+    // Each view's share is 15 bytes: one ten-byte chunk each, and the ten
+    // bytes left over go to the next request in order.
+    const left = [0, 1, 2].map((x) => request(x));
+    const right = [0, 1, 2].map((x) => request(x, { entityId: `other-${x}`, priority: 100 + x }));
+    const of = new Map<ChunkRequest, number>([...left.map((r) => [r, 1] as const), ...right.map((r) => [r, 2] as const)]);
+    const plan = { requests: [...left, ...right], bytesOf: TEN_BYTES, viewsOf: (req: ChunkRequest) => [of.get(req)!] };
+    const [admission] = admitPlans([plan], { detail: 30, coarse: 0 }, Infinity, quarters);
+    expect(admission.admitted).toEqual([left[0], left[1], right[0]]);
+    expect(admission.shortfall.detail).toBe(3);
+  });
+
+  it("charges a request two views asked for once", () => {
+    const shared = request(0);
+    const own = [1, 2, 3].map((x) => request(x, { priority: 100 + x }));
+    const plan = {
+      requests: [shared, ...own],
+      bytesOf: TEN_BYTES,
+      viewsOf: (req: ChunkRequest) => (req === shared ? [1, 2] : [2]),
+    };
+    const [admission] = admitPlans([plan], { detail: 30, coarse: 0 }, Infinity, quarters);
+    expect(admission.admitted).toEqual([shared, own[0], own[1]]);
+  });
+});
+
 describe("admitPlans with planes", () => {
   it("charges a request for some planes of a chunk apart from one for all of it", () => {
     const planes = request(0, { plane: 1, planes: [0, 3] });
@@ -147,6 +240,20 @@ describe("admitPlans with planes", () => {
     // The whole chunk does not fit beside its planes, and goes without.
     expect(admission.admitted).toEqual([planes]);
     expect(admission.shortfall.detail).toBe(0);
+  });
+});
+
+describe("admitPlans against what the cache holds", () => {
+  it("charges a request for planes the whole chunk the cache holds for it, once with a request for the whole", () => {
+    const planes = [0, 1, 2].map((x) => request(x, { plane: 1, planes: [0, 3] }));
+    const whole = request(0, { mode: "volume", priority: 10 });
+    const bytesOf = (req: ChunkRequest, all?: boolean) => (req.planes && !all ? 3 : 8);
+    const heldWhole = (req: ChunkRequest) => req.x === 0;
+    const [admission] = admitPlans([{ requests: [...planes, whole], bytesOf, heldWhole }], { detail: 13, coarse: 0 });
+    // Chunk 0 costs its whole 8 bytes, which the volume view's request for it
+    // shares; the other two cost their planes.
+    expect(admission.admitted).toEqual([...planes.slice(0, 2), whole]);
+    expect(admission.shortfall.detail).toBe(1);
   });
 });
 
@@ -169,8 +276,9 @@ describe("chunkBytesFor", () => {
     const bytesOf = chunkBytesFor(manifest);
     expect(bytesOf(request(0))).toBe(8 * 64 * 64 * 2);
     expect(bytesOf(request(0, { level: 1 }))).toBe(4 * 32 * 32 * 2);
-    // Three of the eight planes cost three eighths of the chunk.
+    // Three of the eight planes cost three eighths of the chunk, or all of it held whole.
     expect(bytesOf(request(0, { plane: 1, planes: [0, 3] }))).toBe(3 * 64 * 64 * 2);
+    expect(bytesOf(request(0, { plane: 1, planes: [0, 3] }), true)).toBe(8 * 64 * 64 * 2);
   });
 
   it("charges every type that decodes to float32 four bytes a sample", () => {

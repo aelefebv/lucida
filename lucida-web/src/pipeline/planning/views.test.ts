@@ -158,6 +158,50 @@ describe("a plan for several views", () => {
     expect(second.nextState.views.get(1)).toMatchObject({ zoomDirection: null, previousCut: { index: 60 } });
   });
 
+  it("fetches whole a chunk two crossing slice views ask for planes of, each drawing its own plane", () => {
+    const xy = viewAt(0, 40);
+    const xz = { ...viewAt(1, 40), selection: { ...viewAt(1, 40).selection, cut: { axis: "y" as const, index: 30 } } };
+    const both = plan(createSyntheticSnapshot({ views: [xy, xz] }), createSyntheticState(), noPrefetch);
+    // The requests that draw a plane, each view's along its own axis.
+    const drawing = both.requests.filter((req) => req.lane === "detail" && req.plane !== undefined);
+    const ofView = (axis: "y" | "z") => drawing.filter((req) => (req.planeAxis ?? "z") === axis);
+    const shared = ofView("z").map((req) => req.chunkKey).filter((key) => ofView("y").some((req) => req.chunkKey === key));
+    expect(shared.length).toBeGreaterThan(0);
+    expect(ofView("z").length).toBeGreaterThan(shared.length);
+    for (const req of drawing) {
+      // Planes of a chunk one view cuts, and the whole of one both cut.
+      expect(req.planes === undefined).toBe(shared.includes(req.chunkKey));
+    }
+  });
+
+  it("widens two views' bands of one chunk along one axis to one band holding both", () => {
+    const both = plan(createSyntheticSnapshot({ views: [viewAt(0, 36), viewAt(1, 44)] }), createSyntheticState(), noPrefetch);
+    const banded = both.requests.filter((req) => req.lane === "detail" && req.planes);
+    const bands = new Map<string, string>();
+    for (const req of banded) {
+      const band = req.planes!.join(":");
+      expect(bands.get(req.chunkKey) ?? band).toBe(band);
+      bands.set(req.chunkKey, band);
+      expect(req.planes![0]).toBeLessThanOrEqual(req.plane!);
+      expect(req.plane!).toBeLessThan(req.planes![1]);
+    }
+    expect(new Set(banded.map((req) => req.plane))).toEqual(new Set([4, 12]));
+  });
+
+  it("puts the view under a gesture first in each lane", () => {
+    const views = [viewAt(0, 10), viewAt(1, 80)];
+    const plain = plan(createSyntheticSnapshot({ views }), createSyntheticState(), noPrefetch);
+    const led = plan(createSyntheticSnapshot({ views, leadingView: 0 }), createSyntheticState(), noPrefetch);
+    const detail = (requests: readonly ChunkRequest[]) => requests.filter((req) => req.lane === "detail");
+    // View 0 cuts the first chunk along Z, view 1 the third.
+    const viewOf = (req: ChunkRequest) => (req.z === 0 ? 0 : 1);
+    // Without a gesture view 1's chunks happen to rank first; with view 0
+    // under one, every chunk of view 0 comes before any of view 1.
+    expect(detail(plain.requests).map(viewOf)).toEqual([1, 1, 1, 1, 0, 0, 0, 0]);
+    expect(detail(led.requests).map(viewOf)).toEqual([0, 0, 0, 0, 1, 1, 1, 1]);
+    expect(keys(led.requests)).toEqual(keys(plain.requests));
+  });
+
   it("regenerates each view's requests from its own active set on a scrub", () => {
     const planned = plan(
       createSyntheticSnapshot({ views: [viewAt(0, 10), viewAt(1, 80)] }),
