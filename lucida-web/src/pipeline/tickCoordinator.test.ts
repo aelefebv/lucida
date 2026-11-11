@@ -2035,6 +2035,17 @@ describe("views of one dataset in two modes", () => {
     expect(requests.filter((req) => req.chunkKey === key).map((req) => req.mode).sort()).toEqual(["slice", "volume"]);
   });
 
+  it("puts the active view first in a dataset's lanes only while a gesture runs", () => {
+    const leading = (gesture: boolean) => {
+      const { ctx } = makeTwoModes();
+      const planFn = vi.fn(plan);
+      new TickCoordinator(new Uploader(), planFn).planAndFetch({ ...ctx, gesture }, emptyMinimap);
+      return planFn.mock.calls[0][0].leadingView;
+    };
+    expect(leading(false)).toBeUndefined();
+    expect(leading(true)).toBe(0);
+  });
+
   it("plans a slice view whose cut the dataset's placement tilts from the volume pools, with no label", () => {
     const { scene, ctx, coldState } = makeTwoModes();
     // Turned a sixth about Z, which tilts the cut of view 0's XZ plane.

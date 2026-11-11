@@ -880,11 +880,9 @@ export class TickCoordinator {
     // place, which only a full plan follows.
     const fastPathsHold = views.length === 1
       && [...ctx.datasets.keys()].every((dsId) => drawMode(ctx, views[0], dsId) === views[0].mode);
-    // A camera or a cut moving is a gesture, made in the active view. While
-    // one runs, that view's requests lead each lane of a dataset it shares.
-    const leadingView = views.length > 1 && (causes.includes("view") || causes.includes("selection"))
-      ? drawn.id
-      : undefined;
+    // A gesture is made in the active view. While one runs, that view's
+    // requests lead each lane of a dataset it shares.
+    const leadingView = views.length > 1 && ctx.gesture ? drawn.id : undefined;
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
     // A selection scrub, minimap chunks no plan asked for, or both: the active
