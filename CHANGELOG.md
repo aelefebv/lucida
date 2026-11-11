@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.37.0](https://github.com/aelefebv/lucida/compare/v0.36.0...v0.37.0) (2026-11-11)
+
+
+### Features
+
+* a cursor crosshair marks the same point in every view ([#1550](https://github.com/aelefebv/lucida/issues/1550)) ([b9ac351](https://github.com/aelefebv/lucida/commit/b9ac35110e8f0da3b08e0525e0ba1c37ab8834fd))
+* agents set swipe and blink, and captures can draw plane lines ([#1568](https://github.com/aelefebv/lucida/issues/1568)) ([e919245](https://github.com/aelefebv/lucida/commit/e9192450d71fe1382dc55bf11cf1629981b86ddc))
+* agents set up and capture multi-view layouts from the CLI and Python ([#1560](https://github.com/aelefebv/lucida/issues/1560)) ([494a6ed](https://github.com/aelefebv/lucida/commit/494a6edf8b046b4976834ccb33d86bbb05e99f9c))
+* each view has a Home control that fits it to its data again ([#1569](https://github.com/aelefebv/lucida/issues/1569)) ([8ae7f07](https://github.com/aelefebv/lucida/commit/8ae7f078aafd900f4106f825828efb2709100875))
+* **web:** label overlays draw in side views ([#1557](https://github.com/aelefebv/lucida/issues/1557)) ([6384ee2](https://github.com/aelefebv/lucida/commit/6384ee2e95fdef8a0a75defa45e341a433157706))
+* **web:** link or unlink every property at once ([#1567](https://github.com/aelefebv/lucida/issues/1567)) ([51fa629](https://github.com/aelefebv/lucida/commit/51fa6293f5690d4197f4f677686614ac26976f0a))
+* **web:** per-view notices collapse into an icon you can expand ([#1572](https://github.com/aelefebv/lucida/issues/1572)) ([3cfc6a3](https://github.com/aelefebv/lucida/commit/3cfc6a33465b83d207c233ed5020c8b9c26dc09f))
+
+
+### Bug Fixes
+
+* **core:** a view stops comparing when one of its pair leaves it ([#1571](https://github.com/aelefebv/lucida/issues/1571)) ([2416587](https://github.com/aelefebv/lucida/commit/2416587f8815642b220c43c6937d610ca99ccfd2))
+* four-up's plane lines follow the tile under the pointer in a collection ([#1566](https://github.com/aelefebv/lucida/issues/1566)) ([65f40d3](https://github.com/aelefebv/lucida/commit/65f40d3d84188f4618122b64ff59ea1b8285c230))
+
 ## [0.36.0](https://github.com/aelefebv/lucida/compare/v0.35.0...v0.36.0) (2026-11-11)
 
 
