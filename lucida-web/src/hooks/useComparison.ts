@@ -1,21 +1,18 @@
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useMemo } from "react";
 import {
   comparisonActions,
   lineUpReason,
   placedByHandNote,
   readLineUp,
   readLineUpByHand,
-  type Comparison,
   type ComparisonActions,
 } from "../comparison.ts";
 import type { Engine } from "../engine.ts";
 import { toast } from "../ui/toastQueue.ts";
 
 export interface ComparisonControls {
-  /** The comparison the view shows, re-rendering only when it changes. */
-  current: Comparison | null;
   actions: ComparisonActions;
-  /** A layer's name, for the controls to say what they compare. */
+  /** A layer's name, as the layer panel shows it. */
   nameOf(datasetId: string): string;
   /** Why a layer can't be compared with another, or null when it can. */
   blocker(id: string, other: string): string | null;
@@ -25,16 +22,11 @@ export interface ComparisonControls {
   compareWith(id: string, other: string): void;
 }
 
-/** The view's comparison and what changes it, for the layer menu and the canvas controls. */
+/** What starts and changes the active view's comparison, for the layer menu and the trace driver. */
 export function useComparison(
   engine: Engine,
   layers: readonly { id: string; name: string }[],
 ): ComparisonControls {
-  const current = useSyncExternalStore(
-    engine.store.subscribe,
-    engine.store.getComparison,
-    engine.store.getComparison,
-  );
   const actions = useMemo(() => comparisonActions(engine.scene, engine.loop), [engine]);
   const nameOf = useCallback(
     (datasetId: string) => layers.find((layer) => layer.id === datasetId)?.name ?? datasetId,
@@ -61,5 +53,5 @@ export function useComparison(
     },
     [actions, nameOf],
   );
-  return { current, actions, nameOf, blocker, byHand, compareWith };
+  return { actions, nameOf, blocker, byHand, compareWith };
 }

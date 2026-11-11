@@ -13,6 +13,7 @@ import { frameClock } from "../frameClock.ts";
 import { floatingControlBoxes } from "../shell/floatingControls.ts";
 import { armLabel, parseScaleBar, scaleBarNote, type ScaleBarReading } from "./scaleBar.ts";
 import { placeScaleBar, snapLength } from "./scaleBarPlacement.ts";
+import { viewOverlayBoxes } from "./viewOverlay.ts";
 import "./ScaleBar.css";
 
 interface Props {
@@ -44,7 +45,7 @@ export function ScaleBar({ scene, surface }: Props) {
         if (reading) draw(reading, { mark, across, down, note });
       }
       root.hidden = reading === null;
-      if (reading) place(root, surface.element);
+      if (reading) place(root, surface);
     };
     return frameClock.subscribe(tick);
   }, [scene, surface]);
@@ -80,17 +81,11 @@ function draw(reading: ScaleBarReading, { mark, across, down, note }: Parts) {
   note.textContent = qualified ?? "";
 }
 
-/**
- * Put the bar in its pane's corner, clear of the stage's floating controls
- * and of the notices the pane shows, which announce themselves as status.
- */
-function place(root: HTMLElement, pane: HTMLElement) {
-  const obstacles = [
-    ...floatingControlBoxes(pane),
-    ...Array.from(pane.querySelectorAll(':scope > [role="status"]'), (notice) => notice.getBoundingClientRect()),
-  ];
+/** Put the bar in its pane's corner, clear of the stage's floating controls and of what lies over its view. */
+function place(root: HTMLElement, { view, element }: ViewSurface) {
+  const obstacles = [...floatingControlBoxes(element), ...viewOverlayBoxes(element, view)];
   const size = root.getBoundingClientRect();
-  const at = placeScaleBar(pane.getBoundingClientRect(), size.width, size.height, obstacles);
+  const at = placeScaleBar(element.getBoundingClientRect(), size.width, size.height, obstacles);
   root.style.visibility = at ? "" : "hidden";
   if (!at) return;
   root.style.left = `${at.left}px`;
