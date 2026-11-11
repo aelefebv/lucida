@@ -226,8 +226,8 @@ describe("buildColdState", () => {
       levelDims: [4, 2, 8],
       gridShape: [2, 2, 2],
     });
-    // The layout's X stays across; Z starts at 0; the cut has no offset.
-    expect(msg.activeSet[0].layoutPositionVox).toEqual([100, 0]);
+    // The planner already places the image across and down the plane.
+    expect(msg.activeSet[0].layoutPositionVox).toEqual([100, 200]);
     expect(msg.visibleRegion).toMatchObject({ xyBoundsVox: [10, 0, 50, 2], zRangeVox: [3, 4] });
 
     // An XY cut keeps the image's own frame and names no axis.

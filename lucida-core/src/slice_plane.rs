@@ -49,6 +49,25 @@ impl SlicePlane {
         self.axes()[2]
     }
 
+    /// The plane whose cut is `axis`.
+    pub fn cutting(axis: SpatialAxis) -> SlicePlane {
+        match axis {
+            SpatialAxis::Z => SlicePlane::Xy,
+            SpatialAxis::Y => SlicePlane::Xz,
+            SpatialAxis::X => SlicePlane::Yz,
+        }
+    }
+
+    /// A point `[across, down]` on this plane as `[x, y, z]`, at nothing
+    /// along the cut.
+    pub fn frame_point(self, on_plane: [f64; 2]) -> [f64; 3] {
+        let [across, down, _] = self.axes();
+        let mut point = [0.0; 3];
+        point[across.xyz()] = on_plane[0];
+        point[down.xyz()] = on_plane[1];
+        point
+    }
+
     /// How far one sample of a frame `frame_to_scene` places reaches on
     /// screen: the smaller of its extents along the two axes this plane
     /// draws. A slice zoom times this is device pixels per sample, measured
@@ -117,6 +136,16 @@ mod tests {
         assert_eq!(SlicePlane::Yz.cut(), SpatialAxis::X);
         assert_eq!(SlicePlane::Xz.axes()[1], SpatialAxis::Z);
         assert_eq!(SlicePlane::Yz.axes()[1], SpatialAxis::Z);
+        for plane in SlicePlane::ALL {
+            assert_eq!(SlicePlane::cutting(plane.cut()), plane);
+        }
+    }
+
+    #[test]
+    fn a_point_on_a_plane_lands_on_the_axes_it_draws() {
+        assert_eq!(SlicePlane::Xy.frame_point([2.0, 3.0]), [2.0, 3.0, 0.0]);
+        assert_eq!(SlicePlane::Xz.frame_point([2.0, 3.0]), [2.0, 0.0, 3.0]);
+        assert_eq!(SlicePlane::Yz.frame_point([2.0, 3.0]), [0.0, 2.0, 3.0]);
     }
 
     #[test]

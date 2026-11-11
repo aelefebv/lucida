@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use lucida_content::LevelGeometry;
 
 use crate::camera::VisibleRegion;
-use crate::slice_plane::slice_level_plane;
+use crate::slice_plane::{SlicePlane, slice_level_plane};
 use lucida_content::SpatialAxis;
 
 /// A chunk coordinate in the multiscale grid.
@@ -50,7 +50,7 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
 pub const RENDER_RADIUS_DISABLED: f64 = 2.0;
 
 /// The view as chunk enumeration reads it, in layout coordinates: level-0
-/// samples, with each entity offset by its place in the layout.
+/// samples, with each entity offset by its place in the view.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkView {
     xy_bounds: [f64; 4],
@@ -59,7 +59,7 @@ pub struct ChunkView {
     /// samples the one chunk along its cut axis that holds each of its planes.
     frustum_planes: Option<Vec<[f64; 4]>>,
     /// The axis a 2-D view cuts. Its range is in each image's own samples,
-    /// so a layout's offset never applies along it.
+    /// so an image's place never applies along it.
     cut: SpatialAxis,
     /// The region's sort center, else its middle: where the render radius is
     /// measured from.
@@ -143,12 +143,25 @@ impl ChunkView {
             focus: [center[0], center[1], focus_z],
         }
     }
+
+    /// Where an entity placed at `position` on the axes this view draws
+    /// sits in its frame, `[x, y, z]`: X and Y in a volume view, and in a
+    /// 2-D view the axes across and down the screen, never the cut.
+    fn entity_offset(&self, position: [f64; 2]) -> [f64; 3] {
+        match self.frustum_planes {
+            Some(_) => [position[0], position[1], 0.0],
+            None => SlicePlane::cutting(self.cut).frame_point(position),
+        }
+    }
 }
 
-/// One level of one entity, placed in the layout, to enumerate.
+/// One level of one entity, placed in the view, to enumerate.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkQuery {
-    /// The entity's place in the layout, in level-0 samples.
+    /// The entity's place on the two axes the view draws, in level-0
+    /// samples: its layout position in a volume view or an XY cut, and its
+    /// place across and down the screen in a side view
+    /// ([`crate::scene::DatasetDerivedState::plane_position`]).
     position: [f64; 2],
     /// Level-0 shape, X, Y, Z.
     full: [f64; 3],
@@ -225,26 +238,23 @@ pub fn enumerate_chunks(
     let [grid_x, grid_y, grid_z] = query.grid;
     counts.considered += grid_x as u64 * grid_y as u64 * grid_z as u64;
 
-    let [px, py] = query.position;
     let slice_cut = view.frustum_planes.is_none().then_some(view.cut);
-    // A layout places an image along X and Y, but a 2-D view's cut is in the
-    // image's own samples.
-    let offset = |axis: SpatialAxis, position: f64| {
-        if slice_cut == Some(axis) {
-            0.0
-        } else {
-            position
-        }
-    };
-    let (ox, oy) = (offset(SpatialAxis::X, px), offset(SpatialAxis::Y, py));
+    let [ox, oy, oz] = view.entity_offset(query.position);
     let [min_x, min_y, max_x, max_y] = view.xy_bounds;
     let (min_x, min_y, max_x, max_y) = (min_x - ox, min_y - oy, max_x - ox, max_y - oy);
+    // A side view's cut past an image's last plane samples nothing of it: a
+    // collection cuts every tile at one plane, which a shorter tile may not
+    // reach.
     if max_x <= 0.0 || max_y <= 0.0 || min_x >= query.full[0] || min_y >= query.full[1] {
         return;
     }
 
     let world = query.chunk_world();
-    let bounds = [[min_x, max_x], [min_y, max_y], view.z_range];
+    let bounds = [
+        [min_x, max_x],
+        [min_y, max_y],
+        [view.z_range[0] - oz, view.z_range[1] - oz],
+    ];
     let range = |axis: SpatialAxis| {
         let a = axis.xyz();
         if slice_cut == Some(axis) {
@@ -265,7 +275,7 @@ pub fn enumerate_chunks(
         && query.radius_view >= 0.0
         && query.radius_view < RENDER_RADIUS_DISABLED)
         .then_some(view.radius_basis * query.radius_view);
-    let local = |p: [f64; 3]| [p[0] - ox, p[1] - oy, p[2]];
+    let local = |p: [f64; 3]| [p[0] - ox, p[1] - oy, p[2] - oz];
     let (center, focus) = (local(view.center), local(view.focus));
 
     for z in z_start..z_end {
@@ -275,7 +285,7 @@ pub fn enumerate_chunks(
                 let lo: [f64; 3] = std::array::from_fn(|a| cell[a] * world[a]);
                 let hi: [f64; 3] = std::array::from_fn(|a| (cell[a] + 1.0) * world[a]);
                 if let Some(planes) = &view.frustum_planes {
-                    let placed = |p: [f64; 3]| [p[0] + ox, p[1] + oy, p[2]];
+                    let placed = |p: [f64; 3]| [p[0] + ox, p[1] + oy, p[2] + oz];
                     if chunk_outside_frustum(&placed(lo), &placed(hi), planes) {
                         continue;
                     }
@@ -635,17 +645,33 @@ mod tests {
     }
 
     #[test]
-    fn a_side_view_cuts_every_image_at_its_own_plane() {
-        // An image placed at Y 1000 is still cut at its own plane 16.
-        let full = geo(0, [64, 100, 256], [64, 8, 256]);
-        let query = ChunkQuery::new(&full, &full, [0.0, 1000.0], RENDER_RADIUS_DISABLED);
+    fn a_side_view_places_an_image_across_and_down_the_screen_and_cuts_its_own_plane() {
+        // Chunks 16 deep, 8 tall and 256 wide. An XZ view cuts plane 16 of
+        // each image, chunk row 2, and shows Z 0 to 64.
+        let full = geo(0, [64, 100, 256], [16, 8, 256]);
         let v = view(r#"{"xy_bounds":[0,16,256,17],"z_range":[0,64],"cut_axis":"y"}"#);
-        let found = enumerate(&v, &query).0;
-        assert!(!found.is_empty());
-        assert!(found.iter().all(|c| c.y == 2));
-        // Along X, where the view is on screen, the layout still places it.
-        let shifted = ChunkQuery::new(&full, &full, [1000.0, 0.0], RENDER_RADIUS_DISABLED);
-        assert!(enumerate(&v, &shifted).0.is_empty());
+        let at = |place: [f64; 2]| {
+            let query = ChunkQuery::new(&full, &full, place, RENDER_RADIUS_DISABLED);
+            enumerate(&v, &query).0
+        };
+        // Placed 32 down the screen, its first 32 planes of Z show.
+        let lower = at([0.0, 32.0]);
+        assert!(lower.iter().all(|c| c.y == 2), "{:?}", cells(&lower));
+        assert_eq!(cells(&lower), [(0, 2, 0), (0, 2, 1)]);
+        assert!(at([0.0, 1000.0]).is_empty());
+        assert!(at([1000.0, 0.0]).is_empty());
+        // A YZ view draws Y across, so an image placed 300 across is off it.
+        let yz = view(r#"{"xy_bounds":[16,0,17,256],"z_range":[0,64],"cut_axis":"x"}"#);
+        let query = |place| ChunkQuery::new(&full, &full, place, RENDER_RADIUS_DISABLED);
+        assert!(!enumerate(&yz, &query([0.0, 0.0])).0.is_empty());
+        assert!(enumerate(&yz, &query([300.0, 0.0])).0.is_empty());
+    }
+
+    #[test]
+    fn a_side_view_cut_past_an_images_last_plane_samples_nothing_of_it() {
+        let short = geo(0, [64, 10, 256], [16, 8, 256]);
+        let v = view(r#"{"xy_bounds":[0,16,256,17],"z_range":[0,64],"cut_axis":"y"}"#);
+        assert!(enumerate(&v, &whole(&short)).0.is_empty());
     }
 
     #[test]

@@ -70,14 +70,14 @@ export interface BuildViewSnapshotArgs {
   mode: "slice" | "volume";
   /**
    * Camera-independent inputs a caller may cache per dataset across
-   * view-only replans, to skip the `member_positions` parse and the
+   * view-only replans, to skip the `plane_positions` parse and the
    * manifest-map rebuilds. Each is optional; an absent one is computed
    * here. A provided value must equal what this builder would compute for
    * the current content and layout epochs, or tile positions and parent
    * edges go wrong.
    */
   precomputed?: {
-    /** Parsed `member_positions(datasetId)` — entityId → 2D layout position. */
+    /** Parsed `plane_positions(view, datasetId)`: entityId → where the view places it. */
     positions?: Record<string, [number, number]>;
     /** Manifest map: image_id → ImageSpec. */
     imageSpecById?: Map<string, ImageSpec>;
@@ -127,14 +127,14 @@ export function buildViewSnapshot(args: BuildViewSnapshotArgs): ViewSnapshot | n
     if (!vq || !vq.visible_entities) return null;
   }
 
-  // 2. member_positions: entityId to 2D layout placement.
+  // 2. plane_positions: entityId to where the view places it.
   const precomputed = args.precomputed;
   let positions: Record<string, [number, number]> = {};
   if (!entitiesOverride) {
     if (precomputed?.positions) {
       positions = precomputed.positions;
     } else {
-      const posJson = scene.member_positions(datasetId);
+      const posJson = scene.plane_positions(view, datasetId);
       positions = JSON.parse(posJson);
     }
   }

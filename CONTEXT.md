@@ -307,7 +307,9 @@ The plane of the scene frame a slice view cuts: `xy`, `xz` or `yz`. The two
 axes it names are on screen, Z always drawn down, and the third is cut at an
 axis position. An `xz` or `yz` view is a side view: it shows Z as the scene
 frame places it, at its physical spacing, and cuts Y or X at a place in the
-scene frame, so datasets over one region cut the same plane.
+scene frame, so datasets over one region cut the same plane. A side view of a
+collection cuts every tile at one place from the tile's own edge, and draws
+each tile's cut in its own cell of the grid, as tall as the tile is deep.
 _Avoid_: orientation, section (unqualified)
 
 **Comparison**:
