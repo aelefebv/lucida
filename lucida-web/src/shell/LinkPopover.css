@@ -23,3 +23,10 @@
   color: var(--lc-text-subtle);
   font-size: var(--lc-text-xs);
 }
+
+.lc-link-channels ul {
+  margin: var(--lc-space-1) 0 0;
+  padding-left: var(--lc-space-4);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}

@@ -312,7 +312,7 @@ describe("render time over the window", () => {
     expect(reading.render?.gpuPass).toBeNull();
 
     const lead = reading.topFinding!;
-    expect(lead.severity).toBe("stall");
+    expect(lead.severity).toBe("bound");
     expect(lead.subject).toBe("render.frame");
     expect(lead.rule).toBe(RULESET.share.id);
     expect(lead.observed).toEqual({
@@ -323,7 +323,7 @@ describe("render time over the window", () => {
       tier: "per-tick readings",
     });
     expect(reading.statement).toBe(
-      "provisional — over the last 5000 ms, render.frame held 5000 ms (100% of the window); the page says chunks_pending",
+      "provisional — over the last 5000 ms, bound by render.frame: it held 5000 ms, 100% of the window; the page says chunks_pending",
     );
   });
 
@@ -340,18 +340,18 @@ describe("render time over the window", () => {
     expect(renderProvisional(reading)).toMatch(/GPU pass p50 [\d.]+ ms/);
   });
 
-  it("holds the share rule to its floor, so a fast window is not a stall", () => {
+  it("holds the share rule to its floor, so a fast window binds nothing", () => {
     // 100% of a 200 ms run so far, but only 200 ms of it: under the floor,
-    // the way a healthy 368 ms local open must not read as a stall.
+    // the way a healthy 368 ms local open must not read as bound.
     const readings = series(0, 200 * MS, 20 * MS, () => ({ inFlight: 2, frameTimeUs: 20 * MS }));
     const reading = deriveProvisional(sample({ atUs: 200 * MS, readings }));
 
     expect(reading.render?.sharePct).toBe(100);
     expect(reading.render?.busyMs).toBeLessThan(RULESET.share.floorMs);
-    expect(reading.findings.find((finding) => finding.severity === "stall")).toBeUndefined();
+    expect(reading.findings.find((finding) => finding.severity === "bound")).toBeUndefined();
   });
 
-  it("ranks findings as the verdict does: stalls and saturation before notes, then by share", () => {
+  it("ranks findings as the verdict does: saturation before bound, then by share", () => {
     const readings = series(7_000 * MS, 12_300 * MS, 20 * MS, () => ({
       inFlight: 24,
       queueDepth: 20_000,
@@ -359,7 +359,7 @@ describe("render time over the window", () => {
     }));
     const reading = deriveProvisional(sample({ readings }));
 
-    expect(reading.findings.map((finding) => finding.severity)).toEqual(["stall", "saturated"]);
+    expect(reading.findings.map((finding) => finding.severity)).toEqual(["saturated", "bound"]);
   });
 });
 

@@ -5,15 +5,15 @@ import { Popover } from "../ui/Popover.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import {
   basisNote,
+  channelPairText,
   LINK_LABELS,
   LINK_MODE_LABELS,
+  linkModes,
   unlinkableReason,
   type PropertyLink,
   type ViewLinks,
 } from "../viewLinks.ts";
 import "./LinkPopover.css";
-
-const MODES: readonly LinkMode[] = ["linked", "relative", "off"];
 
 export interface LinkPopoverProps {
   links: ViewLinks;
@@ -39,20 +39,30 @@ export function LinkPopover({ links, onChange }: LinkPopoverProps) {
         {links.properties.map((link) => (
           <LinkRow key={link.property} link={link} onChange={onChange} />
         ))}
+        {links.channels && links.channels.length > 0 && (
+          <div className="lc-link-channels">
+            <p className="lc-link-reason">Contrast and colormap pair these channels:</p>
+            <ul>
+              {links.channels.map((pair) => (
+                <li key={pair.first} data-paired-by={pair.by}>{channelPairText(pair)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </Popover>
   );
 }
 
 function LinkRow({ link, onChange }: { link: PropertyLink; onChange: LinkPopoverProps["onChange"] }) {
-  const settable = link.unlinkable !== "empty";
+  const settable = link.unlinkable !== "empty" && link.unlinkable !== "shared";
   return (
     <div className="lc-link-row" data-link-property={link.property}>
       <SegmentedControl
         label={LINK_LABELS[link.property]}
         labelPosition="side"
         size="sm"
-        options={MODES.map((mode) => ({ value: mode, label: LINK_MODE_LABELS[mode] }))}
+        options={linkModes(link.property).map((mode) => ({ value: mode, label: LINK_MODE_LABELS[mode] }))}
         value={link.mode}
         isDisabled={!settable}
         onChange={(mode) => onChange(link.property, mode)}

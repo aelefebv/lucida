@@ -4,7 +4,7 @@
  * with no browser involved.
  *
  * Two are regression fixtures named for what they must not produce:
- * {@link healthyLocalOpen} must not report a stall, and
+ * {@link healthyLocalOpen} must not report a finding, and
  * {@link uninstrumentedPrefixOpen} must not report full coverage. Imported
  * only from tests, so nothing here reaches a bundle.
  */
@@ -310,8 +310,8 @@ export function makeRun(spec: RunSpec = {}): TraceRun {
  * A healthy local cold open: everything fast, settled by quiescence.
  *
  * The regression fixture for the share threshold. A relative rule with no
- * absolute floor reports `STALL fetch.wire, 70% of the run` here, because a
- * fast run still spends most of itself somewhere.
+ * absolute floor blames fetch.wire here, 70% of the run, because a fast run
+ * still spends most of itself somewhere.
  */
 export function healthyLocalOpen(): TraceRun {
   const rows: TraceRow[] = [];
@@ -346,6 +346,46 @@ export function healthyLocalOpen(): TraceRun {
     ),
     datasetOpens: [{ requestId: "open-1", startUs: 5 * MS, endUs: 38 * MS }],
     serverRows: [makeMetadataRow("open-1", 1 * MS, 4 * MS, "cache-hit")],
+  });
+}
+
+/**
+ * A warm open that settles with one phase holding most of its chain: the
+ * chunk it finished on spent 300 ms in upload, every other about a
+ * millisecond. Upload's p95 stays under its ceiling, so nothing fails and the
+ * run is bound by upload. `header` replaces fields of the run's header, as a
+ * run that ended another way needs.
+ */
+export function uploadBoundOpen(header: Partial<RunHeader> = {}): TraceRun {
+  const rows: TraceRow[] = [];
+  for (let i = 0; i < 120; i += 1) {
+    rows.push(
+      makeRow(
+        {
+          startUs: 40 * MS + i * 200,
+          durations: {
+            plan: 400,
+            queue: 2 * MS,
+            wire: 18 * MS,
+            decode: 900,
+            upload: i === 119 ? 300 * MS : 1_200,
+            present: 2 * MS,
+          },
+          rid: i,
+          decodeWorkUs: 300,
+        },
+        i,
+      ),
+    );
+  }
+  return makeRun({
+    header: {
+      runId: "upload-bound",
+      durationUs: 400 * MS,
+      cacheWarmth: { detailChunks: 40, detailBytes: 40 * 8_192, coarseChunks: 4, coarseBytes: 4 * 8_192 },
+      ...header,
+    },
+    rows,
   });
 }
 
@@ -561,7 +601,7 @@ export interface FirstPaintSpec {
 /**
  * A content-opened run whose upload or present breaches its ceiling: the
  * first-paint case when the browser cache is cold. The regression fixture
- * for the rule that reads it as a note rather than a stall.
+ * for the rule that reads it as a note rather than a failure.
  */
 export function firstPaintOpen(slow: FrameBoundPhase = "present", spec: FirstPaintSpec = {}): TraceRun {
   return makeRun({
@@ -590,7 +630,7 @@ export function firstPaintOpen(slow: FrameBoundPhase = "present", spec: FirstPai
 
 /**
  * An interaction run with the same slow present. The pipelines were compiled
- * by the open before it, so this is the stall the present ceiling exists for.
+ * by the open before it, so this is the failure the present ceiling exists for.
  */
 export function slowPresentInteraction(input: InputKind): TraceRun {
   return makeRun({
@@ -677,11 +717,11 @@ export function sendHeavyIdleRun(): TraceRun {
 }
 
 /**
- * A 2 s open whose first half is healthy and whose second half stalls: sixty
+ * A 2 s open whose first half is healthy and whose second half slows: sixty
  * fast rows, then forty whose decode runs eight times over its ceiling. The
- * whole run reads as a decode stall; a window over the first half reads as
- * clear. The fixture for the window scoping: the verdict has to move when the
- * window excludes the stall, and stay put when it does not.
+ * whole run fails on decode; a window over the first half reads as clear.
+ * The fixture for the window scoping: the verdict has to move when the
+ * window excludes the slow half, and stay put when it does not.
  */
 export function lateStallOpen(): TraceRun {
   const rows: TraceRow[] = [];

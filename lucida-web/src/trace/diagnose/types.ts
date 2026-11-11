@@ -210,12 +210,29 @@ export interface Attribution {
 }
 
 /**
+ * `fail` is a ceiling crossed or a defect seen, and fails the run.
  * `steady-state` is one of the five rules over the interval after the run
  * closed: what went on after the view settled, or the budget that kept it
- * from settling. Ranked below a stall or a saturation, which are about the
- * run itself, and above a note.
+ * from settling. `bound` names the phase that held a dominant share of the
+ * chain: where the run spent its time, which fails nothing. None of them is
+ * a stall, which is how a run ends, never what a finding says.
  */
-export type FindingSeverity = "stall" | "saturated" | "steady-state" | "note";
+export type FindingSeverity = "fail" | "saturated" | "steady-state" | "bound" | "note";
+
+/**
+ * Which findings outrank which. A failure or a saturation is about the run,
+ * so it leads; a steady-state finding is about the interval after it, so it
+ * follows. A bound finding is about the run but fails nothing, so anything
+ * that fails outranks it and the verdict, which the gate reads, cannot be
+ * bound while something failed. A note is worth a line rather than blame.
+ */
+export const SEVERITY_RANK: Record<FindingSeverity, number> = {
+  fail: 3,
+  saturated: 3,
+  "steady-state": 2,
+  bound: 1,
+  note: 0,
+};
 
 /** What a rule observed. Every field is optional because the four families measure different things. */
 export interface FindingObservation {
@@ -432,10 +449,11 @@ export interface RunIdentity {
  * `steady-state` leads when nothing about the run itself crossed a
  * threshold but a steady-state rule did: the view settled and the pipeline
  * went on, or a budget kept it from settling. The gate fails on it as it
- * fails on a stall.
+ * fails on `fail` and `unsettled`. `bound` is a run that settled with one
+ * phase holding most of its chain, and passes.
  */
 export interface Verdict {
-  kind: "clear" | "stall" | "saturated" | "steady-state" | "unsettled";
+  kind: "clear" | "bound" | "fail" | "saturated" | "steady-state" | "unsettled";
   text: string;
   confidence: Confidence;
 }

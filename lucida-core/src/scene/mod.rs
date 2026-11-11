@@ -1,3 +1,4 @@
+mod channel_links;
 mod comparison;
 mod cut_grid;
 mod four_up;
@@ -9,6 +10,8 @@ mod scale_bar;
 mod types;
 mod views;
 
+pub(crate) use channel_links::ChannelChange;
+pub use channel_links::{ChannelPair, PairedBy};
 pub use comparison::{CompareMode, Comparison, Side};
 pub use cut_grid::{AxisReading, CutGrid};
 pub use four_up::{FOUR_UP, PlaneLine};

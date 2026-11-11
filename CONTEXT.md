@@ -112,7 +112,7 @@ and runs all wait on it (`lucida-web/src/pipeline/settle.ts`).
 
 **Stalled**:
 A view that stopped making progress without settling, with a reason such as
-`server_pending`.
+`server_pending`. A run's end reason, never a finding's severity.
 
 **Coalescing**:
 Folding several callers' demand for the same work onto one operation: one wire
@@ -190,8 +190,9 @@ _Avoid_: report (**Send report** is the action; a bundle is what it sends)
 
 **Diagnostic**:
 What a trace means, derived by one pure function: the verdict, ranked findings,
-and the phase rollup, judged by the ruleset shipped inside it. A `note` is a
-finding that is not a stall.
+and the phase rollup, judged by the ruleset shipped inside it. A `fail` finding
+fails the run. A `bound` finding names the phase that held a dominant share of
+the chain, where the run spent its time, and fails nothing; nor does a `note`.
 
 **Verdict**:
 The diagnostic's one-sentence answer. Only a closed run has one.
@@ -298,7 +299,9 @@ units compare in the scene frame, the *physical basis*; any others compare in
 their own samples, the *voxel basis*. Two views over one region, or showing
 the same samples, link everything by default, and two at one scale but apart
 link zoom and orientation and keep their own centers and depths. A view a
-link takes past its data says so.
+link takes past its data says so. Contrast and colormap link between the two
+datasets' channels, paired by name and then by place, and stay off until
+someone links them.
 _Avoid_: sync (unqualified)
 
 **Framing**:

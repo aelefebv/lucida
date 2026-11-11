@@ -410,8 +410,8 @@ function findingKey(finding: Finding): string {
 
 /**
  * A finding is matched across the two runs by its rule and its subject,
- * never by its rank: the same stall ranked second instead of first is the
- * same stall. A rule fires once per subject, so a second entry under a key
+ * never by its rank: the same finding ranked second instead of first is the
+ * same finding. A rule fires once per subject, so a second entry under a key
  * would be the same finding ranked again, and the first wins.
  */
 function compareFindings(left: Finding[], right: Finding[]): FindingDelta[] {

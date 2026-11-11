@@ -631,6 +631,7 @@ impl ViewportCommand {
 impl Scene {
     pub fn apply(&mut self, cmd: Command) {
         let leader = self.link_leader(&cmd);
+        let channel_change = crate::scene::ChannelChange::of(&cmd);
         let axes_before = self.active_view().axes.clone();
         let epochs = self.epochs.clone();
         self.apply_command(cmd);
@@ -646,13 +647,19 @@ impl Scene {
         {
             followed = self.follow_links(id, &camera, &axes);
         }
+        // A channel's contrast or colormap reaches the channel it pairs with.
+        if let Some(change) = &channel_change {
+            self.follow_channel_link(change);
+        }
         // Every view of a four-up layout stands where the active one does.
         let crossed = self.share_crossing(&axes_before);
         // One move of the epoch says the views moved, whichever moved first.
         if followed.camera && self.epochs.view == epochs.view {
             self.epochs.view += 1;
         }
-        if (followed.axes || crossed) && self.epochs.selection == epochs.selection {
+        if (followed.axes || followed.settings || crossed)
+            && self.epochs.selection == epochs.selection
+        {
             self.epochs.selection += 1;
         }
     }
@@ -1295,7 +1302,7 @@ impl Scene {
 
     /// Channel `channel` of `dataset_id`'s settings, its entry made if the
     /// settings lack one, or `None` for a dataset without settings.
-    fn channel_settings_mut(
+    pub(crate) fn channel_settings_mut(
         &mut self,
         dataset_id: &DatasetId,
         channel: u32,

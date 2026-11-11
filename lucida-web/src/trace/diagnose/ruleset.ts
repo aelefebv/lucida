@@ -17,7 +17,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 14;
+export const RULESET_VERSION = 15;
 
 export interface AbsoluteRule {
   id: string;
@@ -63,7 +63,7 @@ export interface CompareRule {
 
 /**
  * What a breach on one of `phases` means during a run opened by content on a
- * cold browser cache: first paint rather than a stall. The ceiling and the
+ * cold browser cache: first paint rather than a failure. The ceiling and the
  * share rule still measure the phase; this rule only changes the reading of
  * a breach on such an open, and every other run is judged as before.
  */
@@ -203,7 +203,7 @@ export interface LagRule {
     minInputsWhy: string;
   };
   max: LagCeiling;
-  /** Why a breach on a software fallback adapter is a note rather than a stall. */
+  /** Why a breach on a software fallback adapter is a note rather than a failure. */
   softwareAdapter: string;
 }
 
@@ -433,12 +433,12 @@ export const RULESET: Ruleset = {
     id: "share.dominant",
     minPct: 30,
     floorMs: 250,
-    why: "A segment holding more than a third of the critical path is structural — but only once it is long enough to be worth a human second. Share without an absolute floor flags every fast run: a healthy 368 ms local open reported STALL fetch.wire, 70% of the run, because a fast run still spends most of itself somewhere (#893).",
+    why: "A segment holding more than a third of the critical path is structural — but only once it is long enough to be worth a human second. Share without an absolute floor flags every fast run: a healthy 368 ms local open was blamed on fetch.wire, 70% of the run, because a fast run still spends most of itself somewhere (#893). A share says what bound the run, not that it failed: the ceilings judge whether a phase was too slow, so a settled run bound by one phase passes.",
   },
   prefix: {
     id: "coverage.unrecorded-prefix",
     maxPct: 20,
-    why: "Time between run start and the first recorded boundary belongs to no instrument. It is reported as missing coverage and never as a stall, because nothing measured it — and #893 found it was 87% of a healthy local cold open.",
+    why: "Time between run start and the first recorded boundary belongs to no instrument. It is reported as missing coverage and never as a phase that bound the run, because nothing measured it — and #893 found it was 87% of a healthy local cold open.",
   },
   compare: {
     id: "compare.regression",
@@ -448,7 +448,7 @@ export const RULESET: Ruleset = {
   firstPaint: {
     id: "frame.first-paint",
     phases: ["browser.upload", "browser.present"],
-    why: "Upload and present each run to a frame dispatch on the main thread, and on a cold open the frame after the first chunks land is the first frame that draws them. The render worker compiles its pipelines inside that frame, which held the GPU process for 150 to 200 ms in slice mode and about 750 ms in volume mode on a hardware adapter (#1094), and the page's frames wait behind it. The chunks were not slow; the first paint was. So an upload or present breach on a run opened by content on a cold browser cache is a note that names the cost, never a stall. A dataset added to a live page opens a content run too, but its caches hold chunks and its pipelines are compiled, so it keeps the stall. An interaction run once the page is quiescent draws through pipelines already compiled, keeps the stall, and is what confirms a regression.",
+    why: "Upload and present each run to a frame dispatch on the main thread, and on a cold open the frame after the first chunks land is the first frame that draws them. The render worker compiles its pipelines inside that frame, which held the GPU process for 150 to 200 ms in slice mode and about 750 ms in volume mode on a hardware adapter (#1094), and the page's frames wait behind it. The chunks were not slow; the first paint was. So an upload or present breach on a run opened by content on a cold browser cache is a note that names the cost, never a failure. A dataset added to a live page opens a content run too, but its caches hold chunks and its pipelines are compiled, so its breach is judged as on any other run. An interaction run once the page is quiescent draws through pipelines already compiled, is judged the same way, and is what confirms a regression.",
   },
   coldPlan: {
     id: "compute.plan.cold-open",
