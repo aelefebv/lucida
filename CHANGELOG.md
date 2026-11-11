@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.33.0](https://github.com/aelefebv/lucida/compare/v0.32.0...v0.33.0) (2026-11-11)
+
+
+### Features
+
+* every axis position is a place in the scene frame ([#1522](https://github.com/aelefebv/lucida/issues/1522)) ([13bb1ec](https://github.com/aelefebv/lucida/commit/13bb1ec75cd688259146ae8a07e47d0cd7a6a757))
+* link the depth two slice views cut, and say where a link misses ([#1530](https://github.com/aelefebv/lucida/issues/1530)) ([01c9b73](https://github.com/aelefebv/lucida/commit/01c9b731197bb8d01fdd33d3f2f233a51404adeb))
+* read an axis position as a physical place ([#1523](https://github.com/aelefebv/lucida/issues/1523)) ([35d1579](https://github.com/aelefebv/lucida/commit/35d1579371b5a2cfe4d70cf07f257d85e7ebad9f))
+* views of one dataset draw it at their own cut and timepoint ([#1524](https://github.com/aelefebv/lucida/issues/1524)) ([85a024c](https://github.com/aelefebv/lucida/commit/85a024cecb7e8cd3fcf8b3de724a0fc5db1756ca))
+
+
+### Bug Fixes
+
+* **web:** a dataset no view plans wants nothing, so its slots go first under pressure ([#1528](https://github.com/aelefebv/lucida/issues/1528)) ([97967b2](https://github.com/aelefebv/lucida/commit/97967b27a82dd8b9ec47c1bd5e69c7b1bda46a1a))
+
+
+### Refactors
+
+* **web:** a slice pool keys its slots by plane, so one chunk can be held at several ([#1519](https://github.com/aelefebv/lucida/issues/1519)) ([f1e7050](https://github.com/aelefebv/lucida/commit/f1e705068fdc7db5252b67e06ec0eaee8f09a799))
+* **web:** each view draws a dataset through an indirection of its own over shared pools ([#1521](https://github.com/aelefebv/lucida/issues/1521)) ([ca35a0b](https://github.com/aelefebv/lucida/commit/ca35a0b862687dcfeec2562159dbc04d5145a44c))
+
 ## [0.32.0](https://github.com/aelefebv/lucida/compare/v0.31.0...v0.32.0) (2026-11-11)
 
 
