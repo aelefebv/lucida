@@ -1180,6 +1180,45 @@ describe("App wiring: peer messages", () => {
   });
 });
 
+describe("App wiring: the wheel", () => {
+  it("zooms the 2D and the 3D view by one factor a notch", async () => {
+    gpu.ready = true;
+    // The 2D/3D switch animates its selection, which happy-dom can't.
+    const elementProto = Element.prototype as { getAnimations?: () => Animation[] };
+    const stubbedAnimations = !elementProto.getAnimations;
+    if (stubbedAnimations) elementProto.getAnimations = () => [];
+    onTestFinished(() => {
+      if (stubbedAnimations) delete elementProto.getAnimations;
+    });
+    const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
+    const pane = () => document.querySelector<HTMLElement>(".lc-view-pane")!;
+    const zooms = () => scene.commands.filter((cmd) => cmd.type === "zoom_by" || cmd.type === "arcball_zoom");
+
+    await act(async () => {
+      fireEvent.wheel(pane(), { deltaY: -100, deltaMode: 0 });
+    });
+    const slice = zooms().at(-1)!;
+    expect(slice.type).toBe("zoom_by");
+    expect(Number(slice.factor)).toBeCloseTo(1.1, 12);
+    // A sideways scroll zooms nothing.
+    await act(async () => {
+      fireEvent.wheel(pane(), { deltaX: 40, deltaY: 0, deltaMode: 0 });
+    });
+    expect(zooms().length).toBe(1);
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "m", code: "KeyM" });
+    });
+    await act(async () => {
+      fireEvent.wheel(pane(), { deltaY: -100, deltaMode: 0 });
+    });
+    const volume = zooms().at(-1)!;
+    expect(volume.type).toBe("arcball_zoom");
+    // The camera's distance divides by the factor the slice view zooms by.
+    expect(1 / (1 + Number(volume.delta))).toBeCloseTo(Number(slice.factor), 12);
+  });
+});
+
 describe("App wiring: tools and keyboard help", () => {
   it("takes keys right after load, with nothing focused", async () => {
     await mountWithSnapshot(documentJson(["wds-1"]));

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { Engine } from "../engine.ts";
+import { wheelZoom } from "../input/wheel.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
 import { CanvasCard } from "./CanvasCard.tsx";
@@ -229,7 +230,7 @@ export function Minimap({ client, activeLoop, engine, emitPresence, breakFollow 
     };
     const onWheel = (e: WheelEvent) => {
       const [x, y] = local(e);
-      if (navigator.wheelAt(x, y, e.deltaY, e.timeStamp)) e.preventDefault();
+      if (navigator.wheelAt(x, y, wheelZoom(e), e.timeStamp)) e.preventDefault();
     };
     // Handled here, the arrows never reach the window's shortcuts, which pan
     // the slice view by a share of the canvas instead.
