@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.32.0](https://github.com/aelefebv/lucida/compare/v0.31.0...v0.32.0) (2026-11-11)
+
+
+### Features
+
+* each view shows a scale bar ([#1516](https://github.com/aelefebv/lucida/issues/1516)) ([2bd894c](https://github.com/aelefebv/lucida/commit/2bd894c1a27af2d2b7bac6a584e6449f695f01e5))
+* link the two views' pan, zoom, orientation and time ([#1515](https://github.com/aelefebv/lucida/issues/1515)) ([3ccfcb9](https://github.com/aelefebv/lucida/commit/3ccfcb91070981526b1e8fb0fd51e98b761038f5))
+* move and scale a dataset by hand to line it up ([#1510](https://github.com/aelefebv/lucida/issues/1510)) ([3ed7978](https://github.com/aelefebv/lucida/commit/3ed7978c3d322d7f0d78f84818ae0df9f31ff692))
+* side views of a collection cut each tile in its own cell ([#1508](https://github.com/aelefebv/lucida/issues/1508)) ([e06d194](https://github.com/aelefebv/lucida/commit/e06d194a37f5c71f4061a09533b8d1fbdbe16c3d))
+
+
+### Bug Fixes
+
+* **cli:** send a trace zoom's wheel delta so the page gets it at any ratio ([#1517](https://github.com/aelefebv/lucida/issues/1517)) ([db624d7](https://github.com/aelefebv/lucida/commit/db624d7db8d30dccc88603b07dae13f7baac5f5b))
+* **core:** a view keeps the region it showed when a layout changes its rectangle ([#1511](https://github.com/aelefebv/lucida/issues/1511)) ([33c41a9](https://github.com/aelefebv/lucida/commit/33c41a91965bca5d3268145fb8f43dff5031dc0e))
+* put each comparison's controls in its view, and let a set-aside layer's hold go ([#1509](https://github.com/aelefebv/lucida/issues/1509)) ([e8a7481](https://github.com/aelefebv/lucida/commit/e8a7481f992d4319d0439ef43157f9569cd9d914))
+
 ## [0.31.0](https://github.com/aelefebv/lucida/compare/v0.30.0...v0.31.0) (2026-11-11)
 
 
