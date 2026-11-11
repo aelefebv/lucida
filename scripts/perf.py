@@ -961,12 +961,20 @@ def script_file(scenario: Scenario, locations: dict[str, str], runs_dir: Path) -
     steps name catalog datasets, a copy with each one's location put in."""
     if not scenario.adds:
         return scenario.path
-    steps = [
-        {**step, "url": locations[step["url"][len(DATASET_REF) :]]}
-        if step.get("kind") in ("add", "remove") and str(step.get("url", "")).startswith(DATASET_REF)
-        else step
-        for step in scenario.steps
-    ]
+
+    def located(url: Any) -> Any:
+        is_ref = isinstance(url, str) and url.startswith(DATASET_REF)
+        return locations[url[len(DATASET_REF) :]] if is_ref else url
+
+    def resolve(step: dict[str, Any]) -> dict[str, Any]:
+        if step.get("kind") in ("add", "remove"):
+            return {**step, "url": located(step.get("url"))}
+        # A views step moves datasets the script added, by the same names.
+        if step.get("kind") == "views":
+            return {**step, "show": [[located(url) for url in urls] for urls in step.get("show", [])]}
+        return step
+
+    steps = [resolve(step) for step in scenario.steps]
     path = runs_dir / f"{scenario.name}.script.json"
     path.write_text(json.dumps({"steps": steps}, indent=2), encoding="utf-8")
     return path

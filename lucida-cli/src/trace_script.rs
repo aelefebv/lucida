@@ -271,13 +271,20 @@ pub enum ScriptStep {
         interval_ms: Option<u64>,
     },
     /// Divide the canvas among views as `layout` does, `single`, `columns`
-    /// or `rows`, then show in each view, in order, the open datasets whose
-    /// source URLs `show` lists for it. A view `show` leaves out keeps what
-    /// it shows. Only a script file can name the datasets.
+    /// or `rows`, then move into each view, in order, the open datasets
+    /// whose source URLs `show` lists for it, as a layer dropped on a view
+    /// moves there. Only a script file can name the datasets.
     Views {
         layout: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         show: Vec<Vec<String>>,
+    },
+    /// Send the pans, zooms and orbits that follow to the `view`th view, by
+    /// its place in the layout from 0, which a press or a wheel there makes
+    /// the active view; to the canvas again when `view` is absent.
+    Target {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<usize>,
     },
 }
 
@@ -310,6 +317,7 @@ impl ScriptStep {
             Self::Swipe { .. } => "swipe",
             Self::Blink { .. } => "blink",
             Self::Views { .. } => "views",
+            Self::Target { .. } => "target",
         }
     }
 
@@ -479,6 +487,7 @@ impl ScriptStep {
                     .flatten()
                     .try_for_each(|url| validate_with(Some(url)))
             }
+            Self::Target { .. } => Ok(()),
         }
     }
 
@@ -599,6 +608,8 @@ impl std::fmt::Display for ScriptStep {
                 with_suffix(with.as_deref())
             ),
             Self::Views { layout, .. } => write!(f, "views {layout}"),
+            Self::Target { view: Some(view) } => write!(f, "target view {view}"),
+            Self::Target { view: None } => f.write_str("target canvas"),
         }
     }
 }
@@ -1421,11 +1432,12 @@ impl CanvasRect {
 
     /// Where a drag of `delta` starts so that it is centered on the canvas
     /// and stays inside it where it can: half the delta before the center,
-    /// clamped to the canvas.
+    /// clamped to the canvas. A press on the far edge would land past the
+    /// last pixel, on whatever lies beyond, so the clamp stops a pixel short.
     pub fn drag_origin(&self, delta: (f64, f64)) -> (f64, f64) {
         let (cx, cy) = self.center();
-        let x = (cx - delta.0 / 2.0).clamp(self.x, self.x + self.width);
-        let y = (cy - delta.1 / 2.0).clamp(self.y, self.y + self.height);
+        let x = (cx - delta.0 / 2.0).clamp(self.x, self.x + (self.width - 1.0).max(0.0));
+        let y = (cy - delta.1 / 2.0).clamp(self.y, self.y + (self.height - 1.0).max(0.0));
         (x, y)
     }
 }
@@ -1720,9 +1732,10 @@ pub async fn run_script(
 ) -> Result<Viewport, CliError> {
     wait_for_script_seam(page, wait).await?;
     let mut viewport = viewport;
+    let mut target = None;
     let mut steps = Vec::with_capacity(script.steps.len());
     for step in &script.steps {
-        steps.push(run_step(page, step, &mut viewport, wait).await?);
+        steps.push(run_step(page, step, &mut viewport, &mut target, wait).await?);
     }
     let record = ScriptRecord { steps };
     let json = serde_json::to_string(&record)?;
@@ -1739,6 +1752,7 @@ async fn run_step(
     page: &mut Page,
     step: &ScriptStep,
     viewport: &mut Viewport,
+    target: &mut Option<usize>,
     wait: Duration,
 ) -> Result<StepRecord, CliError> {
     let before = read_step_state(page, wait).await?;
@@ -1758,23 +1772,29 @@ async fn run_step(
         // A drag pans the slice view and orbits the volume view, where a
         // shift drag pans instead. Sent only where it means what the step
         // says, so a step never lands as another gesture under another name.
+        ScriptStep::Target { view } => *target = *view,
         ScriptStep::Pan { dx, dy, .. } => {
-            input = Some(match mode {
-                Some("slice") => drag(page, (*dx, *dy), false, pace, wait).await?,
-                Some("arcball") => drag(page, (*dx, *dy), true, pace, wait).await?,
+            let (rect, mode) = gesture_target(page, *target, mode, wait).await?;
+            input = Some(match mode.as_deref() {
+                Some("slice") => drag(page, rect, (*dx, *dy), false, pace, wait).await?,
+                Some("arcball") => drag(page, rect, (*dx, *dy), true, pace, wait).await?,
                 other => withheld("a pan", "the slice or the volume view", other),
             });
         }
         ScriptStep::Orbit { theta, phi, .. } => {
-            input = Some(match mode {
+            let (rect, mode) = gesture_target(page, *target, mode, wait).await?;
+            input = Some(match mode.as_deref() {
                 Some("arcball") => {
-                    drag(page, orbit_drag(*theta, *phi, scale), false, pace, wait).await?
+                    let delta = orbit_drag(*theta, *phi, scale);
+                    drag(page, rect, delta, false, pace, wait).await?
                 }
                 other => withheld("an orbit", "the volume view", other),
             });
         }
         ScriptStep::Zoom { factor, at, .. } => {
-            input = Some(wheel_zoom(page, *factor, *at, mode, scale, pace, wait).await?);
+            let (rect, mode) = gesture_target(page, *target, mode, wait).await?;
+            let zoom = wheel_zoom(page, rect, *factor, *at, mode.as_deref(), scale, pace, wait);
+            input = Some(zoom.await?);
         }
         ScriptStep::Scrub {
             axis,
@@ -2069,13 +2089,53 @@ async fn wait_for_quiescence(
 /// all.
 async fn drag(
     page: &mut Page,
+    rect: CanvasRect,
     delta: (f64, f64),
     shift: bool,
     pace: Option<Duration>,
     wait: Duration,
 ) -> Result<SentInput, CliError> {
-    let rect = canvas_rect(page, wait).await?;
     drag_from(page, rect.drag_origin(delta), delta, shift, pace, wait).await
+}
+
+/// Where a gesture goes and the camera it steers there: the canvas and the
+/// page's camera, or with `view`, that view's pane and its own camera.
+async fn gesture_target(
+    page: &mut Page,
+    view: Option<usize>,
+    mode: Option<&str>,
+    wait: Duration,
+) -> Result<(CanvasRect, Option<String>), CliError> {
+    let Some(index) = view else {
+        return Ok((canvas_rect(page, wait).await?, mode.map(str::to_string)));
+    };
+    let pane: ViewPaneRect = evaluate_json(
+        page,
+        &view_pane_probe(index),
+        &format!("the page has no view {index} to send a gesture to"),
+        "a view's pane",
+        wait,
+    )
+    .await?;
+    Ok((pane.rect, Some(pane.camera)))
+}
+
+/// A view's pane and its camera mode, as the page lays them out.
+#[derive(Debug, Deserialize)]
+struct ViewPaneRect {
+    #[serde(flatten)]
+    rect: CanvasRect,
+    camera: String,
+}
+
+/// The `index`th view's pane in layout order, and its camera mode.
+fn view_pane_probe(index: usize) -> String {
+    format!(
+        "(() => {{ const pane = document.querySelectorAll('[data-view-pane]')[{index}]; \
+         if (!pane) return null; const rect = pane.getBoundingClientRect(); \
+         return JSON.stringify({{ x: rect.left, y: rect.top, width: rect.width, \
+         height: rect.height, camera: pane.dataset.camera }}); }})()"
+    )
 }
 
 /// A drag of `delta` from `from`, in page CSS pixels, paced as [`drag`] is.
@@ -2127,6 +2187,7 @@ async fn drag_from(
 #[allow(clippy::too_many_arguments)]
 async fn wheel_zoom(
     page: &mut Page,
+    rect: CanvasRect,
     factor: f64,
     at: Option<[f64; 2]>,
     mode: Option<&str>,
@@ -2134,7 +2195,6 @@ async fn wheel_zoom(
     pace: Option<Duration>,
     wait: Duration,
 ) -> Result<SentInput, CliError> {
-    let rect = canvas_rect(page, wait).await?;
     let point = at.map(|at| rect.point(at)).unwrap_or_else(|| rect.center());
     // The slice viewer zooms a fixed step per wheel event, so pacing spreads
     // its notches over the span. The volume viewer zooms by the event's
@@ -3160,6 +3220,8 @@ mod tests {
         assert_eq!(rect.center(), (720.0, 450.0));
         assert_eq!(rect.drag_origin((100.0, -50.0)), (670.0, 475.0));
         assert_eq!(rect.drag_origin((4000.0, 0.0)), (0.0, 450.0));
+        // A drag leftward starts on the last pixel, not past it.
+        assert_eq!(rect.drag_origin((-4000.0, 0.0)), (1439.0, 450.0));
         assert_eq!(rect.point([10.0, 20.0]), (10.0, 20.0));
     }
 
@@ -4088,6 +4150,18 @@ mod tests {
             refused(r#"[{"kind": "blink", "count": 2, "with": " "}]"#),
             "step 1 (blink): a comparison names the dataset to compare with by its source URL"
         );
+    }
+
+    #[test]
+    fn a_target_step_points_the_gestures_that_follow_at_a_view() {
+        let script = Script::from_json(
+            r#"[{"kind": "target", "view": 1}, {"kind": "pan", "dx": 10, "dy": 0}, {"kind": "target"}]"#,
+        )
+        .unwrap();
+        assert_eq!(script.steps[0], ScriptStep::Target { view: Some(1) });
+        assert_eq!(script.steps[0].to_string(), "target view 1");
+        assert_eq!(script.steps[2].to_string(), "target canvas");
+        assert_eq!(script.steps[0].kind(), "target");
     }
 
     #[test]

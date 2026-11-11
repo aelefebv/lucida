@@ -68,9 +68,9 @@ export interface ScriptControls {
   /** Show the comparison as a blink and flip it to the other dataset, starting one as `swipe` does. */
   blink(withUrl: string | null): Promise<StepOutcome>;
   /**
-   * Divide the canvas as `layout` does, then show in each view, in order,
-   * the open datasets whose source URLs `show` lists for it. A view `show`
-   * leaves out keeps what it shows.
+   * Divide the canvas as `layout` does, then move into each view, in order,
+   * the open datasets whose source URLs `show` lists for it, as a layer
+   * dropped on a view moves there.
    */
   views(layout: ViewLayoutName, show: readonly (readonly string[])[]): Promise<StepOutcome>;
 }

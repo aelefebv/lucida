@@ -104,6 +104,9 @@ pub struct Scene {
     /// The id the next view a layout adds takes, so no view's id is reused.
     #[serde(skip, default = "first_added_view_id")]
     next_view_id: u32,
+    /// The view shown alone across the canvas, if one is. Client-local.
+    #[serde(skip)]
+    maximized: Option<ViewId>,
     /// The canvas size in device pixels, which each view takes its rectangle
     /// of. Client-local.
     #[serde(skip)]
@@ -219,6 +222,7 @@ impl Scene {
             active: ViewId(0),
             layout: ViewLayout::Single,
             next_view_id: first_added_view_id(),
+            maximized: None,
             canvas: viewport,
             holders: HashMap::new(),
             document: DocumentState::default(),

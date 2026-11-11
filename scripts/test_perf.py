@@ -167,14 +167,16 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "blink-volume",
         "swipe-drag",
         "swipe-drag-volume",
+        "two-views",
     }
 
 
 def test_every_scenario_is_short_enough_for_each_step_to_keep_its_run() -> None:
     # The recorder drops its oldest runs under its memory cap; 13 steps on a
     # 3-channel volume lost the first step's run before export.
+    # A target step only points the gestures after it, so it opens no run.
     for name, scenario in SCENARIOS.items():
-        assert len(scenario.steps) <= 4, name
+        assert len([step for step in scenario.steps if step["kind"] != "target"]) <= 4, name
 
 
 def test_a_scenario_that_adds_a_dataset_names_it_and_never_runs_on_it(tmp_path: Path) -> None:
@@ -192,6 +194,13 @@ def test_a_scenario_that_adds_a_dataset_names_it_and_never_runs_on_it(tmp_path: 
     }
     # A scenario that names no dataset goes to the CLI as it is.
     assert perf.script_file(SCENARIOS["orbit"], locations, tmp_path) == SCENARIOS["orbit"].path
+
+
+def test_a_views_step_moves_the_datasets_a_scenario_added(tmp_path: Path) -> None:
+    locations = {"physical-volume-coarse": "/data/coarse.ome.zarr"}
+    script = json.loads(perf.script_file(SCENARIOS["two-views"], locations, tmp_path).read_text(encoding="utf-8"))
+    views = next(step for step in script["steps"] if step["kind"] == "views")
+    assert views["show"] == [[], ["/data/coarse.ome.zarr"]]
 
 
 def test_a_scenario_adding_a_dataset_the_catalog_lacks_is_refused(tmp_path: Path) -> None:

@@ -185,6 +185,16 @@ pub enum ViewportCommand {
         view: ViewId,
         datasets: ViewDatasets,
     },
+    /// Show `dataset_id` in `view` and in no other view.
+    MoveDatasetToView {
+        view: ViewId,
+        dataset_id: DatasetId,
+    },
+    /// Show `view` alone across the canvas, or every view again with none.
+    MaximizeView {
+        #[serde(default)]
+        view: Option<ViewId>,
+    },
     // 2D camera
     Pan {
         dx: f64,
@@ -481,7 +491,9 @@ impl ViewportCommand {
             | ViewportCommand::SetLabelOpacity { .. } => ViewportScope::DatasetDisplay,
             ViewportCommand::SetViewLayout { .. }
             | ViewportCommand::SetActiveView { .. }
-            | ViewportCommand::SetViewDatasets { .. } => ViewportScope::Views,
+            | ViewportCommand::SetViewDatasets { .. }
+            | ViewportCommand::MoveDatasetToView { .. }
+            | ViewportCommand::MaximizeView { .. } => ViewportScope::Views,
         }
     }
 
@@ -539,7 +551,9 @@ impl ViewportCommand {
             | ViewportCommand::SetLabelOpacity { .. }
             | ViewportCommand::SetViewLayout { .. }
             | ViewportCommand::SetActiveView { .. }
-            | ViewportCommand::SetViewDatasets { .. } => true,
+            | ViewportCommand::SetViewDatasets { .. }
+            | ViewportCommand::MoveDatasetToView { .. }
+            | ViewportCommand::MaximizeView { .. } => true,
             ViewportCommand::Pan { dx, dy } | ViewportCommand::Pan3D { dx, dy } => {
                 dx.is_finite() && dy.is_finite()
             }
@@ -870,6 +884,12 @@ impl Scene {
             }
             ViewportCommand::SetViewDatasets { view, datasets } => {
                 self.set_view_datasets(view, datasets);
+            }
+            ViewportCommand::MoveDatasetToView { view, dataset_id } => {
+                self.move_dataset_to_view(view, &dataset_id);
+            }
+            ViewportCommand::MaximizeView { view } => {
+                self.set_maximized(view);
             }
             ViewportCommand::SetMode3D => {
                 self.set_mode_3d();
