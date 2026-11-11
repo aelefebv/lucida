@@ -670,6 +670,51 @@ impl Scene {
             .reduce(PlaneBox::union)
     }
 
+    /// A dataset's footprint on `view`'s plane as the rectangle its frame's
+    /// box makes there, turned as its placement turns it: the corner where
+    /// its first sample starts, then its edges along its own across and down
+    /// axes, each `[across, down]`. A placement that tilts the view's cut
+    /// makes no rectangle on it, so that dataset gets the box around its
+    /// bounds ([`Self::dataset_plane_bounds`]). `None` as those are.
+    pub fn dataset_plane_quad(&self, view: ViewId, dataset_id: &str) -> Option<[[f64; 2]; 3]> {
+        let plane = self.view(view)?.slice_plane();
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = self.derived.get(&ds_id)?;
+        let to_scene = self.placement(&ds_id)?;
+        let [across, down, cut] = plane.axes().map(SpatialAxis::xyz);
+        if !to_scene.keeps_axis(cut) {
+            let bounds = self.dataset_plane_bounds(view, dataset_id)?;
+            let size = [bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1]];
+            return Some([
+                [bounds.min[0], bounds.min[1]],
+                [size[0], 0.0],
+                [0.0, size[1]],
+            ]);
+        }
+        let (lo, hi) = derived
+            .members
+            .iter()
+            .filter_map(|member| {
+                let extent = member.levels.first()?.shape;
+                let lo = plane.frame_point(derived.plane_position(plane, member));
+                let size = [extent[4], extent[3], extent[2]].map(|n| n as f64);
+                Some((lo, std::array::from_fn::<f64, 3, _>(|i| lo[i] + size[i])))
+            })
+            .reduce(|(a_lo, a_hi), (b_lo, b_hi)| {
+                (
+                    std::array::from_fn(|i| a_lo[i].min(b_lo[i])),
+                    std::array::from_fn(|i| a_hi[i].max(b_hi[i])),
+                )
+            })?;
+        let origin = to_scene.apply(lo);
+        let edge = |axis: usize| {
+            let column = to_scene.column(axis);
+            let length = hi[axis] - lo[axis];
+            [column[across] * length, column[down] * length]
+        };
+        Some([[origin[across], origin[down]], edge(across), edge(down)])
+    }
+
     /// A dataset's bounds in both of `view`'s spaces, or `None` when it has
     /// none.
     pub fn dataset_bounds(&self, view: ViewId, dataset_id: &str) -> Option<FitBounds> {

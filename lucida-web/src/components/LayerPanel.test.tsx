@@ -61,6 +61,7 @@ function layer(overrides: Partial<LayerInfo> = {}): LayerInfo {
     downsamplingMethod: null,
     physicalScale: true,
     userTransform: null,
+    rotationDegrees: [0, 0, 0],
     units: [null, null, null],
     ...overrides,
   };
@@ -751,6 +752,7 @@ describe("LayerPanel placement by hand", () => {
   async function renderPlacement(overrides: Partial<LayerInfo>, props: Partial<Parameters<typeof LayerPanel>[0]> = {}) {
     const onSetUserTransform = vi.fn();
     const onResetUserTransform = vi.fn();
+    const onTurnUserTransform = vi.fn();
     render(
       <LayerPanel
         {...baseProps({
@@ -758,12 +760,13 @@ describe("LayerPanel placement by hand", () => {
           layers: [layer(overrides)],
           onSetUserTransform,
           onResetUserTransform,
+          onTurnUserTransform,
           ...props,
         })}
       />,
     );
     await openAdvanced();
-    return { onSetUserTransform, onResetUserTransform };
+    return { onSetUserTransform, onResetUserTransform, onTurnUserTransform };
   }
 
   it("says on the row when a layer was moved by hand", async () => {
@@ -785,18 +788,58 @@ describe("LayerPanel placement by hand", () => {
     expect(screen.getByRole("textbox", { name: "original.zarr offset X in micrometers" })).toBeTruthy();
   });
 
+  it("turns the layer to the angles its fields read, and says in what order they turn", async () => {
+    const { onTurnUserTransform } = await renderPlacement({ userTransform: moved, rotationDegrees: [0, 0, 10] });
+    const field = screen.getByRole("textbox", { name: "original.zarr rotation Y in degrees" });
+    await userEvent.clear(field);
+    await userEvent.type(field, "30{Enter}");
+    expect(onTurnUserTransform).toHaveBeenLastCalledWith("wds-1", moved, [0, 30, 10]);
+    expect(screen.getByText("Rotation").getAttribute("title")).toMatch(/about X, then Y, then Z/);
+  });
+
+  it("keeps showing the angles typed while the rotation they made stands", async () => {
+    // Stands in for what X 20, Y 90, Z 10 makes, which reads back as X 30, Y 90, Z 0.
+    const turned = { ...moved, rotation: [0.1, 0.2, 0.3, 0.927] } satisfies LayerInfo["userTransform"];
+    const onTurnUserTransform = vi.fn(() => turned);
+    const panel = (overrides: Partial<LayerInfo>) => (
+      <LayerPanel
+        {...baseProps({
+          expandedLayerId: "wds-1",
+          layers: [layer(overrides)],
+          onSetUserTransform: vi.fn(),
+          onResetUserTransform: vi.fn(),
+          onTurnUserTransform,
+        })}
+      />
+    );
+    const { rerender } = render(panel({ userTransform: moved, rotationDegrees: [20, 90, 0] }));
+    await openAdvanced();
+    const field = (axis: string) =>
+      screen.getByRole("textbox", { name: `original.zarr rotation ${axis} in degrees` }) as HTMLInputElement;
+    await userEvent.clear(field("Z"));
+    await userEvent.type(field("Z"), "10{Enter}");
+    expect(onTurnUserTransform).toHaveBeenLastCalledWith("wds-1", moved, [20, 90, 10]);
+
+    rerender(panel({ userTransform: turned, rotationDegrees: [30, 90, 0] }));
+    expect([field("X").value, field("Y").value, field("Z").value]).toEqual(["20", "90", "10"]);
+    // Turned some other way, as by the handle or an undo, the fields read the rotation again.
+    const other = { ...moved, rotation: [0, 0, 0.5, 0.866] } satisfies LayerInfo["userTransform"];
+    rerender(panel({ userTransform: other, rotationDegrees: [0, 0, 60] }));
+    expect([field("X").value, field("Y").value, field("Z").value]).toEqual(["0", "0", "60"]);
+  });
+
   it("resets only a layer that was moved, and only for an editor", async () => {
     const { onResetUserTransform } = await renderPlacement({ userTransform: moved });
-    await userEvent.click(screen.getByRole("button", { name: "Reset position and size" }));
+    await userEvent.click(screen.getByRole("button", { name: "Reset placement" }));
     expect(onResetUserTransform).toHaveBeenCalledWith("wds-1");
     cleanup();
 
     await renderPlacement({ userTransform: null });
-    expect(screen.getByRole("button", { name: "Reset position and size" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Reset placement" }).hasAttribute("disabled")).toBe(true);
     cleanup();
 
     await renderPlacement({ userTransform: moved }, { canEdit: false });
-    expect(screen.getByRole("button", { name: "Reset position and size" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Reset placement" }).hasAttribute("disabled")).toBe(true);
   });
 });
 

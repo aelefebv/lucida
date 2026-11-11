@@ -1,5 +1,6 @@
-/* The Move and scale tool's outline and corner handles. Positions are written
-   per frame as inline transforms; everything static lives here. */
+/* The Move, scale and rotate tool's outline, corner handles and turn handle.
+   Positions are written per frame as inline transforms; everything static
+   lives here. */
 
 .lc-move-scale {
   position: absolute;
@@ -11,7 +12,8 @@
 }
 
 .lc-move-scale-box,
-.lc-move-scale-handle {
+.lc-move-scale-handle,
+.lc-move-scale-turn {
   position: absolute;
   top: 0;
   left: 0;
@@ -26,10 +28,14 @@
   box-shadow: var(--lc-annotation-shadow);
   background: color-mix(in oklab, var(--lc-accent) 8%, transparent);
   cursor: move;
+  /* The inline matrix places the box's top left corner, where the layer's
+     first sample starts, and turns the box about it. */
+  transform-origin: 0 0;
   will-change: transform;
 }
 
-.lc-move-scale-handle {
+.lc-move-scale-handle,
+.lc-move-scale-turn {
   --handle-size: 10px;
   width: var(--handle-size);
   height: var(--handle-size);
@@ -52,8 +58,18 @@
   cursor: nesw-resize;
 }
 
+.lc-move-scale-turn {
+  border-radius: 50%;
+  cursor: grab;
+}
+
+.lc-move-scale-turn:active {
+  cursor: grabbing;
+}
+
 @media (pointer: coarse) {
-  .lc-move-scale-handle {
+  .lc-move-scale-handle,
+  .lc-move-scale-turn {
     --handle-size: 18px;
   }
 }

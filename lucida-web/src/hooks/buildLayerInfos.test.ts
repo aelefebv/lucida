@@ -76,6 +76,7 @@ function stubScene(
     pinnable_levels: () => Uint32Array.from(pinnableLevels),
     dataset_has_physical_scale: (id: string) => id.startsWith("physical"),
     dataset_user_transform: () => "null",
+    dataset_rotation_degrees: () => new Float64Array([0, 0, 0]),
     dataset_units: () => "[null,null,null]",
   } as unknown as WasmScene;
 }

@@ -15,6 +15,7 @@
 use lucida_content::{DatasetManifest, LevelGeometry};
 use serde::{Deserialize, Serialize};
 
+use crate::camera::{quat_from_axis_angle, quat_multiply};
 use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
 
@@ -271,16 +272,17 @@ impl DeclaredFrame {
 }
 
 /// Where a person put a dataset by hand, on top of where its declared frame
-/// places it: stretched by `scale` and moved by `translation`, about the
-/// frame's origin, the corner where its first sample starts. It changes only
-/// where the scene draws the dataset, never the data or what the dataset
-/// declares.
+/// places it: stretched by `scale`, turned by `rotation` and moved by
+/// `translation`, about the frame's origin, the corner where its first sample
+/// starts. It changes only where the scene draws the dataset, never the data
+/// or what the dataset declares.
 ///
 /// `translation` is `[x, y, z]` in the dataset's own declared numbers, so it
 /// means the same whichever dataset fixes the scene frame. `rotation` is a
-/// unit quaternion `[x, y, z, w]` applied between the two, held so a rotation
-/// can join without a new record; this build places only the identity
-/// ([`Self::is_valid`]).
+/// unit quaternion `[x, y, z, w]`. A person reads and sets it as angles about
+/// X, then Y, then Z ([`rotation_from_degrees`]), and turns a dataset about
+/// its center ([`Self::turned_to`]), while the record keeps the frame's
+/// origin, so it means one thing however it was set.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UserTransform {
     #[serde(default = "no_translation")]
@@ -322,11 +324,32 @@ impl UserTransform {
 
     /// Whether a scene can place a dataset by it: every number finite, every
     /// scale above zero, so the dataset keeps a size and its orientation, and
-    /// no rotation, which placement can't express yet.
+    /// a rotation of unit length, which turns it without stretching it.
     pub fn is_valid(&self) -> bool {
+        let length = self.rotation.iter().map(|v| v * v).sum::<f64>().sqrt();
         self.translation.iter().all(|v| v.is_finite())
             && self.scale.iter().all(|s| s.is_finite() && *s > 0.0)
-            && self.rotation == no_rotation()
+            && (length - 1.0).abs() <= UNIT_ROTATION_TOLERANCE
+    }
+
+    /// This transform turned to `rotation` about `pivot`, a point of
+    /// `frame`'s samples that stays where this transform puts it. The scale
+    /// stays as it is.
+    pub fn turned_to(
+        &self,
+        frame: &DeclaredFrame,
+        rotation: [f64; 4],
+        pivot: [f64; 3],
+    ) -> UserTransform {
+        let turned = UserTransform { rotation, ..*self };
+        let held = self.in_frame(frame).apply(pivot);
+        let moved = turned.in_frame(frame).apply(pivot);
+        UserTransform {
+            translation: std::array::from_fn(|i| {
+                self.translation[i] + (held[i] - moved[i]) * frame.spacing[i]
+            }),
+            ..turned
+        }
     }
 
     /// The map this transform makes of `frame`'s samples, ahead of the
@@ -377,6 +400,56 @@ impl UserTransform {
         self.with_frame_map(frame, &placed.then(&declared.inverse()))
     }
 }
+
+/// How far a stored rotation's length may stray from one, as the rounding of
+/// angles turned into a quaternion leaves it.
+const UNIT_ROTATION_TOLERANCE: f64 = 1e-6;
+
+/// The rotation that turns by `degrees[0]` about X, then `degrees[1]` about
+/// Y, then `degrees[2]` about Z, each about the axis as the turns before it
+/// left it: the order a person reads a user transform's rotation in.
+pub fn rotation_from_degrees(degrees: [f64; 3]) -> [f64; 4] {
+    let [x, y, z] = [0, 1, 2].map(|a| {
+        let mut axis = [0.0; 3];
+        axis[a] = 1.0;
+        quat_from_axis_angle(axis, degrees[a].to_radians())
+    });
+    quat_multiply(quat_multiply(x, y), z)
+}
+
+/// The angles [`rotation_from_degrees`] takes to make `rotation`: X and Z in
+/// (-180, 180], Y in [-90, 90].
+///
+/// At a quarter turn about Y, X and Z turn about the same line, so only their
+/// sum, or their difference, is known. There Y reads exactly ±90, Z reads
+/// zero and X holds the whole turn, the one reading of every such rotation.
+pub fn rotation_degrees(rotation: [f64; 4]) -> [f64; 3] {
+    let m = rotation_matrix(rotation);
+    // Y from its sine and cosine together: an arcsine near a quarter turn
+    // loses half the digits its input has.
+    let cos_y = m[0][0].hypot(m[0][1]);
+    let [x, y, z] = if cos_y > QUARTER_TURN_COSINE {
+        [
+            (-m[1][2]).atan2(m[2][2]),
+            m[0][2].atan2(cos_y),
+            (-m[0][1]).atan2(m[0][0]),
+        ]
+    } else {
+        [
+            m[2][1].atan2(m[1][1]),
+            std::f64::consts::FRAC_PI_2.copysign(m[0][2]),
+            0.0,
+        ]
+    };
+    // A quaternion carries rounding nobody typed, so the angles keep nine
+    // decimals, and adding zero reads a negative zero as zero.
+    [x, y, z].map(|a| (a.to_degrees() * 1e9).round() / 1e9 + 0.0)
+}
+
+/// Below this cosine of Y, a rotation reads as a quarter turn about Y. It
+/// sits far above a quaternion's rounding and far below the cosine of any
+/// angle a person types short of 90.
+const QUARTER_TURN_COSINE: f64 = 1e-9;
 
 /// The turn a quaternion `[x, y, z, w]` makes, by rows. It is scaled to a
 /// unit quaternion first; one with no length turns nothing.
@@ -922,7 +995,7 @@ mod tests {
     }
 
     #[test]
-    fn a_user_transform_is_valid_only_with_a_size_and_no_rotation() {
+    fn a_user_transform_is_valid_only_with_a_size_and_a_unit_rotation() {
         assert!(UserTransform::IDENTITY.is_valid());
         let with = |f: fn(&mut UserTransform)| {
             let mut t = UserTransform::IDENTITY;
@@ -932,7 +1005,83 @@ mod tests {
         assert!(!with(|t| t.scale[1] = 0.0));
         assert!(!with(|t| t.scale[0] = -1.0));
         assert!(!with(|t| t.translation[2] = f64::NAN));
-        assert!(!with(|t| t.rotation = [0.0, 0.0, 1.0, 0.0]));
+        assert!(with(|t| t.rotation = [0.0, 0.0, 1.0, 0.0]));
+        assert!(with(
+            |t| t.rotation = rotation_from_degrees([10.0, -20.0, 30.0])
+        ));
+        assert!(!with(|t| t.rotation = [0.0, 0.0, 0.5, 0.5]));
+        assert!(!with(|t| t.rotation = [0.0; 4]));
+        assert!(!with(|t| t.rotation = [f64::NAN, 0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn angles_turn_about_x_then_y_then_z_and_read_back() {
+        // A quarter turn about X, then one about the Y that left: X's axis
+        // ends along Y, Y's along Z, and Z's along X.
+        let m = rotation_matrix(rotation_from_degrees([90.0, 90.0, 0.0]));
+        let column = |c: usize| [m[0][c], m[1][c], m[2][c]];
+        assert!(close(column(0), [0.0, 1.0, 0.0]));
+        assert!(close(column(1), [0.0, 0.0, 1.0]));
+        assert!(close(column(2), [1.0, 0.0, 0.0]));
+        // Away from a quarter turn about Y, the angles read back as typed.
+        for degrees in [
+            [30.0, 0.0, 0.0],
+            [10.0, -20.0, 30.0],
+            [-170.0, 45.0, 120.0],
+            [20.0, 30.0, 0.0],
+        ] {
+            assert_eq!(rotation_degrees(rotation_from_degrees(degrees)), degrees);
+        }
+        assert_eq!(rotation_degrees(no_rotation()), [0.0; 3]);
+        // Near one they still make the same rotation, if not the same digits.
+        for degrees in [[10.0, 89.999, 30.0], [-40.0, -89.999, 75.0]] {
+            let read = rotation_degrees(rotation_from_degrees(degrees));
+            assert!(same_rotation(
+                rotation_from_degrees(read),
+                rotation_from_degrees(degrees)
+            ));
+            assert!((read[1] - degrees[1]).abs() < 1e-6);
+        }
+        // At one, X and Z share a line: Y reads exactly a quarter turn, Z
+        // zero, and X their sum at +90 or their difference at -90.
+        for (typed, canonical) in [
+            ([20.0, 90.0, 0.0], [20.0, 90.0, 0.0]),
+            ([20.0, 90.0, 15.0], [35.0, 90.0, 0.0]),
+            ([20.0, -90.0, 15.0], [5.0, -90.0, 0.0]),
+        ] {
+            let rotation = rotation_from_degrees(typed);
+            let read = rotation_degrees(rotation);
+            assert_eq!(read[1], canonical[1]);
+            assert_eq!(read[2], 0.0);
+            assert!((read[0] - canonical[0]).abs() < 1e-6);
+            assert!(same_rotation(rotation_from_degrees(read), rotation));
+        }
+    }
+
+    /// Whether two unit quaternions turn alike: `q` and `-q` do.
+    fn same_rotation(a: [f64; 4], b: [f64; 4]) -> bool {
+        let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        (dot.abs() - 1.0).abs() < 1e-12
+    }
+
+    #[test]
+    fn a_turn_keeps_its_pivot_where_it_was_and_the_scale_as_it_was() {
+        let own = frame([0.5, 0.5, 2.0], [100.0, 0.0, 0.0], Some(1e-6));
+        let from = UserTransform {
+            translation: [3.0, -4.0, 1.0],
+            scale: [2.0, 1.0, 1.5],
+            ..UserTransform::IDENTITY
+        };
+        let pivot = [64.0, 32.0, 8.0];
+        let rotation = rotation_from_degrees([0.0, 15.0, 30.0]);
+        let turned = from.turned_to(&own, rotation, pivot);
+        assert!(close(
+            turned.in_frame(&own).apply(pivot),
+            from.in_frame(&own).apply(pivot)
+        ));
+        assert_eq!(turned.rotation, rotation);
+        assert_eq!(turned.scale, from.scale);
+        assert!(turned.is_valid());
     }
 
     #[test]

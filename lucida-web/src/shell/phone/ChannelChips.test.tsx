@@ -48,6 +48,7 @@ function layer(id: string, channels: LayerChannel[]): LayerInfo {
     downsamplingMethod: null,
     physicalScale: true,
     userTransform: null,
+    rotationDegrees: [0, 0, 0],
     units: [null, null, null],
   };
 }
