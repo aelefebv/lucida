@@ -286,10 +286,11 @@ while it wants the same form, and otherwise leaves it out and says why.
 
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on
-another canvas it keeps the region it showed. A *framed* camera is the fit of
-every visible dataset, which a new canvas or new content fits again. An
-*unframed* camera is a stand-in nothing chose: the scene fits it as soon as
-there is data, and a client never persists it.
+another canvas, or in the rectangle a new view layout gives it, it keeps the
+region it showed; a canvas resized under it keeps its scale. A *framed*
+camera is the fit of every visible dataset, which a new canvas or new content
+fits again. An *unframed* camera is a stand-in nothing chose: the scene fits
+it as soon as there is data, and a client never persists it.
 _Avoid_: auto-fit (fitting follows the camera's state, not an event such as an open)
 
 **Scene frame**:
