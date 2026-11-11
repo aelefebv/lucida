@@ -330,6 +330,22 @@ impl WasmScene {
         serde_json::to_string(&self.inner.comparison()).unwrap()
     }
 
+    /// The comparison `view` shows, as JSON, or `null` for none or an
+    /// unknown view.
+    pub fn view_comparison(&self, view: u32) -> String {
+        let comparison = self
+            .inner
+            .view(ViewId(view))
+            .and_then(|view| view.comparison.as_ref());
+        serde_json::to_string(&comparison).unwrap()
+    }
+
+    /// The layers `view`'s comparison sets aside, as a JSON list of dataset
+    /// ids in layer order ([`Scene::set_aside`]).
+    pub fn set_aside(&self, view: u32) -> String {
+        serde_json::to_string(&self.inner.set_aside(ViewId(view))).unwrap()
+    }
+
     /// Compare `a` with `b` in `mode`, `"swipe"` or `"blink"`
     /// ([`Scene::compare`]). Answers with the line-up verdict as
     /// [`Self::datasets_line_up`] does; anything but `yes` started nothing.

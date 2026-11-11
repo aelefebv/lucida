@@ -232,12 +232,15 @@ impl Scene {
     }
 
     /// Whether `view` can hold `dataset_id`'s pools of `kind`: it is on the
-    /// canvas, shows the dataset, and draws from that kind.
+    /// canvas, shows the dataset, and draws from that kind. A view whose
+    /// comparison sets the dataset aside draws nothing of it, so it lets the
+    /// hold go to a view that does, and comes back behind that view once the
+    /// comparison ends, as a view that showed the dataset again would.
     fn can_hold(&self, view: ViewId, dataset_id: &DatasetId, kind: PoolKind) -> bool {
         self.is_shown(view)
-            && self
-                .view(view)
-                .is_some_and(|v| v.shows(dataset_id) && PoolKind::of(&v.camera) == kind)
+            && self.view(view).is_some_and(|v| {
+                v.shows(dataset_id) && !v.sets_aside(dataset_id) && PoolKind::of(&v.camera) == kind
+            })
     }
 
     /// Record each dataset's holder of each kind of pools, so it stays until
@@ -309,7 +312,8 @@ impl Scene {
 
     fn withholding(&self, view: ViewId, dataset_id: &DatasetId) -> Option<Withheld> {
         let shown = self.view(view)?;
-        if !shown.shows(dataset_id) {
+        // A view that sets the dataset aside wants none of it to draw.
+        if !shown.shows(dataset_id) || shown.sets_aside(dataset_id) {
             return None;
         }
         let holder = self.dataset_holder(dataset_id, PoolKind::of(&shown.camera))?;

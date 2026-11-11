@@ -1,10 +1,6 @@
-/* At the view's top: the bottom of the stage holds the floating controls,
-   and its top left the tool palette, which the left inset clears. */
+/* Across the column at the view's top (`ViewOverlays.css`). */
 .lc-withheld-notice {
-  position: absolute;
-  left: calc(var(--lc-control-h) * 2 + var(--lc-space-4));
-  right: var(--lc-space-2);
-  top: var(--lc-space-2);
+  align-self: stretch;
   display: flex;
   flex-direction: column;
   gap: var(--lc-space-1);
@@ -12,6 +8,9 @@
   border: 1px solid var(--lc-border);
   border-radius: var(--lc-radius);
   background: var(--lc-surface-float);
+  /* As a card's: a swipe divider behind it blurs out rather than crossing the text. */
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
   box-shadow: var(--lc-shadow-1);
   color: var(--lc-text);
   font-family: var(--lc-font);

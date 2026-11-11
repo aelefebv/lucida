@@ -1648,12 +1648,23 @@ const MINIMAP_RECT_PROBE: &str = r#"(() => {
   return JSON.stringify({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
 })()"#;
 
-/// The swipe divider's handle, or null when the page shows none: the
-/// capture surface lays it out at no size.
+/// The active view's swipe divider handle, or null when the page shows none:
+/// the capture surface lays it out at no size. Another view's comparison
+/// keeps a divider of its own.
 const SWIPE_DIVIDER_PROBE: &str = r#"(() => {
-  const divider = document.querySelector('.lc-swipe-divider');
+  const divider = document.querySelector('.lc-view-overlay[data-active] .lc-swipe-divider');
   if (!divider) return null;
   const rect = divider.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return null;
+  return JSON.stringify({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
+})()"#;
+
+/// The span the active view's divider slides along: the view's rectangle,
+/// which a divider's place is a fraction of.
+const SWIPE_TRACK_PROBE: &str = r#"(() => {
+  const track = document.querySelector('.lc-view-overlay[data-active] .lc-swipe');
+  if (!track) return null;
+  const rect = track.getBoundingClientRect();
   if (rect.width === 0 || rect.height === 0) return null;
   return JSON.stringify({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
 })()"#;
@@ -2374,9 +2385,14 @@ async fn drag_divider(
         }
         tokio::time::sleep(POLL).await;
     };
-    let canvas = canvas_rect(page, wait).await?;
+    let Some(track) = rect_probe(page, SWIPE_TRACK_PROBE, "a swipe divider's view", wait).await?
+    else {
+        return Ok(SentInput::Withheld {
+            reason: "the page shows the swipe divider over no view".to_string(),
+        });
+    };
     let from = handle.center();
-    let to_x = canvas.x + at * canvas.width;
+    let to_x = track.x + at * track.width;
     drag_from(page, from, (to_x - from.0, 0.0), false, pace, wait).await
 }
 
