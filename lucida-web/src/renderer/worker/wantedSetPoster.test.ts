@@ -44,8 +44,8 @@ describe("the wanted-set report", () => {
     state.sliceAtlases.set("pool", {
       z: 11,
       // Cut at plane 10, in the same chunk as plane 11.
-      slots: new Map([["img:ch0|0/0/0/0/0/0", 0]]),
-      slotLevelZ: Int32Array.from([10]),
+      slots: new Map([["img:ch0|0/0/0/0/0/0|10", 0]]),
+      planesByChunk: new Map([["img:ch0|0/0/0/0/0/0", new Map([[10, 0]])]]),
       entityMetas: new Map([["img:ch0", [{ level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], levelDims: [64, 128, 128], offset: 0 }]]]),
     } as never);
     const posts: WorkerToMainMessage[] = [];

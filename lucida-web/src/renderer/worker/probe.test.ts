@@ -51,6 +51,7 @@ function fakePool(datasetId: string, chunk: number, cells: number): FakePool {
     indirectionBuf: {} as GPUBuffer,
     indirectionData: new Uint32Array(cells).fill(INDIRECTION_MISS),
     slots: new Map(),
+    planesByChunk: new Map(),
     slotGridIdx: new Int32Array(slotsX * slotsY).fill(-1),
     freeSlots: [],
     totalSlots: slotsX * slotsY,
@@ -65,7 +66,6 @@ function fakePool(datasetId: string, chunk: number, cells: number): FakePool {
     axis: "z",
     t: 0,
     c: 0,
-    slotLevelZ: new Int32Array(slotsX * slotsY).fill(0),
     indirectionDirty: false,
   };
 }

@@ -636,6 +636,9 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
 
 describe("handleSliceChunkData — admission, eviction and Z retargeting", () => {
   /** A level-0 slice pool for member A over a 4 × 4 grid. */
+  /** Member A's slot key for `key` cut at level plane `plane`. */
+  const sk = (key: string, plane = 0) => ["imgA", key, plane].join("|");
+
   function slicePool(ctx: WorkerCtx, z = 0) {
     const atlas = getOrCreateSlicePool(ctx, "ds1", "ds1", 32, 32, z, 0, 0, "u16");
     atlas.entityMetas.set("imgA", [makeSliceMeta(4, 4)]);
@@ -654,7 +657,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
 
     handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunkAtZ0, chunkAtZ1], { fullResZ: 4 }), epochs(), "ds1", "imgA");
 
-    expect([...atlas.slots.keys()]).toEqual([`imgA|${chunkAtZ1.key}`]);
+    expect([...atlas.slots.keys()]).toEqual([sk(chunkAtZ1.key, 4)]);
     expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([
       ["held", undefined, [chunkAtZ1.key]],
       ["refused", "wrong-slice", [chunkAtZ0.key]],
@@ -695,7 +698,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
       posts.length = 0;
       handleSliceChunkData(ctx, makeSliceMsg("imgA", [right]), epochs(), "ds1", "imgA");
       expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([["refused", "atlas-policy", [right.key]]]);
-      expect([...atlas.slots.keys()]).toEqual([`imgA|${left.key}`]);
+      expect([...atlas.slots.keys()]).toEqual([sk(left.key)]);
     }
   });
 
@@ -709,13 +712,13 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     const old = makeSliceChunk(0, 0, 0, 0, 0, 0);
     want(ctx, "imgA", [old.key, next.key]);
     handleSliceChunkData(ctx, makeSliceMsg("imgA", [old]), epochs(), "ds1", "imgA");
-    expect(atlas.slots.has(`imgA|${old.key}`)).toBe(true);
+    expect(atlas.slots.has(sk(old.key))).toBe(true);
 
     remapSliceIndirection(atlas, t, c, 0);
     posts.length = 0;
     handleSliceChunkData(ctx, makeSliceMsg("imgA", [next], { t, c }), epochs(), "ds1", "imgA");
 
-    expect([...atlas.slots.keys()]).toEqual([`imgA|${next.key}`]);
+    expect([...atlas.slots.keys()]).toEqual([sk(next.key)]);
     expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([
       ["held", [next.key]],
       ["lost", [old.key]],
@@ -729,21 +732,20 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     const chunk = makeSliceChunk(0, 0, 0, 1, 0, 0);
     want(ctx, "imgA", [chunk.key]);
     handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 4 }), epochs(), "ds1", "imgA");
-    const slot = atlas.slots.get(`imgA|${chunk.key}`)!;
+    const slot = atlas.slots.get(sk(chunk.key, 4))!;
     expect(atlas.indirectionData[0]).toBe(slot);
-    expect(atlas.slotLevelZ[slot]).toBe(4);
 
-    // The cold state at Z 5 keeps the chunk's key but must not show plane 4.
+    // The cold state at Z 5 keeps plane 4 resident but must not show it.
+    atlas.z = 5;
     remapSliceIndirection(atlas, 0, 0, 5);
-    expect(atlas.slots.has(`imgA|${chunk.key}`)).toBe(true);
+    expect(atlas.slots.has(sk(chunk.key, 4))).toBe(true);
     expect(atlas.indirectionData[0]).toBe(0xFFFFFFFF);
 
     const writeCount = () => (ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
     const writes = writeCount();
     posts.length = 0;
     handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
-    expect(atlas.slots.get(`imgA|${chunk.key}`)).toBe(slot);
-    expect(atlas.slotLevelZ[slot]).toBe(5);
+    expect([...atlas.slots]).toEqual([[sk(chunk.key, 5), slot]]);
     expect(atlas.indirectionData[0]).toBe(slot);
     expect(writeCount()).toBe(writes + 1);
     expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
@@ -752,6 +754,26 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     posts.length = 0;
     handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
     expect(writeCount()).toBe(writes + 1);
+    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
+  });
+
+  it("keeps a plane the pool still draws, and gives another plane of the chunk a slot of its own", () => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = slicePool(ctx, 4);
+    const chunk = makeSliceChunk(0, 0, 0, 1, 0, 0);
+    want(ctx, "imgA", [chunk.key]);
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 4 }), epochs(), "ds1", "imgA");
+    const drawn = atlas.slots.get(sk(chunk.key, 4))!;
+
+    // Plane 5 of the same chunk, cut ahead of a cold state that still draws plane 4.
+    posts.length = 0;
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
+
+    const other = atlas.slots.get(sk(chunk.key, 5))!;
+    expect(other).not.toBe(drawn);
+    expect(atlas.slots.get(sk(chunk.key, 4))).toBe(drawn);
+    expect(atlas.indirectionData[0]).toBe(drawn);
+    expect([...atlas.planesByChunk.get(`imgA|${chunk.key}`)!]).toEqual([[4, drawn], [5, other]]);
     expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
   });
 
@@ -793,13 +815,13 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     atlas.indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
     remapSliceIndirection(atlas, 0, 0, 0);
     ctx.state.targetLevelByMember.slice.set("imgA", 1);
-    expect(atlas.slotGridIdx[atlas.slots.get(`imgA|${finer.key}`)!]).toBe(-1);
+    expect(atlas.slotGridIdx[atlas.slots.get(sk(finer.key))!]).toBe(-1);
 
     posts.length = 0;
     handleSliceChunkData(ctx, level1Msg([incoming]), epochs(), "ds1", "imgA");
 
     expect(reports(posts, "lost").map((r) => r.keys)).toEqual([[otherT.key]]);
-    expect([...atlas.slots.keys()].sort()).toEqual([`imgA|${finer.key}`, `imgA|${incoming.key}`, `imgA|${far.key}`].sort());
+    expect([...atlas.slots.keys()].sort()).toEqual([sk(finer.key), sk(incoming.key), sk(far.key)].sort());
   });
 });
 

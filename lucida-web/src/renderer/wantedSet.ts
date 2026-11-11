@@ -34,14 +34,14 @@ export interface AtlasLevelMeta {
 /** Minimal shared-pool atlas state for wanted-set computation. */
 export interface AtlasSnapshot {
   z?: number; // only for slice atlases
-  /** Slots keyed by composite "memberId|chunkKey". */
+  /** Slots keyed by composite slot key (`chunkKeys.ts`). */
   slots: Map<string, number>;
   /**
-   * Slice atlases only: the level plane each slot's 2-D data was cut from,
-   * by slot index. A slot cut from another plane than the one `z` maps to
-   * holds stale data and counts as missing.
+   * Slice atlases only: the planes of each `"memberId|chunkKey"` the pool
+   * holds. A chunk held only at planes other than the one `z` maps to holds
+   * stale data and counts as missing.
    */
-  slotLevelZ?: ArrayLike<number>;
+  planesByChunk?: ReadonlyMap<string, ReadonlyMap<number, number>>;
   /** Per-entity level sections. */
   entityMetas?: Map<string, AtlasLevelMeta[]>;
 }
@@ -149,7 +149,7 @@ export function computeWantedSet(
               c: channel,
               chunkKey,
             });
-            if (atlas.slots.has(makeCompositeKey(memberId, chunkKey))) {
+            if ((atlas.planesByChunk?.get(makeCompositeKey(memberId, chunkKey))?.size ?? 0) > 0) {
               stalePlanes.push({ memberId, tier, chunkKey });
             }
           }
@@ -274,10 +274,10 @@ function holdsCurrentData(
   context: SampleContext,
   chunkKey: string,
 ): boolean {
-  const slot = atlas.slots.get(makeCompositeKey(context.memberId, chunkKey));
-  if (slot === undefined) return false;
-  if (context.viewMode !== "slice" || atlas.slotLevelZ === undefined) return true;
-  return atlas.slotLevelZ[slot] === sliceLevelPlane(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
+  const key = makeCompositeKey(context.memberId, chunkKey);
+  if (context.viewMode !== "slice" || atlas.planesByChunk === undefined) return atlas.slots.has(key);
+  const plane = sliceLevelPlane(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
+  return atlas.planesByChunk.get(key)?.has(plane) ?? false;
 }
 
 /** One section the shader may sample for a member, with the pool it reads. */

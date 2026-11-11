@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { remapIndirection, applyViewHotState, getRayHitForMember, type AtlasState, type LodIndirectionMeta } from "./volume/index.ts";
 import { parseChunkKey } from "./chunkKeys.ts";
 import { remapSliceIndirection, type SliceAtlasState } from "./slice/index.ts";
+import { holdSliceSlot } from "./slice/atlas.ts";
 import type { ViewHotStateMessage } from "./workerProtocol.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
@@ -72,6 +73,7 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     indirectionBuf: null as unknown as GPUBuffer,
     indirectionData: new Uint32Array(Math.max(totalIndirection, 1)).fill(0xFFFFFFFF),
     slots: new Map(),
+    planesByChunk: new Map(),
     slotGridIdx: new Int32Array(totalSlots).fill(-1),
     freeSlots: [],
     totalSlots,
@@ -80,17 +82,14 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     entityMetas,
     entityZInfo,
     z: 0, t: 0, c: 0, axis: "z",
-    slotLevelZ: new Int32Array(totalSlots).fill(-1),
     indirectionDirty: false,
     ...overrides,
   };
 }
 
-/** Insert a fake chunk into a shared-pool slice atlas's slots map (composite key). */
 /** Insert a fake slice chunk whose 2D data was cut from level plane `plane`. */
 function insertSliceChunk(atlas: SliceAtlasState, level: number, t: number, c: number, z: number, y: number, x: number, slotIndex: number, plane: number) {
-  atlas.slots.set(`memA|${level}/${t}/${c}/${z}/${y}/${x}`, slotIndex);
-  atlas.slotLevelZ[slotIndex] = plane;
+  holdSliceSlot(atlas, "memA", `${level}/${t}/${c}/${z}/${y}/${x}`, plane, slotIndex);
 }
 
 /** Insert a fake chunk into a shared-pool atlas's slots map (composite key). */

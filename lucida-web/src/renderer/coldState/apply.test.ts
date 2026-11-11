@@ -711,7 +711,7 @@ describe("Suite A — applyColdState", () => {
     const poolKey = poolOf(ctx.state, "imgA:ch0", "detail", 1)!;
     deliverSlice(ctx, sliceUpload(1, 0), coldCoarse.epochs, poolKey, "imgA:ch0");
     const atlas = sli(ctx.state).get(poolKey)!;
-    const slot1 = atlas.slots.get("imgA:ch0|1/0/0/0/0/0")!;
+    const slot1 = atlas.slots.get("imgA:ch0|1/0/0/0/0/0|10")!;
     expect(atlas.indirectionData[0]).toBe(slot1);
 
     // Target 0: level 1's plane stays mapped in its own section while
@@ -726,7 +726,7 @@ describe("Suite A — applyColdState", () => {
     // Level 0's chunk for the same plane is z=1; both levels map at once,
     // each against its own chunk-Z target.
     deliverSlice(ctx, sliceUpload(0, 1), coldFine.epochs, poolOf(ctx.state, "imgA:ch0", "detail", 0)!, "imgA:ch0");
-    const slot0 = atlas.slots.get("imgA:ch0|0/0/0/1/0/0")!;
+    const slot0 = atlas.slots.get("imgA:ch0|0/0/0/1/0/0|20")!;
     applyColdState(ctx, coldFine);
     expect(atlas.indirectionData[0]).toBe(slot0);
     expect(atlas.indirectionData[16]).toBe(slot1);

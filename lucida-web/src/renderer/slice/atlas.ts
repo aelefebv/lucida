@@ -26,6 +26,7 @@ import { chunkPoolTier } from "../poolKeys.ts";
 import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
 import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
 import type { SpatialAxis } from "../slicePlane.ts";
+import { makeCompositeKey, makeSliceSlotKey, parseCompositeKey } from "../chunkKeys.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding the current
@@ -292,8 +293,19 @@ export interface SliceAtlasState {
   format: SampleFormat;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
-  /** Composite keys "memberId|chunkKey" → slotIndex (insertion-order = LRU). */
+  /**
+   * Slot keys `"memberId|chunkKey|plane"` (`makeSliceSlotKey`) → slot index,
+   * insertion order = LRU. The plane is the level plane along {@link axis}
+   * the slot's 2D data was cut from, so one chunk can be held at several
+   * planes. Changed only through {@link holdSliceSlot} and
+   * {@link dropSliceSlot}, which keep {@link planesByChunk} in step.
+   */
   slots: Map<string, number>;
+  /**
+   * `"memberId|chunkKey"` → plane → slot index: the planes of each chunk the
+   * pool holds, so an upload finds them without walking every slot.
+   */
+  planesByChunk: Map<string, Map<number, number>>;
   /** slotIndex → globalGridIdx (for eviction cleanup). */
   slotGridIdx: Int32Array<ArrayBuffer>;
   freeSlots: number[];
@@ -317,16 +329,12 @@ export interface SliceAtlasState {
   z: number; t: number; c: number;
   /**
    * The axis this pool's slots are cut along, which its pool key names, so
-   * it never changes. Its "Z" (`z`, `entityZInfo`, `slotLevelZ`) is that
-   * axis, and slot keys read in its frame (`parsePlaneChunkKey`).
-   */
-  axis: SpatialAxis;
-  /**
-   * slotIndex → the level plane its 2D data was cut from, -1 when empty. A
-   * slot whose plane is not the one the current Z maps to is stale: the remap
+   * it never changes. Its "Z" (`z`, `entityZInfo`, a slot's plane) is that
+   * axis, and slot keys read in its frame (`parsePlaneChunkKey`). A slot
+   * whose plane is not the one the current Z maps to is stale: the remap
    * leaves it unmapped and the wanted set reports it missing.
    */
-  slotLevelZ: Int32Array<ArrayBuffer>;
+  axis: SpatialAxis;
   indirectionDirty: boolean;
 }
 
@@ -388,14 +396,13 @@ function createSliceAtlas(
   return {
     datasetId,
     texture, format, indirectionBuf, indirectionData,
-    slots: new Map(), slotGridIdx, freeSlots, totalSlots,
+    slots: new Map(), planesByChunk: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY,
     slotsX, slotsY, maxSlotsY,
     entityMetas: new Map(),
     entityZInfo: new Map(),
     z, t, c,
     axis: "z",
-    slotLevelZ: new Int32Array(totalSlots).fill(-1),
     indirectionDirty: true,
   };
 }
@@ -408,6 +415,50 @@ export function sliceAtlasBytes(atlas: SliceAtlasState): number {
 /** The bytes one row of a slice pool's slots holds: the step it grows and shrinks by. */
 export function sliceRowBytes(atlas: SliceAtlasState): number {
   return atlas.slotsX * atlas.chunkX * atlas.chunkY * bytesPerTexel(atlas.format);
+}
+
+/** The planes of a member's chunk the pool holds, each with its slot. */
+export function heldPlanesOf(
+  atlas: SliceAtlasState,
+  memberId: string,
+  chunkKey: string,
+): ReadonlyMap<number, number> | undefined {
+  return atlas.planesByChunk.get(makeCompositeKey(memberId, chunkKey));
+}
+
+/** Record that `slot` holds plane `plane` of a member's chunk. */
+export function holdSliceSlot(
+  atlas: SliceAtlasState,
+  memberId: string,
+  chunkKey: string,
+  plane: number,
+  slot: number,
+): void {
+  holdSliceSlotKey(atlas, makeSliceSlotKey(memberId, chunkKey, plane), slot);
+}
+
+function holdSliceSlotKey(atlas: SliceAtlasState, key: string, slot: number): void {
+  const parsed = parseCompositeKey(key);
+  if (!parsed || parsed.plane === null) return;
+  atlas.slots.set(key, slot);
+  const chunk = makeCompositeKey(parsed.memberId, parsed.chunkKey);
+  let planes = atlas.planesByChunk.get(chunk);
+  if (!planes) {
+    planes = new Map();
+    atlas.planesByChunk.set(chunk, planes);
+  }
+  planes.set(parsed.plane, slot);
+}
+
+/** Forget the slot a slot key names. Its slot index is the caller's to reuse. */
+export function dropSliceSlot(atlas: SliceAtlasState, key: string): void {
+  if (!atlas.slots.delete(key)) return;
+  const parsed = parseCompositeKey(key);
+  if (!parsed || parsed.plane === null) return;
+  const chunk = makeCompositeKey(parsed.memberId, parsed.chunkKey);
+  const planes = atlas.planesByChunk.get(chunk);
+  planes?.delete(parsed.plane);
+  if (planes?.size === 0) atlas.planesByChunk.delete(chunk);
 }
 
 /**
@@ -442,9 +493,6 @@ export function growSliceAtlas(
   const slotGridIdx = new Int32Array(totalSlots).fill(-1);
   slotGridIdx.set(atlas.slotGridIdx);
   atlas.slotGridIdx = slotGridIdx;
-  const slotLevelZ = new Int32Array(totalSlots).fill(-1);
-  slotLevelZ.set(atlas.slotLevelZ);
-  atlas.slotLevelZ = slotLevelZ;
   for (let i = totalSlots - 1; i >= atlas.totalSlots; i--) atlas.freeSlots.push(i);
   atlas.slotsY = slotsY;
   atlas.totalSlots = totalSlots;
@@ -523,11 +571,10 @@ export function shrinkSliceAtlas(
   atlas.texture.destroy();
   atlas.texture = texture;
 
-  const slotLevelZ = new Int32Array(capacity).fill(-1);
-  for (const [key, slot] of plan.slots) slotLevelZ[slot] = atlas.slotLevelZ[atlas.slots.get(key)!];
   atlas.slotGridIdx = remapSlotEntries(atlas.slots, atlas.slotGridIdx, atlas.indirectionData, plan, capacity);
-  atlas.slotLevelZ = slotLevelZ;
-  atlas.slots = plan.slots;
+  atlas.slots = new Map();
+  atlas.planesByChunk = new Map();
+  for (const [key, slot] of plan.slots) holdSliceSlotKey(atlas, key, slot);
   atlas.freeSlots = plan.freeSlots;
   atlas.slotsY = slotsY;
   atlas.totalSlots = capacity;

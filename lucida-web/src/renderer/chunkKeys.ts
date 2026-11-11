@@ -1,9 +1,10 @@
 import { fromPlaneFrame, toPlaneFrame, type SpatialAxis } from "./slicePlane.ts";
 
 /**
- * The `"level/t/c/z/y/x"` chunk key and the `"memberId|chunkKey"` composite
- * slot key the shared atlas pools use. Every site that builds or parses a
- * composite key goes through here.
+ * The `"level/t/c/z/y/x"` chunk key and the composite slot keys the shared
+ * atlas pools use: `"memberId|chunkKey"` in a volume pool, and
+ * `"memberId|chunkKey|plane"` in a slice pool. Every site that builds or
+ * parses a composite key goes through here.
  */
 
 /**
@@ -66,13 +67,30 @@ export function makeCompositeKey(memberId: string, chunkKey: string): string {
 }
 
 /**
+ * Build a slice pool's slot key `"memberId|chunkKey|plane"`. A slice slot
+ * holds one plane of a chunk, the level plane along the pool's axis, so a
+ * pool can hold several planes of one chunk, each in its own slot.
+ */
+export function makeSliceSlotKey(memberId: string, chunkKey: string, plane: number): string {
+  return `${memberId}|${chunkKey}|${plane}`;
+}
+
+/**
  * Parse a composite slot key back into its `(memberId, chunkKey)`
- * components. Returns `null` if `key` has no `|` separator.
+ * components, and the plane of a slice slot key (`null` for a volume one).
+ * Returns `null` if `key` has no `|` separator.
  */
 export function parseCompositeKey(
   key: string,
-): { memberId: string; chunkKey: string } | null {
+): { memberId: string; chunkKey: string; plane: number | null } | null {
   const sep = key.indexOf("|");
   if (sep < 0) return null;
-  return { memberId: key.substring(0, sep), chunkKey: key.substring(sep + 1) };
+  const memberId = key.substring(0, sep);
+  const planeSep = key.indexOf("|", sep + 1);
+  if (planeSep < 0) return { memberId, chunkKey: key.substring(sep + 1), plane: null };
+  return {
+    memberId,
+    chunkKey: key.substring(sep + 1, planeSep),
+    plane: parseInt(key.substring(planeSep + 1), 10),
+  };
 }
