@@ -136,7 +136,7 @@ describe("DimensionBar", () => {
   });
 
   it("offers the view links only while two views divide the canvas", () => {
-    const links = { links: { basis: "physical" as const, properties: [], notices: [] }, onChange: vi.fn() };
+    const links = { links: { basis: "physical" as const, properties: [], notices: [] }, onChange: vi.fn(), onChangeAll: vi.fn() };
     const bar = (layout: ViewLayoutName) => (
       <DimensionBar
         viewMode="2d"

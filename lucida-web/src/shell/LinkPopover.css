@@ -6,6 +6,11 @@
   max-width: 100%;
 }
 
+.lc-link-all {
+  display: flex;
+  gap: var(--lc-space-2);
+}
+
 .lc-link-basis {
   margin: 0;
   color: var(--lc-text-muted);
