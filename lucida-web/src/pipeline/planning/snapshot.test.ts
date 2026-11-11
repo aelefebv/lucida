@@ -10,7 +10,7 @@ import {
   type SnapshotDatasetEntry,
 } from "./snapshot.ts";
 
-// `buildViewSnapshot` reads only `view_query`, `member_positions`,
+// `buildViewSnapshot` reads only `view_query`, `plane_positions`,
 // `visible_region`, and `c() / t() / z()`, so the stub covers just those
 // and is cast to `WasmScene`; no WASM bundle is needed.
 
@@ -76,7 +76,7 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
   const stub = {
     view_query: (_view: number, _dsId: string) =>
       JSON.stringify({ visible_entities: config.visibleEntities }),
-    member_positions: (_dsId: string) => JSON.stringify(config.positions),
+    plane_positions: (_view: number, _dsId: string) => JSON.stringify(config.positions),
     visible_region: (_view: number, _dsId: string) =>
       config.visibleRegion === null ? "null" : JSON.stringify(config.visibleRegion),
     t: () => config.t,

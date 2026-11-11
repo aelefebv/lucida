@@ -140,7 +140,7 @@ describe("dispatchChunkDelivery", () => {
     // Positional layout:
     // (workerMemberId, [chunkData], level, z, t, c,
     //  levelWidth, levelHeight, chunkX, chunkY, chunkZ,
-    //  fullResDepth, levelDepth, fullResZ, epochs, tier)
+    //  fullResDepth, levelDepth, fullResZ, epochs, tier, sliceAxis)
     expect(call[0]).toBe("img-0:ch0");
     expect(call[1]).toHaveLength(1);
     expect(call[1][0]).toMatchObject({ dataType: "uint16", x: 3, y: 2, z: 1, key: "0/0/0/1/2/3" });
@@ -297,6 +297,8 @@ describe("dispatchChunkDelivery", () => {
     // The chunk's place and the level's geometry across, down and along the cut.
     expect(args[1][0]).toMatchObject({ x: 3, y: 1, z: 2, key: "0/0/0/1/2/3" });
     expect(args.slice(6, 14)).toEqual([1024, 4, 256, 2, 256, 1024, 1024, 517]);
+    // The axis it was cut along, so the worker never files it in another plane's pool.
+    expect(args[16]).toBe("y");
 
     // A YZ cut at X 770 is column 2 of the chunk at grid x 3: Y across.
     const yz = makeMockClient();

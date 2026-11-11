@@ -71,7 +71,8 @@ pub struct ResolvedLayer {
     pub t: u32,
     /// The plane of this layer an XZ view cuts along Y, and the one a YZ
     /// view cuts along X: the view's axis position, a place in the scene
-    /// frame, in the layer's own samples.
+    /// frame or, in a collection, from each tile's own edge, in the layer's
+    /// own samples.
     pub y: u32,
     pub x: u32,
     /// Whether the view's z slab reaches past this layer's last plane.
@@ -183,10 +184,11 @@ impl LayerExtent {
     }
 
     /// The plane of this layer an X or Y axis position cuts. The position is
-    /// a place in the scene frame, absent its plane 0, read back through the
-    /// layer's placement `to_scene`, so layers over one region cut the same
-    /// plane. Past the layer it takes the nearest plane, which the layer
-    /// does not draw ([`reach_across`]), as a shallow layer's Z does.
+    /// a place, absent its plane 0, read back through `to_scene`, the
+    /// layer's cut placement ([`Scene::cut_placement`]), so layers over one
+    /// region cut the same plane, and a collection cuts each tile alike.
+    /// Past the layer it takes the nearest plane, which the layer does not
+    /// draw ([`reach_across`]), as a shallow layer's Z does.
     fn cut_plane(&self, position: Option<u32>, axis: SpatialAxis, to_scene: &Affine) -> u32 {
         let a = axis.xyz();
         let mut at = [0.0; 3];
@@ -208,10 +210,11 @@ impl LayerExtent {
 
 /// Where the scene puts one layer, as the cuts through it read it.
 struct LayerPlace {
-    /// The map from the layer's frame into the scene frame.
-    to_scene: Affine,
-    /// The layer's extent along Y and along X in the scene frame, where a
-    /// side view's axis position is a place. `None` without an image.
+    /// The map a side view's axis position reads back through into the
+    /// layer's planes ([`Scene::cut_placement`]).
+    cut_placement: Affine,
+    /// The places along Y and along X where a side view's axis position
+    /// cuts the layer ([`Scene::cut_span`]). `None` without an image.
     extent_y: Option<(f64, f64)>,
     extent_x: Option<(f64, f64)>,
     /// How many positions the scene's cut along Z steps through.
@@ -284,8 +287,8 @@ fn resolve(
         z_range,
         t_clamped: t != view.t,
         t,
-        y: extent.cut_plane(view.y, SpatialAxis::Y, &place.to_scene),
-        x: extent.cut_plane(view.x, SpatialAxis::X, &place.to_scene),
+        y: extent.cut_plane(view.y, SpatialAxis::Y, &place.cut_placement),
+        x: extent.cut_plane(view.x, SpatialAxis::X, &place.cut_placement),
         z_reach: extent.reach_z(&view.z_range, place.depth),
         y_reach: reach_across(view.y, place.extent_y),
         x_reach: reach_across(view.x, place.extent_x),
@@ -337,9 +340,9 @@ impl Scene {
 
     fn layer_place(&self, view: ViewId, dataset_id: &DatasetId) -> LayerPlace {
         LayerPlace {
-            to_scene: self.placement(dataset_id).unwrap_or(Affine::IDENTITY),
-            extent_y: self.scene_extent(dataset_id, SpatialAxis::Y),
-            extent_x: self.scene_extent(dataset_id, SpatialAxis::X),
+            cut_placement: self.cut_placement(dataset_id).unwrap_or(Affine::IDENTITY),
+            extent_y: self.cut_span(dataset_id, SpatialAxis::Y),
+            extent_x: self.cut_span(dataset_id, SpatialAxis::X),
             depth: self.cut_extent(view, SpatialAxis::Z),
         }
     }
@@ -412,7 +415,7 @@ impl Scene {
     ) -> Range<u32> {
         match (
             self.document.manifests.get(dataset_id),
-            self.placement(dataset_id),
+            self.cut_placement(dataset_id),
         ) {
             (Some(manifest), Some(to_scene)) => {
                 LayerExtent::of(manifest).clamp_cut(axes, plane, &to_scene)

@@ -661,6 +661,25 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     ]);
   });
 
+  it.each([
+    { cut: "along another axis", overrides: { sliceAxis: "y" as const } },
+    { cut: "for other chunk dims", overrides: { chunkY: 64 } },
+  ])("refuses a plane cut $cut than the pool it is routed to, and writes nothing", ({ overrides }) => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = slicePool(ctx);
+    const write = vi.spyOn(ctx.device.queue, "writeTexture");
+    const chunk = makeSliceChunk(0, 0, 0, 0, 0, 0);
+    want(ctx, "imgA", [chunk.key]);
+
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], overrides), epochs(), "ds1", "imgA");
+
+    expect(atlas.slots.size).toBe(0);
+    expect(write).not.toHaveBeenCalled();
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([
+      ["refused", "wrong-slice", [chunk.key]],
+    ]);
+  });
+
   it("an equal-distance slice chunk never displaces a wanted resident: it is refused, and the resident stays", () => {
     const { ctx, posts } = makeMockCtx();
     const atlas = slicePool(ctx);
