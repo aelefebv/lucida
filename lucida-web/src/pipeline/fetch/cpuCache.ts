@@ -388,11 +388,12 @@ export class CpuCache {
    */
   private viewCoarseKeysThisTick = new Set<string>();
   /**
-   * Where the views' detail and coarse lanes want each key delivered this
-   * tick, by `deliveryTarget`: the volume pools, or one plane of the chunk in
-   * the slice pools of one axis. A chunk goes to each.
+   * The views' detail and coarse requests for each key this tick. Each names
+   * where it wants the chunk delivered (`deliveryTarget`): the volume pools,
+   * or one plane of the chunk in the slice pools of one axis. Most keys have
+   * one request, held bare, so a submit allocates nothing for it.
    */
-  private targetsWantingThisTick = new Map<string, Map<string, Pick<ChunkRequest, "mode" | "cut">>>();
+  private viewRequestsThisTick = new Map<string, ChunkRequest | ChunkRequest[]>();
 
   /**
    * Moves whenever the plan side of what {@link getDeliverable} and the
@@ -597,12 +598,10 @@ export class CpuCache {
         }
       }
       if (req.lane === "detail" || req.lane === "coarse") {
-        let targets = this.targetsWantingThisTick.get(key);
-        if (!targets) {
-          targets = new Map();
-          this.targetsWantingThisTick.set(key, targets);
-        }
-        targets.set(deliveryTarget(req.mode, req.cut), { mode: req.mode, cut: req.cut });
+        const held = this.viewRequestsThisTick.get(key);
+        if (held === undefined) this.viewRequestsThisTick.set(key, req);
+        else if (Array.isArray(held)) held.push(req);
+        else this.viewRequestsThisTick.set(key, [held, req]);
       }
       if (tier === "detail") {
         this.desiredDetailKeysThisTick.add(key);
@@ -1014,7 +1013,7 @@ export class CpuCache {
     this.viewDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
-    this.targetsWantingThisTick.clear();
+    this.viewRequestsThisTick.clear();
     this.rejectionTracker.clear();
     // The submits that follow carry the new wanted set and re-arm for it.
     this.wantedRequests = [];
@@ -1074,7 +1073,7 @@ export class CpuCache {
    * pools; the volume's whole chunk is fetched on its own and replaces it.
    */
   private pushDeliveries(entry: CacheEntry, out: ReadyChunkDelivery[]): void {
-    const targets = this.targetsWantingThisTick.get(chunkSchedulerKey(entry, entry.residencyTier));
+    const targets = this.targetsWanting(chunkSchedulerKey(entry, entry.residencyTier));
     if (!targets) return;
     let cached: CachedChunk | null = null;
     for (const [target, { mode, cut }] of targets) {
@@ -1083,6 +1082,15 @@ export class CpuCache {
       cached ??= this.chunkEntryToCached(entry);
       out.push(cut ? { ...cached, mode, cut } : { ...cached, mode });
     }
+  }
+
+  /** Each place this tick's view requests want `key` delivered, by `deliveryTarget`, with a request that names it. */
+  private targetsWanting(key: string): Map<string, ChunkRequest> | undefined {
+    const held = this.viewRequestsThisTick.get(key);
+    if (held === undefined) return undefined;
+    const targets = new Map<string, ChunkRequest>();
+    for (const req of Array.isArray(held) ? held : [held]) targets.set(deliveryTarget(req.mode, req.cut), req);
+    return targets;
   }
 
   markSent(delivery: ReadyChunkDelivery): void {
@@ -1925,7 +1933,7 @@ export class CpuCache {
     // slice pools already hold from its planes and no volume pool wants,
     // changes nothing on screen. Waking the page for it would hold a settled
     // view open until the prefetch ends.
-    const targets = this.targetsWantingThisTick.get(chunk);
+    const targets = this.targetsWanting(chunk);
     const unseen =
       cacheEntry.lane === "prefetch" ||
       (result.planes === undefined &&
