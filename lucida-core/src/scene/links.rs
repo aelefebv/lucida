@@ -126,10 +126,20 @@ pub struct LinksState {
 /// takes the defaults again.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ViewLinks {
-    /// The datasets the first and the second view link by.
-    pair: Option<[DatasetId; 2]>,
+    /// The dataset the first and the second view each link by.
+    references: [Option<DatasetId>; 2],
     modes: [LinkMode; 5],
     offsets: [Option<Offset>; 5],
+}
+
+impl ViewLinks {
+    /// The datasets the views link by, once each shows one.
+    fn pair(&self) -> Option<[DatasetId; 2]> {
+        match &self.references {
+            [Some(first), Some(second)] => Some([first.clone(), second.clone()]),
+            _ => None,
+        }
+    }
 }
 
 /// One property's value in one view, in the numbers its camera or axis
@@ -335,7 +345,7 @@ impl Scene {
     /// The links between the two views, or `None` with one view.
     pub fn links(&self) -> Option<LinksState> {
         let views = self.linked_views()?;
-        let pair = self.links.pair.as_ref();
+        let pair = self.links.pair();
         let properties = LinkProperty::ALL
             .into_iter()
             .map(|property| PropertyLink {
@@ -345,7 +355,7 @@ impl Scene {
             })
             .collect();
         Some(LinksState {
-            basis: pair.map(|pair| self.link_basis(pair)),
+            basis: pair.map(|pair| self.link_basis(&pair)),
             properties,
         })
     }
@@ -366,7 +376,7 @@ impl Scene {
         }
         self.links.modes[property.index()] = mode;
         self.links.offsets[property.index()] = None;
-        self.settle_link(property);
+        self.settle_link(property, self.active);
     }
 
     /// Take the defaults when the views link by a new pair of datasets: a
@@ -375,23 +385,39 @@ impl Scene {
     /// center by linking pan relative; any other pair links nothing. Called
     /// after every command, since anything that changes what a view shows
     /// can change the pair. Returns what that moved in the views.
+    ///
+    /// The view that shows what it showed leads, and then one that showed
+    /// something: a view given its first dataset, or another one, takes the
+    /// pose the other already shows, as a view switching to the other's mode
+    /// does. Between two alike, the active view leads.
     pub(crate) fn refresh_links(&mut self) -> Followed {
-        let pair = self.link_pair();
-        if pair == self.links.pair {
+        let references = self.link_references();
+        if references == self.links.references {
             return Followed::default();
         }
-        let modes = pair
-            .as_ref()
-            .map_or([LinkMode::Off; 5], |pair| self.default_link_modes(pair));
+        let standing = [0, 1].map(|i| match &self.links.references[i] {
+            Some(before) if references[i].as_ref() == Some(before) => 2,
+            Some(_) => 1,
+            None => 0,
+        });
         self.links = ViewLinks {
-            pair,
-            modes,
+            references,
+            modes: [LinkMode::Off; 5],
             offsets: [None; 5],
         };
         self.epochs.links += 1;
+        let (Some(views), Some(pair)) = (self.linked_views(), self.links.pair()) else {
+            return Followed::default();
+        };
+        self.links.modes = self.default_link_modes(&pair);
+        let leader = match standing[0].cmp(&standing[1]) {
+            std::cmp::Ordering::Greater => views[0],
+            std::cmp::Ordering::Less => views[1],
+            std::cmp::Ordering::Equal => self.active,
+        };
         let mut followed = Followed::default();
         for property in LinkProperty::ALL {
-            followed.add(self.settle_link(property));
+            followed.add(self.settle_link(property, leader));
         }
         followed
     }
@@ -402,7 +428,7 @@ impl Scene {
     /// each view keeps its own region of its own rectangle, and a link set
     /// by hand starts from the views as they stand.
     pub(crate) fn link_leader(&self, cmd: &Command) -> Option<(ViewId, Camera, AxisPositions)> {
-        self.links.pair.as_ref()?;
+        self.links.pair()?;
         if matches!(
             cmd,
             Command::Viewport(
@@ -431,7 +457,7 @@ impl Scene {
         before: &Camera,
         axes_before: &AxisPositions,
     ) -> Followed {
-        let (Some(views), Some(_)) = (self.linked_views(), &self.links.pair) else {
+        let (Some(views), Some(_)) = (self.linked_views(), self.links.pair()) else {
             return Followed::default();
         };
         let Some(other) = views.into_iter().find(|id| *id != leader) else {
@@ -483,9 +509,11 @@ impl Scene {
             .cloned()
     }
 
-    fn link_pair(&self) -> Option<[DatasetId; 2]> {
-        let [first, second] = self.linked_views()?;
-        Some([self.link_reference(first)?, self.link_reference(second)?])
+    /// The dataset each of two views links by, or none with one view.
+    fn link_references(&self) -> [Option<DatasetId>; 2] {
+        self.linked_views().map_or([None, None], |views| {
+            views.map(|view| self.link_reference(view))
+        })
     }
 
     fn link_basis(&self, pair: &[DatasetId; 2]) -> LinkBasis {
@@ -537,7 +565,7 @@ impl Scene {
         property: LinkProperty,
         [first, second]: [ViewId; 2],
     ) -> Option<Unlinkable> {
-        if self.links.pair.is_none() {
+        if self.links.pair().is_none() {
             return Some(Unlinkable::Empty);
         }
         if property == LinkProperty::Z {
@@ -553,16 +581,16 @@ impl Scene {
     }
 
     /// Start `property`'s link from the views as they stand: a relative one
-    /// keeps their offset, and a linked one brings the other view to the
-    /// active one.
-    fn settle_link(&mut self, property: LinkProperty) -> Followed {
+    /// keeps their offset, and a linked one brings the other view to
+    /// `leader`.
+    fn settle_link(&mut self, property: LinkProperty, leader: ViewId) -> Followed {
         match self.links.modes[property.index()] {
             LinkMode::Off => Followed::default(),
             LinkMode::Relative => {
                 self.links.offsets[property.index()] = self.offset_now(property);
                 Followed::default()
             }
-            LinkMode::Linked => self.carry_link(property, self.active),
+            LinkMode::Linked => self.carry_link(property, leader),
         }
     }
 
@@ -570,7 +598,7 @@ impl Scene {
     /// they stand, carried into the second's basis.
     fn offset_now(&self, property: LinkProperty) -> Option<Offset> {
         let [first, second] = self.linked_views()?;
-        let maps = self.link_maps(self.links.pair.as_ref()?);
+        let maps = self.link_maps(&self.links.pair()?);
         let from = self.view_value(first, property)?;
         let to = self.view_value(second, property)?;
         if !from.pairs_with(to) {
@@ -585,7 +613,7 @@ impl Scene {
     /// Bring the other view's `property` to `leader`'s through its link.
     fn carry_link(&mut self, property: LinkProperty, leader: ViewId) -> Followed {
         let mode = self.links.modes[property.index()];
-        let (Some(views), Some(pair)) = (self.linked_views(), self.links.pair.clone()) else {
+        let (Some(views), Some(pair)) = (self.linked_views(), self.links.pair()) else {
             return Followed::default();
         };
         if mode == LinkMode::Off || self.unlinkable(property, views).is_some() {
@@ -845,6 +873,33 @@ mod tests {
         );
         assert!(close(distance, d));
         assert_eq!(angles, a);
+    }
+
+    #[test]
+    fn the_view_given_a_dataset_takes_the_other_views_region_even_when_active() {
+        let mut scene = Scene::new([800, 600]);
+        open(&mut scene, "a", [1, 1, 64, 64], 1.0, true, [0.0; 3]);
+        open(&mut scene, "b", [1, 1, 128, 128], 0.5, true, [0.0; 3]);
+        let layout = ViewLayout::Columns;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        let [first, second] = views(&scene);
+        steer(
+            &mut scene,
+            first,
+            ViewportCommand::SetCenter { x: 9.0, y: 30.0 },
+        );
+        steer(&mut scene, first, ViewportCommand::SetZoom { value: 6.0 });
+        apply(&mut scene, ViewportCommand::SetActiveView { view: second });
+        let dataset_id = DatasetId::from("b");
+        apply(
+            &mut scene,
+            ViewportCommand::MoveDatasetToView {
+                view: second,
+                dataset_id,
+            },
+        );
+        assert_eq!(slice(&scene, first), ([9.0, 30.0], 6.0));
+        assert_eq!(slice(&scene, second), ([9.0, 30.0], 6.0));
     }
 
     #[test]
