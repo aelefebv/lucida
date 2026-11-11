@@ -235,8 +235,12 @@ export interface SetXCommand {
   x: number;
 }
 
-/** How the canvas divides among the views: one across it, two side by side, or two stacked. */
-export type ViewLayoutName = "single" | "columns" | "rows";
+/**
+ * How the canvas divides among the views: one across it, two side by side,
+ * two stacked, four free views in quarters, or four-up, the same datasets
+ * as three slices and a volume crossing at one point.
+ */
+export type ViewLayoutName = "single" | "columns" | "rows" | "grid" | "four_up";
 
 /** Divide the canvas as `layout` does. A view the layout adds starts showing nothing. */
 export interface SetViewLayoutCommand {

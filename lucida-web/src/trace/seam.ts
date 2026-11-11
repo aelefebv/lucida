@@ -42,6 +42,7 @@ import {
 } from "./steps.ts";
 import { INPUT_SCALE, type InputScale } from "../components/inputScale.ts";
 import { isLinkMode, isLinkProperty } from "../viewLinks.ts";
+import { isViewLayoutName } from "../viewLayout.ts";
 import { requestAdapterWithRetry, type AdapterRetry } from "../renderer/requestAdapter.ts";
 import type { SavedView } from "../savedView/types.ts";
 import {
@@ -553,8 +554,8 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     views: async (layout: string, show: string[][] = [], keep = false) => {
       const controls = scriptControls();
       if (!controls) return noControls();
-      if (layout !== "single" && layout !== "columns" && layout !== "rows") {
-        return refused(`a layout is single, columns or rows, not ${layout}`);
+      if (!isViewLayoutName(layout)) {
+        return refused(`a layout is single, columns, rows, grid or four_up, not ${layout}`);
       }
       const urls = Array.isArray(show) && show.every((urls) => Array.isArray(urls) && urls.every((url) => typeof url === "string"));
       if (!urls) return refused("a layout shows a list of source URLs for each view");
