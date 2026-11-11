@@ -463,6 +463,33 @@ impl Scene {
         true
     }
 
+    /// Put the active view's camera back where a new view of what it shows
+    /// starts, on a canvas of `viewport` device pixels: facing the way a new
+    /// camera of its family does ([`Camera::home`]) and framed, so it fits
+    /// everything visible as a reframe does, four-up's shared zoom included.
+    /// Its mode, slice plane and axis positions stay, so four-up's crossing
+    /// doesn't move. The other view follows through its links, as it
+    /// follows a fit.
+    ///
+    /// Returns whether the camera changed, and bumps `epochs.view` when it
+    /// did. A canvas with no area changes nothing.
+    pub fn home(&mut self, viewport: [u32; 2]) -> bool {
+        if viewport[0] == 0 || viewport[1] == 0 {
+            return false;
+        }
+        let view = self.active_view_mut();
+        let (id, before, axes) = (view.id(), view.camera.clone(), view.axes.clone());
+        view.resize(view.rect.size_on(viewport), None);
+        view.camera.home();
+        self.reframe(id);
+        let changed = self.active_view().camera != before;
+        if changed {
+            self.epochs.view += 1;
+            self.follow_links(id, &before, &axes);
+        }
+        changed
+    }
+
     /// Fit the active view's slice camera to `region`, a box in
     /// `dataset_id`'s frame, on its canvas: a part of the data, so the camera
     /// is left placed. A volume camera ignores it, as does a dataset the
@@ -4936,6 +4963,89 @@ mod tests {
             [512.0, 512.0, 128.0]
         );
         assert_eq!(scene.active_view().axes.y, Some(400.5));
+    }
+
+    #[test]
+    fn home_frames_a_moved_slice_view_again() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = opened_volume([800, 600]);
+        let framed = scene.active_view().camera.clone();
+        apply_vp(
+            &mut scene,
+            Pan {
+                dx: 300.0,
+                dy: -200.0,
+            },
+        );
+        apply_vp(&mut scene, ZoomBy { factor: 8.0 });
+        assert_eq!(scene.active_view().camera.framing(), Framing::Placed);
+        let epochs = scene.epochs.clone();
+        assert!(scene.home([800, 600]));
+        assert_eq!(scene.active_view().camera, framed);
+        assert!(scene.epochs.view > epochs.view);
+        assert!(!scene.home([800, 600]));
+        assert!(!scene.home([0, 600]));
+    }
+
+    #[test]
+    fn home_turns_a_volume_back_to_the_first_orbit_and_fits_it() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = opened_volume([800, 600]);
+        apply_vp(&mut scene, SetMode3D);
+        let framed = scene.active_view().camera.clone();
+        apply_vp(
+            &mut scene,
+            Rotate3D {
+                d_theta: 0.9,
+                d_phi: -0.3,
+            },
+        );
+        apply_vp(&mut scene, Zoom3D { delta: 0.5 });
+        apply_vp(&mut scene, Pan3D { dx: 40.0, dy: 10.0 });
+        assert!(scene.home([800, 600]));
+        assert_eq!(scene.active_view().camera, framed);
+    }
+
+    #[test]
+    fn home_turns_a_fly_camera_back_to_where_a_new_one_looks() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = opened_volume([800, 600]);
+        apply_vp(&mut scene, SetModeFly);
+        let framed = scene.active_view().camera.clone();
+        let Camera::Fly(fly) = &mut scene.active_view_mut().camera else {
+            panic!("a fly camera");
+        };
+        fly.position = [3.0, -1.0, 2.0];
+        fly.orientation = [0.0, 0.38268343, 0.0, 0.92387953];
+        fly.framing = Framing::Placed;
+        assert!(scene.home([800, 600]));
+        assert_eq!(scene.active_view().camera, framed);
+    }
+
+    #[test]
+    fn home_keeps_a_side_views_plane_and_cut() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = opened_volume([800, 600]);
+        apply_vp(
+            &mut scene,
+            SetSlicePlane {
+                plane: SlicePlane::Xz,
+            },
+        );
+        apply_vp(&mut scene, SetY { y: 40 });
+        let framed = scene.active_view().camera.clone();
+        let axes = scene.active_view().axes.clone();
+        apply_vp(
+            &mut scene,
+            Pan {
+                dx: -120.0,
+                dy: 80.0,
+            },
+        );
+        apply_vp(&mut scene, ZoomBy { factor: 3.0 });
+        assert!(scene.home([800, 600]));
+        assert_eq!(scene.active_view().camera, framed);
+        assert_eq!(scene.active_view().axes, axes);
     }
 
     #[test]

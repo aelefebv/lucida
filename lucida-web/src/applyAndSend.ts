@@ -28,15 +28,27 @@ export function applyViewportCommand(scene: WasmScene, cmd: ViewportCommand) {
   noteSceneWrite();
 }
 
-/** Fit everything visible on `canvas`, as the fit key and double tap do. The
+/** Fit everything visible on `canvas`, as a double tap in a volume does. The
  *  canvas's size goes with the call, so the fit frames the canvas the user
  *  sees rather than the last size a render tick told the scene. */
 export function frameOnCanvas(scene: WasmScene, canvas: HTMLCanvasElement): void {
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.round(canvas.clientWidth * dpr);
-  const height = Math.round(canvas.clientHeight * dpr);
+  const [width, height] = deviceSize(canvas);
   guardedSceneCall("frame", scene, () => scene.frame(width, height));
   noteSceneWrite();
+}
+
+/** Put the active view back to the framed fit of what it shows on `canvas`,
+ *  a volume facing the way a new one does, as Home does. The canvas's size
+ *  goes with the call, as a fit's does. */
+export function homeOnCanvas(scene: WasmScene, canvas: HTMLCanvasElement): void {
+  const [width, height] = deviceSize(canvas);
+  guardedSceneCall("home", scene, () => scene.home(width, height));
+  noteSceneWrite();
+}
+
+function deviceSize(canvas: HTMLCanvasElement): [number, number] {
+  const dpr = window.devicePixelRatio || 1;
+  return [Math.round(canvas.clientWidth * dpr), Math.round(canvas.clientHeight * dpr)];
 }
 
 /** Fit the slice camera to `region`, a rect in `datasetId`'s frame, on

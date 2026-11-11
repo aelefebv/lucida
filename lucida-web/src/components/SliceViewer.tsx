@@ -2,7 +2,7 @@
 import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
-import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
+import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
@@ -35,8 +35,6 @@ interface Props {
   scene: WasmScene;
   /** The view this takes input for, and the element over its rectangle. */
   surface: ViewSurface;
-  /** The canvas every view divides, which a fit sizes the scene to. */
-  canvas: HTMLCanvasElement;
   /** Whether it is the active view, the one keyboard shortcuts steer. */
   active: boolean;
   emitPresence: () => void;
@@ -63,7 +61,7 @@ interface Props {
   onLongPress?: (at: ClientPoint) => void;
 }
 
-function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFollow, sendCursor, loopRef, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, sendCursor, loopRef, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   // The view's own element: its pixels, its pointer events, its cursor.
   const { element } = surface;
   const [dragging, setDragging] = useState(false);
@@ -403,15 +401,6 @@ function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFo
     keys: ["-"],
     repeat: true,
     run: () => moveView(() => applyViewportCommand(scene, { type: "zoom_by", factor: 1 / KEY_ZOOM_FACTOR }), "zoom"),
-  });
-  useCommand({
-    id: "view.fit",
-    enabled: active,
-    label: "Fit to view",
-    group: "View",
-    keys: ["0"],
-    keywords: ["reset", "frame", "home"],
-    run: () => moveView(() => frameOnCanvas(scene, canvas), "zoom"),
   });
 
   useEffect(() => {

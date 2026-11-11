@@ -248,6 +248,14 @@ impl WasmScene {
         self.inner.frame(&FrameTarget::Visible, [width, height])
     }
 
+    /// Put the active view's camera back to the framed fit of what it shows
+    /// on a canvas of `width` × `height` device pixels, a volume camera
+    /// facing the way a new one does ([`Scene::home`]). Home calls it.
+    /// Returns whether the camera changed.
+    pub fn home(&mut self, width: u32, height: u32) -> bool {
+        self.inner.home([width, height])
+    }
+
     /// Fit the slice camera to the rect `[min_x, min_y]..[max_x, max_y]` in
     /// `dataset_id`'s frame on its canvas, as a collection's group navigator
     /// does. Returns whether it moved the camera; a volume camera ignores it.

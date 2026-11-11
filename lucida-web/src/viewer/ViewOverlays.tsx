@@ -6,7 +6,8 @@
  * it asks for, of where a link took it past its data, and that the point
  * under the pointer is outside its data. The column keeps them from covering
  * each other, and the bar comes first so a notice coming or going never moves
- * it under the pointer.
+ * it under the pointer. Home sits in the top right corner, outside the
+ * column, so nothing the column holds moves it.
  *
  * They lie beside the pane, not in it: the viewers listen on the pane itself,
  * and a press on a control would also pan the view. A press or focus in them
@@ -14,6 +15,7 @@
  * comparison controls, which steer the active view, steer the comparison
  * they show.
  */
+import { HouseIcon } from "@phosphor-icons/react";
 import { useSyncExternalStore } from "react";
 import { setAsideNote, type ComparisonActions } from "../comparison.ts";
 import { ComparisonBar, SwipeDivider } from "../components/Comparison.tsx";
@@ -25,6 +27,8 @@ import type { Hover } from "./hover.ts";
 import { LinkNotices } from "./LinkNotices.tsx";
 import { PlaneLines } from "./PlaneLines.tsx";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
+import { IconButton } from "../ui/Button.tsx";
+import type { KeyCombo } from "../ui/shortcuts.ts";
 import "./ViewOverlays.css";
 
 interface Props {
@@ -44,9 +48,11 @@ interface Props {
   dragPlane?: (view: number, axis: SpatialAxis, fraction: number) => void;
   /** The crosshairs the point under the pointer puts in the other views. */
   hover?: Pick<Hover, "subscribe" | "markOf">;
+  /** Fit the active view to its data again, with the keys that do it. */
+  home?: { run: () => void; keys: readonly KeyCombo[] };
 }
 
-export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane, hover }: Props) {
+export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane, hover, home }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
     <div className="lc-view-overlays">
@@ -91,6 +97,19 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
               <LinkNotices notices={linkNotices?.find((shown) => shown.view === pane.id)?.notices ?? []} />
               {hover && <CrosshairOutside hover={hover} view={pane.id} />}
             </div>
+            {home && pane.draws.length > 0 && (
+              <div className="lc-view-home">
+                <IconButton
+                  icon={HouseIcon}
+                  size="sm"
+                  label="Home"
+                  // The keys steer the active view alone.
+                  shortcut={pane.active ? home.keys : undefined}
+                  tooltipPlacement="left"
+                  onPress={home.run}
+                />
+              </div>
+            )}
           </div>
         );
       })}

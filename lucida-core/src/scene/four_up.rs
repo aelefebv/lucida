@@ -397,6 +397,37 @@ mod tests {
     }
 
     #[test]
+    fn home_fits_a_view_at_the_shared_zoom_and_leaves_the_crossing() {
+        let mut scene = four_up();
+        let ids: Vec<ViewId> = scene.views().iter().map(|v| v.id()).collect();
+        apply(&mut scene, ViewportCommand::SetActiveView { view: ids[2] });
+        apply(&mut scene, ViewportCommand::SetY { y: 30 });
+        let framed = scene.active_view().camera.clone();
+        let crossing: Vec<AxisPositions> = scene.views().iter().map(|v| v.axes.clone()).collect();
+        apply(
+            &mut scene,
+            ViewportCommand::Pan {
+                dx: 120.0,
+                dy: 40.0,
+            },
+        );
+        apply(&mut scene, ViewportCommand::ZoomBy { factor: 3.0 });
+        assert!(scene.home([800, 600]));
+        assert_eq!(scene.active_view().camera, framed);
+        let now: Vec<AxisPositions> = scene.views().iter().map(|v| v.axes.clone()).collect();
+        assert_eq!(now, crossing);
+        // The volume turns back to the first orbit without moving it either.
+        apply(&mut scene, ViewportCommand::SetActiveView { view: ids[3] });
+        let first = scene.active_view().camera.clone();
+        let (d_theta, d_phi) = (0.7, 0.2);
+        apply(&mut scene, ViewportCommand::Rotate3D { d_theta, d_phi });
+        assert!(scene.home([800, 600]));
+        assert_eq!(scene.active_view().camera, first);
+        let now: Vec<AxisPositions> = scene.views().iter().map(|v| v.axes.clone()).collect();
+        assert_eq!(now, crossing);
+    }
+
+    #[test]
     fn the_slice_views_fit_at_one_zoom_so_xy_and_xz_line_up_along_x() {
         let scene = four_up();
         let slice = |index: usize| match &scene.views()[index].camera {
