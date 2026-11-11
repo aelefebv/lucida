@@ -103,7 +103,7 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
   };
 
   useImperativeHandle(ref, () => ({
-    pressAt: (at) => point(pointerOver(paneAt(eventRoot, at), at, true, performance.now())),
+    pressAt: (at) => point(pointerOver(paneAt(eventRoot, at), canvas, at, true, performance.now())),
   }));
 
   useEffect(() => {
@@ -112,7 +112,7 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
       if (e.pointerType === "touch") return;
       // Over a marker drawn on a view, as off the canvas, nothing is read.
       const pane = isViewPane(e.target) ? (e.target as HTMLElement) : null;
-      point(pointerOver(pane, e, false, e.timeStamp));
+      point(pointerOver(pane, canvas, e, false, e.timeStamp));
       // A drag is the pan or orbit it moves, not a hover.
       if (pane && e.buttons === 0) trace?.()?.markHover(e.timeStamp);
     };
@@ -143,7 +143,7 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
     };
     // `point` reads only refs, the hover and the scene.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eventRoot, hover, trace]);
+  }, [canvas, eventRoot, hover, trace]);
 
   useEffect(() => {
     const state = probe.current;
@@ -256,15 +256,23 @@ function paneAt(root: HTMLElement, at: ClientPoint): HTMLElement | null {
   return null;
 }
 
-/** The pointer at a client point over `pane`, or null off every view. */
-function pointerOver(pane: HTMLElement | null, at: ClientPoint, touch: boolean, atMs: number): HoverPointer | null {
-  if (!pane) return null;
-  const rect = pane.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return null;
+/**
+ * The pointer at a client point over `pane`, or null off every view. Placed
+ * on the canvas, as the worker reads a point of the frame it drew.
+ */
+function pointerOver(
+  pane: HTMLElement | null,
+  canvas: HTMLCanvasElement,
+  at: ClientPoint,
+  touch: boolean,
+  atMs: number,
+): HoverPointer | null {
+  if (!pane || canvas.clientWidth === 0 || canvas.clientHeight === 0) return null;
+  const bounds = canvas.getBoundingClientRect();
   return {
     view: Number(pane.dataset.viewPane),
-    x: (at.clientX - rect.left) / rect.width,
-    y: (at.clientY - rect.top) / rect.height,
+    x: (at.clientX - bounds.left) / canvas.clientWidth,
+    y: (at.clientY - bounds.top) / canvas.clientHeight,
     touch,
     atMs,
   };

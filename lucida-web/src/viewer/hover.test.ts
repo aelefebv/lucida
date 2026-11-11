@@ -9,12 +9,16 @@ import { Hover, readPoints, type CrosshairMark } from "./hover.ts";
 const AT: CrosshairMark = { view: 1, kind: "at", at: [0.25, 0.5], arms: [[1, 0], [0, 1], [0, 0]] };
 const OUTSIDE: CrosshairMark = { view: 2, kind: "outside" };
 
+/** A scene of two columns that answers `marks` wherever the pointer is. */
 function sceneAnswering(marks: CrosshairMark[]) {
-  return { crosshairs: vi.fn((_view: number, _x: number, _y: number) => JSON.stringify(marks)) };
+  return {
+    crosshairs: vi.fn((_view: number, _x: number, _y: number) => JSON.stringify(marks)),
+    view_rect: (view: number) => new Float64Array([view * 0.5, 0, 0.5, 1]),
+  };
 }
 
 describe("Hover", () => {
-  it("asks the scene where the pointer's point lands, and tells listeners only when that moves", () => {
+  it("asks the scene where the point under the pointer in its view lands, and tells listeners only when that moves", () => {
     const hover = new Hover();
     const listener = vi.fn();
     hover.subscribe(listener);
@@ -24,9 +28,10 @@ describe("Hover", () => {
     expect(scene.crosshairs).not.toHaveBeenCalled();
     expect(listener).not.toHaveBeenCalled();
 
-    hover.setPointer({ view: 0, x: 0.3, y: 0.6, touch: false, atMs: 5 });
+    // A quarter of the way across the canvas is halfway across the first column.
+    hover.setPointer({ view: 0, x: 0.25, y: 0.6, touch: false, atMs: 5 });
     hover.refresh(scene);
-    expect(scene.crosshairs).toHaveBeenCalledWith(0, 0.3, 0.6);
+    expect(scene.crosshairs).toHaveBeenCalledWith(0, 0.5, 0.6);
     expect(hover.markOf(1)).toEqual(AT);
     expect(hover.markOf(2)).toEqual(OUTSIDE);
     expect(hover.markOf(0)).toBeNull();
@@ -50,7 +55,7 @@ describe("readPoints", () => {
       2: [0, 0.5, 1, 0.5],
     };
     const marks = new Map<number, CrosshairMark>([[1, AT], [2, OUTSIDE]]);
-    const points = readPoints({ view: 0, x: 0.2, y: 0.4, touch: true, atMs: 0 }, marks, (view) => rects[view]);
+    const points = readPoints({ view: 0, x: 0.1, y: 0.4, touch: true, atMs: 0 }, marks, (view) => rects[view]);
     expect(points).toEqual([
       { view: 0, x: 0.1, y: 0.4, rect: rects[0], touch: true, crosshair: false },
       { view: 1, x: 0.625, y: 0.5, rect: rects[1], touch: false, crosshair: true },

@@ -14,7 +14,7 @@ afterEach(cleanup);
 function hoverWith(marks: CrosshairMark[]) {
   const hover = new Hover();
   hover.setPointer({ view: 0, x: 0.5, y: 0.5, touch: false, atMs: 0 });
-  hover.refresh({ crosshairs: () => JSON.stringify(marks) });
+  hover.refresh({ crosshairs: () => JSON.stringify(marks), view_rect: () => new Float64Array([0, 0, 1, 1]) });
   return hover;
 }
 
@@ -46,7 +46,10 @@ describe("Crosshair", () => {
     expect(container.textContent).toMatch(/outside this view's data/);
 
     act(() => {
-      hover.refresh({ crosshairs: () => JSON.stringify([{ view: 2, kind: "at", at: [0.5, 0.5], arms: [[1, 0], [0, 1], [0, 0]] }]) });
+      hover.refresh({
+        crosshairs: () => JSON.stringify([{ view: 2, kind: "at", at: [0.5, 0.5], arms: [[1, 0], [0, 1], [0, 0]] }]),
+        view_rect: () => new Float64Array([0, 0, 1, 1]),
+      });
     });
     expect(container.querySelector("[data-crosshair-outside]")).toBeNull();
     expect(container.querySelectorAll("[data-crosshair]")).toHaveLength(1);

@@ -14,7 +14,7 @@ import type { WasmScene } from "lucida-core";
 /** The pointer over a view. */
 export interface HoverPointer {
   readonly view: number;
-  /** Fractions of the view's width and height from its top left. */
+  /** Fractions of the canvas from its top left. */
   readonly x: number;
   readonly y: number;
   /** Whether a finger put it there. */
@@ -56,9 +56,8 @@ export class Hover {
   }
 
   /** Work the crosshairs out again from the pointer and `scene`, telling the listeners when they moved. */
-  refresh(scene: Pick<WasmScene, "crosshairs">): ReadonlyMap<number, CrosshairMark> {
-    const pointer = this.pointer;
-    const json = pointer ? scene.crosshairs(pointer.view, pointer.x, pointer.y) : "[]";
+  refresh(scene: Pick<WasmScene, "crosshairs" | "view_rect">): ReadonlyMap<number, CrosshairMark> {
+    const json = this.pointer ? crosshairsUnder(scene, this.pointer) : "[]";
     if (json === this.marksJson) return this.marks;
     this.marksJson = json;
     const marks = JSON.parse(json) as CrosshairMark[];
@@ -76,6 +75,13 @@ export class Hover {
   markOf(view: number): CrosshairMark | null {
     return this.marks.get(view) ?? null;
   }
+}
+
+/** The scene's crosshairs for the point under `pointer`, as JSON. */
+function crosshairsUnder(scene: Pick<WasmScene, "crosshairs" | "view_rect">, pointer: HoverPointer): string {
+  const [x, y, width, height] = scene.view_rect(pointer.view);
+  if (!(width > 0 && height > 0)) return "[]";
+  return scene.crosshairs(pointer.view, (pointer.x - x) / width, (pointer.y - y) / height);
 }
 
 /** A point the readout reads: under the pointer, or under a crosshair. */
@@ -105,7 +111,8 @@ export function readPoints(
     const rect = rectOf(view);
     return { view, x: rect[0] + x * rect[2], y: rect[1] + y * rect[3], rect };
   };
-  const points: ReadPoint[] = [{ ...onCanvas(pointer.view, [pointer.x, pointer.y]), touch: pointer.touch, crosshair: false }];
+  const { view, x, y, touch } = pointer;
+  const points: ReadPoint[] = [{ view, x, y, rect: rectOf(view), touch, crosshair: false }];
   for (const mark of marks.values()) {
     if (mark.kind !== "at") continue;
     points.push({ ...onCanvas(mark.view, mark.at), touch: false, crosshair: true, ...(mark.world && { world: mark.world }) });
