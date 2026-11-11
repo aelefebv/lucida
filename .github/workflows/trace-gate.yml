@@ -157,8 +157,89 @@ jobs:
       # WebGPU device within seconds of creating it, whatever GPU flags it is
       # given. Mesa's lavapipe supplies one. The page's adapter is still
       # SwiftShader, which the run's client line reports.
+      #
+      # Its packages are cached, keyed by the runner image they were resolved
+      # against, so that a run need not reach the Ubuntu archive. Bump the
+      # number in the key to discard every entry. Unlike the builds, a pull
+      # request saves this cache: the entry is a few megabytes, and a pull
+      # request misses main's only on an image main's nightly run has not used.
+      # TEMPORARY, reverted by the next commit: Canonical's DNS is down, so
+      # this run seeds the pull request's cache through a mirror outside it.
+      - name: Point apt at a mirror outside Canonical (temporary)
+        run: echo "http://mirrors.edge.kernel.org/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt
+
+      - name: Key the Vulkan driver's packages
+        id: vulkan-key
+        run: |
+          prefix="mesa-vulkan-drivers-1-$ImageOS-"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "key=$prefix$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      # An older image's packages usually still install, so they carry the
+      # gate through an archive outage that follows an image update.
+      - name: Restore the Vulkan driver's packages
+        id: vulkan-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/vulkan-debs
+          key: ${{ steps.vulkan-key.outputs.key }}
+          restore-keys: ${{ steps.vulkan-key.outputs.prefix }}
+
+      # Cached packages install as a set that may neither download nor remove
+      # anything. A set that does not fit this image fails before dpkg
+      # changes anything, and the packages are downloaded afresh.
       - name: Install a software Vulkan driver
-        run: sudo apt-get install -y -q mesa-vulkan-drivers
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dir="$RUNNER_TEMP/vulkan-debs"
+
+          # apt skips downloading a named .deb only when the same file is in
+          # its own archive directory.
+          install_cached() {
+            local debs=("$dir"/*.deb)
+            (( ${#debs[@]} )) \
+              && sudo cp "${debs[@]}" /var/cache/apt/archives/ \
+              && sudo apt-get install -y -q --no-download --no-remove "${debs[@]}"
+          }
+
+          if install_cached; then
+            echo "Installed the cached packages without contacting the archive"
+            exit 0
+          fi
+          if [[ -d "$dir" ]]; then
+            echo "::warning::The cached packages do not install on this runner image; downloading them"
+          fi
+
+          rm -rf "$dir"
+          sudo apt-get clean
+          # Refreshed once, not per attempt: with the archive unreachable a
+          # refresh takes minutes and only warns, and the download then
+          # resolves against the image's own indexes.
+          sudo apt-get update -q || true
+          attempt=1
+          until sudo apt-get install -y -q --download-only mesa-vulkan-drivers; do
+            if (( attempt == 4 )); then
+              echo "::error::Could not download the packages from the Ubuntu archive"
+              exit 1
+            fi
+            delay=$(( 15 * 2 ** (attempt - 1) ))
+            echo "::warning::Download attempt $attempt failed; retrying in ${delay}s"
+            sleep "$delay"
+            attempt=$(( attempt + 1 ))
+          done
+          mkdir -p "$dir"
+          cp /var/cache/apt/archives/*.deb "$dir"/
+          install_cached
+
+      # Saved here rather than at the end of the job, so that a failing gate
+      # still keeps them. One half saves, as for the builds.
+      - name: Save the Vulkan driver's packages
+        if: steps.vulkan-cache.outputs.cache-hit != 'true' && matrix.saves-cache
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/vulkan-debs
+          key: ${{ steps.vulkan-key.outputs.key }}
 
       # The runner's first Chrome launch pays for cold disk and font caches,
       # and once that pushed the first run's plan pass past its ceiling. An
