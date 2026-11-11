@@ -159,10 +159,11 @@
   inset: auto;
 }
 
-/* The bare surface shows the canvas alone. The views' panes stay, empty,
-   since each takes its view's input. */
+/* The bare surface shows the canvas alone. The views' panes stay, empty
+   but for a scale bar the capture asked for, since each takes its view's
+   input. */
 .lc-canvas-stage[data-bare] > :not(canvas, .lc-canvas-stage-layers),
 .lc-canvas-stage[data-bare] .lc-canvas-stage-layers > :not(.lc-view-panes),
-.lc-canvas-stage[data-bare] .lc-view-pane > * {
+.lc-canvas-stage[data-bare] .lc-view-pane > :not(.lc-scale-bar) {
   display: none;
 }
