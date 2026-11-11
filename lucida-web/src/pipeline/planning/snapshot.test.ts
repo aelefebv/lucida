@@ -82,6 +82,7 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
     t: () => config.t,
     z: () => config.z,
     slice_plane: () => "xy",
+    transposed: () => false,
     cut_index: () => config.z,
     epochs: () =>
       JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),

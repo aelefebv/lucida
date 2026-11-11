@@ -40,6 +40,7 @@ function makeCtx(views: TickView[]) {
     zoom: (view: number) => camera.get(view),
     center: () => [0, 0],
     slice_plane: () => "xy",
+    transposed: () => false,
     inv_view_proj: (view: number) => [camera.get(view)],
     clip_distance: () => 0,
     clip_mode: () => "none",

@@ -114,7 +114,7 @@ impl Scene {
                 // The slice zoom is device pixels per scene-frame unit.
                 let units_per_pixel = ratio / slice.zoom;
                 let per_unit = per_unit(&placed.to_scene)?;
-                let [across_axis, down_axis, _] = slice.plane.axes();
+                let [across_axis, down_axis] = slice.screen_axes();
                 let across = per_unit[across_axis.xyz()] * units_per_pixel;
                 let down = per_unit[down_axis.xyz()] * units_per_pixel;
                 let stretched = !same(across, down);
@@ -318,6 +318,38 @@ fn decimal(digit: u8, exponent: i32) -> String {
         format!("{digit}{}", "0".repeat(exponent as usize))
     } else {
         format!("0.{}{digit}", "0".repeat((-exponent - 1) as usize))
+    }
+}
+
+#[cfg(test)]
+mod transposed_tests {
+    use lucida_content::{PhysicalSpace, SpatialAxis};
+
+    use super::super::test_helpers::make_dataset_opened_with_shape;
+    use crate::camera::Camera;
+    use crate::command::{Command, DocumentCommand, ViewportCommand};
+    use crate::scene::Scene;
+    use crate::slice_plane::SlicePlane;
+
+    #[test]
+    fn a_transposed_view_measures_the_axis_it_draws_across() {
+        let mut scene = Scene::new([800, 600]);
+        let mut opened =
+            make_dataset_opened_with_shape("a", "a", 1, [1, 1, 32, 64, 64], [1, 1, 16, 64, 64], 1);
+        let unit = Some("micrometer".to_string());
+        opened.manifest = opened.manifest.with_space(PhysicalSpace {
+            units: [unit.clone(), unit.clone(), unit],
+            origin: [0.0; 3],
+        });
+        scene.apply(DocumentCommand::DatasetOpened(opened).into());
+        let plane = SlicePlane::Yz;
+        scene.apply(Command::Viewport(ViewportCommand::SetSlicePlane { plane }));
+        if let Camera::Slice(slice) = &mut scene.views[0].camera {
+            slice.transposed = true;
+        }
+        let view = scene.active_view().id();
+        let bar = scene.scale_bar(view).expect("a bar");
+        assert_eq!(bar.across.axis, Some(SpatialAxis::Z));
     }
 }
 

@@ -419,6 +419,7 @@ function makeSeamHarness(opts: {
     center: () => new Float32Array([512, 512]),
     active_view: () => 0,
     slice_plane: () => "xy",
+    transposed: () => false,
     cut_index: () => 0,
     epochs: () => JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),

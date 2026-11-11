@@ -142,6 +142,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     plane_positions: (_view: number, _dsId: string) => JSON.stringify(config.memberPositions),
     visible_region: (_view: number, _dsId: string) => JSON.stringify(config.visibleRegion),
     slice_plane: () => "xy",
+    transposed: () => false,
     cut_index: () => 0,
     t: () => config.t,
     z: () => config.z,

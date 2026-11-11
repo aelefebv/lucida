@@ -324,6 +324,8 @@ impl Scene {
         if let Camera::Slice(slice) = &mut view.camera {
             slice.plane = plane;
             slice.framing = Framing::Framed;
+            // Another plane is drawn the way a plane stands alone.
+            slice.transposed = false;
         }
         match cut {
             SpatialAxis::Y => {
@@ -5185,6 +5187,7 @@ mod tests {
             viewport: [1920, 1080],
             framing: Framing::Placed,
             plane: SlicePlane::Xy,
+            transposed: false,
         });
         let mut remote_view = AxisPositions::new();
         remote_view.t = 3;
@@ -5235,6 +5238,7 @@ mod tests {
             viewport: [64, 64],
             framing: Framing::Placed,
             plane: SlicePlane::Xy,
+            transposed: false,
         });
         scene.import_presence(
             zero_zoom.clone(),

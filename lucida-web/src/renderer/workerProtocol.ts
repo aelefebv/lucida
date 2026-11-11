@@ -380,6 +380,14 @@ export interface SliceRenderMultiPassMessage {
   zoom: number;
   cx: number;
   cy: number;
+  /**
+   * Whether the view draws its plane transposed, the plane's down axis
+   * across the screen. The layers' quads and `cx`, `cy` arrive with the
+   * plane's two axes already swapped, so drawing, clipping and probing need
+   * nothing more; peer cursors, which arrive in the plane's own frame, swap
+   * theirs.
+   */
+  transposed?: boolean;
   /** The canvas's backing store. */
   canvasW: number;
   canvasH: number;

@@ -170,6 +170,7 @@ vi.mock("lucida-core", () => {
     set_aside() { return "[]"; }
     view_comparison() { return "null"; }
     slice_plane() { return "xy"; }
+    transposed() { return false; }
     cut_index() { return this.view.z; }
     cut_reading() { return JSON.stringify({ position: this.view.z, count: 1, place: this.view.z + 0.5 }); }
     zoom() { return 1; }

@@ -19,6 +19,7 @@ impl Scene {
     /// Four-up then gives each view its part, fitted.
     pub(crate) fn set_view_layout(&mut self, layout: ViewLayout) {
         let entering_four_up = layout == ViewLayout::FourUp && self.layout != layout;
+        let leaving_four_up = self.layout == ViewLayout::FourUp && layout != ViewLayout::FourUp;
         let rects = layout.rects();
         while self.views.len() > rects.len() {
             let drop = self
@@ -38,6 +39,9 @@ impl Scene {
         self.maximized = None;
         if entering_four_up {
             self.arrange_four_up();
+        }
+        if leaving_four_up {
+            self.leave_four_up();
         }
         let ids: Vec<ViewId> = self.views.iter().map(View::id).collect();
         self.view_query_cursors

@@ -1,5 +1,6 @@
 //! The four-up layout: one set of datasets as an XY, an XZ and a YZ slice
-//! and a volume, crossing at one point. The point is the views' axis
+//! and a volume, crossing at one point. YZ is drawn transposed, Z across and
+//! Y down, so that it shares XY's rows as XZ shares its columns. The point is the views' axis
 //! positions, which every view holds on all three axes, so the four share
 //! them: each slice view cuts where the other two draw their lines, and a
 //! move of one view's position moves them all. Their cameras stay their own.
@@ -12,8 +13,8 @@ use crate::slice_plane::SlicePlane;
 use crate::view::{AxisPositions, ViewLayout};
 
 /// What each view of a four-up layout shows, in the layout's order: XY at
-/// the top left, YZ at its right, XZ under it so the two share X, and the
-/// volume at the bottom right.
+/// the top left, YZ at its right so the two share Y, XZ under it so the two
+/// share X, and the volume at the bottom right.
 pub const FOUR_UP: [Option<SlicePlane>; 4] = [
     Some(SlicePlane::Xy),
     Some(SlicePlane::Yz),
@@ -60,6 +61,9 @@ impl Scene {
         for (index, (view, role)) in self.views.iter_mut().zip(FOUR_UP).enumerate() {
             view.axes = axes.clone();
             if index == slot {
+                if let Camera::Slice(slice) = &mut view.camera {
+                    slice.transposed = slice.plane == SlicePlane::Yz;
+                }
                 continue;
             }
             let viewport = view.camera.viewport();
@@ -68,6 +72,7 @@ impl Scene {
                     let mut camera = Camera::new_2d(viewport);
                     if let Camera::Slice(slice) = &mut camera {
                         slice.plane = plane;
+                        slice.transposed = plane == SlicePlane::Yz;
                     }
                     camera
                 }
@@ -105,6 +110,18 @@ impl Scene {
             slice.set_zoom(leader.zoom);
             slice.set_center(center[0], center[1]);
             slice.framing = Framing::Placed;
+        }
+    }
+
+    /// Draw every slice view the way its plane stands alone again, as a
+    /// layout other than four-up does. A transposed view keeps its region.
+    pub(super) fn leave_four_up(&mut self) {
+        for view in &mut self.views {
+            for camera in view.cameras_mut() {
+                if let Camera::Slice(slice) = camera {
+                    slice.transposed = false;
+                }
+            }
         }
     }
 
@@ -282,6 +299,75 @@ mod tests {
         // XZ shares X, and YZ draws Y across; each stays on the middle of Z.
         assert_eq!(xz.0, [xy.0[0], 16.0]);
         assert_eq!(yz.0, [xy.0[1], 16.0]);
+    }
+
+    #[test]
+    fn yz_is_drawn_transposed_so_it_shares_xys_rows() {
+        let scene = four_up();
+        let slice = |index: usize| match &scene.views()[index].camera {
+            Camera::Slice(slice) => slice.clone(),
+            other => panic!("a slice camera, not {other:?}"),
+        };
+        let (xy, yz, xz) = (slice(0), slice(1), slice(2));
+        assert!(yz.transposed && !xy.transposed && !xz.transposed);
+        assert_eq!(yz.screen_axes(), [SpatialAxis::Z, SpatialAxis::Y]);
+        // Any Y lands on one screen row in both, and any X on one column of
+        // XY and XZ, the views being alike in size.
+        for y in [10.0, 64.0, 101.5] {
+            assert_eq!(xy.to_screen([20.0, y])[1], yz.to_screen([y, 3.0])[1]);
+        }
+        for x in [5.0, 48.0, 90.0] {
+            assert_eq!(xy.to_screen([x, 30.0])[0], xz.to_screen([x, 3.0])[0]);
+        }
+    }
+
+    #[test]
+    fn a_transposed_and_a_standalone_yz_at_one_cut_plan_the_same_chunks() {
+        // Square views, so the two cover the same region of the plane.
+        let mut scene = Scene::new([800, 400]);
+        open(&mut scene, "a", [32, 128, 96]);
+        let layout = ViewLayout::Columns;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        let ids: Vec<ViewId> = scene.views().iter().map(|v| v.id()).collect();
+        let datasets = ViewDatasets::All;
+        let second = ids[1];
+        apply(
+            &mut scene,
+            ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets,
+            },
+        );
+        for id in &ids {
+            apply(&mut scene, ViewportCommand::SetActiveView { view: *id });
+            let plane = SlicePlane::Yz;
+            apply(&mut scene, ViewportCommand::SetSlicePlane { plane });
+            apply(&mut scene, ViewportCommand::SetX { x: 40 });
+        }
+        if let Camera::Slice(slice) = &mut scene.views[1].camera {
+            slice.transposed = true;
+        }
+        let a = DatasetId::from("a");
+        let plan = |view: ViewId| format!("{:?}", scene.chunk_plan_for(view, &a));
+        assert_eq!(plan(ids[0]), plan(ids[1]));
+    }
+
+    #[test]
+    fn another_layout_or_another_plane_draws_a_plane_as_it_stands_alone() {
+        let mut scene = four_up();
+        let yz = scene.views()[1].id();
+        apply(&mut scene, ViewportCommand::SetActiveView { view: yz });
+        let plane = SlicePlane::Xy;
+        apply(&mut scene, ViewportCommand::SetSlicePlane { plane });
+        let transposed = |scene: &Scene, index: usize| match &scene.views()[index].camera {
+            Camera::Slice(slice) => slice.transposed,
+            _ => false,
+        };
+        assert!(!transposed(&scene, 1));
+        let mut scene = four_up();
+        let layout = ViewLayout::Grid;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        assert!((0..4).all(|index| !transposed(&scene, index)));
     }
 
     #[test]

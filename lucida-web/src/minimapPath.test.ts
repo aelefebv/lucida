@@ -288,6 +288,7 @@ describe("tickMinimap overview/overlay split", () => {
       zoom: () => s.zoom,
       center: () => s.center,
       slice_plane: () => "xy",
+      transposed: () => false,
       eye_position: () => new Float32Array(s.eye),
       epochs: () =>
         JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: s.settings }),
