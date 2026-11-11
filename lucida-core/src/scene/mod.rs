@@ -17,7 +17,7 @@ pub use channel_links::{ChannelPair, PairedBy};
 pub use comparison::{BLINK_RATES, CompareMode, Comparison, Side};
 pub use crosshair::{CrosshairMark, ViewCrosshair};
 pub use cut_grid::{AxisReading, CutGrid};
-pub use four_up::{FOUR_UP, PlaneLine};
+pub use four_up::{FOUR_UP, PlaneLine, PlaneTile};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 pub use link_notices::{LinkNotice, ViewLinkNotices};

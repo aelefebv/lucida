@@ -3,15 +3,21 @@
  * slice view, which a drag moves, and outlines over the volume. A drag sets
  * the plane's place at the pointer, and every view crosses there.
  */
-import type { PointerEvent } from "react";
+import { useSyncExternalStore, type PointerEvent } from "react";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
-import { isUpright, type PlaneLine } from "./planeLines.ts";
+import { isUpright, type FourUpPlanes, type PlaneLine } from "./planeLines.ts";
 import "./PlaneLines.css";
 
 interface Props {
   lines: readonly PlaneLine[];
   /** Move `axis`'s plane to `fraction` of the way across the view; absent where no line moves. */
   onDrag?: (axis: SpatialAxis, fraction: number) => void;
+}
+
+/** `view`'s planes as `planes` reads them, following the scene and the tile. */
+export function ViewPlaneLines({ planes, view, onDrag }: Omit<Props, "lines"> & { planes: FourUpPlanes; view: number }) {
+  const lines = useSyncExternalStore(planes.subscribe, () => planes.linesOf(view));
+  return <PlaneLines lines={lines} onDrag={onDrag} />;
 }
 
 export function PlaneLines({ lines, onDrag }: Props) {

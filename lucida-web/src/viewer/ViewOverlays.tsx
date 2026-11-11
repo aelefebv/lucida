@@ -23,7 +23,8 @@ import { CoverageNotice, type Coverage } from "./CoverageNotice.tsx";
 import { Crosshair, CrosshairOutside } from "./Crosshair.tsx";
 import type { Hover } from "./hover.ts";
 import { LinkNotices } from "./LinkNotices.tsx";
-import { PlaneLines } from "./PlaneLines.tsx";
+import { ViewPlaneLines } from "./PlaneLines.tsx";
+import type { FourUpPlanes } from "./planeLines.ts";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import "./ViewOverlays.css";
 
@@ -40,6 +41,8 @@ interface Props {
   byHand(a: string, b: string): string | null;
   /** With two linked views, where the links took each past its data. */
   linkNotices?: readonly ViewLinkNotices[];
+  /** Where four-up's planes cross each view. */
+  planes?: FourUpPlanes | null;
   /** Move `axis`'s plane to `fraction` of the way across `view`, as dragging its line does. */
   dragPlane?: (view: number, axis: SpatialAxis, fraction: number) => void;
   /** The crosshairs the point under the pointer puts in the other views. */
@@ -49,7 +52,7 @@ interface Props {
 }
 
 export function ViewOverlays({
-  views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane, hover, still,
+  views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, planes, dragPlane, hover, still,
 }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
@@ -71,10 +74,13 @@ export function ViewOverlays({
             onFocusCapture={select}
           >
             {/* Under the column, so its controls and notices cover the lines. */}
-            <PlaneLines
-              lines={pane.lines}
-              onDrag={dragPlane && pane.cameraMode === "slice" ? (axis, fraction) => dragPlane(pane.id, axis, fraction) : undefined}
-            />
+            {planes && (
+              <ViewPlaneLines
+                planes={planes}
+                view={pane.id}
+                onDrag={dragPlane && pane.cameraMode === "slice" ? (axis, fraction) => dragPlane(pane.id, axis, fraction) : undefined}
+              />
+            )}
             {hover && <Crosshair hover={hover} view={pane.id} />}
             {/* Before the column, so the bar covers the line where they cross. */}
             {comparison && <SwipeDivider comparison={comparison} actions={actions} nameOf={nameOf} />}
