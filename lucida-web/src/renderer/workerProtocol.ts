@@ -1072,8 +1072,8 @@ export interface GpuPassTimeMessage {
 
 /**
  * What the render worker holds on the GPU against its one budget. `bytes` is
- * the sum of the four holder lines; colormaps and descriptor buffers, a few
- * KiB, are left out.
+ * the sum of the four holder lines; colormaps and the views' descriptor
+ * buffers, a few KiB, are left out.
  */
 export interface GpuMemoryReport {
   /** The device-fitted total, halved when the device runs out of memory under it. */
@@ -1083,6 +1083,7 @@ export interface GpuMemoryReport {
   chunkBytes: number;
   /** The share of {@link chunkBytes} in views' indirection buffers, one per view and pool. */
   indirectionBytes: number;
+  /** Label pools: textures, indirection, descriptor and palette buffers. */
   labelBytes: number;
   /** Viewport render targets and the depth texture. */
   targetBytes: number;
@@ -1124,7 +1125,11 @@ export interface GpuPoolCapacity {
  */
 export interface GpuCapacityReport {
   budgetBytes: number;
-  /** What the other holders take of the total now: label pools, render targets, minimap textures. */
+  /**
+   * What the other holders take of the total now: label pools, render
+   * targets, minimap textures. The label pools of a dataset no view plans
+   * are left out, since a chunk pool that needs their bytes takes them.
+   */
   reservedBytes: number;
   pools: GpuPoolCapacity[];
   /** The device's limits, which size a pool the worker has not made yet. */
