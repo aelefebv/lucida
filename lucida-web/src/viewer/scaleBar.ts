@@ -27,6 +27,8 @@ export interface ScaleBarReading {
   readonly down: ScaleBarArm | null;
   /** The reading holds at the depth of the orbit center alone. */
   readonly at_orbit_center: boolean;
+  /** A person scaled the dataset by hand along an axis the bar measures. */
+  readonly scaled_by_hand: boolean;
 }
 
 /** `scene.scale_bar(view)`'s JSON as a reading, or null when the view shows no bar. */
@@ -38,6 +40,13 @@ export function parseScaleBar(json: string): ScaleBarReading | null {
 /** An arm's label, led by its axis when there are two arms to tell apart. */
 export function armLabel(arm: ScaleBarArm, twoArms: boolean): string {
   return twoArms && arm.axis ? `${arm.axis.toUpperCase()} ${arm.label}` : arm.label;
+}
+
+/** What qualifies the reading, or null when nothing does. */
+export function scaleBarNote(reading: ScaleBarReading): string | null {
+  const notes = [reading.at_orbit_center && "at orbit center", reading.scaled_by_hand && "scaled by hand"];
+  const said = notes.filter((note): note is string => typeof note === "string");
+  return said.length > 0 ? said.join(", ") : null;
 }
 
 export const scaleBarPreference = booleanPreference("view.scaleBar", true);

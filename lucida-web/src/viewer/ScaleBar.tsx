@@ -10,8 +10,8 @@ import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
 import type { ViewSurface } from "../components/cameraProjection.ts";
 import { frameClock } from "../frameClock.ts";
-import { floatingControlBoxes } from "../shell/CanvasStage.tsx";
-import { armLabel, parseScaleBar, type ScaleBarReading } from "./scaleBar.ts";
+import { floatingControlBoxes } from "../shell/floatingControls.ts";
+import { armLabel, parseScaleBar, scaleBarNote, type ScaleBarReading } from "./scaleBar.ts";
 import { placeScaleBar, snapLength } from "./scaleBarPlacement.ts";
 import "./ScaleBar.css";
 
@@ -75,8 +75,9 @@ function draw(reading: ScaleBarReading, { mark, across, down, note }: Parts) {
   across.textContent = armLabel(reading.across, corner);
   down.hidden = !reading.down;
   down.textContent = reading.down ? armLabel(reading.down, corner) : "";
-  note.hidden = !reading.at_orbit_center;
-  note.textContent = reading.at_orbit_center ? "at orbit center" : "";
+  const qualified = scaleBarNote(reading);
+  note.hidden = qualified === null;
+  note.textContent = qualified ?? "";
 }
 
 /**

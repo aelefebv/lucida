@@ -62,6 +62,9 @@ pub struct ScaleBar {
     /// The reading holds only at the depth of the arcball's orbit center:
     /// a perspective view draws nearer things larger.
     pub at_orbit_center: bool,
+    /// A person scaled the dataset by hand along an axis the bar measures,
+    /// so it reads the dataset's declared lengths as that scale draws them.
+    pub scaled_by_hand: bool,
 }
 
 impl Scene {
@@ -97,6 +100,10 @@ impl Scene {
         let [width, height] = shown.camera.viewport().map(|v| f64::from(v) / ratio);
         let across_cap = arm_cap(width);
         let down_cap = arm_cap(height);
+        let hand_scale = self
+            .user_transform(dataset_id)
+            .map_or([1.0; 3], |transform| transform.scale);
+        let scaled_by_hand = |axes: &[SpatialAxis]| axes.iter().any(|a| hand_scale[a.xyz()] != 1.0);
         match &shown.camera {
             Camera::Slice(slice) => {
                 // The slice zoom is device pixels per scene-frame unit.
@@ -110,17 +117,13 @@ impl Scene {
                     dataset_id: dataset_id.clone(),
                     measure,
                     per_pixel: [across, down],
-                    across: arm(
-                        measure,
-                        stretched.then_some(across_axis),
-                        across,
-                        across_cap,
-                    )?,
+                    across: arm(measure, Some(across_axis), across, across_cap)?,
                     down: match stretched {
                         true => Some(arm(measure, Some(down_axis), down, down_cap)?),
                         false => None,
                     },
                     at_orbit_center: false,
+                    scaled_by_hand: scaled_by_hand(&[across_axis, down_axis]),
                 })
             }
             Camera::Arcball(arcball) => {
@@ -138,6 +141,11 @@ impl Scene {
                     across: arm(measure, None, length, across_cap)?,
                     down: None,
                     at_orbit_center: true,
+                    scaled_by_hand: scaled_by_hand(&[
+                        SpatialAxis::X,
+                        SpatialAxis::Y,
+                        SpatialAxis::Z,
+                    ]),
                 })
             }
             Camera::Fly(_) => None,
@@ -485,7 +493,7 @@ mod tests {
         set_zoom(&mut scene, 1.0);
         let bar = bar(&scene);
         assert_eq!(bar.down, None);
-        assert_eq!(bar.across.axis, None);
+        assert_eq!(bar.across.axis, Some(SpatialAxis::Y));
         assert_eq!(bar.across.label, "50 \u{b5}m");
     }
 
@@ -551,6 +559,41 @@ mod tests {
         );
         scene.set_mode_fly();
         assert_eq!(scene.scale_bar(scene.active_view().id()), None);
+    }
+
+    #[test]
+    fn a_dataset_scaled_by_hand_reads_its_lengths_as_drawn_and_says_so() {
+        let mut scene = scene_at(1.0);
+        open(
+            &mut scene,
+            "a",
+            [64, 256, 256],
+            [2.0, 0.5, 0.5],
+            Some("micrometer"),
+        );
+        set_zoom(&mut scene, 1.0);
+        let before = bar(&scene);
+        assert!(!before.scaled_by_hand);
+        // Twice as tall on Z only: an XY view measures nothing it changed.
+        let z_only = crate::placement::UserTransform {
+            scale: [1.0, 1.0, 2.0],
+            ..crate::placement::UserTransform::IDENTITY
+        };
+        scene
+            .document
+            .set_user_transform(DatasetId::from("a"), z_only);
+        assert_eq!(bar(&scene), before);
+        // Twice as wide and tall: a pixel shows half the length it did.
+        let doubled = crate::placement::UserTransform {
+            scale: [2.0, 2.0, 1.0],
+            ..crate::placement::UserTransform::IDENTITY
+        };
+        scene
+            .document
+            .set_user_transform(DatasetId::from("a"), doubled);
+        let after = bar(&scene);
+        assert!(after.scaled_by_hand);
+        assert!((after.per_pixel[0] - before.per_pixel[0] / 2.0).abs() < 1e-18);
     }
 
     #[test]

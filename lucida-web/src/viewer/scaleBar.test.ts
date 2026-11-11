@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { armLabel, parseScaleBar, scaleBarShown } from "./scaleBar.ts";
+import { armLabel, parseScaleBar, scaleBarNote, scaleBarShown, type ScaleBarReading } from "./scaleBar.ts";
 
 describe("scaleBarShown", () => {
   it("follows the setting on the viewer page", () => {
@@ -32,5 +32,25 @@ describe("parseScaleBar", () => {
   it("reads no bar from null", () => {
     expect(parseScaleBar("null")).toBeNull();
     expect(parseScaleBar("")).toBeNull();
+  });
+});
+
+describe("scaleBarNote", () => {
+  const reading: ScaleBarReading = {
+    dataset_id: "a",
+    measure: "length",
+    per_pixel: [1e-7, 1e-7],
+    across: { axis: null, pixels: 100, label: "10 µm" },
+    down: null,
+    at_orbit_center: false,
+    scaled_by_hand: false,
+  };
+
+  it("says what qualifies the reading, and nothing otherwise", () => {
+    expect(scaleBarNote(reading)).toBeNull();
+    expect(scaleBarNote({ ...reading, scaled_by_hand: true })).toBe("scaled by hand");
+    expect(scaleBarNote({ ...reading, at_orbit_center: true, scaled_by_hand: true })).toBe(
+      "at orbit center, scaled by hand",
+    );
   });
 });

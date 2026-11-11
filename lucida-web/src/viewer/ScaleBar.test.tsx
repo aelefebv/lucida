@@ -55,10 +55,11 @@ const READING: ScaleBarReading = {
   across: { ...ACROSS, axis: null },
   down: null,
   at_orbit_center: false,
+  scaled_by_hand: false,
 };
 
 describe("ScaleBar", () => {
-  it("draws one bar as long as its length, in whole device pixels", () => {
+  it("draws one bar as long as its length, in whole pixels", () => {
     const bar = mount(READING);
     runFrame();
     expect(bar.root().hidden).toBe(false);
