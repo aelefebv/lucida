@@ -70,6 +70,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
     view_camera_mode: () => "slice",
     withheld: () => "[]",
     set_aside: () => "[]",
+    plane_lines: () => "[]",
     view_comparison: () => "null",
     resolved_layers: () => JSON.stringify(state.layers),
     comparison: () => "null",

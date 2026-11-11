@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis, resolveIndex, type IndexChange } from "../axes.ts";
-import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
+import { cutAxis, type SlicePlane, type SpatialAxis } from "../renderer/slicePlane.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { requestRender } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -111,19 +111,24 @@ export function useDimensions({
   // press, not the last render, so presses before a render each move. The
   // slider moves along the slice plane's cut: Z for an XY view, Y or X for a
   // side view.
-  const handleCutChange = useCallback((v: IndexChange) => {
+  const handleAxisChange = useCallback((axis: SpatialAxis, index: number) => {
     bridgeCallbacksRef.current.breakFollow();
     loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
-      const axis = cutAxis(scene.slice_plane(scene.active_view()) as SlicePlane);
-      const index = resolveIndex(v, scene.cut_index(scene.active_view()));
       applyViewportCommand(scene, axis === "z"
         ? { type: "set_z", z: index }
         : axis === "y" ? { type: "set_y", y: index } : { type: "set_x", x: index });
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
+
+  const handleCutChange = useCallback((v: IndexChange) => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return;
+    const axis = cutAxis(scene.slice_plane(scene.active_view()) as SlicePlane);
+    handleAxisChange(axis, resolveIndex(v, scene.cut_index(scene.active_view())));
+  }, [wasmSceneRef, handleAxisChange]);
 
   // A plane is another camera, as a mode is, so it fits the data again.
   const handleSlicePlaneChange = useCallback((plane: SlicePlane) => {
@@ -156,11 +161,11 @@ export function useDimensions({
     labelNamesFor,
     handleViewModeToggle,
     handleTChange,
-    handleCutChange, handleSlicePlaneChange,
+    handleCutChange, handleAxisChange, handleSlicePlaneChange,
   }), [
     z, t, viewMode, cameraMode, layers, dimZ, dimT,
     slicePlane, cutIndex, cutPlace, dimCut,
     dimensionExtentsFor, labelNamesFor, handleViewModeToggle,
-    handleTChange, handleCutChange, handleSlicePlaneChange,
+    handleTChange, handleCutChange, handleAxisChange, handleSlicePlaneChange,
   ]);
 }

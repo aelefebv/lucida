@@ -34,6 +34,7 @@ import { ViewPanes } from "./ViewPanes.tsx";
 import { ViewOverlays } from "./ViewOverlays.tsx";
 import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
+import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
 import type { UserTransformActions } from "../hooks/useUserTransforms.ts";
 
@@ -69,6 +70,8 @@ interface Props {
   showDebugOverlays: boolean;
   /** What a press in a view calls to make it the active view. */
   viewLayout: ViewLayoutActions;
+  /** Stand the active view at position `index` of its grid along `axis`, as a scrub does. */
+  onAxisChange: (axis: SpatialAxis, index: number) => void;
   /** What the move tool places the selected layer with. */
   userTransforms: UserTransformActions;
 }
@@ -95,6 +98,7 @@ export function CanvasLayers({
   canvasSize,
   showDebugOverlays,
   viewLayout,
+  onAxisChange,
   userTransforms,
 }: Props) {
   const engine = useEngine();
@@ -279,6 +283,10 @@ export function CanvasLayers({
           coverageOf={(view) => settles.find((settle) => settle.view === view)}
           byHand={(a, b) => (wasmScene ? placedByHandNote(readLineUpByHand(wasmScene, a, b), nameOf) : null)}
           linkNotices={links?.notices}
+          dragPlane={(view, axis, fraction) => {
+            const index = wasmScene?.plane_line_position(view, axis, fraction) ?? -1;
+            if (index >= 0) onAxisChange(axis, Number(index));
+          }}
         />
       )}
       {viewers && panesRoot && (

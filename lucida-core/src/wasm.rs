@@ -629,6 +629,28 @@ impl WasmScene {
             .count
     }
 
+    /// Where four-up's planes cross `view`, as a JSON list of
+    /// [`crate::scene::PlaneLine`]: empty in any other layout.
+    pub fn plane_lines(&self, view: u32) -> String {
+        serde_json::to_string(&self.inner.plane_lines(ViewId(view))).unwrap_or_default()
+    }
+
+    /// The position on `view`'s grid along `axis`, `"x"`, `"y"` or `"z"`,
+    /// under `fraction` of the way across the view along the screen axis
+    /// that draws it, as dragging that plane's line sets it; -1 for an axis
+    /// the view doesn't draw.
+    pub fn plane_line_position(&self, view: u32, axis: &str, fraction: f64) -> i64 {
+        let axis = match axis {
+            "x" => lucida_content::SpatialAxis::X,
+            "y" => lucida_content::SpatialAxis::Y,
+            "z" => lucida_content::SpatialAxis::Z,
+            _ => return -1,
+        };
+        self.inner
+            .plane_line_position(ViewId(view), axis, fraction)
+            .map_or(-1, i64::from)
+    }
+
     /// Whether `view`'s slice camera draws its plane transposed, the plane's
     /// down axis across the screen. Its center stays in the plane's frame.
     pub fn transposed(&self, view: u32) -> bool {

@@ -1,0 +1,40 @@
+/* Over the view's rectangle; only a line's grip takes the pointer. */
+.lc-plane-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.lc-plane-line {
+  fill: none;
+  stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.85;
+}
+
+.lc-plane-line-grip {
+  stroke: transparent;
+  stroke-width: 12px;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
+  cursor: row-resize;
+}
+
+.lc-plane-line-grip[data-upright] {
+  cursor: col-resize;
+}
+
+[data-axis="x"] .lc-plane-line {
+  stroke: var(--lc-canvas-axis-x);
+}
+
+[data-axis="y"] .lc-plane-line {
+  stroke: var(--lc-canvas-axis-y);
+}
+
+[data-axis="z"] .lc-plane-line {
+  stroke: var(--lc-canvas-axis-z);
+}

@@ -1235,6 +1235,7 @@ function Viewer({
               canvasSize={canvasSize}
               showDebugOverlays={showDebugOverlays}
               viewLayout={viewLayout}
+              onAxisChange={dims.handleAxisChange}
               userTransforms={userTransforms}
             />
           </CanvasStage>
