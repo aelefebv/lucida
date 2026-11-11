@@ -33,6 +33,7 @@ import { ScaleBar } from "./ScaleBar.tsx";
 import { useScaleBarShown } from "./scaleBar.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
 import { ViewOverlays } from "./ViewOverlays.tsx";
+import { HOME_KEYS, useViewHome } from "./useViewHome.ts";
 import { FourUpPlanes, useFollowTile } from "./planeLines.ts";
 import { Hover } from "./hover.ts";
 import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
@@ -138,6 +139,7 @@ export function CanvasLayers({
   const viewers = hasDatasets && wasmScene && client && session && canvas
     ? { scene: wasmScene, client, session, canvas }
     : null;
+  const home = useViewHome({ viewers, loopRef: render.loopRef, breakFollow, emitPresence });
   // The one loop draws every view; a change of mode or layout keeps it.
   useViewerLoop(
     viewers && { session: viewers.session, datasets, client: viewers.client, canvas: viewers.canvas },
@@ -175,7 +177,6 @@ export function CanvasLayers({
             key="slice"
             scene={viewers.scene}
             surface={surface}
-            canvas={viewers.canvas}
             active={pane.active}
             emitPresence={emitPresence}
             breakFollow={breakFollow}
@@ -299,6 +300,7 @@ export function CanvasLayers({
             if (index !== null) onAxisChange(axis, index);
           }}
           hover={hover}
+          home={home ? { run: home, keys: HOME_KEYS } : undefined}
         />
       )}
       {viewers && panesRoot && (

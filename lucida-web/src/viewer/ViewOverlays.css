@@ -26,6 +26,21 @@
   pointer-events: none;
 }
 
+/* The view's top right corner, inside the room the column leaves at its
+   right. It wears the scale bar's surface, since it lies over the data. */
+.lc-view-home {
+  position: absolute;
+  top: var(--lc-space-2);
+  right: var(--lc-space-2);
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-float);
+  box-shadow: var(--lc-shadow-1);
+  pointer-events: auto;
+}
+
 .lc-view-comparison-bar {
   max-width: 100%;
   pointer-events: auto;
