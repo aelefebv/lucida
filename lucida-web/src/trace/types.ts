@@ -183,37 +183,38 @@ export interface RunCause {
  * sets a channel's window; remove takes a dataset away; and compare moves a
  * comparison's divider, flips its blink, or starts or ends one. They change
  * what is drawn rather than where the camera is, so the run they open
- * carries the `selection` epoch.
+ * carries the `selection` epoch. Hover moves only what is drawn over the
+ * canvas, the readouts and the crosshairs, so its run carries no epoch.
  */
 export const INPUT_KINDS = [
-  "pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove", "plane", "compare",
+  "pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove", "plane", "compare", "hover",
 ] as const;
 export type InputKind = (typeof INPUT_KINDS)[number];
 
 const VIEW_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "resize", "plane"];
 
+/** The inputs that move only what is drawn over the canvas, which no viewport frame answers. */
+export const OVERLAY_INPUTS: readonly InputKind[] = ["hover"];
+
 export function interactionCause(input: InputKind): RunCause {
   return {
-    epoch: VIEW_INPUTS.includes(input) ? "view" : "selection",
+    epoch: VIEW_INPUTS.includes(input) ? "view" : OVERLAY_INPUTS.includes(input) ? null : "selection",
     dirtyKind: "interactive",
     source: input,
   };
 }
 
 /**
- * Whether a cause is one {@link interactionCause} produced: an epoch an
- * input moves, an interactive dirty, and one of the inputs as its
- * source. All three, so a synthetic view-epoch cause with a residency dirty
+ * Whether a cause is one {@link interactionCause} produced: one of the
+ * inputs as its source, with the epoch that input moves and an interactive
+ * dirty. All of them, so a synthetic view-epoch cause with a residency dirty
  * kind is not judged as a gesture. The ruleset's frame-time ceiling reads
  * this.
  */
 export function isInteractionCause(cause: RunCause | null): boolean {
-  return (
-    cause !== null &&
-    (cause.epoch === "view" || cause.epoch === "selection") &&
-    cause.dirtyKind === "interactive" &&
-    (INPUT_KINDS as readonly string[]).includes(cause.source)
-  );
+  if (cause === null || !(INPUT_KINDS as readonly string[]).includes(cause.source)) return false;
+  const made = interactionCause(cause.source as InputKind);
+  return cause.epoch === made.epoch && cause.dirtyKind === made.dirtyKind;
 }
 
 /**
@@ -1545,7 +1546,9 @@ export interface TraceInput {
   /**
    * When the first frame dispatched after the input was applied left for the
    * render worker, and when its GPU work finished. That frame draws the view
-   * the input set. Null when the run closed first.
+   * the input set. A hover's frame is the read of the samples under its
+   * point instead: when that read left for the worker, and when the page drew
+   * the readouts and crosshairs for it. Null when the run closed first.
    */
   dispatchedUs: number | null;
   presentedUs: number | null;

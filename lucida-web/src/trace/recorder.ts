@@ -55,6 +55,7 @@ import {
   clampStamp,
   COUNTED_PHASES,
   interactionCause,
+  OVERLAY_INPUTS,
   PHASES,
   READING_NAMES,
   ReadingColumn,
@@ -827,9 +828,21 @@ export class TraceRecorder {
     else this.openRun(interactionCause(input));
     const run = this.open;
     if (!run?.cause) return;
-    run.wantedSetMetAtMs = null;
-    for (const view of run.views.values()) view.settledAtMs = null;
+    // A hover moves nothing the views settle on.
+    if (!OVERLAY_INPUTS.includes(input)) {
+      run.wantedSetMetAtMs = null;
+      for (const view of run.views.values()) view.settledAtMs = null;
+    }
     (run.lag ??= new LagRecord()).noteInput(input, atMs);
+  }
+
+  /**
+   * The page drew the readouts and crosshairs for every hover up to
+   * `throughMs`, from a read of the worker that left at `dispatchedMs`.
+   * Answers those hovers.
+   */
+  noteOverlayDrawn(throughMs: number, dispatchedMs: number): void {
+    this.open?.lag?.noteOverlayDrawn(throughMs, dispatchedMs, this.now());
   }
 
   /**

@@ -142,7 +142,7 @@ def test_scenarios_name_what_they_need() -> None:
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
     kinds = {step["kind"] for scenario in SCENARIOS.values() for step in scenario.steps}
-    assert {"mode", "plane", "fit", "resize", "contrast", "add", "remove", "minimap", "swipe", "blink"} <= kinds
+    assert {"mode", "plane", "fit", "resize", "contrast", "add", "remove", "minimap", "swipe", "blink", "hover"} <= kinds
     paced = {
         name
         for name, scenario in SCENARIOS.items()
@@ -169,6 +169,9 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "swipe-drag-volume",
         "two-views",
         "two-views-linked",
+        "hover",
+        "two-views-hover",
+        "four-up-hover",
     }
 
 

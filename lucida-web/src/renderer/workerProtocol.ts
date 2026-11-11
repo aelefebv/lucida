@@ -826,6 +826,12 @@ export interface ProbeMessage {
   id: number;
   x: number;
   y: number;
+  /**
+   * In a volume view, a point of world space to read each channel and label
+   * at, rather than along the ray under `x` and `y`: a crosshair's point,
+   * which the view marks wherever it lies, in front of the data or behind it.
+   */
+  point?: [number, number, number];
 }
 
 export type MainToWorkerMessage =

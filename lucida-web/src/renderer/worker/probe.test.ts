@@ -459,36 +459,72 @@ describe("the worker's pixel probe in 3D with no clip plane", () => {
   });
 });
 
+/**
+ * A label over {@link drewVolume}'s cube, drawn in its frame: background,
+ * except id 5 on the plane at sample depth 12. Returns the frame.
+ */
+function addLabelOverlay(ctx: ReturnType<typeof drewVolume>["ctx"]): VolumeRenderMultiPassMessage {
+  const side = 16;
+  const texels = new Uint32Array(side ** 3);
+  texels.fill(5, 12 * side * side, 13 * side * side);
+  const label = {
+    datasetId: "ds",
+    texture: { texels, width: side, height: side } as unknown as GPUTexture,
+    indirectionData: Uint32Array.from({ length: 8 }, (_, i) => i),
+    slotsX: 2, slotsY: 2, slotsZ: 2,
+    gridX: 2, gridY: 2, gridZ: 2,
+    chunkX: 8, chunkY: 8, chunkZ: 8,
+    width: side, height: side, depth: side,
+  } as unknown as LabelVolumePool;
+  ctx.state.labelVolumePools.set(labelVolumePoolKey("vol:label:regions", 0), label);
+  const frame = [...ctx.state.lastFrames.values()][0] as VolumeRenderMultiPassMessage;
+  const entry = ctx.state.draws.get("ds|0")!.cold.activeSet[0];
+  frame.layers.push({
+    datasetId: "vol:label:regions",
+    blendMode: "alpha",
+    renderMode: "translucent",
+    entityIndex: 0,
+    entityId: "entity",
+    isLabel: true,
+    labelChunk: { level: 0, t: 0 },
+    modelMatrix: entry.modelMatrix,
+    invModelMatrix: entry.invModelMatrix,
+  });
+  return frame;
+}
+
+describe("the worker's probe of a 3D view at a point", () => {
+  const sample = { datasetId: "ds", entityId: "entity", channel: 0 };
+
+  it("reads the sample at the point, not the first the ray under it draws", async () => {
+    const { ctx, settle } = drewVolume("translucent", { contrastMin: 100, contrastMax: 1100 });
+    // World z -0.3 is local depth 0.2: sample 3, in front of the plane of 600.
+    await dispatchMessage(ctx, { type: "probe", id: 1, x: 0.5, y: 0.5, point: [0, 0, -0.3] });
+    expect((await settle()).samples).toEqual([{ ...sample, position: [8, 8, 3], state: "value", value: 10, level: 0 }]);
+  });
+
+  it("reads nothing of a layer whose cube the point misses", async () => {
+    const { ctx, settle } = drewVolume("translucent", { contrastMin: 100, contrastMax: 1100 });
+    await dispatchMessage(ctx, { type: "probe", id: 1, x: 0.5, y: 0.5, point: [0, 0, 0.7] });
+    expect((await settle()).samples).toEqual([]);
+  });
+
+  it("reads a label's id at the point", async () => {
+    const { ctx, settle } = drewVolume("translucent", { contrastMin: 100, contrastMax: 1100 });
+    addLabelOverlay(ctx);
+    // World z 0.28125 is local depth 12.5 / 16, on the label's plane of 5.
+    await dispatchMessage(ctx, { type: "probe", id: 1, x: 0.5, y: 0.5, point: [0, 0, 0.28125] });
+    expect((await settle()).samples).toEqual([
+      { ...sample, position: [8, 8, 12], state: "value", value: 10, level: 0 },
+      { datasetId: "ds", entityId: "entity", labelImageId: "vol:label:regions", position: [8, 8, 12], state: "value", value: 5 },
+    ]);
+  });
+});
+
 describe("the worker's pixel probe of a 3D label overlay", () => {
   it("reads the channels on the clip plane's cut face, and the label's first id behind it", async () => {
     const { ctx, settle } = drewVolume("translucent", { contrastMin: 0, contrastMax: 1000 });
-    // A label over the same cube: background, except id 5 on the plane at sample depth 12.
-    const side = 16;
-    const texels = new Uint32Array(side ** 3);
-    texels.fill(5, 12 * side * side, 13 * side * side);
-    const label = {
-      datasetId: "ds",
-      texture: { texels, width: side, height: side } as unknown as GPUTexture,
-      indirectionData: Uint32Array.from({ length: 8 }, (_, i) => i),
-      slotsX: 2, slotsY: 2, slotsZ: 2,
-      gridX: 2, gridY: 2, gridZ: 2,
-      chunkX: 8, chunkY: 8, chunkZ: 8,
-      width: side, height: side, depth: side,
-    } as unknown as LabelVolumePool;
-    ctx.state.labelVolumePools.set(labelVolumePoolKey("vol:label:regions", 0), label);
-    const frame = [...ctx.state.lastFrames.values()][0] as VolumeRenderMultiPassMessage;
-    const entry = ctx.state.draws.get("ds|0")!.cold.activeSet[0];
-    frame.layers.push({
-      datasetId: "vol:label:regions",
-      blendMode: "alpha",
-      renderMode: "translucent",
-      entityIndex: 0,
-      entityId: "entity",
-      isLabel: true,
-      labelChunk: { level: 0, t: 0 },
-      modelMatrix: entry.modelMatrix,
-      invModelMatrix: entry.invModelMatrix,
-    });
+    const frame = addLabelOverlay(ctx);
     // The plane 0.9 ahead of the eye cuts the cube at local depth 0.4: sample 6, background there.
     frame.clipDistance = 0.9;
     frame.clipMode = 0;

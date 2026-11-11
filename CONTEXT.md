@@ -303,6 +303,15 @@ datasets' channels, paired by name and then by place, and stay off until
 someone links them.
 _Avoid_: sync (unqualified)
 
+**Crosshair**:
+The point under the pointer in one view, marked where it lands in each other
+view that looks at the same place: four-up's other views, and the other of two
+views a link of where they look joins, carried through the link's basis. Each
+marked view reads its samples under the mark, as hover does, and one whose
+data misses the point says so. A volume view gives a point only where its ray
+meets data.
+_Avoid_: cursor (a peer cursor is a collaborator's pointer)
+
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on
 another canvas, or in the rectangle a new view layout gives it, it keeps the

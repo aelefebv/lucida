@@ -468,6 +468,12 @@ export function pickLabelSample(values: readonly MarchedValue[]): number {
  * A point in one unit cube carried into another through world space: `model`
  * takes it out of the first, `invModel` into the second. Column-major.
  */
+/** `point` in the unit cube `invModel` maps world space into, or null outside it. */
+export function cubePoint(point: readonly number[], invModel: ArrayLike<number>): Vec3 | null {
+  const local = transform(invModel, [point[0], point[1], point[2], 1]);
+  return local.every((v) => v >= 0 && v <= 1) ? local : null;
+}
+
 export function betweenCubes(pos: readonly number[], model: ArrayLike<number>, invModel: ArrayLike<number>): Vec3 {
   return transform(invModel, [...transform(model, [pos[0], pos[1], pos[2], 1]), 1]);
 }

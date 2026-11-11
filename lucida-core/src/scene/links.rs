@@ -588,6 +588,34 @@ impl Scene {
         followed
     }
 
+    /// The map from where `from` looks into where `to` does, when they are
+    /// the two views a link joins and a link of where they look (pan, zoom,
+    /// orientation or depth) isn't off: the scene frame itself in the
+    /// physical basis, and through the two datasets' samples in the voxel
+    /// basis.
+    pub(super) fn linked_place_map(&self, from: ViewId, to: ViewId) -> Option<Affine> {
+        let views = self.linked_views()?;
+        let pair = self.links.pair()?;
+        let places = [
+            LinkProperty::Pan,
+            LinkProperty::Zoom,
+            LinkProperty::Orientation,
+            LinkProperty::Z,
+        ];
+        if places
+            .iter()
+            .all(|p| self.links.modes[p.index()] == LinkMode::Off)
+        {
+            return None;
+        }
+        let scene = self.link_maps(&pair).scene;
+        match (from, to) {
+            _ if [from, to] == views => Some(scene),
+            _ if [to, from] == views => Some(scene.inverse()),
+            _ => None,
+        }
+    }
+
     /// The two views a link joins, in layout order.
     fn linked_views(&self) -> Option<[ViewId; 2]> {
         match self.views.as_slice() {

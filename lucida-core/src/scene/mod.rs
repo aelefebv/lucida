@@ -1,5 +1,6 @@
 mod channel_links;
 mod comparison;
+mod crosshair;
 mod cut_grid;
 mod four_up;
 mod layers;
@@ -13,6 +14,7 @@ mod views;
 pub(crate) use channel_links::ChannelChange;
 pub use channel_links::{ChannelPair, PairedBy};
 pub use comparison::{CompareMode, Comparison, Side};
+pub use crosshair::{CrosshairMark, ViewCrosshair};
 pub use cut_grid::{AxisReading, CutGrid};
 pub use four_up::{FOUR_UP, PlaneLine};
 pub(crate) use layers::LayerExtent;

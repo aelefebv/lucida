@@ -31,6 +31,7 @@ import { fromPlaneFrame } from "../slicePlane.ts";
 import {
   betweenCubes,
   clipPlaneHit,
+  cubePoint,
   levelZeroPosition,
   locateSample,
   marchSamples,
@@ -107,6 +108,8 @@ export function handleProbe(ctx: WorkerCtx, probe: ProbeMessage): void {
     // A tilted cut samples its member's bricks, as a volume view's clip face does.
     const cuts = cutHits(frame, msg.x, msg.y, (memberId) => memberOf(ctx, memberId, frame.view)?.entry.invModelMatrix);
     for (const cut of cuts) probeMember(ctx, cut.memberId, cut.local, samples, reads, frame.view, "volume");
+  } else if (frame?.type === "volumeRenderMultiPass" && probe.point) {
+    for (const layer of frame.layers) probeVolumeLayerAt(ctx, frame.view, layer, probe.point, samples, reads);
   } else if (frame?.type === "volumeRenderMultiPass") {
     for (const layer of frame.layers) {
       if (layer.isLabel) {
@@ -475,6 +478,65 @@ function probeVolumeLabel(
     const marched = pending(values);
     settleMarch(sample, steps, marched, pickLabelSample(marched), position);
   });
+}
+
+/**
+ * One layer of a volume frame read at a point of world space: each channel's
+ * sample there, or the label id there, as the layer's pools hold them. A
+ * layer whose cube the point misses reads nothing.
+ */
+function probeVolumeLayerAt(
+  ctx: WorkerCtx,
+  view: number,
+  layer: VolumeLayerParams,
+  point: readonly number[],
+  samples: ProbeSample[],
+  reads: TexelReads,
+): void {
+  if (!layer.isLabel) {
+    const invModel = memberOf(ctx, layer.datasetId, view)?.entry.invModelMatrix;
+    const local = invModel && cubePoint(point, invModel);
+    if (local) probeMember(ctx, layer.datasetId, local, samples, reads, view, "volume");
+    return;
+  }
+  const pool = layer.labelChunk && ctx.state.labelVolumePools.get(labelVolumePoolKey(layer.datasetId, layer.labelChunk.t));
+  const local = pool && layer.invModelMatrix ? cubePoint(point, layer.invModelMatrix) : null;
+  if (!pool || !local || !layer.modelMatrix) return;
+  const source: ProbeSource<ReadablePool> = {
+    meta: {
+      level: layer.labelChunk?.level ?? 0,
+      levelDims: [pool.depth, pool.height, pool.width],
+      chunkDims: [pool.chunkZ, pool.chunkY, pool.chunkX],
+      gridDims: [pool.gridZ, pool.gridY, pool.gridX],
+      offset: 0,
+    },
+    atlas: {
+      texture: pool.texture,
+      indirectionData: pool.indirectionData,
+      slotsX: pool.slotsX,
+      slotsY: pool.slotsY,
+      slotsZ: pool.slotsZ,
+    },
+  };
+  const location = locateSample([source], null, local, "volume");
+  const entry = drawOf(ctx.state, pool.datasetId, view)?.cold.activeSet.find((e) => e.entityId === layer.entityId);
+  const dims = entry ? levelZeroDims(entry) : null;
+  const sample: ProbeSample = {
+    datasetId: pool.datasetId,
+    entityId: layer.entityId ?? "",
+    labelImageId: layer.datasetId,
+    state: location.kind === "resident" ? "value" : location.kind,
+  };
+  if (entry && dims) {
+    sample.position = levelZeroPosition(betweenCubes(local, layer.modelMatrix, entry.invModelMatrix), dims, "volume");
+  }
+  samples.push(sample);
+  if (location.kind === "resident") {
+    const index = reads.add(location.atlas, location.texel, "id");
+    reads.then((values) => {
+      sample.value = values[index];
+    });
+  }
 }
 
 interface ColdMember {

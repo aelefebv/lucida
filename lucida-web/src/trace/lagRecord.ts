@@ -10,12 +10,19 @@
  * sequence number of the next frame dispatched, and is answered when the
  * worker reports that frame, or a later one, done.
  *
+ * A hover moves only what is drawn over the canvas, so no viewport frame
+ * answers it. It is answered when the page has drawn the readouts and
+ * crosshairs for its point, which read the samples there from the worker.
+ *
  * Each list is a drop-oldest ring that counts what it overwrote. Inputs still
  * waiting for a frame are always the newest few, so the ring never overwrites
  * one before it is answered.
  */
 
-import { INPUT_KINDS, type InputKind, type TraceLag } from "./types.ts";
+import { INPUT_KINDS, OVERLAY_INPUTS, type InputKind, type TraceLag } from "./types.ts";
+
+/** The kinds {@link LagRecord.noteOverlayDrawn} answers, as the ring stores them. */
+const OVERLAY_KINDS = new Set(OVERLAY_INPUTS.map((kind) => INPUT_KINDS.indexOf(kind)));
 
 /** About seventeen seconds of continuous input at 60 Hz; a scripted drag sends at most 60. */
 export const INPUT_CAPACITY = 1024;
@@ -76,7 +83,7 @@ export class LagRecord {
     for (let n = Math.max(this.dispatched, this.taken - INPUT_CAPACITY); n < this.taken; n++) {
       const slot = n % INPUT_CAPACITY;
       this.inputFrameSeq[slot] = frameSeq;
-      this.inputDispatchedMs[slot] = atMs;
+      if (!OVERLAY_KINDS.has(this.inputKind[slot])) this.inputDispatchedMs[slot] = atMs;
     }
     this.dispatched = this.taken;
   }
@@ -89,9 +96,26 @@ export class LagRecord {
     for (; n < this.dispatched; n++) {
       const slot = n % INPUT_CAPACITY;
       if (this.inputFrameSeq[slot] > frameSeq) break;
-      this.inputPresentedMs[slot] = atMs;
+      if (!OVERLAY_KINDS.has(this.inputKind[slot])) this.inputPresentedMs[slot] = atMs;
     }
     this.answered = n;
+  }
+
+  /**
+   * The page drew what every hover up to `throughMs` showed, from a read of
+   * the worker that left at `dispatchedMs`: those hovers are answered now.
+   * Hovers are answered in the order they came, so the newest answered one
+   * ends the walk back.
+   */
+  noteOverlayDrawn(throughMs: number, dispatchedMs: number, atMs: number): void {
+    for (let n = this.taken - 1; n >= Math.max(0, this.taken - INPUT_CAPACITY); n--) {
+      const slot = n % INPUT_CAPACITY;
+      if (!OVERLAY_KINDS.has(this.inputKind[slot])) continue;
+      if (!Number.isNaN(this.inputPresentedMs[slot])) break;
+      if (this.inputAtMs[slot] > throughMs) continue;
+      this.inputDispatchedMs[slot] = dispatchedMs;
+      this.inputPresentedMs[slot] = atMs;
+    }
   }
 
   noteLongTask(startMs: number, durationMs: number): void {
