@@ -1224,6 +1224,49 @@ describe("display-only fast path", () => {
     }
   });
 
+  it("plans nothing of a layer the view's comparison sets aside, and plans it again once it ends", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const coldStateSelection = vi.fn();
+      const ctxAt = (selection: number, setAside: boolean) => {
+        const scene = createMockScene({
+          epochs: { content: 1, layout: 1, view: 1, selection },
+          allSettings: baseSettings(),
+        }) as { resolved_layers: () => string };
+        const resolve = scene.resolved_layers;
+        scene.resolved_layers = () =>
+          JSON.stringify((JSON.parse(resolve()) as ResolvedLayer[]).map((l) => ({
+            ...l, visible: !setAside, set_aside: setAside,
+          })));
+        return makeCtx(scene, datasets, { cpuCache, coldState, coldStateSelection });
+      };
+
+      orch.planAndFetch(ctxAt(1, false), emptyMinimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+      vi.mocked(cpuCache.submit).mockClear();
+
+      // Its own setting still says visible, but nothing of it is planned,
+      // fetched or patched.
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(ctxAt(2, true), emptyMinimap);
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(cpuCache.submit).not.toHaveBeenCalled();
+      expect(coldStateSelection).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(ctxAt(3, false), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(coldState).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the last zoom's level prefetch when a T scrub is served from the cached active set", () => {
     vi.useFakeTimers({ toFake: ["performance"] });
     try {

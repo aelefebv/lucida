@@ -276,8 +276,18 @@ function viewCutPlane(ctx: TickContext, view: TickView): SlicePlane | null {
 }
 
 /**
- * The datasets the view draws and plans: each one shown whose layer the cut
- * passes through. A change to this set changes the roster.
+ * Whether a view of `plane` plans `layer`: one it draws, neither hidden, nor
+ * set aside by the view's comparison, nor missed by its cut. Without a layer
+ * the view's `view_query` decides, and answers nothing for a dataset it does
+ * not draw.
+ */
+function plansLayer(layer: ResolvedLayer | undefined, plane: SlicePlane | null): boolean {
+  return layer === undefined || (layer.visible && !outsideCut(layer, plane));
+}
+
+/**
+ * The datasets the view draws and plans: each one shown whose layer it
+ * plans. A change to this set changes the roster.
  */
 function drawnDatasetIds(
   settings: SceneSettings,
@@ -286,7 +296,7 @@ function drawnDatasetIds(
 ): Set<string> {
   const drawn = new Set<string>();
   for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
-    if (dsSettings.visible && !outsideCut(layers.get(dsId), plane)) drawn.add(dsId);
+    if (dsSettings.visible && plansLayer(layers.get(dsId), plane)) drawn.add(dsId);
   }
   return drawn;
 }
@@ -836,11 +846,12 @@ export class TickCoordinator {
       if (dsSettings && !dsSettings.visible) continue;
       // Each view that draws the dataset plans it, its holder first, whose
       // plan is what the worker holds; a view that leaves it out gets no
-      // view query for it. A layer a view's cut misses draws nothing there,
-      // so nothing of it is planned for that view.
+      // view query for it. A layer a view's cut misses, or its comparison
+      // sets aside, draws nothing there, so nothing of it is planned for
+      // that view.
       const holder = holderView(ctx, dsId);
       const viewsOfDataset = views
-        .filter((view) => !outsideCut(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)))
+        .filter((view) => plansLayer(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)))
         .sort((a, b) => Number(b.id === holder.id) - Number(a.id === holder.id));
       if (viewsOfDataset.length === 0) continue;
 

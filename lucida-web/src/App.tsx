@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { ComparisonBar, SwipeDivider } from "./components/Comparison.tsx";
+import { setAsideNote } from "./comparison.ts";
 import { Minimap } from "./components/Minimap.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { sceneClipDepth } from "./components/clipDepth.ts";
@@ -1128,6 +1129,7 @@ function Viewer({
                       comparison={comparison.current}
                       actions={comparison.actions}
                       nameOf={comparison.nameOf}
+                      setAside={setAsideNote(dims.layers)}
                     />
                   )}
                   {/* `#a=<id>` didn't resolve. A recipient without access fails

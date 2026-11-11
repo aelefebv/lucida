@@ -147,6 +147,14 @@ impl View {
         self.datasets.shows(dataset_id)
     }
 
+    /// Whether the view's comparison sets `dataset_id` aside: one is under
+    /// way and the dataset is not one of its pair.
+    pub fn sets_aside(&self, dataset_id: &DatasetId) -> bool {
+        self.comparison
+            .as_ref()
+            .is_some_and(|c| !c.compares(dataset_id))
+    }
+
     /// The plane the slice camera cuts, whether it is active or parked. A
     /// view that never had one cuts XY.
     pub fn slice_plane(&self) -> SlicePlane {
