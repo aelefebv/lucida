@@ -956,6 +956,8 @@ impl Scene {
                 let views_before = self.views().to_vec();
                 let active_before = self.active_view().id();
                 self.mutate_viewport(cmd);
+                // A view that stops showing one of its pair stops comparing.
+                self.keep_comparison_lined_up();
                 if self.views() != views_before.as_slice()
                     || self.active_view().id() != active_before
                 {
