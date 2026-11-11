@@ -315,12 +315,24 @@ pub fn stitch_grid(thumbs: &[Vec<u8>], labels: &[String], cols: u32) -> Result<V
 /// captured through this clean surface (no sidebar/toolbar), but the sidecar
 /// keeps the normal interactive URLs so an agent or human can drill in.
 pub fn with_render_param(url: &str) -> String {
+    with_query_param(url, "render", "1")
+}
+
+/// Ask a viewer URL's page to draw each view's scale bar, or not, whatever
+/// the browser's settings say. The capture surface draws none unless asked.
+pub fn with_scale_bar_param(url: &str, shown: bool) -> String {
+    with_query_param(url, "scale_bar", if shown { "1" } else { "0" })
+}
+
+/// Add `key=value` to a viewer URL's query string, keeping any `#view=…`
+/// fragment after it.
+fn with_query_param(url: &str, key: &str, value: &str) -> String {
     let (base, fragment) = match url.split_once('#') {
         Some((base, fragment)) => (base, Some(fragment)),
         None => (url, None),
     };
     let separator = if base.contains('?') { '&' } else { '?' };
-    let mut out = format!("{base}{separator}render=1");
+    let mut out = format!("{base}{separator}{key}={value}");
     if let Some(fragment) = fragment {
         out.push('#');
         out.push_str(fragment);
@@ -349,6 +361,18 @@ mod tests {
         );
         // No fragment at all.
         assert_eq!(with_render_param("http://h/w/ws"), "http://h/w/ws?render=1");
+    }
+
+    #[test]
+    fn scale_bar_param_follows_the_render_param_before_the_fragment() {
+        assert_eq!(
+            with_scale_bar_param(&with_render_param("http://h/w/ws#view=ABC"), true),
+            "http://h/w/ws?render=1&scale_bar=1#view=ABC"
+        );
+        assert_eq!(
+            with_scale_bar_param("http://h/w/ws", false),
+            "http://h/w/ws?scale_bar=0"
+        );
     }
 
     /// A tiny solid-color PNG for stitch tests.
