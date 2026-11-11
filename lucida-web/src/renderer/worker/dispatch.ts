@@ -15,6 +15,7 @@ import {
   applyColdStateSelection,
   applyColdStateDelta,
   releaseUndrawnViews,
+  wantNothingOf,
 } from "../coldState/index.ts";
 import {
   handleLabelSliceChunkData,
@@ -203,6 +204,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       for (const draw of drawsOf(ctx.state, msg.datasetId)) applyColdState(ctx, draw.cold);
       return;
     }
+
+    case "datasetUnplanned":
+      // Nothing on the GPU changes, and nothing of the dataset is missing.
+      wantNothingOf(ctx, msg.datasetId);
+      return;
 
     case "removeLayerResources":
       removeDatasetResources(ctx, msg.datasetId);

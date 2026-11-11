@@ -568,6 +568,16 @@ export class Uploader {
     this.resendGuard.onRebuild();
   }
 
+  /**
+   * Tell the worker no view plans `datasetId` any more, so it wants none of
+   * the dataset's chunks. The dataset's next cold state is diffed against
+   * nothing, as the worker then wants nothing of it.
+   */
+  sendDatasetUnplanned(ctx: TickContext, datasetId: string): void {
+    ctx.client.datasetUnplanned({ type: "datasetUnplanned", datasetId });
+    this.wantedByDatasetView.delete(datasetId);
+  }
+
   // Lifecycle (dataset removal)
 
   clearMember(workerMemberId: string): void {
