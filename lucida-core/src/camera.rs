@@ -50,6 +50,12 @@ pub struct VisibleRegion {
     /// Optional frustum planes in full-resolution voxel coordinates for per-chunk culling.
     /// Each plane is [a, b, c, d] where ax + by + cz + d >= 0 means inside.
     pub frustum_planes: Option<[[f64; 4]; 6]>,
+    /// A slice view of a dataset its placement turns in the plane: the
+    /// screen's four edges in the dataset's frame, each `[a, b, c, d]` with
+    /// `ax + by + cz + d >= 0` inside, so planning leaves out the chunks of
+    /// the box around them that the screen doesn't show. `None` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub side_planes: Option<[[f64; 4]; 4]>,
     /// The axis a slice view cuts. Its extent here is the dataset's own
     /// planes the view cuts; the other two are what the screen shows. A
     /// volume view leaves it at Z and ignores it.
@@ -729,6 +735,26 @@ impl Slice {
         (lo[across], hi[across], lo[down], hi[down]) = (u0, u1, v0, v1);
         let (mut min, mut max) = frame_to_scene.inverse().apply_box(lo, hi);
         (min[cut], max[cut]) = (planes.start as f64, planes.end as f64);
+        // A turned dataset's box around the screen holds corners the screen
+        // doesn't show, which its edges, read into the frame, cut away.
+        let side_planes = (!frame_to_scene.is_axis_aligned()).then(|| {
+            let row = |axis: usize| frame_to_scene.linear[axis];
+            let edge = |axis: usize, sign: f64, bound: f64| {
+                let r = row(axis);
+                [
+                    sign * r[0],
+                    sign * r[1],
+                    sign * r[2],
+                    sign * (frame_to_scene.offset[axis] - bound),
+                ]
+            };
+            [
+                edge(across, 1.0, u0),
+                edge(across, -1.0, u1),
+                edge(down, 1.0, v0),
+                edge(down, -1.0, v1),
+            ]
+        });
         // A cut along Z names its planes. A view that draws Z covers every
         // plane its bounds touch.
         let z_range = if cut == 2 {
@@ -745,6 +771,7 @@ impl Slice {
             radius_basis_vox: visible_radius_basis_from_box(min, max),
             sort_center: None,
             frustum_planes: None,
+            side_planes,
             cut_axis: self.plane.cut(),
         }
     }
@@ -1343,6 +1370,7 @@ impl Arcball {
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
+            side_planes: None,
             cut_axis: SpatialAxis::Z,
         }
     }
@@ -1756,6 +1784,7 @@ impl Fly {
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
+            side_planes: None,
             cut_axis: SpatialAxis::Z,
         }
     }

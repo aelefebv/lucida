@@ -890,6 +890,28 @@ mod tests {
         // Inside the turned square, and inside its box but past the square.
         assert!(pick(&scene, [0.0, 45.0]));
         assert!(!pick(&scene, [40.0, 5.0]));
+
+        // Planning keeps the square's samples on screen and drops the box's
+        // corners off it: the frame point under the screen's center is
+        // inside every edge, and one far past the screen is not.
+        let region = scene.visible_region(view, &a).unwrap();
+        let planes = region
+            .side_planes
+            .expect("a turned dataset's region has edges");
+        let inside = |p: [f64; 3]| {
+            planes
+                .iter()
+                .all(|e| e[0] * p[0] + e[1] * p[1] + e[2] * p[2] + e[3] >= 0.0)
+        };
+        let to_frame = scene.placement(&a).unwrap().inverse();
+        let center = scene
+            .view(view)
+            .unwrap()
+            .camera
+            .unproject_ray(400.0, 300.0)
+            .origin;
+        assert!(inside(to_frame.apply([center[0], center[1], 0.0])));
+        assert!(!inside(to_frame.apply([center[0] + 1e6, center[1], 0.0])));
     }
 
     #[test]

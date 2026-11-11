@@ -19,7 +19,7 @@ import { FpsCounter } from "./components/FpsCounter.tsx";
 import { extractCollectionData } from "./components/CollectionSelector.tsx";
 import type { VoxelRect } from "./pipeline/layoutBuilders.ts";
 import { frameRegionOnCanvas } from "./applyAndSend.ts";
-import { readPlacement, sceneToFrame } from "./placement.ts";
+import { readPlaneMap, sceneToFrame } from "./placement.ts";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
@@ -888,7 +888,7 @@ function Viewer({
       },
       getViewCenter: () => {
         const ws = scene.wasmSceneRef.current;
-        return ws ? sceneToFrame(readPlacement(ws, ds.id), [ws.center(ws.active_view())[0], ws.center(ws.active_view())[1]]) : null;
+        return ws ? sceneToFrame(readPlaneMap(ws, ds.id), [ws.center(ws.active_view())[0], ws.center(ws.active_view())[1]]) : null;
       },
     };
   })();

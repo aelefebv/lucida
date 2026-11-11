@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
   COPY_DST: 0x08,
 };
 
+import { axisAlignedQuad } from "../sliceQuad.ts";
 import type { EntityDescriptorIndex, MemberSourceBinding } from "../descriptorBuffer.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { UNTIMED } from "../passTiming.ts";
@@ -14,7 +15,7 @@ import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import type { SliceAtlasState } from "./atlas.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
-import { handleSliceRenderMultiPass } from "./render.ts";
+import { handleSliceRenderMultiPass, memberScissor } from "./render.ts";
 import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
 
 vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
@@ -203,7 +204,7 @@ function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMulti
     type: "sliceRenderMultiPass",
     epochs: EPOCHS,
     layers: [
-      { datasetId: memberId, entityId: "entity-a", entityIndex: 0, blendMode: "alpha", dataW, dataH },
+      { datasetId: memberId, entityId: "entity-a", entityIndex: 0, blendMode: "alpha", quad: axisAlignedQuad(0, 0, dataW, dataH) },
     ],
     zoom: 1,
     cx: dataW / 2,
@@ -214,6 +215,20 @@ function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMulti
     rect: [0, 0, 64, 64],
   };
 }
+
+describe("a member's scissor", () => {
+  it("covers the pixels around a turned member's corners", () => {
+    const msg = memberMsg("img-0:ch0");
+    // At zoom 1 about (64, 64) on 64 x 64, scene (x, y) is at pixel (x - 32, y - 32).
+    // 100 x 100 turned an eighth about (64, 0) reaches past every edge.
+    const r = 100 * Math.SQRT1_2;
+    const layer = { ...msg.layers[0], quad: { origin: [64, 0] as [number, number], across: [r, r] as [number, number], down: [-r, r] as [number, number] } };
+    expect(memberScissor(msg, layer)).toEqual([0, 0, 64, 64]);
+    // One whose corners span scene x and y from 54 to 74.
+    const small = { ...layer, quad: { origin: [64, 54] as [number, number], across: [10, 10] as [number, number], down: [-10, 10] as [number, number] } };
+    expect(memberScissor(msg, small)).toEqual([22, 22, 20, 20]);
+  });
+});
 
 describe("handleSliceRenderMultiPass — the compile", () => {
   // The reason is in `pipelineCompile.ts`.
@@ -386,10 +401,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
           datasetId: "img-0",
           entityIndex: 0,
           blendMode,
-          dataW: 2048,
-          dataH: 1024,
-          offsetX: 100,
-          offsetY: 200,
+          quad: axisAlignedQuad(100, 200, 2048, 1024),
           aggregate: { poolMemberId: "img-0", count, quads },
         },
       ],
@@ -600,10 +612,7 @@ describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () 
           datasetId: `img-${i}:ch${channel}`,
           entityIndex: channel * 12 + i,
           blendMode: "additive",
-          dataW: 128,
-          dataH: 128,
-          offsetX: (i % 4) * 128,
-          offsetY: Math.floor(i / 4) * 128,
+          quad: axisAlignedQuad((i % 4) * 128, Math.floor(i / 4) * 128, 128, 128),
           passGroup,
         });
       }
@@ -651,8 +660,8 @@ describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () 
     expect(memberOf(renderer, 0, 5).scissor).toEqual([128, 128, 128, 128]);
     expect(memberOf(renderer, 1, 11).scissor).toEqual([384, 256, 128, 128]);
     expect(memberOf(renderer, 1, 11).entityIndex).toBe(23);
-    // Each draw keeps its own member-local view center.
-    expect([memberOf(renderer, 0, 5).cx, memberOf(renderer, 0, 5).cy]).toEqual([128, 64]);
+    // Each draw is placed at its own quad under the frame's camera.
+    expect(memberOf(renderer, 0, 5).placement).toEqual({ zoom: 1, cx: 256, cy: 192, quad: axisAlignedQuad(128, 128, 128, 128) });
   });
 
   it("leaves out a tile off the target, and still updates its eviction reference", async () => {

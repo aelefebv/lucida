@@ -16,7 +16,7 @@ import { Axis } from "../axes.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "../trace/linkedSelection.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import type { DatasetState } from "../types.ts";
-import { frameToScene, readPlacement, type Placement } from "../placement.ts";
+import { frameToScene, readPlaneMap, type PlaneMap } from "../placement.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/fetch/index.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
@@ -321,7 +321,7 @@ interface TileFrame {
   fullVoxel: [number, number, number];
   model: Float32Array | null;
   /** Where the tile's dataset sits in the scene frame, for the slice path. */
-  placement: Placement;
+  placement: PlaneMap;
 }
 
 /** Project a world-space point to CSS-pixel screen coords. */
@@ -640,7 +640,7 @@ export function DebugOverlays({
           pos: [0, 0], // overwritten below
           fullVoxel: [lvl0Shape[Axis.X], lvl0Shape[Axis.Y], lvl0Shape[Axis.Z]],
           model,
-          placement: readPlacement(ws, dsId),
+          placement: readPlaneMap(ws, dsId),
         };
       };
 
@@ -708,7 +708,7 @@ export function DebugOverlays({
                 pos: [0, 0],
                 fullVoxel: [1, 1, 1],
                 model: null,
-                placement: readPlacement(ws, dsId),
+                placement: readPlaneMap(ws, dsId),
               };
             }
             if (!frame) continue;

@@ -92,7 +92,7 @@ vi.mock("lucida-core", () => {
       return new Float64Array();
     }
     dataset_placement() {
-      return new Float64Array([0, 0, 0, 1, 1, 1]);
+      return new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
     }
     all_dataset_settings() {
       const out: Record<string, unknown> = {};

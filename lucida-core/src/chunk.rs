@@ -58,6 +58,9 @@ pub struct ChunkView {
     /// A 3-D view culls chunks against its frustum. A 2-D view has none, and
     /// samples the one chunk along its cut axis that holds each of its planes.
     frustum_planes: Option<Vec<[f64; 4]>>,
+    /// A 2-D view of a turned dataset culls chunks against the screen's
+    /// edges read into its frame, keeping its cut.
+    side_planes: Option<Vec<[f64; 4]>>,
     /// The axis a 2-D view cuts. Its range is in each image's own samples,
     /// so an image's place never applies along it.
     cut: SpatialAxis,
@@ -83,6 +86,8 @@ struct RegionInput {
     #[serde(default)]
     frustum_planes: Option<Vec<[f64; 4]>>,
     #[serde(default)]
+    side_planes: Option<Vec<[f64; 4]>>,
+    #[serde(default)]
     cut_axis: SpatialAxis,
 }
 
@@ -97,6 +102,7 @@ impl ChunkView {
                 radius_basis_vox: Some(region.radius_basis_vox),
                 sort_center: region.sort_center,
                 frustum_planes: region.frustum_planes.map(Vec::from),
+                side_planes: region.side_planes.map(Vec::from),
                 cut_axis: region.cut_axis,
             },
             depth_bias,
@@ -137,6 +143,7 @@ impl ChunkView {
             xy_bounds: region.xy_bounds,
             z_range: region.z_range,
             frustum_planes: region.frustum_planes,
+            side_planes: region.side_planes,
             cut: region.cut_axis,
             center,
             radius_basis,
@@ -284,11 +291,14 @@ pub fn enumerate_chunks(
                 let cell = [col as f64, row as f64, z as f64];
                 let lo: [f64; 3] = std::array::from_fn(|a| cell[a] * world[a]);
                 let hi: [f64; 3] = std::array::from_fn(|a| (cell[a] + 1.0) * world[a]);
-                if let Some(planes) = &view.frustum_planes {
-                    let placed = |p: [f64; 3]| [p[0] + ox, p[1] + oy, p[2] + oz];
-                    if chunk_outside_frustum(&placed(lo), &placed(hi), planes) {
-                        continue;
-                    }
+                let placed = |p: [f64; 3]| [p[0] + ox, p[1] + oy, p[2] + oz];
+                let culled = |planes: &Option<Vec<[f64; 4]>>| {
+                    planes.as_deref().is_some_and(|planes| {
+                        chunk_outside_frustum(&placed(lo), &placed(hi), planes)
+                    })
+                };
+                if culled(&view.frustum_planes) || culled(&view.side_planes) {
+                    continue;
                 }
                 counts.after_frustum += 1;
                 if let Some(radius) = radius {
@@ -526,6 +536,15 @@ mod tests {
         assert_eq!(found.len(), 32);
         assert!(found.iter().all(|c| c.x < 2));
         assert_eq!(counts.after_frustum, 32);
+    }
+
+    #[test]
+    fn a_turned_slice_view_culls_by_the_screen_edges_and_keeps_its_cut() {
+        // A diagonal edge keeps chunks with some sample where x + y <= 500.
+        let v =
+            view(r#"{"xy_bounds":[0,0,1024,1024],"z_range":[0,1],"side_planes":[[-1,-1,0,500]]}"#);
+        let (found, _) = enumerate(&v, &whole(&cube()));
+        assert_eq!(cells(&found), [(0, 0, 0), (1, 0, 0), (0, 1, 0)]);
     }
 
     #[test]

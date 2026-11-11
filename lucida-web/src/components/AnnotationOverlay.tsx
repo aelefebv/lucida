@@ -30,7 +30,7 @@ import {
   useCanvasTaps,
 } from "./annotationInteraction.ts";
 import { eventToFrame, makeFrameToScreen, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
-import { frameToScene, readPlacement } from "../placement.ts";
+import { frameToScene, readPlaneMap } from "../placement.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import {
@@ -413,7 +413,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         setOpenPinId(pin.id);
         const scene = wasmSceneRef.current;
         if (scene) {
-          const [x, y] = frameToScene(readPlacement(scene, datasetId), pin.position);
+          const [x, y] = frameToScene(readPlaneMap(scene, datasetId), pin.position);
           applyViewportCommand(scene, { type: "set_center", x, y });
           // Repaint under the recentered camera; the pull-based loop won't
           // otherwise.

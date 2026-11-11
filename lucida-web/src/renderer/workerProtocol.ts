@@ -7,6 +7,7 @@ import type { SampleFormat } from "./dataTypeUtil.ts";
 import type { BlendMode } from "./layerCompositor.ts";
 import type { DeviceLimits } from "./gpuContext.ts";
 import type { PoolCut, SpatialAxis } from "./slicePlane.ts";
+import type { SliceQuad } from "./sliceQuad.ts";
 
 export interface InitMessage {
   type: "init";
@@ -302,8 +303,7 @@ export interface SliceAggregateParams {
    * Interleaved per-member records, 32 bytes each, matching the
    * shader's `MemberQuad` layout:
    *   - f32 ×4 — quad rect in layer UV: originX, originY, width, height
-   *     (relative to the aggregate layer's `offsetX/offsetY` +
-   *     `dataW/dataH` extent)
+   *     (fractions of the aggregate layer's quad)
    *   - u32 — entity descriptor index for the member
    *   - u32 ×3 — padding (zero)
    */
@@ -312,14 +312,9 @@ export interface SliceAggregateParams {
 
 export interface SliceLayerParams {
   datasetId: string;
-  /** The quad's extent in the scene frame the camera views. */
-  dataW: number;
-  dataH: number;
+  /** Where the layer's quad lies in the scene frame the camera views, turned as its dataset is. */
+  quad: SliceQuad;
   blendMode: "alpha" | "additive" | "max";
-  /** The quad's corner in the scene frame along X (default 0). */
-  offsetX?: number;
-  /** The quad's corner in the scene frame along Y (default 0). */
-  offsetY?: number;
   /** See {@link VolumeLayerParams.entityId}. */
   entityId?: string;
   /** See {@link VolumeLayerParams.entityIndex}. */
@@ -343,16 +338,16 @@ export interface SliceLayerParams {
   /**
    * A label layer's extent in its source image's level-0 samples,
    * `[width, height]`: what its quad spans, before placement scales it into
-   * the scene frame. A probe reads sample positions in it. Absent, the quad
-   * measures one scene unit per sample.
+   * the scene frame. A probe reads sample positions in it. Absent, a sample
+   * is one scene unit along each of the quad's edges.
    */
   labelSamples?: [number, number];
   /**
    * Batched member quads for an aggregate layer. When present the
    * worker renders the whole batch in one pass (one instanced draw)
-   * instead of one pass per member; `datasetId`, `offsetX/offsetY`,
-   * `dataW/dataH` describe the batch's union extent, and per-member
-   * geometry + descriptor indices ride in {@link SliceAggregateParams}.
+   * instead of one pass per member; `datasetId` and `quad` describe the
+   * batch's union extent, and per-member geometry + descriptor indices
+   * ride in {@link SliceAggregateParams}.
    * Absent for ordinary per-member layers.
    */
   aggregate?: SliceAggregateParams;
