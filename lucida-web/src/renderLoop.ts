@@ -655,6 +655,26 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
+   * The pointer moved over a view, which moves only what is drawn over the
+   * canvas: the readouts and the crosshairs. The recorder hears it as an
+   * input, but nothing in the views changed, so it dirties no frame. The
+   * settle state goes out again so the run it opened can close on it.
+   */
+  markHover(atMs?: number): void {
+    if (this.datasets.size === 0) return;
+    traceRecorder.noteInput("hover", atMs);
+    this.republishSettle();
+  }
+
+  /**
+   * The page drew the readouts and crosshairs for every hover up to
+   * `throughMs`, from a read of the worker that left at `dispatchedMs`.
+   */
+  noteHoverDrawn(throughMs: number, dispatchedMs: number): void {
+    traceRecorder.noteOverlayDrawn(throughMs, dispatchedMs);
+  }
+
+  /**
    * Feed the newest finished frame to the adaptive resolution and the frame
    * pacer, and arrange for a lowered resolution to come back once input
    * stops, with a frame to show it.

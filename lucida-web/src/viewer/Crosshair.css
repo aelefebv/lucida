@@ -1,0 +1,18 @@
+/* Centered on the point, a fixed size in CSS pixels at any pixel ratio. Over
+   data of any brightness, so it wears the annotations' white ring and dark
+   shadow. */
+.lc-crosshair {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  overflow: visible;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(var(--lc-annotation-shadow));
+  pointer-events: none;
+}
+
+.lc-crosshair line {
+  stroke: var(--lc-annotation-ring);
+  stroke-width: 1.5px;
+  stroke-linecap: round;
+}

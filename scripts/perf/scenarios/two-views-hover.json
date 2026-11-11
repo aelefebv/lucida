@@ -1,0 +1,11 @@
+{
+  "description": "two slice views of datasets over one region side by side, linked by default; move the pointer across the left view for 3 s at a person's pace, so a crosshair and a readout follow it in the right view at the same point; to set against hover in one view",
+  "requires": ["physical", "volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "add", "url": "dataset:physical-volume-coarse" },
+    { "kind": "views", "layout": "columns", "show": [[], ["dataset:physical-volume-coarse"]] },
+    { "kind": "target", "view": 0 },
+    { "kind": "hover", "dx": -300, "dy": -150, "durationMs": 3000 }
+  ]
+}

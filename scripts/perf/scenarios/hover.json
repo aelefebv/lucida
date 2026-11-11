@@ -1,0 +1,7 @@
+{
+  "description": "move the pointer across the view for 3 s at a person's pace with no button down, so the readout follows it; with one view there is no crosshair, so this is what two-views-hover and four-up-hover set their crosshairs against",
+  "camera": "slice",
+  "steps": [
+    { "kind": "hover", "dx": -300, "dy": -150, "durationMs": 3000 }
+  ]
+}

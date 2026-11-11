@@ -755,6 +755,13 @@ impl WasmScene {
             .unwrap_or_default()
     }
 
+    /// Where the point under `(x, y)` in `view`, fractions of its width and
+    /// height, lands in each other view that looks at the same place, as a
+    /// JSON list of [`crate::scene::ViewCrosshair`].
+    pub fn crosshairs(&self, view: u32, x: f64, y: f64) -> String {
+        serde_json::to_string(&self.inner.crosshairs(ViewId(view), [x, y])).unwrap_or_default()
+    }
+
     /// The position on `view`'s grid along `axis`, `"x"`, `"y"` or `"z"`,
     /// under `fraction` of the way across the view along the screen axis
     /// that draws it, as dragging that plane's line on `tile` sets it; -1
