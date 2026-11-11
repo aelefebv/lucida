@@ -30,3 +30,29 @@
   max-width: 100%;
   pointer-events: auto;
 }
+
+/* A notice across the column: that the view covers less than it asks for,
+   or where a link took it past its data. */
+.lc-view-notice {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  padding: var(--lc-space-1) var(--lc-space-2);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-float);
+  /* As a card's: a swipe divider behind it blurs out rather than crossing the text. */
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.lc-view-notice p {
+  margin: 0;
+}
