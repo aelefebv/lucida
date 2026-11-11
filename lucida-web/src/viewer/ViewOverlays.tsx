@@ -109,7 +109,7 @@ export function ViewOverlays({
               {hover && <CrosshairOutside hover={hover} view={pane.id} />}
             </div>
             {home && pane.draws.length > 0 && (
-              <div className="lc-view-home">
+              <div className="lc-view-home" data-keep-clear="">
                 <IconButton
                   icon={HouseIcon}
                   size="sm"
