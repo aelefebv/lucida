@@ -55,6 +55,7 @@ import {
   clampStamp,
   COUNTED_PHASES,
   interactionCause,
+  OVERLAY_INPUTS,
   PHASES,
   READING_NAMES,
   ReadingColumn,
@@ -818,18 +819,38 @@ export class TraceRecorder {
    * re-arms the hold, so the run closes on quiescence after the last input;
    * otherwise a slow drag would shatter into a run per pause.
    *
+   * A hover moves only what is drawn over the canvas, so it keeps to runs
+   * of its own: it opens one, or extends the hover run that is open, and
+   * goes unrecorded in any other run, whose lag it would blur. A gesture
+   * ends an open hover run and opens its own.
+   *
    * `atMs` is when the input event happened, on this recorder's clock: the
    * event's own timestamp, so the time it waited behind a busy main thread
    * counts as lag. Now when there is no event to read one from.
    */
   noteInput(input: InputKind, atMs: number = this.now()): void {
+    const overlay = OVERLAY_INPUTS.includes(input);
+    const hoverRun = OVERLAY_INPUTS.includes(this.open?.cause?.source as InputKind);
+    if (this.isRunOpen && overlay && !hoverRun) return;
+    if (this.isRunOpen && !overlay && hoverRun) this.closeRun("run-opened");
     if (this.isRunOpen) this.clearHoldTimer();
     else this.openRun(interactionCause(input));
     const run = this.open;
     if (!run?.cause) return;
-    run.wantedSetMetAtMs = null;
-    for (const view of run.views.values()) view.settledAtMs = null;
+    if (!overlay) {
+      run.wantedSetMetAtMs = null;
+      for (const view of run.views.values()) view.settledAtMs = null;
+    }
     (run.lag ??= new LagRecord()).noteInput(input, atMs);
+  }
+
+  /**
+   * The page drew the readouts and crosshairs for every hover up to
+   * `throughMs`, from a read of the worker that left at `dispatchedMs`.
+   * Answers those hovers.
+   */
+  noteOverlayDrawn(throughMs: number, dispatchedMs: number): void {
+    this.open?.lag?.noteOverlayDrawn(throughMs, dispatchedMs, this.now());
   }
 
   /**

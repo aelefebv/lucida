@@ -289,7 +289,21 @@ pub enum ScriptStep {
         property: LinkProperty,
         mode: LinkMode,
     },
-    /// Send the pans, zooms and orbits that follow to the `view`th view, by
+    /// Move the pointer by a screen delta, in CSS pixels, with no button
+    /// down, from where a pan by it would start, as one burst or spread over
+    /// `durationMs`. The view under it reads the samples there, and puts a
+    /// crosshair in each view that looks at the same place.
+    Hover {
+        dx: f64,
+        dy: f64,
+        #[serde(
+            rename = "durationMs",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<u64>,
+    },
+    /// Send the pans, zooms, orbits and hovers that follow to the `view`th view, by
     /// its place in the layout from 0, which a press or a wheel there makes
     /// the active view; to the canvas again when `view` is absent.
     Target {
@@ -334,6 +348,7 @@ impl ScriptStep {
             Self::Blink { .. } => "blink",
             Self::Views { .. } => "views",
             Self::Link { .. } => "link",
+            Self::Hover { .. } => "hover",
             Self::Target { .. } => "target",
         }
     }
@@ -506,6 +521,19 @@ impl ScriptStep {
                     .flatten()
                     .try_for_each(|url| validate_with(Some(url)))
             }
+            Self::Hover {
+                dx,
+                dy,
+                duration_ms,
+            } => {
+                if !dx.is_finite() || !dy.is_finite() {
+                    return Err("a hover delta is two finite numbers".to_string());
+                }
+                if *dx == 0.0 && *dy == 0.0 {
+                    return Err("a hover by 0,0 moves nothing".to_string());
+                }
+                validate_duration("a hover", *duration_ms)
+            }
             Self::Link { .. } | Self::Target { .. } => Ok(()),
         }
     }
@@ -514,6 +542,7 @@ impl ScriptStep {
     fn pace(&self) -> Option<Duration> {
         match self {
             Self::Pan { duration_ms, .. }
+            | Self::Hover { duration_ms, .. }
             | Self::Zoom { duration_ms, .. }
             | Self::Orbit { duration_ms, .. }
             | Self::Minimap { duration_ms, .. }
@@ -628,6 +657,11 @@ impl std::fmt::Display for ScriptStep {
             ),
             Self::Views { layout, .. } => write!(f, "views {layout}"),
             Self::Link { property, mode } => write!(f, "link {property} {mode}"),
+            Self::Hover {
+                dx,
+                dy,
+                duration_ms,
+            } => write!(f, "hover {dx},{dy}{}", pace_suffix(*duration_ms)),
             Self::Target { view: Some(view) } => write!(f, "target view {view}"),
             Self::Target { view: None } => f.write_str("target canvas"),
         }
@@ -1504,6 +1538,16 @@ pub enum SentInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         span_ms: Option<f64>,
     },
+    /// The pointer moved from `from` to `to` in CSS pixels with no button
+    /// down, over `moves` move events.
+    #[serde(rename_all = "camelCase")]
+    Move {
+        from: [f64; 2],
+        to: [f64; 2],
+        moves: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        span_ms: Option<f64>,
+    },
     /// A key pressed and released, named as the viewer's shortcuts name it.
     Key { key: String },
     /// A left-button press and release at `at`, in CSS pixels.
@@ -1523,6 +1567,7 @@ impl SentInput {
     fn span_ms(&self) -> Option<f64> {
         match self {
             Self::Drag { span_ms, .. }
+            | Self::Move { span_ms, .. }
             | Self::Wheel { span_ms, .. }
             | Self::Control { span_ms, .. } => *span_ms,
             _ => None,
@@ -1811,6 +1856,10 @@ async fn run_step(
                 Some("arcball") => drag(page, rect, (*dx, *dy), true, pace, wait).await?,
                 other => withheld("a pan", "the slice or the volume view", other),
             });
+        }
+        ScriptStep::Hover { dx, dy, .. } => {
+            let (rect, _) = gesture_target(page, *target, mode, wait).await?;
+            input = Some(hover(page, rect, (*dx, *dy), pace, wait).await?);
         }
         ScriptStep::Orbit { theta, phi, .. } => {
             let (rect, mode) = gesture_target(page, *target, mode, wait).await?;
@@ -2186,6 +2235,41 @@ fn view_pane_probe(index: usize) -> String {
          return JSON.stringify({{ x: rect.left, y: rect.top, width: rect.width, \
          height: rect.height, camera: pane.dataset.camera }}); }})()"
     )
+}
+
+/// A move of the pointer by `delta` with no button down, from where a drag
+/// of it would start, paced as [`drag`] is. The pointer stays where it ends.
+async fn hover(
+    page: &mut Page,
+    rect: CanvasRect,
+    delta: (f64, f64),
+    pace: Option<Duration>,
+    wait: Duration,
+) -> Result<SentInput, CliError> {
+    let from = rect.drag_origin(delta);
+    let moves = pace.map_or_else(|| drag_moves(delta), paced_moves);
+    let moved = |at: (f64, f64)| json!({ "type": "mouseMoved", "x": at.0, "y": at.1, "button": "none", "buttons": 0 });
+    let start = tokio::time::Instant::now();
+    page.dispatch_mouse_event(moved(from), wait).await?;
+    let mut to = from;
+    for (n, offset) in drag_path(delta, moves).into_iter().enumerate() {
+        if let Some(span) = pace {
+            tokio::time::sleep_until(start + paced_offset(n + 1, moves + 1, span)).await;
+        }
+        to = (from.0 + offset.0, from.1 + offset.1);
+        if pace.is_some() {
+            page.dispatch_mouse_event_unacknowledged(moved(to)).await?;
+        } else {
+            page.dispatch_mouse_event(moved(to), wait).await?;
+            tokio::time::sleep(MOVE_INTERVAL).await;
+        }
+    }
+    Ok(SentInput::Move {
+        from: [from.0, from.1],
+        to: [to.0, to.1],
+        moves,
+        span_ms: pace.map(|_| elapsed_ms(start)),
+    })
 }
 
 /// A drag of `delta` from `from`, in page CSS pixels, paced as [`drag`] is.
@@ -4287,6 +4371,36 @@ mod tests {
         let refused = Script::from_json(r#"[{"kind": "link", "property": "pan", "mode": "on"}]"#)
             .unwrap_err();
         assert!(refused.contains("unknown variant `on`"), "{refused}");
+    }
+
+    #[test]
+    fn a_hover_step_moves_the_pointer_with_no_button_down() {
+        let script =
+            Script::from_json(r#"[{"kind": "hover", "dx": -300, "dy": -150, "durationMs": 3000}]"#)
+                .unwrap();
+        let hover = ScriptStep::Hover {
+            dx: -300.0,
+            dy: -150.0,
+            duration_ms: Some(3000),
+        };
+        assert_eq!(script.steps, vec![hover.clone()]);
+        assert_eq!(hover.to_string(), "hover -300,-150/3000");
+        assert_eq!(hover.pace(), Some(Duration::from_secs(3)));
+        let refused = |json: &str| Script::from_json(json).unwrap_err();
+        assert_eq!(
+            refused(r#"[{"kind": "hover", "dx": 0, "dy": 0}]"#),
+            "step 1 (hover): a hover by 0,0 moves nothing"
+        );
+        assert_eq!(
+            serde_json::to_value(SentInput::Move {
+                from: [10.0, 20.0],
+                to: [5.0, 20.0],
+                moves: 2,
+                span_ms: None,
+            })
+            .unwrap(),
+            json!({ "sent": "move", "from": [10.0, 20.0], "to": [5.0, 20.0], "moves": 2 })
+        );
     }
 
     #[test]

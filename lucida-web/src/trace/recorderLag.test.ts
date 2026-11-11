@@ -111,6 +111,35 @@ describe("the lag tier", () => {
     expect(diagnostic.lag!.inputToFrame).toEqual({ samples: 3, p50Ms: 27, p95Ms: 35, maxMs: 35 });
   });
 
+  it("answers a hover when the overlays drew it, never with a viewport frame", () => {
+    const rig = makeRig();
+    rig.at(1_002);
+    rig.recorder.noteInput("hover", 1_000);
+    rig.at(1_010);
+    rig.recorder.noteInput("hover", 1_008);
+    // A frame residency asked for draws nothing a hover moved.
+    rig.at(1_012);
+    rig.recorder.noteFrameDispatched(3);
+    rig.at(1_020);
+    rig.recorder.noteFrameDone(3, 1_020);
+    // A read that left with the first hover's point is drawn: only it is answered.
+    rig.at(1_030);
+    rig.recorder.noteOverlayDrawn(1_000, 1_016);
+    rig.at(1_041);
+    rig.recorder.noteInput("hover", 1_040);
+    rig.at(1_050);
+    rig.recorder.noteOverlayDrawn(1_040, 1_042);
+
+    const { run, diagnostic } = exportRun(rig);
+    expect(run.header.cause).toEqual({ epoch: null, dirtyKind: "interactive", source: "hover" });
+    expect(run.lag!.inputs).toEqual([
+      { kind: "hover", atUs: -2_000, dispatchedUs: 14_000, presentedUs: 28_000 },
+      { kind: "hover", atUs: 6_000, dispatchedUs: 40_000, presentedUs: 48_000 },
+      { kind: "hover", atUs: 38_000, dispatchedUs: 40_000, presentedUs: 48_000 },
+    ]);
+    expect(diagnostic.lag!.inputToFrame).toEqual({ samples: 3, p50Ms: 30, p95Ms: 42, maxMs: 42 });
+  });
+
   it("summarises a scripted drag per input and finds nothing wrong with one that keeps up", () => {
     const rig = makeRig();
     for (let t = 800; t < 1_000; t += 16.7) rig.recorder.noteAnimationFrame(t);
