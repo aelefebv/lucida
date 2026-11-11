@@ -1,0 +1,8 @@
+{
+  "description": "open the dataset, divide the canvas four-up, its XY, YZ and XZ slices and its volume crossing at one point, and wait for the four to settle; to set against cold-open in one view",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "views", "layout": "four_up" }
+  ]
+}
