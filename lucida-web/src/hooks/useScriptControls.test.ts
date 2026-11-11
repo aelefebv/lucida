@@ -83,7 +83,7 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
     viewLayout: {
       layout: () => "single", views: () => [0], setLayout: vi.fn(), activate: vi.fn(),
       show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
-      links: () => null, link: vi.fn(),
+      links: () => null, link: vi.fn(), linkAll: vi.fn(),
     },
     selectedDatasetId: null,
     datasetsRef: { current: datasets },
@@ -253,7 +253,7 @@ describe("useScriptControls", () => {
     const viewLayout = {
       layout: () => "columns" as const, views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(),
       show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
-      links: () => null, link: vi.fn(),
+      links: () => null, link: vi.fn(), linkAll: vi.fn(),
     };
     const given = inputs({
       viewLayout,
@@ -286,7 +286,7 @@ describe("useScriptControls", () => {
       viewLayout: {
         layout: () => "columns", views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(),
         show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
-        links: () => links, link,
+        links: () => links, link, linkAll: vi.fn(),
       },
     });
     const { unmount } = renderHook(() => useScriptControls(given));

@@ -792,7 +792,9 @@ impl Scene {
         property: LinkProperty,
         [first, second]: [ViewId; 2],
     ) -> Option<Unlinkable> {
-        let pair = self.links.pair()?;
+        let Some(pair) = self.links.pair() else {
+            return Some(Unlinkable::Empty);
+        };
         if property.is_channel() {
             return (pair[0] == pair[1]).then_some(Unlinkable::Shared);
         }
@@ -1114,6 +1116,31 @@ mod tests {
         let before = scene.epochs.clone();
         link(&mut scene, LinkProperty::Pan, LinkMode::Linked);
         assert_eq!(scene.epochs, before);
+    }
+
+    #[test]
+    fn nothing_links_while_a_view_shows_nothing() {
+        let mut scene = Scene::new([800, 600]);
+        open(&mut scene, "a", [1, 1, 64, 64], 1.0, true, [0.0; 3]);
+        let layout = ViewLayout::Columns;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        let [_, second] = views(&scene);
+        let datasets = ViewDatasets::Only(Vec::new());
+        apply(
+            &mut scene,
+            ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets,
+            },
+        );
+        assert_eq!(scene.links().unwrap().basis, None);
+        assert!(
+            modes(&scene)
+                .iter()
+                .all(|(_, mode, why)| *mode == LinkMode::Off && *why == Some(Unlinkable::Empty))
+        );
+        link(&mut scene, LinkProperty::Pan, LinkMode::Linked);
+        assert_eq!(modes(&scene)[0].1, LinkMode::Off);
     }
 
     #[test]
