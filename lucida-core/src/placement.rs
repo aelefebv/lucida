@@ -418,20 +418,38 @@ pub fn rotation_from_degrees(degrees: [f64; 3]) -> [f64; 4] {
 }
 
 /// The angles [`rotation_from_degrees`] takes to make `rotation`: X and Z in
-/// (-180, 180], Y in [-90, 90]. Where Y is a quarter turn, X and Z turn about
-/// the same line, so Z reads zero and X holds the whole turn.
+/// (-180, 180], Y in [-90, 90].
+///
+/// At a quarter turn about Y, X and Z turn about the same line, so only their
+/// sum, or their difference, is known. There Y reads exactly ±90, Z reads
+/// zero and X holds the whole turn, the one reading of every such rotation.
 pub fn rotation_degrees(rotation: [f64; 4]) -> [f64; 3] {
     let m = rotation_matrix(rotation);
-    let sin_y = m[0][2].clamp(-1.0, 1.0);
-    let (x, z) = if sin_y.abs() < 1.0 - 1e-9 {
-        ((-m[1][2]).atan2(m[2][2]), (-m[0][1]).atan2(m[0][0]))
+    // Y from its sine and cosine together: an arcsine near a quarter turn
+    // loses half the digits its input has.
+    let cos_y = m[0][0].hypot(m[0][1]);
+    let [x, y, z] = if cos_y > QUARTER_TURN_COSINE {
+        [
+            (-m[1][2]).atan2(m[2][2]),
+            m[0][2].atan2(cos_y),
+            (-m[0][1]).atan2(m[0][0]),
+        ]
     } else {
-        (m[2][1].atan2(m[1][1]), 0.0)
+        [
+            m[2][1].atan2(m[1][1]),
+            std::f64::consts::FRAC_PI_2.copysign(m[0][2]),
+            0.0,
+        ]
     };
     // A quaternion carries rounding nobody typed, so the angles keep nine
     // decimals, and adding zero reads a negative zero as zero.
-    [x, sin_y.asin(), z].map(|a| (a.to_degrees() * 1e9).round() / 1e9 + 0.0)
+    [x, y, z].map(|a| (a.to_degrees() * 1e9).round() / 1e9 + 0.0)
 }
+
+/// Below this cosine of Y, a rotation reads as a quarter turn about Y. It
+/// sits far above a quaternion's rounding and far below the cosine of any
+/// angle a person types short of 90.
+const QUARTER_TURN_COSINE: f64 = 1e-9;
 
 /// The turn a quaternion `[x, y, z, w]` makes, by rows. It is scaled to a
 /// unit quaternion first; one with no length turns nothing.
@@ -1005,22 +1023,45 @@ mod tests {
         assert!(close(column(0), [0.0, 1.0, 0.0]));
         assert!(close(column(1), [0.0, 0.0, 1.0]));
         assert!(close(column(2), [1.0, 0.0, 0.0]));
-        for degrees in [[30.0, 0.0, 0.0], [10.0, -20.0, 30.0], [-170.0, 45.0, 120.0]] {
-            assert!(close(
-                rotation_degrees(rotation_from_degrees(degrees)),
-                degrees
-            ));
+        // Away from a quarter turn about Y, the angles read back as typed.
+        for degrees in [
+            [30.0, 0.0, 0.0],
+            [10.0, -20.0, 30.0],
+            [-170.0, 45.0, 120.0],
+            [20.0, 30.0, 0.0],
+        ] {
+            assert_eq!(rotation_degrees(rotation_from_degrees(degrees)), degrees);
         }
         assert_eq!(rotation_degrees(no_rotation()), [0.0; 3]);
-        assert_eq!(
-            rotation_degrees(rotation_from_degrees([20.0, 30.0, 0.0])),
-            [20.0, 30.0, 0.0]
-        );
-        // At a quarter turn about Y, X carries the turn X and Z share.
-        assert!(close(
-            rotation_degrees(rotation_from_degrees([20.0, 90.0, 0.0])),
-            [20.0, 90.0, 0.0]
-        ));
+        // Near one they still make the same rotation, if not the same digits.
+        for degrees in [[10.0, 89.999, 30.0], [-40.0, -89.999, 75.0]] {
+            let read = rotation_degrees(rotation_from_degrees(degrees));
+            assert!(same_rotation(
+                rotation_from_degrees(read),
+                rotation_from_degrees(degrees)
+            ));
+            assert!((read[1] - degrees[1]).abs() < 1e-6);
+        }
+        // At one, X and Z share a line: Y reads exactly a quarter turn, Z
+        // zero, and X their sum at +90 or their difference at -90.
+        for (typed, canonical) in [
+            ([20.0, 90.0, 0.0], [20.0, 90.0, 0.0]),
+            ([20.0, 90.0, 15.0], [35.0, 90.0, 0.0]),
+            ([20.0, -90.0, 15.0], [5.0, -90.0, 0.0]),
+        ] {
+            let rotation = rotation_from_degrees(typed);
+            let read = rotation_degrees(rotation);
+            assert_eq!(read[1], canonical[1]);
+            assert_eq!(read[2], 0.0);
+            assert!((read[0] - canonical[0]).abs() < 1e-6);
+            assert!(same_rotation(rotation_from_degrees(read), rotation));
+        }
+    }
+
+    /// Whether two unit quaternions turn alike: `q` and `-q` do.
+    fn same_rotation(a: [f64; 4], b: [f64; 4]) -> bool {
+        let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        (dot.abs() - 1.0).abs() < 1e-12
     }
 
     #[test]

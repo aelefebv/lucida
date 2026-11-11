@@ -4,6 +4,7 @@
  * it. The Move, scale and rotate tool changes the same transform on the
  * canvas.
  */
+import { useState } from "react";
 import { ArrowCounterClockwiseIcon } from "@phosphor-icons/react";
 import { Button, NumberField } from "../ui/index.ts";
 import { IDENTITY_USER_TRANSFORM, sameUserTransform, type UserTransform } from "../userTransform.ts";
@@ -32,8 +33,9 @@ export interface UserTransformFieldsProps {
   /** Whether this member may change the shared workspace. */
   canEdit: boolean;
   onChange(from: UserTransform, to: UserTransform): void;
-  /** Turn the layer to `degrees` about its center, from `from`. */
-  onTurn(from: UserTransform, degrees: Triple): void;
+  /** Turn the layer to `degrees` about its center, from `from`: the
+   *  transform that placed it, or null where nothing changed. */
+  onTurn(from: UserTransform, degrees: Triple): UserTransform | null;
   onReset(): void;
 }
 
@@ -54,14 +56,21 @@ export function UserTransformFields({
   onReset,
 }: UserTransformFieldsProps) {
   const current = transform ?? IDENTITY_USER_TRANSFORM;
+  // The angles typed here, with the rotation they made. Read back from the
+  // rotation, a quarter turn about Y folds X and Z together, so the fields
+  // keep showing what was typed until the rotation changes some other way.
+  const [typed, setTyped] = useState<{ degrees: Triple; rotation: UserTransform["rotation"] } | null>(null);
+  const shown = typed && typed.rotation.every((v, i) => v === current.rotation[i]) ? typed.degrees : rotation;
   const set = (part: "translation" | "scale", axis: number, value: number) => {
     const values = current[part].map((v, i) => (i === axis ? value : v)) as Triple;
     const next = { ...current, [part]: values };
     if (!sameUserTransform(next, current)) onChange(current, next);
   };
   const turn = (axis: number, value: number) => {
-    if (!Number.isFinite(value) || value === rotation[axis]) return;
-    onTurn(current, rotation.map((v, i) => (i === axis ? value : v)) as Triple);
+    if (!Number.isFinite(value) || value === shown[axis]) return;
+    const degrees = shown.map((v, i) => (i === axis ? value : v)) as Triple;
+    const placed = onTurn(current, degrees);
+    if (placed) setTyped({ degrees, rotation: placed.rotation });
   };
   const unit = offsetUnit(units);
   return (
@@ -112,7 +121,7 @@ export function UserTransformFields({
             label={`${name} rotation ${axis} in degrees`}
             labelPosition="hidden"
             hideSteppers
-            value={rotation[i]}
+            value={shown[i]}
             formatOptions={{ maximumFractionDigits: 2 }}
             isDisabled={!canEdit}
             onChange={(v) => turn(i, v)}

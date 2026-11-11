@@ -213,8 +213,9 @@ interface Props {
   onSetUserTransform?: (id: string, from: UserTransform, to: UserTransform) => void;
   /** Put a layer back where its metadata places it. */
   onResetUserTransform?: (id: string) => void;
-  /** Turn a layer to degrees about X, then Y, then Z, about its center, from where it was. */
-  onTurnUserTransform?: (id: string, from: UserTransform, degrees: [number, number, number]) => void;
+  /** Turn a layer to degrees about X, then Y, then Z, about its center, from
+   *  where it was: the transform that placed it, or null where nothing changed. */
+  onTurnUserTransform?: (id: string, from: UserTransform, degrees: [number, number, number]) => UserTransform | null;
 }
 
 const CHANNEL_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const satisfies readonly KeyCombo[];
@@ -901,7 +902,7 @@ function Advanced(props: LayerRowProps) {
               units={layer.units}
               canEdit={props.canEdit}
               onChange={(from, to) => props.onSetUserTransform?.(layer.id, from, to)}
-              onTurn={(from, degrees) => props.onTurnUserTransform?.(layer.id, from, degrees)}
+              onTurn={(from, degrees) => props.onTurnUserTransform?.(layer.id, from, degrees) ?? null}
               onReset={() => props.onResetUserTransform?.(layer.id)}
             />
           )}

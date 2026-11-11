@@ -797,6 +797,37 @@ describe("LayerPanel placement by hand", () => {
     expect(screen.getByText("Rotation").getAttribute("title")).toMatch(/about X, then Y, then Z/);
   });
 
+  it("keeps showing the angles typed while the rotation they made stands", async () => {
+    // Stands in for what X 20, Y 90, Z 10 makes, which reads back as X 30, Y 90, Z 0.
+    const turned = { ...moved, rotation: [0.1, 0.2, 0.3, 0.927] } satisfies LayerInfo["userTransform"];
+    const onTurnUserTransform = vi.fn(() => turned);
+    const panel = (overrides: Partial<LayerInfo>) => (
+      <LayerPanel
+        {...baseProps({
+          expandedLayerId: "wds-1",
+          layers: [layer(overrides)],
+          onSetUserTransform: vi.fn(),
+          onResetUserTransform: vi.fn(),
+          onTurnUserTransform,
+        })}
+      />
+    );
+    const { rerender } = render(panel({ userTransform: moved, rotationDegrees: [20, 90, 0] }));
+    await openAdvanced();
+    const field = (axis: string) =>
+      screen.getByRole("textbox", { name: `original.zarr rotation ${axis} in degrees` }) as HTMLInputElement;
+    await userEvent.clear(field("Z"));
+    await userEvent.type(field("Z"), "10{Enter}");
+    expect(onTurnUserTransform).toHaveBeenLastCalledWith("wds-1", moved, [20, 90, 10]);
+
+    rerender(panel({ userTransform: turned, rotationDegrees: [30, 90, 0] }));
+    expect([field("X").value, field("Y").value, field("Z").value]).toEqual(["20", "90", "10"]);
+    // Turned some other way, as by the handle or an undo, the fields read the rotation again.
+    const other = { ...moved, rotation: [0, 0, 0.5, 0.866] } satisfies LayerInfo["userTransform"];
+    rerender(panel({ userTransform: other, rotationDegrees: [0, 0, 60] }));
+    expect([field("X").value, field("Y").value, field("Z").value]).toEqual(["0", "0", "60"]);
+  });
+
   it("resets only a layer that was moved, and only for an editor", async () => {
     const { onResetUserTransform } = await renderPlacement({ userTransform: moved });
     await userEvent.click(screen.getByRole("button", { name: "Reset placement" }));

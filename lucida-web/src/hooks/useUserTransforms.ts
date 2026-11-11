@@ -28,8 +28,9 @@ export interface UserTransformActions {
    *  takes back. Nothing when the two are the same. */
   commit(datasetId: string, from: UserTransform, to: UserTransform): void;
   /** Turn `datasetId` to `degrees` about X, then Y, then Z, about its
-   *  center, from `from`, as one step undo takes back. */
-  turnTo(datasetId: string, from: UserTransform, degrees: [number, number, number]): void;
+   *  center, from `from`, as one step undo takes back: the transform that
+   *  placed it, or null where nothing did. */
+  turnTo(datasetId: string, from: UserTransform, degrees: [number, number, number]): UserTransform | null;
   /** Put `datasetId` back where its metadata places it. */
   reset(datasetId: string): void;
   /** Make placements a chosen saved view just restored one step undo takes
@@ -91,8 +92,9 @@ export function useUserTransforms({
       commit,
       turnTo(datasetId, from, degrees) {
         const scene = engine.scene();
-        const to = scene && userTransformTurned(scene, datasetId, from, degrees);
+        const to = scene && canEdit ? userTransformTurned(scene, datasetId, from, degrees) : null;
         if (to) commit(datasetId, from, to);
+        return to;
       },
       reset(datasetId) {
         commit(datasetId, current(datasetId), IDENTITY_USER_TRANSFORM);
