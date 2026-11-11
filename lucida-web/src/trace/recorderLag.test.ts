@@ -178,11 +178,11 @@ describe("the lag tier", () => {
     expect(diagnostic.lag!.inputToFrame!.maxMs).toBe(290);
 
     const lag = diagnostic.findings.find((finding) => finding.rule === RULESET.lag.id)!;
-    expect(lag.severity).toBe("stall");
+    expect(lag.severity).toBe("fail");
     expect(lag.subject).toBe("input-to-frame");
     expect(lag.observed).toEqual({ stat: "max", ms: 290, n: 40 });
     expect(lag.threshold.value).toBe(RULESET.lag.max.ceilMs);
-    expect(diagnostic.verdict.kind).toBe("stall");
+    expect(diagnostic.verdict.kind).toBe("fail");
     // A run with no chunk rows carries the coverage caveat as well.
     expect(diagnostic.verdict.text.startsWith(
       "pan lagged: input to frame max 290 ms over the 200 ms ceiling, across 40 input(s); the longest main-thread task ran 300 ms",

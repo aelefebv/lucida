@@ -582,7 +582,7 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
             "load": mode_load,
             "attribution": {"cause": "browser.upload", "confidence": "partial"},
         },
-        {"kind": "orbit", "theta": 30, "runId": "run-3", "verdict": {"kind": "stall"}, "lag": lag(28.4, 61, 2)},
+        {"kind": "orbit", "theta": 30, "runId": "run-3", "verdict": {"kind": "bound"}, "lag": lag(28.4, 61, 2)},
         {"kind": "wait", "runId": None},
     ]
     path = run_file(tmp_path, {**DIAGNOSTIC, "lag": lag(28.4, 61, 2)}, script, throttle=REMOTE)
@@ -635,7 +635,7 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
             "kind": "orbit",
             "label": "orbit",
             "runId": "run-3",
-            "verdict": "stall",
+            "verdict": "bound",
             "durationMs": None,
             **no_load,
             "firstInputMs": 56.8,
@@ -934,9 +934,13 @@ def test_a_view_that_stops_settling_is_flagged(tmp_path: Path) -> None:
     cells, comparison = compared(later, root)
     assert comparison.describe(cells[0]) == "worse: verdict clear -> unsettled"
     assert comparison.describe(cells[1]) == "worse: verdict clear -> clear ×1, error ×1"
-    # A stall comes and goes on an unchanged build, so it is no regression.
-    clear, stall = (perf.group_cells([measured(tmp_path, "image.cold-open", verdict=v)])[0] for v in ("clear", "stall"))
-    assert perf.compare_records(clear.record(), stall.record()) == []
+    # A finding over its threshold comes and goes on an unchanged build, so
+    # neither a bound nor a failing verdict is a regression in the comparison.
+    clear, bound, failed = (
+        perf.group_cells([measured(tmp_path, "image.cold-open", verdict=v)])[0] for v in ("clear", "bound", "fail")
+    )
+    assert perf.compare_records(clear.record(), bound.record()) == []
+    assert perf.compare_records(clear.record(), failed.record()) == []
 
 
 def test_a_baseline_is_kept_per_adapter_and_ratio_outside_target(tmp_path: Path) -> None:

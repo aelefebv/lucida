@@ -1586,11 +1586,14 @@ pub struct StepVerdict {
     pub text: String,
 }
 
-/// Whether a verdict kind fails the gate: a stall, a run that never
-/// settled, or a steady-state finding after the view settled. The kinds are
-/// the page's ruleset's.
+/// Whether a verdict kind fails the gate: a failing finding, a run that
+/// never settled, or a steady-state finding after the view settled. A
+/// `bound` verdict names where a settled run spent its time and passes. The
+/// kinds are the page's ruleset's. A page whose ruleset predates `fail`
+/// reports a failing finding as `stall`, and a gate over that page still
+/// fails on it.
 pub fn failing_verdict(kind: &str) -> bool {
-    kind == "stall" || kind == "unsettled" || kind == "steady-state"
+    matches!(kind, "fail" | "unsettled" | "steady-state" | "stall")
 }
 
 /// One step and what it did. The step's own fields are flattened in, so the
@@ -2706,7 +2709,7 @@ async fn wait_for_script_seam(page: &mut Page, wait: Duration) -> Result<(), Cli
 // ---------------------------------------------------------------------------
 
 /// Why an opt-in gate should fail on the script, or `None`: a step whose
-/// run never settled, or whose run's verdict is a stall. Read from the same
+/// run never settled, or whose run's verdict fails. Read from the same
 /// fields the page filled at export; nothing is derived here.
 pub fn script_gate_failure(script: &ScriptRecord) -> Option<String> {
     for (index, step) in script.steps.iter().enumerate() {
@@ -3531,7 +3534,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_fails_on_a_step_that_never_settled_or_stalled_and_names_it() {
+    fn the_gate_fails_on_a_step_that_never_settled_or_failed_and_names_it() {
         let mut script = ScriptRecord {
             steps: vec![
                 record(ScriptStep::Wait, None, false),
@@ -3548,13 +3551,21 @@ mod tests {
         };
         assert_eq!(script_gate_failure(&script), None);
 
+        // Where a settled step spent its time is not a failure.
         script.steps[1].verdict = Some(StepVerdict {
-            kind: "stall".to_string(),
+            kind: "bound".to_string(),
+            text: "bound by browser.upload: it held 270 ms, 31% of the chain, and nothing failed"
+                .to_string(),
+        });
+        assert_eq!(script_gate_failure(&script), None);
+
+        script.steps[1].verdict = Some(StepVerdict {
+            kind: "fail".to_string(),
             text: "frame time over the ceiling".to_string(),
         });
         assert_eq!(
             script_gate_failure(&script).as_deref(),
-            Some("step 2 (orbit 30°,0°) stall: frame time over the ceiling")
+            Some("step 2 (orbit 30°,0°) fail: frame time over the ceiling")
         );
 
         script.steps[1].verdict = None;

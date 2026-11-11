@@ -1305,7 +1305,7 @@ struct TraceRunArgs {
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
-    /// Fail (non-zero) on a stall or steady-state verdict, a run that never
+    /// Fail (non-zero) on a fail or steady-state verdict, a run that never
     /// settled, an error the page raised, or a blank settled frame
     ///
     /// Opt-in, because every other non-zero exit in this CLI means the command
@@ -1442,7 +1442,7 @@ enum TraceCommand {
         /// Seconds to wait for the page to load and settle
         #[arg(long, default_value_t = 120)]
         timeout_seconds: u64,
-        /// Fail (non-zero) on a stall or steady-state verdict, or a replay
+        /// Fail (non-zero) on a fail or steady-state verdict, or a replay
         /// that never settled, as --gate does on a run
         #[arg(long)]
         gate: bool,
@@ -6441,7 +6441,7 @@ mod tests {
                 assert_eq!((run.width, run.height), (1440, 900));
                 assert_eq!(run.device_pixel_ratio, 2.0);
                 assert_eq!(run.output, None);
-                // A stall exits zero unless the call site asks otherwise.
+                // A failing verdict exits zero unless the call site asks otherwise.
                 assert!(!run.gate);
             }
             _ => panic!("expected a trace run"),

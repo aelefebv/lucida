@@ -79,7 +79,7 @@ the N runs, followed by half their range when they differ.
 | top limiter | `attribution.cause` and `.confidence` |
 | first input to frame, input to frame p95, longest task, dropped | `lag.firstInputMs`, `lag.inputToFrame.p95Ms`, `lag.longTasks.longestMs`, `lag.frames.dropped` |
 | errors | the `header.errors` the allow list does not name, repeats counted |
-| verdict | `verdict.kind` |
+| verdict | `verdict.kind`; `bound` is a run that spent most of its chain in one phase and failed nothing |
 
 Times count from the run's start. A scenario with steps reports the run its last step
 opened, and a row for each step follows, from its record in `header.script.steps`, which
@@ -166,9 +166,10 @@ the runner names, so it has to see `--data` at the same absolute path.
 
 The `gate` suite is what CI's "Trace gate" check runs under SwiftShader, through
 `scripts/trace_gate.sh`. It passes `--gate`, so a run that stalls, never settles, or ends on
-a failing verdict fails, and `--bundle`, so each run also leaves the bundle `lucida trace
-replay` reads. The runner names the failed runs and exits non-zero. The script's header
-lists the variables it reads; with none set, it builds and runs the whole suite locally:
+a failing verdict (`fail`, `steady-state` or `unsettled`) fails, and a `bound` one passes. It
+passes `--bundle`, so each run also leaves the bundle `lucida trace replay` reads. The runner
+names the failed runs and exits non-zero. The script's header lists the variables it reads;
+with none set, it builds and runs the whole suite locally:
 
 ```bash
 scripts/trace_gate.sh
