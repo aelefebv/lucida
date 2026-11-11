@@ -154,8 +154,9 @@ impl Scene {
 
     /// The one write to the active view's comparison, so `epochs.comparison`
     /// moves exactly when it does. Setting layers aside or bringing them back
-    /// changes what is drawn and planned, as a visibility toggle does, so it
-    /// moves `epochs.selection` too.
+    /// changes what is drawn and planned, as a visibility toggle does, and so
+    /// does a hold the set-aside layers let go, so either moves
+    /// `epochs.selection` too.
     fn set_comparison(&mut self, next: Option<Comparison>) {
         let view = self.active_view().id();
         if self.active_view().comparison == next {
@@ -164,7 +165,8 @@ impl Scene {
         let aside = self.set_aside(view);
         self.active_view_mut().comparison = next;
         self.epochs.comparison += 1;
-        if self.set_aside(view) != aside {
+        let holders_moved = self.refresh_holders() && self.views().len() > 1;
+        if self.set_aside(view) != aside || holders_moved {
             self.epochs.selection += 1;
         }
     }
@@ -359,6 +361,54 @@ mod tests {
 
         scene.end_comparison();
         assert_eq!(scene.resolved_layers(view), layers);
+    }
+
+    #[test]
+    fn a_layer_set_aside_lets_its_hold_go_to_a_view_that_draws_it() {
+        use crate::view::{ViewDatasets, ViewLayout};
+        let mut scene = lined_up();
+        open(&mut scene, "c", [4, 64, 64], 1.0, true);
+        let viewport = |scene: &mut Scene, cmd: ViewportCommand| scene.apply(cmd.into());
+        viewport(
+            &mut scene,
+            ViewportCommand::SetViewLayout {
+                layout: ViewLayout::Columns,
+            },
+        );
+        let [first, second] = [scene.views()[0].id(), scene.views()[1].id()];
+        let c = DatasetId::from("c");
+        viewport(
+            &mut scene,
+            ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets: ViewDatasets::Only(vec![c.clone()]),
+            },
+        );
+        // The second view wants c as a volume, so the first, which holds it as
+        // a slice, keeps it from the second.
+        viewport(&mut scene, ViewportCommand::SetActiveView { view: second });
+        viewport(&mut scene, ViewportCommand::SetMode3D);
+        viewport(&mut scene, ViewportCommand::SetActiveView { view: first });
+        assert_eq!(scene.dataset_holder(&c), Some(first));
+        assert!(!scene.draws(second, &c));
+
+        let [a, b] = ids();
+        let selection = scene.epochs.selection;
+        scene.compare(a, b, CompareMode::Swipe).unwrap();
+        assert_eq!(scene.dataset_holder(&c), Some(second));
+        assert!(scene.draws(second, &c));
+        assert!(scene.withheld(second).is_empty());
+        // The first view sets c aside, so it holds nothing of it back either.
+        assert!(scene.withheld(first).is_empty());
+        assert!(scene.epochs.selection > selection);
+
+        // The view that kept drawing it keeps the hold, and the one that comes
+        // back says why it leaves c out.
+        scene.end_comparison();
+        assert_eq!(scene.dataset_holder(&c), Some(second));
+        let withheld = scene.withheld(first);
+        assert_eq!(withheld.len(), 1);
+        assert_eq!((&withheld[0].dataset_id, withheld[0].holder), (&c, second));
     }
 
     #[test]

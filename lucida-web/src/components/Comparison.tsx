@@ -1,7 +1,8 @@
 /**
- * The controls of the view's comparison: a bar over the canvas to switch
- * between swipe and blink, blink by key or at a rate, and stop; and the
- * divider a swipe is dragged by.
+ * The controls of a view's comparison: a bar over the view to switch between
+ * swipe and blink, blink by key or at a rate, and stop; and the divider a
+ * swipe is dragged by. Each acts on the active view, which a press in the
+ * view's controls makes their view first (`viewer/ViewComparisons.tsx`).
  */
 import { useEffect, useRef, useState } from "react";
 import { Slider, SliderThumb, SliderTrack } from "react-aria-components";
@@ -29,16 +30,19 @@ interface BarProps {
   nameOf: (datasetId: string) => string;
   /** What it says of the layers the comparison sets aside, or null for none. */
   setAside: string | null;
+  /** Whether its view is the active one, which the actions steer. */
+  active: boolean;
 }
 
-export function ComparisonBar({ comparison, actions, nameOf, setAside }: BarProps) {
+export function ComparisonBar({ comparison, actions, nameOf, setAside, active }: BarProps) {
   // A running blink belongs to the pair it was started on, so a new
-  // comparison starts still.
+  // comparison starts still. It runs only while its view is active, since a
+  // flip steers the active view.
   const pair = comparison ? `${comparison.a}\n${comparison.b}` : null;
   const [playingPair, setPlayingPair] = useState<string | null>(null);
   const [rate, setRate] = useState<BlinkRate>("2");
   const blinking = comparison?.mode === "blink";
-  const playing = blinking && pair !== null && playingPair === pair;
+  const playing = blinking && active && pair !== null && playingPair === pair;
   useBlinkTimer(playing, Number(rate), actions.flip);
 
   useShortcut({
@@ -46,7 +50,8 @@ export function ComparisonBar({ comparison, actions, nameOf, setAside }: BarProp
     keys: FLIP_KEYS,
     label: "Show the other compared layer",
     group: "View",
-    enabled: blinking,
+    // One bar binds the key: the active view's.
+    enabled: blinking && active,
     onTrigger: () => {
       // A key press is the person taking over, so it stops a running blink.
       setPlayingPair(null);

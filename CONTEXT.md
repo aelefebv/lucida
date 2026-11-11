@@ -279,8 +279,9 @@ _Avoid_: layout (unqualified; a collection's arrangement of entities)
 **Holder**:
 The view whose form a dataset's GPU pools hold: one slice cut or the whole
 volume, at one timepoint. The first view to show a dataset holds it until it
-stops showing it. Another view draws the dataset only while it wants the same
-form, and otherwise leaves it out and says why.
+stops showing it, or sets it aside in a comparison. Another view draws the
+dataset only while it wants the same form, and otherwise leaves it out and
+says why.
 
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on

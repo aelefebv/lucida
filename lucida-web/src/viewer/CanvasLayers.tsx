@@ -4,7 +4,7 @@
  * overlays. The view mode and selectors come from the scene store; the engine
  * supplies the scene, client, canvas, loop, and session.
  */
-import { lazy, Suspense, useCallback, useRef, useState, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useMemo, useRef, useState, type RefObject } from "react";
 import { AnnotationDraftOverlay } from "../components/AnnotationDraftOverlay.tsx";
 import { AnnotationOverlay } from "../components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "../components/AnnotationOverlay3D.tsx";
@@ -27,6 +27,8 @@ import type { DatasetState } from "../types.ts";
 import { useEngineParts } from "./engineParts.ts";
 import { useViewerLoop } from "./useViewerLoop.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
+import { ViewComparisons } from "./ViewComparisons.tsx";
+import { comparisonActions } from "../comparison.ts";
 import { WithheldNotice } from "./WithheldNotice.tsx";
 import type { ViewPane } from "../sceneStore.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
@@ -103,6 +105,7 @@ export function CanvasLayers({
     readoutRef.current?.pressAt(at);
   }, [overlay3dRef]);
   const onViewportChanged = useCallback(() => requestRender(engine.loop(), "annotation_viewport"), [engine]);
+  const comparison = useMemo(() => comparisonActions(engine.scene, engine.loop), [engine]);
 
   // The viewers take the live session, scene, and canvas as values. The
   // states above re-render this when any of them arrives.
@@ -244,6 +247,15 @@ export function CanvasLayers({
       <ViewPanes views={views} maximized={maximized} actions={viewLayout} rootRef={setPanesRoot}>
         {paneContent}
       </ViewPanes>
+      {hasDatasets && (
+        <ViewComparisons
+          views={views}
+          store={engine.store}
+          actions={comparison}
+          nameOf={nameOf}
+          activate={viewLayout.activate}
+        />
+      )}
       {viewers && panesRoot && (
         <PixelReadout
           ref={readoutRef}

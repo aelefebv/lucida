@@ -8,7 +8,6 @@ import type { WasmScene } from "lucida-core";
 import { noteSceneWrite } from "./sceneStore.ts";
 import type { InvalidationSink } from "./invalidation.ts";
 import type { PixelRect } from "./renderer/layerBatches.ts";
-import type { ResolvedLayers } from "./resolvedLayers.ts";
 
 export type CompareMode = "swipe" | "blink";
 
@@ -46,6 +45,10 @@ export type ComparisonScene = Pick<
 
 export function readComparison(scene: Pick<WasmScene, "comparison">): Comparison | null {
   return JSON.parse(scene.comparison()) as Comparison | null;
+}
+
+export function readViewComparison(scene: Pick<WasmScene, "view_comparison">, view: number): Comparison | null {
+  return JSON.parse(scene.view_comparison(view)) as Comparison | null;
 }
 
 export function readLineUp(scene: Pick<WasmScene, "datasets_line_up">, a: string, b: string): LineUp {
@@ -94,9 +97,8 @@ export function comparisonClip(
 }
 
 /** What the compare bar says of the layers the comparison sets aside, or null for none. */
-export function setAsideNote(layers: ResolvedLayers): string | null {
-  let count = 0;
-  for (const layer of layers.values()) if (layer.set_aside) count++;
+export function setAsideNote(setAside: readonly string[]): string | null {
+  const count = setAside.length;
   if (count === 0) return null;
   return `${count} other ${count === 1 ? "layer" : "layers"} hidden while comparing`;
 }

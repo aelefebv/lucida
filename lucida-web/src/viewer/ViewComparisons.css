@@ -1,0 +1,25 @@
+/* Over the view panes; only the bar and the divider take the pointer. */
+.lc-view-comparisons {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.lc-view-comparison {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* At the top of the view, narrowed to keep clear of the controls in the
+   canvas's top corners, such as the tool palette, which a view at the
+   canvas's edge reaches under. */
+.lc-view-comparison-bar {
+  position: absolute;
+  top: var(--lc-space-3);
+  left: 50%;
+  translate: -50% 0;
+  width: max-content;
+  max-width: calc(100% - 4 * var(--lc-space-8));
+  pointer-events: auto;
+}

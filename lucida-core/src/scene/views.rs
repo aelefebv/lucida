@@ -196,7 +196,7 @@ impl Scene {
 
     /// The view whose form `dataset_id`'s pools hold: the first view to show
     /// the dataset, for as long as it shows it, so a change of active view
-    /// never moves it. `None` when no view shows it.
+    /// never moves it. `None` when no view can hold it.
     pub fn dataset_holder(&self, dataset_id: &DatasetId) -> Option<ViewId> {
         self.holders
             .get(dataset_id)
@@ -204,19 +204,25 @@ impl Scene {
             .filter(|id| self.can_hold(*id, dataset_id))
             .or_else(|| {
                 self.shown_views()
-                    .find(|view| view.shows(dataset_id))
                     .map(View::id)
+                    .find(|id| self.can_hold(*id, dataset_id))
             })
     }
 
-    /// Whether `view` can hold `dataset_id`'s pools: it is on the canvas and
-    /// shows the dataset.
+    /// Whether `view` can hold `dataset_id`'s pools: it is on the canvas,
+    /// shows the dataset, and draws it. A view whose comparison sets the
+    /// dataset aside draws nothing of it, so it lets the hold go to a view
+    /// that does, and comes back behind that view once the comparison ends,
+    /// as a view that showed the dataset again would.
     fn can_hold(&self, view: ViewId, dataset_id: &DatasetId) -> bool {
-        self.is_shown(view) && self.view(view).is_some_and(|v| v.shows(dataset_id))
+        self.is_shown(view)
+            && self
+                .view(view)
+                .is_some_and(|v| v.shows(dataset_id) && !v.sets_aside(dataset_id))
     }
 
-    /// Record each dataset's holder, so it stays until it stops showing the
-    /// dataset or goes away. Returns whether any holder changed.
+    /// Record each dataset's holder, so it stays until it can hold the
+    /// dataset no more or goes away. Returns whether any holder changed.
     pub(crate) fn refresh_holders(&mut self) -> bool {
         let stale: Vec<DatasetId> = self
             .holders
@@ -237,8 +243,11 @@ impl Scene {
             .keys()
             .filter(|dataset_id| !self.holders.contains_key(*dataset_id))
             .filter_map(|dataset_id| {
-                let view = self.shown_views().find(|view| view.shows(dataset_id))?;
-                Some((dataset_id.clone(), view.id()))
+                let view = self
+                    .shown_views()
+                    .map(View::id)
+                    .find(|id| self.can_hold(*id, dataset_id))?;
+                Some((dataset_id.clone(), view))
             })
             .collect();
         changed |= !unheld.is_empty();
@@ -278,7 +287,9 @@ impl Scene {
 
     fn withholding(&self, view: ViewId, dataset_id: &DatasetId) -> Option<Withheld> {
         let holder = self.dataset_holder(dataset_id)?;
-        if holder == view || !self.view(view)?.shows(dataset_id) {
+        let shown = self.view(view)?;
+        // A view that sets the dataset aside wants none of it to draw.
+        if holder == view || !shown.shows(dataset_id) || shown.sets_aside(dataset_id) {
             return None;
         }
         let held = self.pool_form(holder, dataset_id)?;
