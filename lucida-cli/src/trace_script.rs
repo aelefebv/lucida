@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use lucida_core::saved_view::normalize_dataset_url;
+use lucida_core::scene::{LinkMode, LinkProperty};
 use lucida_core::slice_plane::SlicePlane;
 
 use crate::browser::{Page, Viewport};
@@ -282,6 +283,12 @@ pub enum ScriptStep {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keep: bool,
     },
+    /// Link `property` between the two views in `mode`, `linked`,
+    /// `relative` or `off`, as the link popover does.
+    Link {
+        property: LinkProperty,
+        mode: LinkMode,
+    },
     /// Send the pans, zooms and orbits that follow to the `view`th view, by
     /// its place in the layout from 0, which a press or a wheel there makes
     /// the active view; to the canvas again when `view` is absent.
@@ -320,6 +327,7 @@ impl ScriptStep {
             Self::Swipe { .. } => "swipe",
             Self::Blink { .. } => "blink",
             Self::Views { .. } => "views",
+            Self::Link { .. } => "link",
             Self::Target { .. } => "target",
         }
     }
@@ -490,7 +498,7 @@ impl ScriptStep {
                     .flatten()
                     .try_for_each(|url| validate_with(Some(url)))
             }
-            Self::Target { .. } => Ok(()),
+            Self::Link { .. } | Self::Target { .. } => Ok(()),
         }
     }
 
@@ -611,6 +619,7 @@ impl std::fmt::Display for ScriptStep {
                 with_suffix(with.as_deref())
             ),
             Self::Views { layout, .. } => write!(f, "views {layout}"),
+            Self::Link { property, mode } => write!(f, "link {property} {mode}"),
             Self::Target { view: Some(view) } => write!(f, "target view {view}"),
             Self::Target { view: None } => f.write_str("target canvas"),
         }
@@ -1933,6 +1942,15 @@ async fn run_step(
             let show = serde_json::to_string(show).expect("a list of URL lists serializes");
             let args = format!("{}, {show}, {keep}", json_string(layout));
             let expression = seam_call("views", &args);
+            input = Some(control_outcome(page, &expression, wait).await?);
+        }
+        ScriptStep::Link { property, mode } => {
+            let args = format!(
+                "{}, {}",
+                json_string(&property.to_string()),
+                json_string(&mode.to_string())
+            );
+            let expression = seam_call("link", &args);
             input = Some(control_outcome(page, &expression, wait).await?);
         }
         // The minimap steers the slice view and the orbit camera; the fly
@@ -4194,6 +4212,23 @@ mod tests {
             refused(r#"[{"kind": "views", "layout": "single", "show": [["a.zarr"], ["b.zarr"]]}]"#),
             "step 1 (views): a single layout has 1 view(s), not 2"
         );
+    }
+
+    #[test]
+    fn a_link_step_names_a_property_and_its_mode() {
+        let script =
+            Script::from_json(r#"[{"kind": "link", "property": "zoom", "mode": "relative"}]"#)
+                .unwrap();
+        let link = ScriptStep::Link {
+            property: LinkProperty::Zoom,
+            mode: LinkMode::Relative,
+        };
+        assert_eq!(script.steps, vec![link.clone()]);
+        assert_eq!(link.to_string(), "link zoom relative");
+        assert_eq!(link.kind(), "link");
+        let refused = Script::from_json(r#"[{"kind": "link", "property": "pan", "mode": "on"}]"#)
+            .unwrap_err();
+        assert!(refused.contains("unknown variant `on`"), "{refused}");
     }
 
     #[test]

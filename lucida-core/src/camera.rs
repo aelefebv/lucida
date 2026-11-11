@@ -950,6 +950,26 @@ impl Arcball {
         self.phi = wrap_angle(self.phi + d_phi);
     }
 
+    /// Face the target from `theta` and `phi`, as a rotation to them would.
+    pub fn set_angles(&mut self, theta: f64, phi: f64) {
+        self.theta = wrap_angle(theta);
+        self.phi = wrap_angle(phi);
+    }
+
+    /// Orbit `target`, each component bounded as a pan bounds it.
+    pub fn set_target(&mut self, target: [f64; 3]) {
+        self.target = target.map(|v| step_position(0.0, v));
+    }
+
+    /// Stand `distance` from the target, moving the depth slab as a zoom
+    /// does. A distance that can't be reached by zooming, nothing or no
+    /// number, leaves the camera where it is.
+    pub fn set_distance(&mut self, distance: f64) {
+        if self.distance > 0.0 && distance.is_finite() && distance > 0.0 {
+            self.zoom(distance / self.distance - 1.0);
+        }
+    }
+
     pub fn zoom(&mut self, delta: f64) {
         let before = self.distance;
         let next = self.distance * (1.0 + delta);

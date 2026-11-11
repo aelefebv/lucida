@@ -594,6 +594,12 @@ impl WasmScene {
         self.inner.maximized_view().map(|view| view.0)
     }
 
+    /// How the two views link, as a JSON `LinksState`, or `null` with one
+    /// view.
+    pub fn view_links(&self) -> String {
+        serde_json::to_string(&self.inner.links()).unwrap_or_default()
+    }
+
     /// What `view` shows: `"all"`, or `{"only": [ids]}`; `"null"` for an
     /// unknown view.
     pub fn view_datasets(&self, view: u32) -> String {

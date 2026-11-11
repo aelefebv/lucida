@@ -14,6 +14,7 @@ import type { Comparison, ComparisonActions, LineUp } from "../comparison.ts";
 import { resolvedLayer, resolvedLayers } from "../resolvedLayerFixtures.ts";
 import { noteDatasetOpened, noteDatasetOpenFailed, scriptControls } from "../trace/steps.ts";
 import type { DatasetState } from "../types.ts";
+import type { ViewLinks } from "../viewLinks.ts";
 import { useScriptControls, type ScriptControlInputs } from "./useScriptControls.ts";
 
 /** An open dataset with `channels` channels and `labels` labels. */
@@ -82,6 +83,7 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
     viewLayout: {
       layout: () => "single", views: () => [0], setLayout: vi.fn(), activate: vi.fn(),
       show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
+      links: () => null, link: vi.fn(),
     },
     selectedDatasetId: null,
     datasetsRef: { current: datasets },
@@ -251,6 +253,7 @@ describe("useScriptControls", () => {
     const viewLayout = {
       layout: () => "columns" as const, views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(),
       show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
+      links: () => null, link: vi.fn(),
     };
     const given = inputs({
       viewLayout,
@@ -272,6 +275,40 @@ describe("useScriptControls", () => {
     await expect(scriptControls()!.views("columns", [["/data/c.zarr"]], false)).resolves.toEqual({
       applied: false,
       reason: `no dataset opened from ${normalize_dataset_url("/data/c.zarr")} is open`,
+    });
+    unmount();
+  });
+
+  it("links a property between two views, and says why one can't link", async () => {
+    const link = vi.fn();
+    let links: ViewLinks | null = null;
+    const given = inputs({
+      viewLayout: {
+        layout: () => "columns", views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(),
+        show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
+        links: () => links, link,
+      },
+    });
+    const { unmount } = renderHook(() => useScriptControls(given));
+    await expect(scriptControls()!.link("zoom", "relative")).resolves.toEqual({
+      applied: false,
+      reason: "a link joins two views, and the page shows one",
+    });
+    links = {
+      basis: "physical",
+      properties: [
+        { property: "zoom", mode: "linked" },
+        { property: "orientation", mode: "linked", unlinkable: "cameras" },
+        { property: "z", mode: "off", unlinkable: "not_yet" },
+      ],
+    };
+    await expect(scriptControls()!.link("zoom", "relative")).resolves.toEqual({ applied: true, reason: null });
+    // A property the cameras don't share yet keeps its mode for when they do.
+    await expect(scriptControls()!.link("orientation", "off")).resolves.toEqual({ applied: true, reason: null });
+    expect(link.mock.calls).toEqual([["zoom", "relative"], ["orientation", "off"]]);
+    await expect(scriptControls()!.link("z", "linked")).resolves.toEqual({
+      applied: false,
+      reason: "Z links once depth is a physical place.",
     });
     unmount();
   });

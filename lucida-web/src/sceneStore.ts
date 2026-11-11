@@ -19,6 +19,7 @@ import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { ViewMode } from "./types.ts";
 import type { SlicePlane } from "./renderer/slicePlane.ts";
 import type { ViewLayoutName } from "./commands.ts";
+import { readViewLinks, type ViewLinks } from "./viewLinks.ts";
 
 export type CameraMode = "slice" | "arcball" | "fly";
 
@@ -69,16 +70,20 @@ export interface SceneView {
   readonly layout: ViewLayoutName;
   /** The view shown alone across the canvas, if one is. */
   readonly maximized: number | null;
+  /** How the two views link, or null with one view. */
+  readonly links: ViewLinks | null;
 }
 
-/** The epochs that can move what a saved view records, and the comparison's.
- *  Annotations can move neither, so their epoch is left out. */
+/** The epochs that can move what a saved view records, the comparison's
+ *  and the links'. Annotations can move none of them, so their epoch is
+ *  left out. */
 export interface ViewEpochs {
   readonly content: number;
   readonly layout: number;
   readonly view: number;
   readonly selection: number;
   readonly comparison: number;
+  readonly links: number;
 }
 
 /** A scene before its first write, and the page before it has a scene. */
@@ -93,6 +98,7 @@ const NO_SCENE_VIEW: SceneView = {
   views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, withheld: [] }],
   layout: "single",
   maximized: null,
+  links: null,
 };
 
 /** The raw `resolved_layers()` answer each snapshot was parsed from, so an
@@ -177,6 +183,7 @@ function readEpochs(scene: WasmScene): ViewEpochs {
     view: all.view,
     selection: all.selection,
     comparison: all.comparison,
+    links: all.links,
   };
 }
 
@@ -187,7 +194,8 @@ function sameEpochs(a: ViewEpochs | null, b: ViewEpochs | null): boolean {
     a.layout === b.layout &&
     a.view === b.view &&
     a.selection === b.selection &&
-    a.comparison === b.comparison
+    a.comparison === b.comparison &&
+    a.links === b.links
   );
 }
 
@@ -211,6 +219,7 @@ function readView(scene: WasmScene, knownLayersJson: string | null, previous: Sc
     views: readViews(scene, previous.views),
     layout: (scene.view_layout() || "single") as ViewLayoutName,
     maximized: scene.maximized_view() ?? null,
+    links: readLinks(scene, previous.links),
   };
   layersJsonOf.set(view, layersJson);
   return view;
@@ -235,6 +244,13 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
   return JSON.stringify(views) === JSON.stringify(previous) ? previous : views;
 }
 
+/** The links, keeping `previous` while nothing in them changed. Which
+ *  properties can link follows the cameras, so they are read on every move. */
+function readLinks(scene: WasmScene, previous: ViewLinks | null): ViewLinks | null {
+  const links = readViewLinks(scene);
+  return JSON.stringify(links) === JSON.stringify(previous) ? previous : links;
+}
+
 function sameView(a: SceneView, b: SceneView): boolean {
   return (
     a.z === b.z &&
@@ -245,6 +261,7 @@ function sameView(a: SceneView, b: SceneView): boolean {
     a.cameraMode === b.cameraMode &&
     a.views === b.views &&
     a.layout === b.layout &&
-    a.maximized === b.maximized
+    a.maximized === b.maximized &&
+    a.links === b.links
   );
 }

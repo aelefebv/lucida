@@ -29,4 +29,9 @@ pub struct SceneEpochs {
     /// moves `selection` as well.
     #[serde(default)]
     pub comparison: u64,
+    /// How the views link changed: a property's mode, or the defaults a new
+    /// pair of datasets takes. Planning reads it nowhere; a link that moves
+    /// a view moves `view` or `selection` as well.
+    #[serde(default)]
+    pub links: u64,
 }

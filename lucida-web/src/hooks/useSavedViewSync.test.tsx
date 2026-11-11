@@ -48,6 +48,7 @@ interface MockScene {
   drawn_datasets: () => string;
   view_layout: () => string;
   maximized_view: () => number | undefined;
+  view_links: () => string;
   view_rect: () => number[];
   view_camera_mode: () => string;
   withheld: () => string;
@@ -89,6 +90,7 @@ function makeMockScene(): MockScene {
     drawn_datasets: () => "[]",
     view_layout: () => "single",
     maximized_view: () => undefined,
+    view_links: () => "null",
     view_rect: () => [0, 0, 1, 1],
     view_camera_mode: () => m.cameraModeVal,
     withheld: () => "[]",

@@ -1,14 +1,16 @@
 /**
- * The controls that divide the canvas among views: each writes the scene's
- * views and draws the next frame. A layout moves every view's camera and
- * what one shows changes what it plans, and both bump the epochs the planner
- * reads, so nothing else needs telling.
+ * The controls that divide the canvas among views and link them: each
+ * writes the scene's views and draws the next frame. A layout moves every
+ * view's camera, a link can move the other view's, and what one shows
+ * changes what it plans; each bumps the epochs the planner reads, so nothing
+ * else needs telling.
  */
 
 import { applyViewportCommand } from "./applyAndSend.ts";
-import type { ViewLayoutName } from "./commands.ts";
+import type { LinkMode, LinkProperty, ViewLayoutName } from "./commands.ts";
 import type { InvalidationSink } from "./invalidation.ts";
 import type { WasmScene } from "lucida-core";
+import { readViewLinks, type ViewLinks } from "./viewLinks.ts";
 
 export interface ViewLayoutActions {
   /** How the canvas divides now. */
@@ -28,6 +30,10 @@ export interface ViewLayoutActions {
   add(view: number, datasetIds: readonly string[]): void;
   /** Show `view` alone across the canvas, or every view again with null. */
   maximize(view: number | null): void;
+  /** How the two views link, or null with one view. */
+  links(): ViewLinks | null;
+  /** Link `property` between the two views in `mode`. */
+  link(property: LinkProperty, mode: LinkMode): void;
 }
 
 export function viewLayoutActions(
@@ -38,7 +44,8 @@ export function viewLayoutActions(
     const current = scene();
     if (!current) return;
     edit(current);
-    // Every view the layout touches takes a new size, as a resize gives one.
+    // Every view the layout touches takes a new size, as a resize gives
+    // one, and a link can move the other view.
     loop()?.markInput("resize");
   };
   return {
@@ -61,6 +68,11 @@ export function viewLayoutActions(
     }),
     add: (view, datasetIds) => write((s) => addTo(s, view, datasetIds)),
     maximize: (view) => write((s) => applyViewportCommand(s, { type: "maximize_view", view })),
+    links: () => {
+      const current = scene();
+      return current ? readViewLinks(current) : null;
+    },
+    link: (property, mode) => write((s) => applyViewportCommand(s, { type: "set_view_link", property, mode })),
   };
 }
 

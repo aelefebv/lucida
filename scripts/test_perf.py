@@ -168,6 +168,7 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "swipe-drag",
         "swipe-drag-volume",
         "two-views",
+        "two-views-linked",
     }
 
 

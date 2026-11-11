@@ -1,5 +1,6 @@
 mod comparison;
 mod layers;
+mod links;
 mod placement;
 mod types;
 mod views;
@@ -7,6 +8,8 @@ mod views;
 pub use comparison::{CompareMode, Comparison, Side};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
+use links::ViewLinks;
+pub use links::{LinkBasis, LinkMode, LinkProperty, LinksState, PropertyLink, Unlinkable};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
@@ -134,6 +137,9 @@ pub struct Scene {
     /// [`Scene::dataset_holder`]. Client-local.
     #[serde(skip)]
     holders: HashMap<(DatasetId, PoolKind), ViewId>,
+    /// How the two views of a layout of two follow each other. Client-local.
+    #[serde(skip)]
+    links: ViewLinks,
     /// Shared document state (dataset manifests).
     #[serde(flatten)]
     pub document: DocumentState,
@@ -244,6 +250,7 @@ impl Scene {
             maximized: None,
             canvas: viewport,
             holders: HashMap::new(),
+            links: ViewLinks::default(),
             document: DocumentState::default(),
             display: DisplayState::default(),
             dataset_order: Vec::new(),
@@ -430,11 +437,14 @@ impl Scene {
         };
         let view = self.active_view_mut();
         let before = view.camera.clone();
+        let axes = view.axes.clone();
         view.resize(view.rect.size_on(viewport), None);
         view.camera.fit(&bounds);
         view.camera.set_framing(framing);
         if view.camera != before {
             self.epochs.view += 1;
+            // The other view follows a fit as it follows a steer.
+            self.follow_links(id, &before, &axes);
         }
         true
     }
@@ -449,15 +459,17 @@ impl Scene {
             return false;
         };
         let (min, max) = to_scene.apply_box(region.min, region.max);
-        let Camera::Slice(slice) = &mut self.active_view_mut().camera else {
+        let view = self.active_view_mut();
+        let (id, before, axes) = (view.id(), view.camera.clone(), view.axes.clone());
+        let Camera::Slice(slice) = &mut view.camera else {
             return false;
         };
-        let before = slice.clone();
         slice.fit_to_bounds(PlaneBox::new(min, max), crate::framing::FIT_MARGIN_2D);
         slice.framing = Framing::Placed;
-        let changed = *slice != before;
+        let changed = view.camera != before;
         if changed {
             self.epochs.view += 1;
+            self.follow_links(id, &before, &axes);
         }
         changed
     }
@@ -1230,6 +1242,7 @@ impl Scene {
         let view = self.active_view_mut();
         camera.fit_region_to_viewport(view.camera.viewport());
         let before = view.camera.clone();
+        let axes_before = view.axes.clone();
         view.adopt_camera(camera);
         let id = view.id();
         self.reframe(id);
@@ -1239,10 +1252,13 @@ impl Scene {
         if axes_changed {
             view.axes = axes;
         }
-        if moved {
+        // A followed peer or a restored view steers the active view, and the
+        // other view follows it through the links as it follows a gesture.
+        let followed = self.follow_links(id, &before, &axes_before);
+        if moved || followed.camera {
             self.epochs.view += 1;
         }
-        if axes_changed || self.display != display {
+        if axes_changed || followed.axes || self.display != display {
             self.display = display;
             self.epochs.selection += 1;
         }

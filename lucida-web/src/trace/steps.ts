@@ -11,7 +11,7 @@
  * run rather than a silence.
  */
 
-import type { ViewLayoutName } from "../commands.ts";
+import type { LinkMode, LinkProperty, ViewLayoutName } from "../commands.ts";
 import type { Comparison } from "../comparison.ts";
 import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";
 import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
@@ -73,6 +73,8 @@ export interface ScriptControls {
    * dropped on a view moves there; with `keep`, show them there as well.
    */
   views(layout: ViewLayoutName, show: readonly (readonly string[])[], keep: boolean): Promise<StepOutcome>;
+  /** Link `property` between the two views in `mode`, as the link popover does. */
+  link(property: LinkProperty, mode: LinkMode): Promise<StepOutcome>;
 }
 
 /**

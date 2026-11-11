@@ -270,6 +270,19 @@ export interface MaximizeViewCommand {
   view: number | null;
 }
 
+/** A part of what a view shows that can follow the other view. */
+export type LinkProperty = "pan" | "zoom" | "orientation" | "z" | "t";
+
+/** To the same value, keeping the offset it had when linked, or not at all. */
+export type LinkMode = "linked" | "relative" | "off";
+
+/** Link `property` between the two views in `mode`. */
+export interface SetViewLinkCommand {
+  type: "set_view_link";
+  property: LinkProperty;
+  mode: LinkMode;
+}
+
 /** Cut another plane with the slice camera, which fits the data again. */
 export interface SetSlicePlaneCommand {
   type: "set_slice_plane";
@@ -407,6 +420,7 @@ export type ViewportCommand =
   | SetViewDatasetsCommand
   | MoveDatasetToViewCommand
   | MaximizeViewCommand
+  | SetViewLinkCommand
   | SetModeSliceCommand
   | SetModeArcballCommand
   | SetModeFlyCommand
