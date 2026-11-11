@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WHEEL_ZOOM_PER_PIXEL, wheelPixels, wheelZoom } from "./wheel.ts";
+import { wheelPixels, wheelZoom } from "./wheel.ts";
 
 const PIXEL = 0;
 const LINE = 1;
@@ -28,10 +28,12 @@ describe("a wheel event as a zoom", () => {
     expect(zoom(-100) * zoom(100)).toBeCloseTo(1, 12);
   });
 
-  it("reads a line-mode notch, Firefox's three lines, as 16 px a line", () => {
-    expect(wheelPixels(wheel(3, LINE), PAGE_PX)).toBe(48);
-    expect(zoom(-3, LINE)).toBeCloseTo(Math.exp(48 * WHEEL_ZOOM_PER_PIXEL), 12);
-    expect(zoom(-3, LINE)).toBeCloseTo(1.1 ** 0.48, 12);
+  it("zooms a line-mode notch, Firefox's three lines, as far as a pixel-mode notch", () => {
+    expect(wheelPixels(wheel(3, LINE), PAGE_PX)).toBeCloseTo(100, 9);
+    const line = Math.log(zoom(-3, LINE));
+    const pixel = Math.log(zoom(-100));
+    expect(Math.abs(line - pixel) / pixel).toBeLessThan(0.1);
+    expect(zoom(3, LINE)).toBeCloseTo(1 / 1.1, 9);
   });
 
   it("reads a page-mode event as a page's height", () => {

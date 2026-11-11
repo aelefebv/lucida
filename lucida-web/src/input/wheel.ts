@@ -17,8 +17,12 @@ const DOM_DELTA_PAGE = 2;
 export const WHEEL_NOTCH_PX = 100;
 /** How far one notch zooms. */
 export const WHEEL_NOTCH_ZOOM = 1.1;
-/** A line-mode delta's line, in CSS pixels: a line of the default 16 px font. */
-export const WHEEL_LINE_PX = 16;
+/**
+ * A line-mode delta's line, in CSS pixels. A notch is 3 lines by the
+ * system default, which Chrome on Windows reports as its 100 px, so a
+ * line-mode notch, as Firefox sends it, zooms as far as Chrome's.
+ */
+export const WHEEL_LINE_PX = WHEEL_NOTCH_PX / 3;
 
 /** Natural-log zoom per CSS pixel of a wheel's or a trackpad's scroll. */
 export const WHEEL_ZOOM_PER_PIXEL = Math.log(WHEEL_NOTCH_ZOOM) / WHEEL_NOTCH_PX;
