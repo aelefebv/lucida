@@ -9,6 +9,7 @@ import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState, marchStepScaleFor } from "./volumePath.ts";
 import { tickViews, ViewRedraws } from "./viewTick.ts";
+import { evaluateViewSettles, viewSettleSignal, type ChunkResidency } from "./pipeline/viewSettle.ts";
 import { TickCoordinator } from "./pipeline/tickCoordinator.ts";
 import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
@@ -131,6 +132,11 @@ export class RenderLoop implements TraceEnvironment {
   private uploader = new Uploader();
   private tickCoordinator = new TickCoordinator(this.uploader);
   private redraws = new ViewRedraws();
+  /** Whether a view's chunk is held in the CPU cache and on the GPU. */
+  private readonly chunkResidency: ChunkResidency = {
+    holds: (req) => this.session.cpuCache.holds(req),
+    onGpu: (req) => this.session.cpuCache.deliveryState.isChunkHeld(req.imageId, req.c, req.chunkKey, req.tier, req.mode),
+  };
   /** Each view's mode at the latest tick, so a 2D/3D switch is seen once. */
   private viewModes = new Map<number, "slice" | "volume">();
   private readonly autoContrast = new AutoContrastFitter();
@@ -497,6 +503,13 @@ export class RenderLoop implements TraceEnvironment {
     state.frameInFlight = this.rafId !== null || this.client.framesAwaitingDone() > 0;
     evaluateSettle(state, performance.now());
     settleSignal.publish(state);
+    // With several views, each one's own settle, before the page's: a view
+    // finishing is part of the run that closes when the last one does.
+    const coverage = this.tickCoordinator.viewCoverage();
+    const drawing = state.interactiveDirty || state.residencyDirty || state.frameInFlight;
+    const views = coverage ? evaluateViewSettles(coverage, this.chunkResidency, drawing) : [];
+    viewSettleSignal.publish(views);
+    traceRecorder.noteViewSettles(views);
     traceRecorder.noteQuiescence(state);
     return state;
   }

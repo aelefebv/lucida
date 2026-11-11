@@ -245,7 +245,7 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         comparison.flip();
         return { applied: true, reason: null };
       },
-      views: async (layout, show) => {
+      views: async (layout, show, keep) => {
         const open = new Set(datasetsRef.current?.keys() ?? []);
         let shown: string[][];
         try {
@@ -264,8 +264,12 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         if (shown.length > views.length) {
           return { applied: false, reason: `a ${layout} layout has ${views.length} view(s), not ${shown.length}` };
         }
-        // Each dataset moves into its view, as a layer dropped on it does.
-        shown.forEach((ids, at) => ids.forEach((id) => viewLayout.move(views[at], id)));
+        // Each dataset moves into its view, as a layer dropped on it does, or
+        // with `keep` shows there as well, as a layer shown in both views.
+        shown.forEach((ids, at) => {
+          if (!keep) ids.forEach((id) => viewLayout.move(views[at], id));
+          else if (ids.length > 0) viewLayout.add(views[at], ids);
+        });
         return { applied: true, reason: null };
       },
     });

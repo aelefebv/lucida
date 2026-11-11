@@ -273,11 +273,14 @@ pub enum ScriptStep {
     /// Divide the canvas among views as `layout` does, `single`, `columns`
     /// or `rows`, then move into each view, in order, the open datasets
     /// whose source URLs `show` lists for it, as a layer dropped on a view
-    /// moves there. Only a script file can name the datasets.
+    /// moves there; with `keep`, shows them there as well, as "Show in both
+    /// views" does. Only a script file can name the datasets.
     Views {
         layout: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         show: Vec<Vec<String>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keep: bool,
     },
     /// Send the pans, zooms and orbits that follow to the `view`th view, by
     /// its place in the layout from 0, which a press or a wheel there makes
@@ -473,7 +476,7 @@ impl ScriptStep {
                     .to_string(),
             ),
             Self::Blink { with, .. } => validate_with(with.as_deref()),
-            Self::Views { layout, show } => {
+            Self::Views { layout, show, .. } => {
                 let Some((_, views)) = VIEW_LAYOUTS.iter().find(|(name, _)| name == layout) else {
                     return Err(format!("a layout is single, columns or rows, not {layout}"));
                 };
@@ -1937,9 +1940,10 @@ async fn run_step(
             let interval = Duration::from_millis(interval_ms.unwrap_or(0));
             input = Some(repeat_control(page, &expression, *count, interval, "flips", wait).await?);
         }
-        ScriptStep::Views { layout, show } => {
+        ScriptStep::Views { layout, show, keep } => {
             let show = serde_json::to_string(show).expect("a list of URL lists serializes");
-            let expression = seam_call("views", &format!("{}, {show}", json_string(layout)));
+            let args = format!("{}, {show}, {keep}", json_string(layout));
+            let expression = seam_call("views", &args);
             input = Some(control_outcome(page, &expression, wait).await?);
         }
         // The minimap steers the slice view and the orbit camera; the fly
@@ -4189,6 +4193,7 @@ mod tests {
         let views = ScriptStep::Views {
             layout: "columns".to_string(),
             show: vec![vec!["a.zarr".to_string()], vec!["b.zarr".to_string()]],
+            keep: false,
         };
         assert_eq!(script.steps, vec![views.clone()]);
         assert_eq!(views.to_string(), "views columns");

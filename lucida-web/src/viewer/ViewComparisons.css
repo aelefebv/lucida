@@ -11,15 +11,15 @@
   pointer-events: none;
 }
 
-/* At the top of the view, narrowed to keep clear of the controls in the
-   canvas's top corners, such as the tool palette, which a view at the
-   canvas's edge reaches under. */
+/* At the top of the view, narrowed on both sides by the room the tool
+   palette takes at the canvas's top left, which a view at the canvas's edge
+   reaches under, as the withheld notice clears it. */
 .lc-view-comparison-bar {
   position: absolute;
   top: var(--lc-space-3);
   left: 50%;
   translate: -50% 0;
   width: max-content;
-  max-width: calc(100% - 4 * var(--lc-space-8));
+  max-width: calc(100% - 2 * (var(--lc-control-h) * 2 + var(--lc-space-4)));
   pointer-events: auto;
 }

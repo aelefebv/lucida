@@ -155,6 +155,8 @@ export function renderDiagnostic(
       `${document.run.gpu} · ${document.run.adapterKind.label} · build ${document.run.build}`,
   );
   push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
+  // With several views, each says when it settled and how much it covers.
+  if (document.run.views) push(IDENTITY, `views     ${viewsOf(document.run.views)}`);
   // A run that took no input has no lag reading, and prints no line for one.
   const lag = lagOf(document, p);
   if (lag) push(IDENTITY, `lag       ${lag}`);
@@ -891,4 +893,15 @@ function describeSteadyState(finding: Finding, p: PrintNumber): string {
     parts.push(`window ${p(`${base}.windowMs`, observed.windowMs.toLocaleString())} ms`);
   }
   return parts.join(" · ");
+}
+
+/** Each view's settle and coverage, in one line. */
+function viewsOf(views: NonNullable<DiagnosticDocument["run"]["views"]>): string {
+  return views.map(({ view, settledMs, wanted, short }, at) => {
+    const settled = settledMs === null ? "not settled" : `settled at ${Math.round(settledMs).toLocaleString()} ms`;
+    const covers = short === 0
+      ? `covers all ${wanted.toLocaleString()} it asked for`
+      : `covers ${(wanted - short).toLocaleString()} of ${wanted.toLocaleString()}, short of room for the rest`;
+    return `view ${at + 1} (id ${view}) ${settled}, ${covers}`;
+  }).join(" · ");
 }

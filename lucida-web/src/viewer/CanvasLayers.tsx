@@ -4,7 +4,8 @@
  * overlays. The view mode and selectors come from the scene store; the engine
  * supplies the scene, client, canvas, loop, and session.
  */
-import { lazy, Suspense, useCallback, useMemo, useRef, useState, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { viewSettleSignal } from "../pipeline/viewSettle.ts";
 import { AnnotationDraftOverlay } from "../components/AnnotationDraftOverlay.tsx";
 import { AnnotationOverlay } from "../components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "../components/AnnotationOverlay3D.tsx";
@@ -93,6 +94,8 @@ export function CanvasLayers({
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
   const { viewMode, z, t, layers, views, maximized } = useSceneView(engine.store);
+  // Each view's settle and coverage, with several views.
+  const settles = useSyncExternalStore(viewSettleSignal.subscribe, viewSettleSignal.get);
 
   // A finger's long press stands for both a right-click and a hover.
   const readoutRef = useRef<PixelReadoutHandle>(null);
@@ -238,7 +241,12 @@ export function CanvasLayers({
             surface={surface}
           />
         )}
-        <WithheldNotice withheld={pane.withheld} views={views} nameOf={nameOf} />
+        <WithheldNotice
+          withheld={pane.withheld}
+          views={views}
+          nameOf={nameOf}
+          coverage={settles.find((settle) => settle.view === pane.id)}
+        />
       </>
     );
   };
