@@ -433,40 +433,12 @@ function probeVolumeLabel(
   samples: ProbeSample[],
   reads: TexelReads,
 ): void {
-  const pool = layer.labelChunk && ctx.state.labelVolumePools.get(labelVolumePoolKey(layer.datasetId, layer.labelChunk.t));
-  const model = layer.modelMatrix;
-  const invModel = layer.invModelMatrix;
-  if (!pool || !model || !invModel) return;
-  const readable: ReadablePool = {
-    texture: pool.texture,
-    indirectionData: pool.indirectionData,
-    slotsX: pool.slotsX,
-    slotsY: pool.slotsY,
-    slotsZ: pool.slotsZ,
-  };
-  const source: ProbeSource<ReadablePool> = {
-    meta: {
-      level: layer.labelChunk?.level ?? 0,
-      levelDims: [pool.depth, pool.height, pool.width],
-      chunkDims: [pool.chunkZ, pool.chunkY, pool.chunkX],
-      gridDims: [pool.gridZ, pool.gridY, pool.gridX],
-      offset: 0,
-    },
-    atlas: readable,
-  };
-  // The overlay's cube spans the label's own extent, so a position is carried
-  // into its source entity's cube to count that entity's samples.
-  const entry = drawOf(ctx.state, pool.datasetId, frame.view)?.cold.activeSet
-    .find((e) => e.entityId === layer.entityId);
-  const dims = entry ? levelZeroDims(entry) : null;
-  const position = (pos: readonly number[]) => entry && dims
-    ? levelZeroPosition(betweenCubes(pos, model, entry.invModelMatrix), dims, "volume")
-    : undefined;
-  const span = marchSpan(frame, msg.x, msg.y, invModel);
-  if (!span) return;
-  const steps = marchSamples([source], null, span, MARCH_STEPS.label);
+  const label = labelVolumeRead(ctx, frame.view, layer);
+  const span = label && marchSpan(frame, msg.x, msg.y, label.invModel);
+  if (!label || !span) return;
+  const steps = marchSamples([label.source], null, span, MARCH_STEPS.label);
   const sample: ProbeSample = {
-    datasetId: pool.datasetId,
+    datasetId: label.datasetId,
     entityId: layer.entityId ?? "",
     labelImageId: layer.datasetId,
     state: "none",
@@ -476,8 +448,51 @@ function probeVolumeLabel(
   const pending = readMarch(steps, reads, () => "id");
   reads.then((values) => {
     const marched = pending(values);
-    settleMarch(sample, steps, marched, pickLabelSample(marched), position);
+    settleMarch(sample, steps, marched, pickLabelSample(marched), label.position);
   });
+}
+
+/** A volume frame's label overlay as a probe reads it. */
+interface LabelVolumeRead {
+  datasetId: string;
+  /** The overlay's pool, as the one source of its ids. */
+  source: ProbeSource<ReadablePool>;
+  /** World space to the overlay's cube. */
+  invModel: ArrayLike<number>;
+  /** A point of the overlay's cube among its source entity's level-0 samples. */
+  position(pos: readonly number[]): [number, number, number] | undefined;
+}
+
+function labelVolumeRead(ctx: WorkerCtx, view: number, layer: VolumeLayerParams): LabelVolumeRead | null {
+  const pool = layer.labelChunk && ctx.state.labelVolumePools.get(labelVolumePoolKey(layer.datasetId, layer.labelChunk.t));
+  const model = layer.modelMatrix;
+  const invModel = layer.invModelMatrix;
+  if (!pool || !model || !invModel) return null;
+  const source: ProbeSource<ReadablePool> = {
+    meta: {
+      level: layer.labelChunk?.level ?? 0,
+      levelDims: [pool.depth, pool.height, pool.width],
+      chunkDims: [pool.chunkZ, pool.chunkY, pool.chunkX],
+      gridDims: [pool.gridZ, pool.gridY, pool.gridX],
+      offset: 0,
+    },
+    atlas: {
+      texture: pool.texture,
+      indirectionData: pool.indirectionData,
+      slotsX: pool.slotsX,
+      slotsY: pool.slotsY,
+      slotsZ: pool.slotsZ,
+    },
+  };
+  // The overlay's cube spans the label's own extent, so a position is carried
+  // into its source entity's cube to count that entity's samples.
+  const entry = drawOf(ctx.state, pool.datasetId, view)?.cold.activeSet
+    .find((e) => e.entityId === layer.entityId);
+  const dims = entry ? levelZeroDims(entry) : null;
+  const position = (pos: readonly number[]) => entry && dims
+    ? levelZeroPosition(betweenCubes(pos, model, entry.invModelMatrix), dims, "volume")
+    : undefined;
+  return { datasetId: pool.datasetId, source, invModel, position };
 }
 
 /**
@@ -499,37 +514,18 @@ function probeVolumeLayerAt(
     if (local) probeMember(ctx, layer.datasetId, local, samples, reads, view, "volume");
     return;
   }
-  const pool = layer.labelChunk && ctx.state.labelVolumePools.get(labelVolumePoolKey(layer.datasetId, layer.labelChunk.t));
-  const local = pool && layer.invModelMatrix ? cubePoint(point, layer.invModelMatrix) : null;
-  if (!pool || !local || !layer.modelMatrix) return;
-  const source: ProbeSource<ReadablePool> = {
-    meta: {
-      level: layer.labelChunk?.level ?? 0,
-      levelDims: [pool.depth, pool.height, pool.width],
-      chunkDims: [pool.chunkZ, pool.chunkY, pool.chunkX],
-      gridDims: [pool.gridZ, pool.gridY, pool.gridX],
-      offset: 0,
-    },
-    atlas: {
-      texture: pool.texture,
-      indirectionData: pool.indirectionData,
-      slotsX: pool.slotsX,
-      slotsY: pool.slotsY,
-      slotsZ: pool.slotsZ,
-    },
-  };
-  const location = locateSample([source], null, local, "volume");
-  const entry = drawOf(ctx.state, pool.datasetId, view)?.cold.activeSet.find((e) => e.entityId === layer.entityId);
-  const dims = entry ? levelZeroDims(entry) : null;
+  const label = labelVolumeRead(ctx, view, layer);
+  const local = label && cubePoint(point, label.invModel);
+  if (!label || !local) return;
+  const location = locateSample([label.source], null, local, "volume");
   const sample: ProbeSample = {
-    datasetId: pool.datasetId,
+    datasetId: label.datasetId,
     entityId: layer.entityId ?? "",
     labelImageId: layer.datasetId,
     state: location.kind === "resident" ? "value" : location.kind,
   };
-  if (entry && dims) {
-    sample.position = levelZeroPosition(betweenCubes(local, layer.modelMatrix, entry.invModelMatrix), dims, "volume");
-  }
+  const position = label.position(local);
+  if (position) sample.position = position;
   samples.push(sample);
   if (location.kind === "resident") {
     const index = reads.add(location.atlas, location.texel, "id");

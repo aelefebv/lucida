@@ -234,9 +234,9 @@ export function isDatasetOpenCause(cause: RunCause | null): boolean {
  * `stalled` is a view that stopped making progress without settling, and
  * the header's `stallReason` says what it waited on.
  *
- * The last two belong to the unlabelled steady-state interval alone.
- * `run-opened` means a labelled run began, which is not a settling event.
- * `rotated` means the interval reached the per-run cap: steady state has no
+ * The last two belong to the unlabelled steady-state interval, except that
+ * a gesture ends an open hover run as `run-opened` too. `run-opened` means a
+ * labelled run began, which is not a settling event. `rotated` means the interval reached the per-run cap: steady state has no
  * privileged start, so it hands over to a fresh interval rather than
  * truncating and losing the most recent work.
  */

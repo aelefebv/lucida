@@ -1,8 +1,9 @@
 /**
  * What draws on and over the canvas: the 2D or 3D viewer, the annotation
  * overlays and draft, the pixel readout and the crosshairs of the point under
- * the pointer, the peer cursors, and the debug overlays. The view mode and selectors come from the scene store; the engine
- * supplies the scene, client, canvas, loop, and session.
+ * the pointer, the peer cursors, and the debug overlays. The view mode and
+ * selectors come from the scene store; the engine supplies the scene, client,
+ * canvas, loop, and session.
  */
 import { lazy, Suspense, useCallback, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { viewSettleSignal } from "../pipeline/viewSettle.ts";
