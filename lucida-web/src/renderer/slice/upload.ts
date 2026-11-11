@@ -119,8 +119,14 @@ export function handleSliceChunkData(
     return;
   }
 
-  if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
-    console.warn(`[sliceChunkData] chunkDims mismatch for ${memberId}: pool=[${atlas.chunkX},${atlas.chunkY}] msg=[${chunkX},${chunkY}] level=${level}`);
+  // The page cuts a plane for the view as it stands, which can run ahead of
+  // the cold state that routes it here. A plane cut along another axis, or
+  // for other chunk dims, belongs to another pool: written here it would read
+  // as this pool's plane, or reach past its texture. The page sends it again
+  // once the cold state catches up.
+  if ((msg.sliceAxis ?? "z") !== atlas.axis || atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
+    refuseAll("wrong-slice");
+    return;
   }
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
