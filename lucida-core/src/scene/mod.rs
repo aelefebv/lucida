@@ -11,7 +11,7 @@ mod views;
 
 pub use comparison::{CompareMode, Comparison, Side};
 pub use cut_grid::{AxisReading, CutGrid};
-pub use four_up::FOUR_UP;
+pub use four_up::{FOUR_UP, PlaneLine};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 pub use link_notices::{LinkNotice, ViewLinkNotices};

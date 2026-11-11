@@ -11,6 +11,9 @@ pub enum SpatialAxis {
 }
 
 impl SpatialAxis {
+    /// Every axis, in `[x, y, z]` order.
+    pub const ALL: [SpatialAxis; 3] = [SpatialAxis::X, SpatialAxis::Y, SpatialAxis::Z];
+
     /// The axis's index into an `[x, y, z]` triple.
     pub fn xyz(self) -> usize {
         match self {
