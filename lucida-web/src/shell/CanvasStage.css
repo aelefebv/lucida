@@ -167,3 +167,13 @@
 .lc-canvas-stage[data-bare] .lc-view-pane > :not(.lc-scale-bar) {
   display: none;
 }
+
+/* A capture that asks for them (`plane_lines=1`) draws four-up's plane
+   lines too, and nothing else that lies over the views. */
+.lc-shell[data-plane-lines] .lc-canvas-stage[data-bare] .lc-canvas-stage-layers > .lc-view-overlays {
+  display: block;
+}
+
+.lc-shell[data-plane-lines] .lc-canvas-stage[data-bare] .lc-view-overlay > :not(.lc-plane-lines) {
+  display: none;
+}

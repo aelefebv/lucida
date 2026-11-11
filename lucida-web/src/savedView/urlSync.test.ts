@@ -232,6 +232,8 @@ describe("UrlSync", () => {
     expect(fetchViewerProfile).toHaveBeenCalledWith("cli.default");
     expect(applier.apply).toHaveBeenCalledTimes(1);
     expect(applier.applied[0].view.t).toBe(12);
+    // Its owner set its comparisons, which line up as the document places them.
+    expect(applier.apply).toHaveBeenCalledWith(v, { comparisons: true });
   });
 
   it("handles popstate by re-applying", async () => {

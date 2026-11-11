@@ -57,6 +57,10 @@ function fakeComparison(verdict: LineUp = { verdict: "yes" }) {
       calls.push(["flip"]);
       edit({ showing: current?.showing === "a" ? "b" : "a" });
     },
+    setBlinkRate: (rate) => {
+      calls.push(["rate", rate]);
+      edit({ rate: rate ?? undefined });
+    },
   };
   return { actions, calls };
 }

@@ -382,7 +382,7 @@ mod tests {
         // its mark sits on XZ's line of the Z plane.
         let (on_xz, arms) = at(&marks, xz).expect("a mark in XZ");
         let z_line = scene
-            .plane_lines(xz)
+            .plane_lines(xz, None)
             .into_iter()
             .find(|line| line.axis == SpatialAxis::Z)
             .expect("XZ draws Z");

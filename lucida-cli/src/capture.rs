@@ -35,6 +35,9 @@ pub struct CaptureOptions {
     pub height: u32,
     pub device_pixel_ratio: f64,
     pub scale_bar: bool,
+    /// Whether four-up's plane lines lie over the views, which the capture
+    /// surface leaves out unless asked.
+    pub plane_lines: bool,
 }
 
 /// One image a capture wrote.
@@ -81,7 +84,12 @@ pub async fn capture_viewer(
         CaptureParts::Page => url.to_string(),
         CaptureParts::View(_) | CaptureParts::CanvasAndViews => montage::with_render_param(url),
     };
-    let url = montage::with_scale_bar_param(&url, size.scale_bar);
+    let url = montage::with_still_param(&montage::with_scale_bar_param(&url, size.scale_bar));
+    let url = if size.plane_lines {
+        montage::with_plane_lines_param(&url)
+    } else {
+        url
+    };
     let viewport = Viewport::new(size.width, size.height, size.device_pixel_ratio);
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = browser.open_page(&url, token, wait).await?;

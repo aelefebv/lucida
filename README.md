@@ -115,13 +115,15 @@ The canvas can hold several views. Views are counted from 0 in the layout's orde
 lucida view layout columns a.ome.zarr b.ome.zarr --screenshot pair.png   # each dataset in its own view, captured whole and view by view
 lucida view link pan off                    # pan, zoom, orientation, z, t, contrast or colormap: linked, relative or off
 lucida camera mode arcball --view 1
+lucida view compare a.ome.zarr b.ome.zarr --swipe 0.4 --screenshot swipe.png   # or --blink 2; --end stops
 lucida view layout four-up                  # XY, YZ and XZ slices and a volume, crossing at one point
-lucida viewer screenshot views.png --each-view
+lucida viewer screenshot views.png --each-view --plane-lines
 ```
 
 ```python
 workspace.view.layout("columns", ["a.ome.zarr", "b.ome.zarr"])
 workspace.view.zoom(2, view=1)
+workspace.view.compare("a.ome.zarr", "b.ome.zarr", swipe=0.4)
 workspace.viewer.screenshot("pair.png", each_view=True)   # runs the lucida CLI
 ```
 

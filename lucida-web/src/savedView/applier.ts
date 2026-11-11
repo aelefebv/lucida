@@ -9,7 +9,9 @@
 // automatic restore must never undo a move someone else made since. A
 // comparison comes back with placement or not at all: whether its pair lines
 // up depends on placement, and it sets aside every other layer its view
-// shows, which only someone who picked the view expects. The views go next to
+// shows, which only someone who picked the view expects. A viewer profile is
+// the exception: it records no placement, so its pairs were lined up as the
+// document places them, and its owner set them comparing. The views go next to
 // last, through `import_views`, and the active view's camera last, through
 // `import_presence`, so each lands through one mutator. The in-progress state
 // lets urlSync suppress URL writes while an apply runs.
@@ -93,6 +95,9 @@ export interface ApplyOptions {
    *  recorded it and brings back its comparisons. Every automatic restore
    *  leaves the document's placement, and shows no comparison. */
   chosen?: boolean;
+  /** Bring back its comparisons without its placement, for a viewer profile,
+   *  whose pairs line up as the document places them. */
+  comparisons?: boolean;
 }
 
 /** A dataset an `apply()` placed by hand, from where it was. */
@@ -406,7 +411,7 @@ export class SavedViewApplier {
       // The views, then the active view's camera and axis positions, with an
       // older view's scene-wide channel mode, which the scene decodes into
       // each layer's solo over the settings set above.
-      importViews(sceneAfter, view, options.chosen === true);
+      importViews(sceneAfter, view, options.chosen === true || options.comparisons === true);
       importCameraView(sceneAfter, view, clamped.t, legacyChannelMode(view));
 
       this.emitApplyResult(sceneAfter, view);

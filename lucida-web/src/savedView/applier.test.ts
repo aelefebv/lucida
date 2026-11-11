@@ -476,7 +476,7 @@ describe("SavedViewApplier", () => {
       expect(scene.view_ids()).toHaveLength(1);
     });
 
-    it("brings comparisons back only for a view someone chose", async () => {
+    it("brings comparisons back only for a view someone chose, or a viewer profile", async () => {
       const { scene } = createScene(["wds-a"]);
       const imported: { comparisons: boolean }[] = [];
       const importViews = scene.import_views.bind(scene);
@@ -486,7 +486,8 @@ describe("SavedViewApplier", () => {
       };
       await applierOn(scene).apply(emptyView());
       await applierOn(scene).apply(emptyView(), { chosen: true });
-      expect(imported.map((i) => i.comparisons)).toEqual([false, true]);
+      await applierOn(scene).apply(emptyView(), { comparisons: true });
+      expect(imported.map((i) => i.comparisons)).toEqual([false, true, true]);
     });
   });
 

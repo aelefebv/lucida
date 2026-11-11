@@ -42,6 +42,7 @@ import {
 import type { DatasetState } from "./types.ts";
 import { useEngine } from "./engine.ts";
 import { CanvasLayers } from "./viewer/CanvasLayers.tsx";
+import { planeLinesCaptured } from "./viewer/planeLines.ts";
 import { EngineProvider } from "./viewer/EngineProvider.tsx";
 import { useEngineParts } from "./viewer/engineParts.ts";
 import { useAnnotationNavigation } from "./viewer/useAnnotationNavigation.ts";
@@ -72,7 +73,7 @@ import {
   createWorkspaceSavedView,
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
-import { isCaptureSurface } from "./captureSurface.ts";
+import { holdsStill, isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
 import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
@@ -166,6 +167,8 @@ function Viewer({
   // `dataset explore`, and the trace driver: no UI chrome and no persisted
   // writes. Read `captureSurface.ts` before wiring anything new in here.
   const captureSurface = useMemo(() => isCaptureSurface(), []);
+  const capturePlaneLines = useMemo(() => planeLinesCaptured(), []);
+  const still = useMemo(() => holdsStill(), []);
   const developer = useDeveloperSurfaces({ captureSurface });
   // A phone puts its own chrome around the same canvas (src/shell/phone).
   const phone = useViewportClass() === "phone" && !captureSurface;
@@ -1111,7 +1114,12 @@ function Viewer({
   // The canvas stage keeps its place in the tree whichever chrome is around
   // it (see `shell/chrome.ts`).
   return (
-    <div className="lc-shell" data-capture={captureSurface || undefined} data-layout={phone ? "phone" : undefined}>
+    <div
+      className="lc-shell"
+      data-capture={captureSurface || undefined}
+      data-plane-lines={capturePlaneLines || undefined}
+      data-layout={phone ? "phone" : undefined}
+    >
       {chrome.top}
       <div className="lc-shell-body">
         {chrome.left}
@@ -1220,6 +1228,7 @@ function Viewer({
             }}
           >
             <CanvasLayers
+              still={still}
               datasets={datasetsRef.current}
               hasDatasets={datasetsVersion > 0}
               selectedDatasetId={selectedDatasetId}

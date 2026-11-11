@@ -30,7 +30,6 @@ function fakeScene() {
     view_rect: (id: number) => (state.views.length === 1 ? [0, 0, 1, 1] : [state.views.indexOf(id) / 2, 0, 0.5, 1]),
     view_camera_mode: () => state.mode,
     set_aside: () => JSON.stringify(state.setAside),
-    plane_lines: () => "[]",
     slice_plane: () => "xy",
     transposed: () => false,
     cut_index: () => state.z,

@@ -26,3 +26,14 @@ export function isCaptureSurface(search?: string): boolean {
   const raw = search ?? (typeof window === "undefined" ? "" : window.location.search);
   return new URLSearchParams(raw).get("render") === "1";
 }
+
+/**
+ * Whether what would run on its own, a running blink, holds still: on the
+ * capture surface, or on a viewer page a capture loaded with `still=1`.
+ * Running, it would keep the view from settling, and a capture waits on
+ * settling, then shows the side the comparison records.
+ */
+export function holdsStill(search?: string): boolean {
+  const raw = search ?? (typeof window === "undefined" ? "" : window.location.search);
+  return isCaptureSurface(raw) || new URLSearchParams(raw).get("still") === "1";
+}
