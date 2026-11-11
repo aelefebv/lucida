@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.36.0](https://github.com/aelefebv/lucida/compare/v0.35.0...v0.36.0) (2026-11-11)
+
+
+### Features
+
+* rotate a dataset by hand, on the canvas, in its fields and from the CLI ([#1548](https://github.com/aelefebv/lucida/issues/1548)) ([6e4041a](https://github.com/aelefebv/lucida/commit/6e4041a07ed5a2ae7133348268fb3d7c68508aa4))
+* saved views, share links and follow carry every view and their links ([#1552](https://github.com/aelefebv/lucida/issues/1552)) ([c1d8f9a](https://github.com/aelefebv/lucida/commit/c1d8f9aab579fa3af5b23b57ef81d25ed0eb038f))
+
+
+### Bug Fixes
+
+* **web:** a hidden dataset's label pools yield GPU memory first under pressure ([#1553](https://github.com/aelefebv/lucida/issues/1553)) ([371470f](https://github.com/aelefebv/lucida/commit/371470f0e4365c78c87f4517dd40a89c20ad1161))
+
+
+### Performance
+
+* **web:** divide the memory budgets among views by their area on screen ([#1544](https://github.com/aelefebv/lucida/issues/1544)) ([1bb45bd](https://github.com/aelefebv/lucida/commit/1bb45bdb416357a8481c6295f1e5e680c9e5ba07))
+
 ## [0.35.0](https://github.com/aelefebv/lucida/compare/v0.34.0...v0.35.0) (2026-11-11)
 
 
