@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import stat
 import subprocess
 import uuid
@@ -513,6 +514,42 @@ class WorkspaceResource:
         async with self._connect_ws() as ws:
             return await recv_snapshot(ws, timeout)
 
+    def _run_cli(self, args: list[str], *, timeout: float) -> dict[str, Any]:
+        """Run the ``lucida`` CLI against this workspace and return its JSON.
+        It reads this client's config file and token, so it reaches the
+        server as this client does."""
+        client = self._client
+        env = dict(os.environ)
+        env["LUCIDA_CONFIG_PATH"] = str(client.config_store.path)
+        if client.token:
+            env["LUCIDA_TOKEN"] = client.token
+        argv = [
+            *cli_command(),
+            "--server",
+            client.server.url,
+            "--workspace",
+            self.id,
+            "--json",
+            *args,
+        ]
+        try:
+            completed = subprocess.run(
+                argv, env=env, capture_output=True, text=True, timeout=timeout + 30
+            )
+        except subprocess.TimeoutExpired as error:
+            raise LucidaError("session_disconnect", f"the lucida CLI ran past {timeout}s") from error
+        if completed.returncode != 0:
+            try:
+                error = json.loads(completed.stderr)["error"]
+                kind, message = error["kind"], error["message"]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                kind, message = "unexpected", completed.stderr.strip() or "the lucida CLI failed"
+            raise LucidaError(kind, message)
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise LucidaError("protocol", f"the lucida CLI printed invalid JSON: {error}") from error
+
     def _connect_ws(self) -> Any:
         headers = {}
         if self._client.token:
@@ -774,18 +811,88 @@ class ViewerResource:
         snapshot = await self._workspace.async_snapshot(timeout=timeout)
         return self._state(snapshot)
 
-    def apply(self, command: Any, *, timeout: float = 30.0) -> dict[str, Any]:
-        return run_sync(self.async_apply(command, timeout=timeout))
+    def apply(
+        self, command: Any, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return run_sync(self.async_apply(command, view=view, timeout=timeout))
 
-    async def async_apply(self, command: Any, *, timeout: float = 30.0) -> dict[str, Any]:
+    async def async_apply(
+        self, command: Any, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
         """Apply one viewport command to the profile and store the result.
 
         ``command`` is a command in the core's tagged form, such as
         ``{"type": "pan", "dx": 10.0, "dy": 0.0}``, or a function of the
-        workspace snapshot and the stored view that returns one.
+        workspace snapshot and the stored view that returns one. With
+        ``view``, it acts in the view at that place in the layout, counted
+        from 0, which becomes the active view first, as a press there makes
+        it; without, in the active view.
         """
+
+        def change(scene: Any, snapshot: dict[str, Any]) -> Any:
+            built = command
+            if callable(built):
+                built = built(snapshot, json.loads(scene.saved_view_json()))
+            scene.apply(json.dumps(built), view)
+            return built
+
         snapshot = await self._workspace.async_snapshot(timeout=timeout)
-        return self._apply(snapshot, command)
+        return self._change(snapshot, change)
+
+    def _apply_change(self, change: Any, *, timeout: float = 30.0) -> dict[str, Any]:
+        """Change the profile through its compiled scene and store the result.
+
+        ``change`` is a function of the scene and the workspace snapshot that
+        changes the scene with its methods, such as ``lay_out`` or
+        ``show_in``, and returns the command it applied, if one describes it.
+        """
+        snapshot = self._workspace.snapshot(timeout=timeout)
+        return self._change(snapshot, change)
+
+    def screenshot(
+        self,
+        output: str | os.PathLike[str],
+        *,
+        view: int | None = None,
+        each_view: bool = False,
+        width: int = 1200,
+        height: int = 800,
+        device_pixel_ratio: float = 1.0,
+        scale_bar: bool = True,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        """Capture this profile's view once every view has settled.
+
+        Writes the viewer page to ``output``; with ``view``, that view alone;
+        with ``each_view``, the canvas alone and each view beside it as
+        ``<stem>-view-<N>.png``, all from one load. Returns what the CLI's
+        ``viewer screenshot --json`` reports, whose ``captured`` lists each
+        image written.
+
+        The capture runs the ``lucida`` CLI, which drives a local Chrome, so
+        both clients share one browser driver. It takes the CLI from
+        ``LUCIDA_CLI``, else from ``PATH``.
+        """
+        args = ["screenshot", os.fspath(output)]
+        if view is not None:
+            args += ["--view", str(view)]
+        if each_view:
+            args.append("--each-view")
+        args += [
+            "--width",
+            str(width),
+            "--height",
+            str(height),
+            "--device-pixel-ratio",
+            str(device_pixel_ratio),
+            "--timeout-seconds",
+            str(max(1, round(timeout))),
+        ]
+        if not scale_bar:
+            args.append("--no-scale-bar")
+        return self._workspace._run_cli(
+            ["viewer", "--profile", self.profile, *args], timeout=timeout
+        )
 
     def _state(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         record, view, seed_source = self._current()
@@ -794,13 +901,11 @@ class ViewerResource:
             record = self._store(scene, seed_source)
         return self._result(snapshot, record, scene, None)
 
-    def _apply(self, snapshot: dict[str, Any], command: Any) -> dict[str, Any]:
+    def _change(self, snapshot: dict[str, Any], change: Any) -> dict[str, Any]:
         _, view, seed_source = self._current()
         scene = open_profile_scene(snapshot, view)
-        if callable(command):
-            command = command(snapshot, json.loads(scene.saved_view_json()))
         try:
-            scene.apply(json.dumps(command))
+            command = change(scene, snapshot)
         except LookupError as error:
             raise LucidaError("missing_resource", str(error)) from error
         except ValueError as error:
@@ -838,6 +943,7 @@ class ViewerResource:
         command: dict[str, Any] | None,
     ) -> dict[str, Any]:
         view = json.loads(scene.saved_view_json())
+        links = scene.links_json()
         return {
             "workspace_id": self._workspace.id,
             "profile": record["profile"],
@@ -852,47 +958,151 @@ class ViewerResource:
             "display": view["display"],
             "dataset_order": view["dataset_order"],
             "dataset_settings": view["dataset_settings"],
+            "views": json.loads(scene.views_json()),
+            "links": None if links is None else json.loads(links),
             "saved_view": view,
         }
 
 
 class ViewResource:
-    """The viewer profile's 2D slice camera and its selected Z, T and C."""
+    """The viewer profile's views: how the canvas divides among them, what
+    each shows and how two link, and each one's 2D slice camera and selected
+    Z and T.
+
+    Views are counted from 0 in the layout's order, as ``viewer.state()``
+    lists them under ``views``. A camera or position change acts in the view
+    ``view=`` names, which becomes the active view first, or in the active
+    view.
+    """
+
+    _LAYOUTS = {"single", "columns", "rows", "grid", "four_up"}
 
     def __init__(self, workspace: WorkspaceResource):
         self._workspace = workspace
 
-    def pan(self, dx: float, dy: float, *, timeout: float = 30.0) -> dict[str, Any]:
+    def pan(
+        self, dx: float, dy: float, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
         """Pan the slice camera by ``dx``, ``dy`` screen pixels."""
-        return self._apply({"type": "pan", "dx": dx, "dy": dy}, timeout)
+        return self._apply({"type": "pan", "dx": dx, "dy": dy}, view, timeout)
 
-    def zoom(self, factor: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        return self._apply({"type": "zoom_by", "factor": factor}, timeout)
+    def zoom(
+        self, factor: float, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return self._apply({"type": "zoom_by", "factor": factor}, view, timeout)
 
-    def set_zoom(self, value: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        return self._apply({"type": "set_zoom", "value": value}, timeout)
+    def set_zoom(
+        self, value: float, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return self._apply({"type": "set_zoom", "value": value}, view, timeout)
 
-    def center(self, x: float, y: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        return self._apply({"type": "set_center", "x": x, "y": y}, timeout)
+    def center(
+        self, x: float, y: float, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return self._apply({"type": "set_center", "x": x, "y": y}, view, timeout)
 
-    def slice(self, axis: str, index: int, *, timeout: float = 30.0) -> dict[str, Any]:
+    def slice(
+        self, axis: str, index: int, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
         axis = axis.lower()
         if axis == "c":
             raise LucidaError(
                 "config", "channels are shown per layer; use channel.solo(dataset, channel)"
             )
-        if axis not in {"z", "t"}:
+        if axis not in {"z", "y", "x", "t"}:
             raise LucidaError("config", f"unknown slice axis: {axis}")
-        return self._apply({"type": f"set_{axis}", axis: index}, timeout)
+        return self._apply({"type": f"set_{axis}", axis: index}, view, timeout)
 
-    def z_range(self, start: int, end: int, *, timeout: float = 30.0) -> dict[str, Any]:
-        return self._apply({"type": "set_z_range", "start": start, "end": end}, timeout)
+    def plane(
+        self, plane: str, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        """Cut the slice view along ``"xy"``, ``"xz"`` or ``"yz"``. An xz view
+        moves along Y, and a yz view along X."""
+        return self._apply({"type": "set_slice_plane", "plane": plane.lower()}, view, timeout)
+
+    def z_range(
+        self, start: int, end: int, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return self._apply({"type": "set_z_range", "start": start, "end": end}, view, timeout)
 
     def viewport_size(self, width: int, height: int, *, timeout: float = 30.0) -> dict[str, Any]:
-        return self._apply({"type": "set_viewport", "width": width, "height": height}, timeout)
+        return self._apply({"type": "set_viewport", "width": width, "height": height}, None, timeout)
 
-    def _apply(self, command: dict[str, Any], timeout: float) -> dict[str, Any]:
-        return self._workspace.viewer.apply(command, timeout=timeout)
+    def layout(
+        self,
+        layout: str,
+        datasets: list[str] | None = None,
+        *,
+        view: int | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Divide the canvas: ``"single"``, ``"columns"`` (1×2), ``"rows"``
+        (2×1), ``"grid"`` (2×2) or ``"four_up"``.
+
+        Each of ``datasets``, by id or unambiguous name, moves into the view
+        at its place, as a layer dropped on a view moves there. Four-up shows
+        the same datasets as an XY, a YZ and an XZ slice and a volume crossing
+        at one point, so there each shows in all four. Two views of datasets
+        over one region link by default; see :meth:`link`.
+        """
+        layout = layout.lower().replace("-", "_")
+        if layout not in self._LAYOUTS:
+            raise LucidaError("config", f"a layout is one of {sorted(self._LAYOUTS)}, not {layout}")
+
+        def change(scene: Any, snapshot: dict[str, Any]) -> None:
+            ids = [snapshot_dataset_id(snapshot, item) for item in datasets or []]
+            scene.lay_out(layout, ids, view)
+
+        return self._workspace.viewer._apply_change(change, timeout=timeout)
+
+    def show(
+        self,
+        datasets: str | list[str],
+        *,
+        view: int,
+        keep: bool = False,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Show ``datasets`` in ``view``: moved there and out of every other
+        view, or with ``keep`` as well as wherever they show."""
+        names = [datasets] if isinstance(datasets, str) else list(datasets)
+
+        def change(scene: Any, snapshot: dict[str, Any]) -> None:
+            ids = [snapshot_dataset_id(snapshot, item) for item in names]
+            scene.show_in(view, ids, keep)
+
+        return self._workspace.viewer._apply_change(change, timeout=timeout)
+
+    def activate(self, view: int, *, timeout: float = 30.0) -> dict[str, Any]:
+        """Make ``view`` the one later commands steer."""
+        return self._workspace.viewer._apply_change(
+            lambda scene, _snapshot: scene.apply(
+                json.dumps({"type": "set_active_view", "view": scene.view_id(view)})
+            ),
+            timeout=timeout,
+        )
+
+    def maximize(self, view: int | None, *, timeout: float = 30.0) -> dict[str, Any]:
+        """Show ``view`` alone across the canvas, or every view again with ``None``."""
+
+        def change(scene: Any, _snapshot: dict[str, Any]) -> None:
+            shown = None if view is None else scene.view_id(view)
+            scene.apply(json.dumps({"type": "maximize_view", "view": shown}))
+
+        return self._workspace.viewer._apply_change(change, timeout=timeout)
+
+    def link(
+        self, property: str, mode: str, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        """Link ``property`` (``"pan"``, ``"zoom"``, ``"orientation"``, ``"z"``,
+        ``"t"``, ``"contrast"`` or ``"colormap"``) between the two views of a
+        layout of two, ``"linked"``, ``"relative"`` or ``"off"``. A linked
+        property takes the active view's value, or ``view``'s."""
+        command = {"type": "set_view_link", "property": property, "mode": mode}
+        return self._apply(command, view, timeout)
+
+    def _apply(self, command: dict[str, Any], view: int | None, timeout: float) -> dict[str, Any]:
+        return self._workspace.viewer.apply(command, view=view, timeout=timeout)
 
 
 class CameraResource:
@@ -900,7 +1110,8 @@ class CameraResource:
 
     A rotate, pan or zoom here switches the camera to arcball, and a fly tick
     to fly, as the viewer's 3D controls do. The 2D slice camera moves through
-    :class:`ViewResource`, which refuses to move a 3D camera.
+    :class:`ViewResource`, which refuses to move a 3D camera. ``view=``
+    names the view whose camera moves, which becomes the active view first.
     """
 
     _MODES = {"slice": "set_mode_slice", "arcball": "set_mode_arcball", "fly": "set_mode_fly"}
@@ -908,22 +1119,29 @@ class CameraResource:
     def __init__(self, workspace: WorkspaceResource):
         self._workspace = workspace
 
-    def mode(self, mode: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    def mode(self, mode: str, *, view: int | None = None, timeout: float = 30.0) -> dict[str, Any]:
         command = self._MODES.get(mode.lower())
         if command is None:
             raise LucidaError("config", "camera.mode must be 'slice', 'arcball' or 'fly'")
-        return self._apply({"type": command}, timeout)
+        return self._apply({"type": command}, timeout, view)
 
-    def rotate(self, d_theta: float, d_phi: float, *, timeout: float = 30.0) -> dict[str, Any]:
+    def rotate(
+        self, d_theta: float, d_phi: float, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
         """Orbit the arcball camera by ``d_theta`` and ``d_phi`` radians."""
-        return self._apply({"type": "arcball_rotate", "d_theta": d_theta, "d_phi": d_phi}, timeout)
+        command = {"type": "arcball_rotate", "d_theta": d_theta, "d_phi": d_phi}
+        return self._apply(command, timeout, view)
 
-    def pan(self, dx: float, dy: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        return self._apply({"type": "arcball_pan", "dx": dx, "dy": dy}, timeout)
+    def pan(
+        self, dx: float, dy: float, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return self._apply({"type": "arcball_pan", "dx": dx, "dy": dy}, timeout, view)
 
-    def zoom(self, delta: float, *, timeout: float = 30.0) -> dict[str, Any]:
+    def zoom(
+        self, delta: float, *, view: int | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
         """Scale the arcball distance by ``1 + delta``, so a negative delta moves in."""
-        return self._apply({"type": "arcball_zoom", "delta": delta}, timeout)
+        return self._apply({"type": "arcball_zoom", "delta": delta}, timeout, view)
 
     def fly_tick(
         self,
@@ -951,8 +1169,10 @@ class CameraResource:
             timeout,
         )
 
-    def _apply(self, command: dict[str, Any], timeout: float) -> dict[str, Any]:
-        return self._workspace.viewer.apply(command, timeout=timeout)
+    def _apply(
+        self, command: dict[str, Any], timeout: float, view: int | None = None
+    ) -> dict[str, Any]:
+        return self._workspace.viewer.apply(command, view=view, timeout=timeout)
 
 
 class LayerResource:
@@ -1505,6 +1725,21 @@ def current_channel(snapshot: dict[str, Any], view: dict[str, Any], dataset_id: 
 def snapshot_dataset_id(snapshot: dict[str, Any], selector: str) -> str:
     summaries = dataset_summaries_from_document(snapshot.get("document", {}))
     return resolve_dataset_id(selector, summaries)
+
+
+def cli_command() -> list[str]:
+    """The ``lucida`` CLI: ``LUCIDA_CLI``, else the one on ``PATH``."""
+    configured = os.environ.get("LUCIDA_CLI")
+    if configured:
+        return [configured]
+    found = shutil.which("lucida")
+    if found:
+        return [found]
+    raise LucidaError(
+        "config",
+        "screenshots run the lucida CLI, which drives a local Chrome; put `lucida` on PATH "
+        "or name it in LUCIDA_CLI",
+    )
 
 
 def native_extension() -> Any:

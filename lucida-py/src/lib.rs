@@ -11,9 +11,9 @@ use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
 use lucida_core::saved_view::{self, SavedView};
 use lucida_core::scene::{DisplayState, DocumentState, Scene};
-use lucida_core::view::AxisPositions;
+use lucida_core::view::{AxisPositions, ViewLayout};
 use lucida_core::view_transform;
-use lucida_core::viewer_profile::ProfileScene;
+use lucida_core::viewer_profile::{ProfileCommandError, ProfileScene};
 
 #[pyclass]
 struct PyScene {
@@ -188,6 +188,28 @@ impl PyScene {
     }
 }
 
+impl PyProfileScene {
+    fn steer(&mut self, view: Option<usize>) -> PyResult<()> {
+        let Some(index) = view else {
+            return Ok(());
+        };
+        let view = self.inner.view_id(index).map_err(refusal)?;
+        self.inner
+            .apply(ViewportCommand::SetActiveView { view })
+            .map_err(refusal)
+    }
+}
+
+/// A refused command as Python raises it: `LookupError` for something the
+/// workspace or layout lacks, `ValueError` for anything else.
+fn refusal(error: ProfileCommandError) -> PyErr {
+    if error.is_missing_resource() {
+        PyLookupError::new_err(error.to_string())
+    } else {
+        PyValueError::new_err(error.to_string())
+    }
+}
+
 /// A viewer profile's view opened over the workspace document, changed by the
 /// same commands the viewer's controls apply.
 ///
@@ -217,20 +239,66 @@ impl PyProfileScene {
         Ok(Self { inner })
     }
 
-    /// Apply one viewport command, given as its tagged JSON. Raises
-    /// `LookupError` when it names a dataset, channel or label the workspace
-    /// lacks, and `ValueError` for any other refusal. A refused command
-    /// changes nothing.
-    fn apply(&mut self, command_json: &str) -> PyResult<()> {
+    /// Apply one viewport command, given as its tagged JSON, in the view at
+    /// `view`'s place in the layout, which becomes the active view first, or
+    /// in the active view. Raises `LookupError` when it names a dataset,
+    /// channel, label or view the workspace or layout lacks, and `ValueError`
+    /// for any other refusal. A refused command changes nothing.
+    #[pyo3(signature = (command_json, view=None))]
+    fn apply(&mut self, command_json: &str, view: Option<usize>) -> PyResult<()> {
         let command: ViewportCommand = serde_json::from_str(command_json)
             .map_err(|e| PyValueError::new_err(format!("invalid view command: {e}")))?;
-        self.inner.apply(command).map_err(|error| {
-            if error.is_missing_resource() {
-                PyLookupError::new_err(error.to_string())
-            } else {
-                PyValueError::new_err(error.to_string())
-            }
-        })
+        self.inner.apply_in(view, command).map_err(refusal)
+    }
+
+    /// Divide the canvas as `layout` (`"single"`, `"columns"`, `"rows"`,
+    /// `"grid"` or `"four_up"`) does, each of `dataset_ids` moved into the
+    /// view at its place; four-up shows them all in every view.
+    #[pyo3(signature = (layout, dataset_ids, view=None))]
+    fn lay_out(
+        &mut self,
+        layout: &str,
+        dataset_ids: Vec<String>,
+        view: Option<usize>,
+    ) -> PyResult<()> {
+        let layout: ViewLayout = serde_json::from_value(serde_json::Value::from(layout))
+            .map_err(|e| PyValueError::new_err(format!("invalid view layout: {e}")))?;
+        let ids: Vec<DatasetId> = dataset_ids.into_iter().map(DatasetId).collect();
+        self.steer(view)?;
+        self.inner.lay_out(layout, &ids).map_err(refusal)
+    }
+
+    /// Show `dataset_ids` in the view at `view`'s place, which becomes the
+    /// active view: moved there and out of every other view, or with `keep`
+    /// as well as wherever they show.
+    #[pyo3(signature = (view, dataset_ids, keep=false))]
+    fn show_in(&mut self, view: usize, dataset_ids: Vec<String>, keep: bool) -> PyResult<()> {
+        let ids: Vec<DatasetId> = dataset_ids.into_iter().map(DatasetId).collect();
+        self.steer(Some(view))?;
+        self.inner.show_in(view, &ids, keep).map_err(refusal)
+    }
+
+    /// The id of the view at `index` in the layout's order, for a command
+    /// that names a view.
+    fn view_id(&self, index: usize) -> PyResult<u32> {
+        self.inner.view_id(index).map(|id| id.0).map_err(refusal)
+    }
+
+    /// Every view as a saved view records them, one view of every dataset
+    /// included, as JSON.
+    fn views_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.scene.views_record(true))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// How the two views of a layout of two link, each view by its place, as
+    /// JSON, or `None` with other than two views.
+    fn links_json(&self) -> PyResult<Option<String>> {
+        self.inner
+            .links()
+            .map(|links| serde_json::to_string(&links))
+            .transpose()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// The view as the profile stores it, a `SavedView` JSON string.
