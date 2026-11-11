@@ -42,6 +42,7 @@ function overlays(byView: Map<number, Comparison>, coverage: Record<number, Cove
       nameOf={(id) => id}
       activate={activate}
       coverageOf={(view) => coverage[view]}
+      byHand={() => null}
     />,
   );
   const of = (view: number) => rendered.container.querySelector(`[data-view="${view}"]`) as HTMLElement;

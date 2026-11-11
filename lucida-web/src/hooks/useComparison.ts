@@ -2,7 +2,9 @@ import { useCallback, useMemo } from "react";
 import {
   comparisonActions,
   lineUpReason,
+  placedByHandNote,
   readLineUp,
+  readLineUpByHand,
   type ComparisonActions,
 } from "../comparison.ts";
 import type { Engine } from "../engine.ts";
@@ -10,8 +12,12 @@ import { toast } from "../ui/toastQueue.ts";
 
 export interface ComparisonControls {
   actions: ComparisonActions;
+  /** A layer's name, as the layer panel shows it. */
+  nameOf(datasetId: string): string;
   /** Why a layer can't be compared with another, or null when it can. */
   blocker(id: string, other: string): string | null;
+  /** Says when a pair lines up because someone placed it by hand, or null. */
+  byHand(id: string, other: string): string | null;
   /** Start comparing a layer with another as a swipe, or say why it can't. */
   compareWith(id: string, other: string): void;
 }
@@ -33,6 +39,13 @@ export function useComparison(
     },
     [engine, nameOf],
   );
+  const byHand = useCallback(
+    (id: string, other: string) => {
+      const scene = engine.scene();
+      return scene ? placedByHandNote(readLineUpByHand(scene, id, other), nameOf) : null;
+    },
+    [engine, nameOf],
+  );
   const compareWith = useCallback(
     (id: string, other: string) => {
       const why = lineUpReason(actions.start(id, other, "swipe"), nameOf);
@@ -40,5 +53,5 @@ export function useComparison(
     },
     [actions, nameOf],
   );
-  return { actions, blocker, compareWith };
+  return { actions, nameOf, blocker, byHand, compareWith };
 }

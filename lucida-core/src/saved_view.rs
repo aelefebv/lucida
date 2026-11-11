@@ -22,7 +22,7 @@ use lucida_content::{DatasetId, LayoutId};
 use wasm_bindgen::prelude::*;
 
 use crate::camera::{Arcball, Camera, Framing};
-use crate::placement::CameraSpace;
+use crate::placement::{CameraSpace, UserTransform};
 use crate::scene::{DatasetDisplaySettings, DisplayState, Scene};
 use crate::view::AxisPositions;
 
@@ -124,6 +124,15 @@ pub struct SavedView {
     /// saved before this field existed assumed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera_space: Option<CameraSpace>,
+
+    /// Where datasets sat by hand when the view was saved: a dataset the
+    /// view names and the map leaves out sat where its declared frame put
+    /// it. Absent, the view records no placement, and a restore leaves
+    /// whatever the document holds. Every view saved before this field
+    /// existed is one, and so is a viewer profile, which holds a camera and
+    /// display settings while placement stays the document's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_transforms: Option<IndexMap<DatasetId, UserTransform>>,
 }
 
 /// The JSON shape of [`SavedView`].
@@ -145,6 +154,8 @@ struct SavedViewWire {
     auto_contrast: IndexMap<DatasetId, bool>,
     #[serde(default)]
     camera_space: Option<CameraSpace>,
+    #[serde(default)]
+    user_transforms: Option<IndexMap<DatasetId, UserTransform>>,
 }
 
 impl From<SavedViewWire> for SavedView {
@@ -172,6 +183,7 @@ impl From<SavedViewWire> for SavedView {
             dataset_settings,
             auto_contrast: wire.auto_contrast,
             camera_space: wire.camera_space,
+            user_transforms: wire.user_transforms,
         }
     }
 }
@@ -222,7 +234,22 @@ impl SavedView {
             dataset_settings: IndexMap::new(),
             auto_contrast: IndexMap::new(),
             camera_space: None,
+            user_transforms: None,
         }
+    }
+
+    /// Record where `document` puts each dataset by hand, so a restore puts
+    /// them there again.
+    pub fn record_placement(&mut self, document: &crate::scene::DocumentState) {
+        self.user_transforms = Some(document.user_transforms.clone());
+    }
+
+    /// Where a restore of this view puts `dataset_id`: its recorded
+    /// transform, or the identity for a dataset it recorded none for.
+    /// `None` when the view records no placement at all.
+    pub fn user_transform_of(&self, dataset_id: &DatasetId) -> Option<UserTransform> {
+        let recorded = self.user_transforms.as_ref()?;
+        Some(recorded.get(dataset_id).copied().unwrap_or_default())
     }
 
     /// This view's camera in `scene`'s spaces, carried from the ones it was
@@ -290,6 +317,12 @@ impl SavedView {
             .drain(..)
             .map(|(id, flag)| (mapped(remap, &id), flag))
             .collect();
+        if let Some(transforms) = self.user_transforms.as_mut() {
+            *transforms = transforms
+                .drain(..)
+                .map(|(id, transform)| (mapped(remap, &id), transform))
+                .collect();
+        }
     }
 }
 
@@ -527,6 +560,46 @@ mod tests {
         let decoded: SavedView =
             serde_json::from_value(decode_payload(&v.to_payload()).unwrap()).unwrap();
         assert_eq!(decoded.camera_space, v.camera_space);
+    }
+
+    #[test]
+    fn user_transforms_ride_only_when_recorded_and_say_where_each_dataset_sat() {
+        let moved = DatasetId("ds-aaaa".into());
+        let other = DatasetId("ds-bbbb".into());
+        let mut v = sample_view();
+        let without = serde_json::to_string(&v).unwrap();
+        assert!(!without.contains("user_transforms"), "{without}");
+        assert_eq!(v.user_transform_of(&moved), None);
+
+        let transform = UserTransform {
+            translation: [2.0, 0.0, 0.0],
+            scale: [3.0; 3],
+            ..UserTransform::IDENTITY
+        };
+        v.user_transforms = Some(IndexMap::from([(moved.clone(), transform)]));
+        assert_round_trips(&v);
+        assert_eq!(v.user_transform_of(&moved), Some(transform));
+        // Recorded, so a dataset the map leaves out sat where it declares.
+        assert_eq!(v.user_transform_of(&other), Some(UserTransform::IDENTITY));
+        let decoded: SavedView =
+            serde_json::from_value(decode_payload(&v.to_payload()).unwrap()).unwrap();
+        assert_eq!(decoded.user_transforms, v.user_transforms);
+
+        // An empty record still says every dataset sat where it declares.
+        v.user_transforms = Some(IndexMap::new());
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.ends_with(r#","user_transforms":{}}"#), "{json}");
+        let back: SavedView = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.user_transform_of(&moved),
+            Some(UserTransform::IDENTITY)
+        );
+
+        let mut remap = std::collections::HashMap::new();
+        remap.insert(moved.clone(), other.clone());
+        v.user_transforms = Some(IndexMap::from([(moved, transform)]));
+        v.remap_dataset_ids(&remap);
+        assert_eq!(v.user_transform_of(&other), Some(transform));
     }
 
     #[test]

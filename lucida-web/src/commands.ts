@@ -16,6 +16,7 @@ import type {
   Colormap,
   RenderMode,
   SavedView,
+  UserTransform,
 } from "./savedView/types.ts";
 
 /** Mirrors `lucida_core::scene::AnnotationKind` (serde snake_case). */
@@ -108,7 +109,15 @@ export interface EditCommentCommand {
   text: string;
 }
 
+/** Place a dataset by hand; the identity puts it back where it declares. */
+export interface SetUserTransformCommand {
+  type: "set_user_transform";
+  dataset_id: string;
+  transform: UserTransform;
+}
+
 export type DocumentCommand =
+  | SetUserTransformCommand
   | RemoveDatasetCommand
   | RenameDatasetCommand
   | RegisterLayoutCommand

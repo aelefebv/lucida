@@ -4,6 +4,7 @@ import {
   comparisonClip,
   intersectRects,
   lineUpReason,
+  placedByHandNote,
   setAsideNote,
   type ComparisonScene,
 } from "./comparison.ts";
@@ -64,12 +65,18 @@ describe("why a pair can't be compared", () => {
   it("names the datasets that declare no scale", () => {
     expect(lineUpReason({ verdict: "yes" }, nameOf)).toBeNull();
     expect(lineUpReason({ verdict: "no_physical_scale", datasets: ["a"] }, nameOf)).toBe(
-      "A has no physical scale to line up by.",
+      "A has no physical scale to line up by. Give it a scale under Position and size to line up by hand.",
     );
     expect(lineUpReason({ verdict: "no_physical_scale", datasets: ["a", "b"] }, nameOf)).toBe(
-      "A and B have no physical scale to line up by.",
+      "A and B have no physical scale to line up by. Give them a scale under Position and size to line up by hand.",
     );
     expect(lineUpReason({ verdict: "apart" }, nameOf)).toBe("They don't overlap in physical space.");
+  });
+
+  it("says when a pair lines up as someone placed it by hand", () => {
+    expect(placedByHandNote([], nameOf)).toBeNull();
+    expect(placedByHandNote(["b"], nameOf)).toBe("Lines up as placed by hand: B.");
+    expect(placedByHandNote(["a", "b"], nameOf)).toBe("Lines up as placed by hand: A and B.");
   });
 });
 
@@ -79,6 +86,7 @@ describe("the comparison controls", () => {
       comparison: () => "null",
       comparison_span: () => [],
       datasets_line_up: () => verdict,
+      datasets_line_up_by_hand: () => "[]",
       compare: vi.fn(() => verdict),
       end_comparison: vi.fn(),
       set_comparison_mode: vi.fn(),

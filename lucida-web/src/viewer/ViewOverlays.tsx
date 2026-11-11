@@ -27,9 +27,11 @@ interface Props {
   activate(view: number): void;
   /** With several views, how much of what `view` asks for fit in the memory they share. */
   coverageOf(view: number): Coverage | undefined;
+  /** Says when a pair lines up because someone placed it by hand, or null. */
+  byHand(a: string, b: string): string | null;
 }
 
-export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf }: Props) {
+export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
     <div className="lc-view-overlays">
@@ -59,6 +61,7 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
                     actions={actions}
                     nameOf={nameOf}
                     setAside={setAsideNote(pane.setAside)}
+                    byHand={byHand(comparison.a, comparison.b)}
                     active={pane.active}
                   />
                 </div>

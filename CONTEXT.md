@@ -302,6 +302,12 @@ changes, a placed camera moves into the new one and keeps its region, and a
 saved view records the one its camera was saved in.
 _Avoid_: world (unqualified; world space is the volume cameras' view of it)
 
+**User transform**:
+Where a person put a dataset by hand: a move and a per-axis scale on top of
+where its declared frame places it in the scene frame. It changes no data and
+persists with the workspace.
+_Avoid_: transform (unqualified; a manifest's coordinate transforms are declared)
+
 **Slice plane**:
 The plane of the scene frame a slice view cuts: `xy`, `xz` or `yz`. The two
 axes it names are on screen, Z always drawn down, and the third is cut at an
@@ -315,8 +321,8 @@ _Avoid_: orientation, section (unqualified)
 **Comparison**:
 Two datasets that line up shown against each other in one view: split by a
 divider dragged across it (swipe), or shown in turn (blink). Two datasets line
-up when each declares length units and their extents in the scene frame
-overlap. Both stay in the wanted set however they are shown.
+up when each declares length units or has a user transform, and their extents
+in the scene frame overlap. Both stay in the wanted set however they are shown.
 
 ## Surfaces
 

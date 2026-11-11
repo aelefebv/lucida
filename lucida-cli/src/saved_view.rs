@@ -5,6 +5,7 @@ use futures_util::{Sink, Stream, StreamExt};
 use lucida_content::LayoutId;
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
+use lucida_core::placement::UserTransform;
 use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{DatasetDisplaySettings, DocumentState};
@@ -146,6 +147,8 @@ pub struct SavedViewApplyResult {
     pub own_client_id: ClientId,
     pub snapshot_seq: u64,
     pub layout_command_count: usize,
+    /// Datasets the view put back where it recorded them by hand.
+    pub transform_command_count: usize,
     pub dataset_presence_sent: bool,
     pub presence_sent: bool,
     pub warnings: Vec<String>,
@@ -531,6 +534,10 @@ pub fn format_saved_view_apply_human(output: &SavedViewApplyOutput) -> String {
         format!("Client: {}", output.result.own_client_id),
         format!("Layout commands: {}", output.result.layout_command_count),
         format!(
+            "Placement commands: {}",
+            output.result.transform_command_count
+        ),
+        format!(
             "Dataset presence: {}",
             if output.result.dataset_presence_sent {
                 "sent"
@@ -651,7 +658,8 @@ fn capture_saved_view_from_snapshot(
             )
         })?;
     let scene = crate::view::scene_from_presence(&snapshot.document, source_presence);
-    let view = lucida_core::viewer_profile::ProfileScene::from(scene).saved_view();
+    let mut view = lucida_core::viewer_profile::ProfileScene::from(scene).saved_view();
+    view.record_placement(&snapshot.document);
     let source = SavedViewPresenceSource {
         client_id: source_client_id,
         kind: if source_client_id == snapshot.your_id {
@@ -724,8 +732,50 @@ where
                     },
                 };
                 send_client_message(write, &message).await?;
-                wait_for_document_ack(incoming, dataset_id, layout_id, wait).await?;
+                wait_for_document_ack(
+                    incoming,
+                    |command| {
+                        matches!(command, DocumentCommand::SetActiveLayout {
+                            dataset_id: observed_dataset,
+                            layout_id: observed_layout,
+                        } if observed_dataset == dataset_id && observed_layout == layout_id)
+                    },
+                    wait,
+                )
+                .await?;
                 layout_command_count += 1;
+            }
+        }
+    }
+
+    let moves = placement_moves(&snapshot.document, view);
+    let mut transform_command_count = 0;
+    if !moves.is_empty() {
+        if workspace.role == WorkspaceRole::Viewer {
+            warnings.push(
+                "workspace role cannot place datasets; leaving them where the workspace has them"
+                    .to_string(),
+            );
+        } else {
+            for (dataset_id, transform) in moves {
+                let message = ClientMessage::Command {
+                    command: DocumentCommand::SetUserTransform {
+                        dataset_id: dataset_id.clone(),
+                        transform,
+                    },
+                };
+                send_client_message(write, &message).await?;
+                wait_for_document_ack(
+                    incoming,
+                    |command| {
+                        matches!(command, DocumentCommand::SetUserTransform {
+                            dataset_id: observed, ..
+                        } if *observed == dataset_id)
+                    },
+                    wait,
+                )
+                .await?;
+                transform_command_count += 1;
             }
         }
     }
@@ -759,10 +809,32 @@ where
         own_client_id: snapshot.your_id,
         snapshot_seq: snapshot.seq,
         layout_command_count,
+        transform_command_count,
         dataset_presence_sent,
         presence_sent: true,
         warnings,
     })
+}
+
+/// The loaded datasets `view` names whose placement by hand differs from
+/// what it recorded, each with the transform that puts it back. Empty for a
+/// view that records no placement.
+fn placement_moves(document: &DocumentState, view: &SavedView) -> Vec<(DatasetId, UserTransform)> {
+    let requested = requested_dataset_ids(view);
+    document
+        .manifests
+        .keys()
+        .filter(|id| requested.contains(*id))
+        .filter_map(|id| {
+            let recorded = view.user_transform_of(id)?;
+            let current = document
+                .user_transforms
+                .get(id)
+                .copied()
+                .unwrap_or_default();
+            (recorded != current).then(|| (id.clone(), recorded))
+        })
+        .collect()
 }
 
 fn requested_dataset_ids(view: &SavedView) -> HashSet<DatasetId> {
@@ -846,10 +918,11 @@ fn layout_exists(document: &DocumentState, dataset_id: &DatasetId, layout_id: &L
             .unwrap_or(false)
 }
 
+/// Wait for the server to take a command: its ack, or the broadcast of one
+/// `expected` recognizes.
 async fn wait_for_document_ack<S>(
     messages: &mut S,
-    dataset_id: &DatasetId,
-    layout_id: &LayoutId,
+    expected: impl Fn(&DocumentCommand) -> bool,
     wait: Duration,
 ) -> Result<u64, CliError>
 where
@@ -858,21 +931,12 @@ where
     const APPLY_WAIT: SessionWait = SessionWait {
         expectation: "saved-view apply confirmation",
         archived_outcome: "saved-view apply completed",
-        timeout_subject: "saved-view layout confirmation",
+        timeout_subject: "saved-view document confirmation",
         timeout_kind: ErrorKind::RejectedCommand,
     };
     observe_until(messages, wait, &APPLY_WAIT, |message| match message {
         ServerMessage::Ack { seq } => Ok(Some(seq)),
-        ServerMessage::CommandBroadcast {
-            seq,
-            command:
-                DocumentCommand::SetActiveLayout {
-                    dataset_id: observed_dataset_id,
-                    layout_id: observed_layout_id,
-                },
-        } if &observed_dataset_id == dataset_id && &observed_layout_id == layout_id => {
-            Ok(Some(seq))
-        }
+        ServerMessage::CommandBroadcast { seq, command } if expected(&command) => Ok(Some(seq)),
         _ => Ok(None),
     })
     .await
@@ -1244,6 +1308,31 @@ mod tests {
     }
 
     #[test]
+    fn capture_records_placement_and_apply_puts_back_only_what_differs() {
+        let id = DatasetId("wds-test".to_string());
+        let moved = UserTransform {
+            translation: [3.0, 0.0, 0.0],
+            ..UserTransform::IDENTITY
+        };
+        let mut snapshot = snapshot();
+        snapshot.document.set_user_transform(id.clone(), moved);
+        let (_source, view) = capture_saved_view_from_snapshot(&snapshot, None).unwrap();
+        assert_eq!(view.user_transform_of(&id), Some(moved));
+        assert!(placement_moves(&snapshot.document, &view).is_empty());
+
+        // Moved again since, the view puts it back.
+        let mut document = snapshot.document.clone();
+        document.set_user_transform(id.clone(), UserTransform::IDENTITY);
+        assert_eq!(placement_moves(&document, &view), vec![(id.clone(), moved)]);
+        // A view that records no placement leaves it.
+        let unrecorded = SavedView {
+            user_transforms: None,
+            ..view
+        };
+        assert!(placement_moves(&document, &unrecorded).is_empty());
+    }
+
+    #[test]
     fn viewer_role_cannot_mutate_saved_views() {
         assert_eq!(
             ensure_saved_view_mutation_allowed(&workspace(WorkspaceRole::Viewer))
@@ -1260,14 +1349,9 @@ mod tests {
             serde_json::json!({ "type": "ack", "seq": 23 }).to_string(),
         ]);
 
-        let seq = wait_for_document_ack(
-            &mut messages,
-            &DatasetId("wds-test".to_string()),
-            &LayoutId("layout-source".to_string()),
-            Duration::from_secs(1),
-        )
-        .await
-        .unwrap();
+        let seq = wait_for_document_ack(&mut messages, |_| false, Duration::from_secs(1))
+            .await
+            .unwrap();
 
         assert_eq!(seq, 23);
     }
@@ -1276,14 +1360,9 @@ mod tests {
     async fn document_ack_wait_timeout_is_rejected() {
         let mut messages = stream::pending::<Result<IncomingSessionMessage, CliError>>();
 
-        let error = wait_for_document_ack(
-            &mut messages,
-            &DatasetId("wds-test".to_string()),
-            &LayoutId("layout-source".to_string()),
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap_err();
+        let error = wait_for_document_ack(&mut messages, |_| true, Duration::from_millis(1))
+            .await
+            .unwrap_err();
 
         assert_eq!(error.kind, ErrorKind::RejectedCommand);
     }

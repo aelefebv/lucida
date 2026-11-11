@@ -72,6 +72,17 @@ export interface CameraSpace {
   world: { extent: number; top: number };
 }
 
+/** Where a person put a dataset by hand, on top of where its declared frame
+ *  places it: `scale` multiplies its declared sample size and `translation`
+ *  moves it, `[x, y, z]` in its own declared units. `rotation` is a unit
+ *  quaternion `[x, y, z, w]`, the identity for now. See `UserTransform` in
+ *  `lucida-core/src/placement.rs`. */
+export interface UserTransform {
+  translation: [number, number, number];
+  rotation: [number, number, number, number];
+  scale: [number, number, number];
+}
+
 /** Whether a client may persist `view`. A stand-in camera, one nothing has
  *  fitted or placed yet, would restore as a pose nobody chose. */
 export function isPersistable(view: SavedView): boolean {
@@ -156,9 +167,10 @@ export type DatasetReferenceMode = "source-url" | "workspace-dataset-id";
 
 /**
  * What a restore may do when the view it applies names a different active
- * layout than the document currently has. The active layout is *document*
- * state, shared with every peer and persisted by the server, so who is
- * allowed to change it, and how, is not one boolean:
+ * layout, or places a dataset by hand differently, than the document
+ * currently has. Both are *document* state, shared with every peer and
+ * persisted by the server, so who is allowed to change them, and how, is not
+ * one boolean:
  *
  * - `broadcast`: apply locally and send the command. An editor restoring a
  *   view is making the change everyone agreed to see.
@@ -198,4 +210,9 @@ export interface SavedView {
    *  scene's spaces. Last, as in Rust, so a pin's view rebroadcasts byte for
    *  byte. */
   camera_space?: CameraSpace;
+  /** Where datasets sat by hand when it was saved; a dataset it names and
+   *  this leaves out sat where it declares. Absent, the view records no
+   *  placement and a restore leaves the document's. After `camera_space`, as
+   *  in Rust. */
+  user_transforms?: Record<DatasetId, UserTransform>;
 }

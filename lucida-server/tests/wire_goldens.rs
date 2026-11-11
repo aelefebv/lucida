@@ -35,6 +35,7 @@ use lucida_content::{
 };
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
+use lucida_core::placement::UserTransform;
 use lucida_core::protocol::{
     ChunkMessage, ClientMessage, CommandRejection, MessageRejection, PeerIdentity, PresenceState,
     ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint,
@@ -261,6 +262,7 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
             "session/client_command_set_active_layout.json",
             "session/client_command_remove_dataset.json",
             "session/client_command_rename_dataset.json",
+            "session/client_command_set_user_transform.json",
         ],
         ClientMessage::Presence { .. } => &["session/client_presence.json"],
         ClientMessage::Cursor { .. } => &["session/client_cursor.json"],
@@ -310,6 +312,9 @@ fn document_command_fixture_paths(cmd: &DocumentCommand) -> &'static [&'static s
         DocumentCommand::RemoveComment { .. } => &["session/client_command_remove_comment.json"],
         DocumentCommand::MoveAnnotation { .. } => &["session/client_command_move_annotation.json"],
         DocumentCommand::EditComment { .. } => &["session/client_command_edit_comment.json"],
+        DocumentCommand::SetUserTransform { .. } => {
+            &["session/client_command_set_user_transform.json"]
+        }
     }
 }
 
@@ -2117,6 +2122,19 @@ fn command_goldens() -> Vec<(&'static str, DocumentCommand, Vec<&'static str>)> 
                 name: "multichannel volume (processed)".into(),
             },
             vec!["/id", "/name"],
+        ),
+        (
+            "session/client_command_set_user_transform.json",
+            DocumentCommand::SetUserTransform {
+                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
+                transform: UserTransform {
+                    translation: [12.5, -4.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [2.0, 2.0, 2.0],
+                },
+            },
+            // Each part of a transform defaults to the identity's.
+            vec!["/dataset_id", "/transform"],
         ),
     ]
 }
