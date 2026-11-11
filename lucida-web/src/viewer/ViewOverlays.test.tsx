@@ -26,6 +26,7 @@ function overlays(
   byView: Map<number, Comparison>,
   coverage: Record<number, Coverage> = {},
   linkNotices: readonly ViewLinkNotices[] = [],
+  views: readonly ViewPane[] = [LEFT, RIGHT],
 ) {
   const actions: ComparisonActions = {
     current: () => null,
@@ -37,10 +38,11 @@ function overlays(
     setBlinkRate: vi.fn(),
   };
   const activate = vi.fn();
+  const home = vi.fn();
   const store = { subscribe: () => () => {}, getComparisons: () => byView };
   const rendered = render(
     <ViewOverlays
-      views={[LEFT, RIGHT]}
+      views={views}
       store={store}
       actions={actions}
       nameOf={(id) => id}
@@ -48,10 +50,11 @@ function overlays(
       coverageOf={(view) => coverage[view]}
       byHand={() => null}
       linkNotices={linkNotices}
+      home={{ run: home, keys: ["0"] }}
     />,
   );
   const of = (view: number) => rendered.container.querySelector(`[data-view="${view}"]`) as HTMLElement;
-  return { actions, activate, of, rendered };
+  return { actions, activate, home, of, rendered };
 }
 
 describe("a view's overlays", () => {
@@ -88,6 +91,23 @@ describe("a view's overlays", () => {
       "The linked depth is outside this view's data, so nothing is drawn.",
       "The linked time is past this view's data, so it shows its last timepoint, 2.",
     ]);
+  });
+
+  it("give each view that draws something a Home button outside the column, which acts on that view", () => {
+    const empty: ViewPane = { ...RIGHT, shows: [], draws: [] };
+    const { activate, home, of } = overlays(new Map(), { 0: { wanted: 100, short: 40 } }, [], [LEFT, empty]);
+    expect(of(3).querySelector(".lc-view-home")).toBeNull();
+    const button = of(0).querySelector('.lc-view-home [aria-label="Home"]') as HTMLElement;
+    expect(button.closest(".lc-view-overlay-top")).toBeNull();
+    fireEvent.click(button);
+    expect(home).toHaveBeenCalledOnce();
+    cleanup();
+    // In a view that isn't active, the press makes it the active one first.
+    const both = overlays(new Map());
+    const right = both.of(3).querySelector('.lc-view-home [aria-label="Home"]') as HTMLElement;
+    fireEvent.pointerDown(right);
+    expect(both.activate).toHaveBeenCalledWith(3);
+    expect(activate).not.toHaveBeenCalled();
   });
 
   it("make their view the active one on a press or focus, before they act", () => {
