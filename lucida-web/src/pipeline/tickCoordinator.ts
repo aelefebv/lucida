@@ -430,6 +430,42 @@ function displayStatesEqual(
 interface DatasetRequests {
   dsId: string;
   requests: readonly ChunkRequest[];
+  /** The views that asked for each of its detail and coarse requests, with several views. */
+  viewsOf?: (req: ChunkRequest) => readonly number[];
+}
+
+/**
+ * Which views asked for each of a dataset's detail and coarse requests:
+ * every view its plan lists them under, or the one view that plans it.
+ */
+function viewsAsking(planned: { views: readonly PlannedView[]; result: RequestPlan }): (req: ChunkRequest) => readonly number[] {
+  const own = (req: ChunkRequest): boolean => req.lane === "detail" || req.lane === "coarse";
+  const byView = planned.result.byView;
+  if (!byView) {
+    const only = [planned.views[0].view.id];
+    return (req) => (own(req) ? only : []);
+  }
+  const asking = new Map<string, number[]>();
+  for (const [view, requests] of byView) {
+    for (const req of requests) {
+      const id = requestIdentity(req);
+      const views = asking.get(id);
+      if (views === undefined) asking.set(id, [view]);
+      else if (!views.includes(view)) views.push(view);
+    }
+  }
+  // Admission asks for each request several times, so its views are found once.
+  const ofRequest = new Map<ChunkRequest, readonly number[]>();
+  for (const req of planned.result.requests) {
+    if (own(req)) ofRequest.set(req, asking.get(requestIdentity(req)) ?? []);
+  }
+  return (req) => ofRequest.get(req) ?? [];
+}
+
+/** Each view's area on the canvas, which its share of the budgets is weighed by, with several views. */
+function viewAreas(ctx: TickContext): Map<number, number> {
+  if (ctx.views.length < 2) return new Map();
+  return new Map(ctx.views.map((view) => [view.id, Math.max(0, view.rect[2]) * Math.max(0, view.rect[3])]));
 }
 
 /**
@@ -445,16 +481,19 @@ function admitDatasetPlans(
 ): Admission[] {
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
   return admitPlans(
-    plans.map(({ dsId, requests }) => {
+    plans.map(({ dsId, requests, viewsOf }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
+        heldWhole: (req: ChunkRequest) => ctx.cpuCache.holdsWhole(req),
         slotOf: gpuSlotsFor(manifest, report, gpuTotalBytes),
+        viewsOf,
       };
     }),
     ctx.cpuCache.tierCapacity(),
     gpuChunkRoomBytes(report, gpuTotalBytes),
+    viewAreas(ctx),
   );
 }
 
@@ -841,6 +880,9 @@ export class TickCoordinator {
     // place, which only a full plan follows.
     const fastPathsHold = views.length === 1
       && [...ctx.datasets.keys()].every((dsId) => drawMode(ctx, views[0], dsId) === views[0].mode);
+    // A gesture is made in the active view. While one runs, that view's
+    // requests lead each lane of a dataset it shares.
+    const leadingView = views.length > 1 && ctx.gesture ? drawn.id : undefined;
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
     // A selection scrub, minimap chunks no plan asked for, or both: the active
@@ -965,6 +1007,7 @@ export class TickCoordinator {
         epochs: currentEpochs,
         views: plannedViewsOfDataset.map((planned) => planned.snapshot),
         minimapPending: minimapPendingFetch,
+        ...(leadingView !== undefined && plannedViewsOfDataset.length > 1 && { leadingView }),
       };
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
@@ -998,7 +1041,11 @@ export class TickCoordinator {
 
     const admissions = this.admit(
       ctx,
-      plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
+      plannedDatasets.map((planned) => ({
+        dsId: planned.dsId,
+        requests: planned.result.requests,
+        viewsOf: views.length > 1 ? viewsAsking(planned) : undefined,
+      })),
     );
     // With several views, how much of what each asks for admission let in.
     const viewCoverage = views.length > 1 ? new Map<number, ViewCoverage>() : null;
@@ -1067,10 +1114,9 @@ export class TickCoordinator {
             datasetId: dsId,
             manifest: ctx.datasets.get(dsId)!.manifest,
             t: snapshot.selection.t,
-            z: snapshot.selection.z,
+            cut: snapshot.selection.cut,
             labelSettings: dsSettings?.label_settings,
             mode,
-            cutAxis: snapshot.selection.cut.axis,
           }) : [],
           entities,
           selection: snapshot.selection,
@@ -1131,7 +1177,7 @@ export class TickCoordinator {
       // (labels live outside `manifest.images`/`entities`), so their chunk
       // requests are synthesized here from the label's own geometry and
       // merged into the fetch plan. In `slice` mode the planes around the
-      // label's mapped Z-plane are fetched, as the image's are; in `volume`
+      // label's plane the view cuts are fetched, as the image's are; in `volume`
       // mode the whole label volume (every z-chunk) is fetched for the 3D
       // first-hit surface. Scoped under each label's own image id, so they
       // never perturb intensity-chunk eviction. Each view asks for its own.
@@ -1139,14 +1185,13 @@ export class TickCoordinator {
         datasetId: dsId,
         manifest: ctx.datasets.get(dsId)!.manifest,
         t: view.snapshot.selection.t,
-        z: view.snapshot.selection.z,
+        cut: view.snapshot.selection.cut,
         // Fetch only the labels the render path will draw (visible +
         // eligible), so a hidden label is neither fetched nor drawn.
         labelSettings: dsSettings?.label_settings,
         mode: view.view.mode,
         config: planningConfig,
         cutStep: view.cutStep,
-        cutAxis: view.snapshot.selection.cut.axis,
       }));
       const requestsWithLabels =
         labelRequests.length > 0
@@ -1551,12 +1596,11 @@ export class TickCoordinator {
         datasetId: p.dsId,
         manifest: ctx.datasets.get(p.dsId)!.manifest,
         t: p.selection.t,
-        z: p.selection.z,
+        cut: p.selection.cut,
         labelSettings: p.dsSettings?.label_settings,
         mode,
         config: planningConfig,
         cutStep: p.cutStep,
-        cutAxis: p.selection.cut.axis,
       });
       const requestsWithLabels =
         labelRequests.length > 0
@@ -1581,10 +1625,9 @@ export class TickCoordinator {
           datasetId: p.dsId,
           manifest: ctx.datasets.get(p.dsId)!.manifest,
           t: p.selection.t,
-          z: p.selection.z,
+          cut: p.selection.cut,
           labelSettings: p.dsSettings?.label_settings,
           mode,
-          cutAxis: p.selection.cut.axis,
         }),
         currentT: p.selection.t,
         currentZ: workerCutIndex(p.selection),

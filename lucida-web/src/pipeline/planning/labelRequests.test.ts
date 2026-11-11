@@ -66,7 +66,7 @@ const volumeLabel: LabelSpec = {
 describe("computeLabelChunkRequests", () => {
   it("returns nothing for a label-less manifest", () => {
     expect(
-      computeLabelChunkRequests({ datasetId: "ds-0", manifest: manifestWithLabel(), t: 0, z: 0 }),
+      computeLabelChunkRequests({ datasetId: "ds-0", manifest: manifestWithLabel(), t: 0, cut: { axis: "z", index: 0 } }),
     ).toEqual([]);
   });
 
@@ -75,7 +75,7 @@ describe("computeLabelChunkRequests", () => {
       datasetId: "ds-0",
       manifest: manifestWithLabel(volumeLabel),
       t: 0,
-      z: 0,
+      cut: { axis: "z", index: 0 },
       labelSettings: allOn(1),
     });
     // 87x85 at chunk 128 → a single 1x1 grid.
@@ -101,7 +101,7 @@ describe("computeLabelChunkRequests", () => {
       datasetId: "ds-0",
       manifest: manifestWithLabel(bigLabel),
       t: 0,
-      z: 0,
+      cut: { axis: "z", index: 0 },
       labelSettings: allOn(1),
     });
     expect(reqs).toHaveLength(9);
@@ -122,7 +122,7 @@ describe("computeLabelChunkRequests", () => {
         datasetId: "ds-0",
         manifest: manifestWithLabel(orphan),
         t: 0,
-        z: 0,
+        cut: { axis: "z", index: 0 },
         labelSettings: allOn(1),
       }),
     ).toEqual([]);
@@ -160,7 +160,7 @@ describe("computeLabelChunkRequests", () => {
       }],
     };
     // Source at t=7, but the label has only t=0.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 7, z: 0, labelSettings: allOn(1) });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 7, cut: { axis: "z", index: 0 }, labelSettings: allOn(1) });
     expect(reqs).toHaveLength(1);
     expect(reqs[0].t).toBe(0);
     expect(reqs[0].chunkKey).toBe("0/0/0/0/0/0"); // t component is 0, not 7
@@ -180,7 +180,7 @@ describe("computeLabelChunkRequests", () => {
         image: image5("img-0:label:huge", [1, 1, 1, 20000, 20000], [1, 1, 1, 512, 512], [1, 1, 1, 1, 1]),
       }],
     };
-    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) })).toEqual([]);
+    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 }, labelSettings: allOn(1) })).toEqual([]);
   });
 
   it("picks a coarse fitting level (bounded requests) over a huge finest level", () => {
@@ -211,7 +211,7 @@ describe("computeLabelChunkRequests", () => {
       images: [image5("img-0", [1, 1, 1, 16384, 16384], [1, 1, 1, 512, 512], [1, 1, 1, 1, 1])],
       labels: [label],
     };
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 }, labelSettings: allOn(1) });
     // Bounded: the coarse level's 4×4 grid, not level 0's 1024 chunks.
     expect(reqs).toHaveLength(16);
     expect(reqs.every((r) => r.level === 1)).toBe(true);
@@ -247,7 +247,7 @@ describe("computeLabelChunkRequests", () => {
 
     // Fetch agrees: with both masks turned on, requests target the resolvable
     // second label, not the ineligible first.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(2) });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 }, labelSettings: allOn(2) });
     expect(reqs.length).toBeGreaterThan(0);
     expect(reqs.every((r) => r.imageId === "img-0:label:ok")).toBe(true);
   });
@@ -259,9 +259,9 @@ describe("computeLabelChunkRequests", () => {
       singleLevelLabel("c", "Uint32", [512, 512]),
     ]);
     // Default (no settings): masks are opt-in, so nothing is fetched on open.
-    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0 })).toEqual([]);
+    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 } })).toEqual([]);
     // With every mask explicitly turned on, all three are fetched.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(3) });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 }, labelSettings: allOn(3) });
     const ids = new Set(reqs.map((r) => r.imageId));
     expect(ids).toEqual(
       new Set(["img-0:label:a", "img-0:label:b", "img-0:label:c"]),
@@ -276,7 +276,7 @@ describe("computeLabelChunkRequests", () => {
     const resolved = resolveDefaultLabel(manifest);
     expect(resolved?.label.image.image_id).toBe("img-0:label:seg32");
 
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(2) });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 }, labelSettings: allOn(2) });
     expect(reqs.every((r) => r.imageId === "img-0:label:seg32")).toBe(true);
   });
 
@@ -284,7 +284,7 @@ describe("computeLabelChunkRequests", () => {
     const manifest = multiLabelManifest([singleLevelLabel("mask8", "Uint8", [512, 512])]);
     expect(resolveDefaultLabel(manifest)).toBeNull();
     // Even explicitly turned on, an ineligible uint8 mask fetches nothing.
-    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, labelSettings: allOn(1) })).toEqual([]);
+    expect(computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 }, labelSettings: allOn(1) })).toEqual([]);
   });
 });
 
@@ -399,7 +399,7 @@ describe("resolveVisibleLabels", () => {
       datasetId: "ds-0",
       manifest: m,
       t: 0,
-      z: 0,
+      cut: { axis: "z", index: 0 },
       labelSettings: [
         { visible: false, opacity: 0.5 },
         { visible: true, opacity: 0.5 },
@@ -416,7 +416,7 @@ describe("resolveVisibleLabels", () => {
       datasetId: "ds-0",
       manifest: m,
       t: 0,
-      z: 0,
+      cut: { axis: "z", index: 0 },
       labelSettings: [
         { visible: true, opacity: 0.5 },
         { visible: true, opacity: 0.5 },
@@ -460,7 +460,7 @@ describe("resolveVisibleLabels", () => {
       datasetId: "ds-0",
       manifest: m,
       t: 0,
-      z: 0,
+      cut: { axis: "z", index: 0 },
       labelSettings: [
         { visible: true, opacity: 0.5 },
         { visible: false, opacity: 0.5 },
@@ -543,7 +543,7 @@ describe("resolveVisibleLabels — mode-aware, no stand-in", () => {
     expect(resolveVisibleLabels(m, seen([true, false]), { mode: "volume" })).toEqual([]);
     expect(
       computeLabelChunkRequests({
-        datasetId: "ds-0", manifest: m, t: 0, z: 0, mode: "volume",
+        datasetId: "ds-0", manifest: m, t: 0, cut: { axis: "z", index: 0 }, mode: "volume",
         labelSettings: seen([true, false]),
       }),
     ).toEqual([]);
@@ -642,7 +642,7 @@ describe("computeLabelChunkRequests — volume mode", () => {
   }
 
   it("emits EVERY (z, y, x) chunk of the chosen level (the full volume)", () => {
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "volume", labelSettings: allOn(1) });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, cut: { axis: "z", index: 0 }, mode: "volume", labelSettings: allOn(1) });
     // gz=2, gy=2, gx=2 → 8 chunks; slice mode would emit only 4 (single z).
     expect(reqs).toHaveLength(8);
     // Both z-chunks are present (not just the mapped-Z plane).
@@ -657,11 +657,11 @@ describe("computeLabelChunkRequests — volume mode", () => {
   });
 
   it("slice mode (and the default mode) fetches only the mapped z-plane", () => {
-    const sliceReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, mode: "slice", labelSettings: allOn(1) });
+    const sliceReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, cut: { axis: "z", index: 0 }, mode: "slice", labelSettings: allOn(1) });
     expect(sliceReqs).toHaveLength(4); // gy*gx, single z-chunk
     expect(new Set(sliceReqs.map((r) => r.z))).toEqual(new Set([0]));
     // Omitting `mode` behaves identically to slice (back-compat).
-    const defaultReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, z: 0, labelSettings: allOn(1) });
+    const defaultReqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest: volManifest(), t: 0, cut: { axis: "z", index: 0 }, labelSettings: allOn(1) });
     expect(defaultReqs).toHaveLength(4);
     expect(new Set(defaultReqs.map((r) => r.z))).toEqual(new Set([0]));
   });
@@ -678,7 +678,7 @@ describe("computeLabelChunkRequests — volume mode", () => {
       }],
     };
     // Source at t=5, but the label has only t=0 — every z-chunk stays at t=0.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 5, z: 0, mode: "volume", labelSettings: allOn(1) });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 5, cut: { axis: "z", index: 0 }, mode: "volume", labelSettings: allOn(1) });
     expect(reqs).toHaveLength(2); // gz=2, gy=gx=1
     expect(reqs.every((r) => r.t === 0)).toBe(true);
     expect(new Set(reqs.map((r) => r.z))).toEqual(new Set([0, 1]));
@@ -689,7 +689,7 @@ describe("computeLabelChunkRequests — volume mode", () => {
       datasetId: "ds-0",
       manifest: volManifest(),
       t: 0,
-      z: 0,
+      cut: { axis: "z", index: 0 },
       mode: "volume",
       labelSettings: [{ visible: false, opacity: 0.5 }],
     });
@@ -731,7 +731,7 @@ describe("computeLabelChunkRequests — the slice view's planes", () => {
   }
 
   const at = (z: number, more: Partial<Parameters<typeof computeLabelChunkRequests>[0]> = {}) =>
-    computeLabelChunkRequests({ datasetId: "ds-0", manifest: deepManifest(), t: 0, z, labelSettings: allOn(1), ...more });
+    computeLabelChunkRequests({ datasetId: "ds-0", manifest: deepManifest(), t: 0, cut: { axis: "z", index: z }, labelSettings: allOn(1), ...more });
 
   it("ask for the plane drawn and fetch a band around it, inside the chunk and off its padding", () => {
     const reqs = at(40);
@@ -753,12 +753,12 @@ describe("computeLabelChunkRequests — the slice view's planes", () => {
     const whole = (req: { plane?: number; planes?: readonly [number, number] }) =>
       req.plane === undefined && req.planes === undefined;
     const flat = computeLabelChunkRequests({
-      datasetId: "ds-0", manifest: deepManifest(1), t: 0, z: 40, labelSettings: allOn(1),
+      datasetId: "ds-0", manifest: deepManifest(1), t: 0, cut: { axis: "z", index: 40 }, labelSettings: allOn(1),
     });
     expect(flat.every(whole)).toBe(true);
     const shallow = computeLabelChunkRequests({
       // Plane 41 is plane 1 of a 4-plane chunk, and planes 0 to 3 are all of it.
-      datasetId: "ds-0", manifest: deepManifest(4), t: 0, z: 41, labelSettings: allOn(1),
+      datasetId: "ds-0", manifest: deepManifest(4), t: 0, cut: { axis: "z", index: 41 }, labelSettings: allOn(1),
     });
     expect(shallow.every(whole)).toBe(true);
     expect(at(40, { mode: "volume" }).every(whole)).toBe(true);
@@ -779,7 +779,7 @@ describe("computeLabelChunkRequests — the slice view's planes", () => {
     expect(new Set(prefetch.map((req) => req.chunkKey))).toEqual(new Set(band.map((req) => req.chunkKey)));
     // A chunk already fetched whole has no band to follow up.
     const flat = computeLabelChunkRequests({
-      datasetId: "ds-0", manifest: deepManifest(1), t: 0, z: 41, labelSettings: allOn(1), cutStep: true,
+      datasetId: "ds-0", manifest: deepManifest(1), t: 0, cut: { axis: "z", index: 41 }, labelSettings: allOn(1), cutStep: true,
     });
     expect(flat.some((req) => req.lane === "prefetch")).toBe(false);
   });
@@ -815,8 +815,8 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
   }
   // Masks are opt-in; these tests exercise level selection with the mask turned
   // on, so `vol`/`slice` carry an explicit all-visible setting (one label each).
-  const vol = { datasetId: "ds-0", t: 0, z: 0, mode: "volume" as const, labelSettings: allOn(1) };
-  const slice = { datasetId: "ds-0", t: 0, z: 0, mode: "slice" as const, labelSettings: allOn(1) };
+  const vol = { datasetId: "ds-0", t: 0, mode: "volume" as const, labelSettings: allOn(1) };
+  const slice = { datasetId: "ds-0", t: 0, mode: "slice" as const, labelSettings: allOn(1) };
 
   it("renders a label whose Z busts the monolithic 3D limit when its bricks fit", () => {
     // Z=2100 > the 2048 monolithic-texture limit, but bricking tiles it across

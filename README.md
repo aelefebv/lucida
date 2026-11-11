@@ -109,6 +109,24 @@ print(workspace.viewer.web_url)             # a page showing that view
 
 View, camera, layer and channel changes from either client go to a viewer profile the server keeps, `default` unless you name another (`--viewer-profile` in the CLI, `workspace.viewer_profile` in Python), so they last after the call returns and a page opened at the profile's URL shows them. The Python client applies them through its compiled extension, so build it (below) before using them.
 
+The canvas can hold several views. Views are counted from 0 in the layout's order, and a command given one (`--view N`, `view=N`) acts in it and makes it the active view:
+
+```bash
+lucida view layout columns a.ome.zarr b.ome.zarr --screenshot pair.png   # each dataset in its own view, captured whole and view by view
+lucida view link pan off                    # pan, zoom, orientation, z, t, contrast or colormap: linked, relative or off
+lucida camera mode arcball --view 1
+lucida view layout four-up                  # XY, YZ and XZ slices and a volume, crossing at one point
+lucida viewer screenshot views.png --each-view
+```
+
+```python
+workspace.view.layout("columns", ["a.ome.zarr", "b.ome.zarr"])
+workspace.view.zoom(2, view=1)
+workspace.viewer.screenshot("pair.png", each_view=True)   # runs the lucida CLI
+```
+
+`viewer state --json` and `workspace.viewer.state()` report every view under `views`, the record a saved view carries, and how two views link under `links`. Over HTTP, put a saved view with a `views` record to `/api/workspaces/<id>/viewer-profiles/<name>`.
+
 From a checkout, run scripts with `uv run --project lucida-py python your_script.py`. The client takes a token from its constructor, `LUCIDA_TOKEN`, the macOS Keychain entry `lucida auth login` writes, or the CLI config file.
 
 Smoke passes against a running server: `scripts/smoke_lucida_cli.sh` and `scripts/smoke_python_client.py` read `LUCIDA_SMOKE_SERVER` and `LUCIDA_SMOKE_DATASET` (set `LUCIDA_SMOKE_CAPTURE=0` without Chrome), and `scripts/smoke_dataset_reliability.py --fixtures-root <DIR>` opens the fixture list in the script from `<DIR>`.

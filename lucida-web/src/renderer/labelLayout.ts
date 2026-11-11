@@ -7,7 +7,7 @@
  * Axis order is `[T, C, Z, Y, X]`.
  */
 
-import { sliceLevelPlane } from "./slicePlane.ts";
+import { planeAxes, planeCutting, sliceLevelPlane, tczyx, type SpatialAxis } from "./slicePlane.ts";
 
 /** Level-0 geometry: 5D `shape` and `scale`, canonical `[T, C, Z, Y, X]`. */
 export interface Level0 {
@@ -53,15 +53,18 @@ function footprintAxis(
 
 /**
  * Width and height, in the source's full-res voxel units, the label must
- * occupy to stay aligned: `label.shape * label.scale / source.scale`.
+ * occupy across and down the plane cutting `cut` to stay aligned:
+ * `label.shape * label.scale / source.scale`.
  */
 export function labelFootprint(
   source: Level0,
   label: Level0,
+  cut: SpatialAxis = "z",
 ): { dataW: number; dataH: number } {
+  const [across, down] = planeAxes(planeCutting(cut));
   return {
-    dataW: footprintAxis(label.shape, label.scale, source.scale, AXIS_X),
-    dataH: footprintAxis(label.shape, label.scale, source.scale, AXIS_Y),
+    dataW: footprintAxis(label.shape, label.scale, source.scale, tczyx(across)),
+    dataH: footprintAxis(label.shape, label.scale, source.scale, tczyx(down)),
   };
 }
 
@@ -81,22 +84,21 @@ function labelAxisIndex(sourceIdx: number, source: Level0, label: Level0, axis: 
 }
 
 /**
- * The label's own full-resolution Z lining up with a source full-res Z.
- * Used by both the request emitter and the delivery path so the fetched
- * chunk's Z and the worker's slice pick agree.
+ * The plane along `axis` of a label level `levelExtent` planes deep along it
+ * that the slice view draws at the source's full-res plane `sourceIndex`
+ * along `axis`. The fetch, the plane cut sent to the worker, and the plane
+ * the worker checks its cells against all use it, so a cell holding another
+ * plane is always one to send again.
  */
-export function labelDepthZ(sourceZ: number, source: Level0, label: Level0): number {
-  return labelAxisIndex(sourceZ, source, label, AXIS_Z);
-}
-
-/**
- * The plane of a label level `levelDepth` planes deep that the slice view
- * draws at source full-res Z `sourceZ`. The fetch, the plane cut sent to the
- * worker, and the plane the worker checks its cells against all use it, so a
- * cell holding another plane is always one to send again.
- */
-export function labelLevelZ(sourceZ: number, source: Level0, label: Level0, levelDepth: number): number {
-  return sliceLevelPlane(labelDepthZ(sourceZ, source, label), safeCount(label.shape, AXIS_Z), levelDepth);
+export function labelLevelPlane(
+  sourceIndex: number,
+  source: Level0,
+  label: Level0,
+  axis: SpatialAxis,
+  levelExtent: number,
+): number {
+  const index = tczyx(axis);
+  return sliceLevelPlane(labelAxisIndex(sourceIndex, source, label, index), safeCount(label.shape, index), levelExtent);
 }
 
 /**

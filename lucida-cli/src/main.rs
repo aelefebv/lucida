@@ -1,6 +1,7 @@
 mod admin;
 mod auth;
 mod browser;
+mod capture;
 mod config;
 mod credentials;
 mod dataset;
@@ -29,9 +30,11 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lucida_core::command::ViewportCommand;
+use lucida_core::placement::rotation_degrees;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
-use lucida_core::scene::{BlendMode, Colormap, RenderMode};
+use lucida_core::scene::{BlendMode, Colormap, LinkMode, LinkProperty, RenderMode};
 use lucida_core::slice_plane::SlicePlane;
+use lucida_core::view::ViewLayout;
 use lucida_core::view_transform::{self, ExplorationSidecar};
 use lucida_protocol::DatasetSourceHealth;
 use serde_json::Value;
@@ -45,6 +48,7 @@ use crate::auth::{
     AuthClient, LoginResult, PollOutcome, generate_raw_token, open_browser, poll_interval,
 };
 use crate::browser::Viewport;
+use crate::capture::{CaptureOptions, CaptureParts, CapturedImage, capture_viewer};
 use crate::config::{
     CliConfig, ConfigStore, EffectiveServer, normalize_server_base_url, resolve_server,
 };
@@ -83,11 +87,11 @@ use crate::saved_view::{
 use crate::status::{ServerClient, StatusReport, format_status_human};
 use crate::view::{
     DatasetDisplayCommand, DatasetPresenceOutput, DebugStateOutput, PeerCursorOutput,
-    PeerFollowOutput, PeerListOutput, PeerWorkspaceClient, ViewApplyOutput, ViewWorkspaceClient,
-    ViewerProfileClient, ViewerProfileOutput, ViewerSourceOutput, format_dataset_presence_human,
-    format_debug_state_human, format_diagnostic_source, format_peer_cursor_human,
-    format_peer_follow_human, format_peer_list_human, format_view_apply_human,
-    format_viewer_profile_human, format_viewer_source_human,
+    PeerFollowOutput, PeerListOutput, PeerWorkspaceClient, ViewApplyOutput, ViewChange,
+    ViewRequest, ViewWorkspaceClient, ViewerProfileClient, ViewerProfileOutput, ViewerSourceOutput,
+    format_dataset_presence_human, format_debug_state_human, format_diagnostic_source,
+    format_peer_cursor_human, format_peer_follow_human, format_peer_list_human,
+    format_view_apply_human, format_viewer_profile_human, format_viewer_source_human,
 };
 use crate::workspace::{
     WorkspaceClient, WorkspaceLifecycleOutput, WorkspaceLinkAccess, WorkspaceListOutput,
@@ -150,6 +154,12 @@ enum Command {
         command: DatasetCommand,
     },
     /// Update local view state in the selected workspace
+    ///
+    /// The canvas holds one view or several (`view layout`). Each command acts
+    /// in the active view, or in the view --view names, which becomes the
+    /// active view first, as a press there makes it. The JSON reports the
+    /// active view's camera and position, and every view and link under
+    /// `views` and `links`.
     View {
         /// Durable headless viewer profile to update when --from-peer is omitted
         #[arg(long, default_value = "default", value_name = "NAME")]
@@ -160,6 +170,9 @@ enum Command {
         /// Seconds to wait for the workspace snapshot
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
+        /// Act in the view at this place in the layout, counted from 0
+        #[arg(long, global = true, value_name = "N")]
+        view: Option<usize>,
         #[command(subcommand)]
         command: ViewCommand,
     },
@@ -174,6 +187,10 @@ enum Command {
         /// Seconds to wait for the workspace snapshot
         #[arg(long, default_value_t = 30)]
         timeout_seconds: u64,
+        /// Move the camera of the view at this place in the layout, counted
+        /// from 0, which becomes the active view first
+        #[arg(long, global = true, value_name = "N")]
+        view: Option<usize>,
         #[command(subcommand)]
         command: CameraCommand,
     },
@@ -583,12 +600,12 @@ enum DatasetCommand {
         #[arg(long, default_value_t = 60)]
         timeout_seconds: u64,
     },
-    /// Show where a dataset was placed by hand, or move and scale it
+    /// Show where a dataset was placed by hand, or move, scale and rotate it
     ///
     /// The placement goes on top of where the dataset's metadata puts it and
     /// never changes the data. It is shared with everyone in the workspace,
-    /// as the viewer's Move and scale tool is. With no option, prints the
-    /// current placement.
+    /// as the viewer's Move, scale and rotate tool is. With no option, prints
+    /// the current placement.
     Transform {
         /// Workspace-local dataset id or unambiguous dataset name
         dataset: String,
@@ -598,8 +615,13 @@ enum DatasetCommand {
         /// Scale on the declared sample size: one number for every axis, or `x,y,z`
         #[arg(long, value_parser = parse_scale, value_name = "S|X,Y,Z")]
         scale: Option<[f64; 3]>,
+        /// Rotation `x,y,z` in degrees: about X, then Y, then Z, each about
+        /// the axis the turns before it left. The dataset turns about its
+        /// center, before any --offset or --scale sets those outright
+        #[arg(long, value_parser = parse_triple, allow_hyphen_values = true, value_name = "X,Y,Z")]
+        rotate: Option<[f64; 3]>,
         /// Put the dataset back where its metadata places it, before any
-        /// --offset or --scale
+        /// --rotate, --offset or --scale
         #[arg(long)]
         reset: bool,
         /// Seconds to wait for the workspace snapshot and acknowledgement
@@ -712,9 +734,118 @@ enum ViewCommand {
     ZRange { start: u32, end: u32 },
     /// Set camera viewport size in pixels
     ViewportSize { width: u32, height: u32 },
+    /// Divide the canvas among views: single, columns (1×2), rows (2×1),
+    /// grid (2×2) or four-up
+    ///
+    /// Each DATASET moves into the view at its place, in order, as a layer
+    /// dropped on a view moves there. Four-up shows the same datasets as an
+    /// XY, a YZ and an XZ slice and a volume crossing at one point, so there
+    /// every DATASET shows in all four. Two views of datasets over one region
+    /// link pan, zoom, orientation, depth and time by default; see `view
+    /// link`.
+    Layout {
+        layout: ViewLayoutValue,
+        /// Workspace-local dataset ids or unambiguous names
+        datasets: Vec<String>,
+        /// Then capture the canvas to this PNG, and each view beside it as
+        /// `<stem>-view-<N>.png`, as `viewer screenshot --each-view` does
+        #[arg(long, value_name = "PNG")]
+        screenshot: Option<String>,
+        #[command(flatten)]
+        capture: CaptureArgs,
+    },
+    /// Show datasets in the view --view names: moved there and out of every
+    /// other view, or with --keep as well as wherever they show
+    Show {
+        /// Workspace-local dataset ids or unambiguous names
+        #[arg(required = true)]
+        datasets: Vec<String>,
+        /// Keep them in the views that show them, as "Show in both views" does
+        #[arg(long)]
+        keep: bool,
+    },
+    /// Make the view at this place in the layout, from 0, the one commands
+    /// steer
+    Active {
+        #[arg(value_name = "VIEW")]
+        place: usize,
+    },
+    /// Show the view at this place alone across the canvas, or every view
+    /// again without VIEW
+    Maximize {
+        #[arg(value_name = "VIEW")]
+        place: Option<usize>,
+    },
+    /// Link a property between the two views of a layout of two
+    ///
+    /// A linked property takes the active view's value, a relative one keeps
+    /// the offset it had when linked, and one that is off stays put. Contrast
+    /// and colormap link the two datasets' channels, paired by name and then
+    /// by place. The JSON's `links` says why a mode can't apply now, and
+    /// `views.links.basis` whether the views compare in physical units or in
+    /// samples.
+    Link {
+        property: LinkPropertyValue,
+        mode: LinkModeValue,
+    },
 }
 
 impl ViewCommand {
+    /// The request this command makes, in the view `view` names.
+    fn request(&self, view: Option<usize>) -> Result<ViewRequest, CliError> {
+        let view = match self {
+            ViewCommand::Active { place } => {
+                if view.is_some_and(|named| named != *place) {
+                    return Err(CliError::config(
+                        "`view active` names its view; drop --view",
+                    ));
+                }
+                Some(*place)
+            }
+            _ => view,
+        };
+        Ok(ViewRequest {
+            view,
+            change: self.change()?,
+        })
+    }
+
+    fn change(&self) -> Result<ViewChange, CliError> {
+        Ok(match self {
+            ViewCommand::Layout {
+                layout, datasets, ..
+            } => ViewChange::Layout {
+                layout: (*layout).into(),
+                datasets: datasets.clone(),
+            },
+            ViewCommand::Show { datasets, keep } => ViewChange::Show {
+                datasets: datasets.clone(),
+                keep: *keep,
+            },
+            ViewCommand::Active { .. } => ViewChange::Activate,
+            ViewCommand::Maximize { place } => ViewChange::Maximize(*place),
+            ViewCommand::Link { property, mode } => {
+                ViewChange::Command(ViewportCommand::SetViewLink {
+                    property: (*property).into(),
+                    mode: (*mode).into(),
+                })
+            }
+            plain => ViewChange::Command(plain.viewport_command()?),
+        })
+    }
+
+    /// Where `view layout --screenshot` writes, and how it renders.
+    fn screenshot(&self) -> Option<(&str, &CaptureArgs)> {
+        match self {
+            ViewCommand::Layout {
+                screenshot: Some(output),
+                capture,
+                ..
+            } => Some((output.as_str(), capture)),
+            _ => None,
+        }
+    }
+
     fn viewport_command(&self) -> Result<ViewportCommand, CliError> {
         Ok(match self {
             ViewCommand::Pan { dx, dy } => ViewportCommand::Pan { dx: *dx, dy: *dy },
@@ -761,7 +892,108 @@ impl ViewCommand {
                     pixel_ratio: None,
                 }
             }
+            ViewCommand::Layout { .. }
+            | ViewCommand::Show { .. }
+            | ViewCommand::Active { .. }
+            | ViewCommand::Maximize { .. }
+            | ViewCommand::Link { .. } => {
+                unreachable!("ViewCommand::change maps the commands that name views")
+            }
         })
+    }
+}
+
+/// The view layouts, as the CLI spells them.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ViewLayoutValue {
+    Single,
+    Columns,
+    Rows,
+    Grid,
+    #[value(alias = "four_up")]
+    FourUp,
+}
+
+impl From<ViewLayoutValue> for ViewLayout {
+    fn from(value: ViewLayoutValue) -> Self {
+        match value {
+            ViewLayoutValue::Single => ViewLayout::Single,
+            ViewLayoutValue::Columns => ViewLayout::Columns,
+            ViewLayoutValue::Rows => ViewLayout::Rows,
+            ViewLayoutValue::Grid => ViewLayout::Grid,
+            ViewLayoutValue::FourUp => ViewLayout::FourUp,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LinkPropertyValue {
+    Pan,
+    Zoom,
+    Orientation,
+    /// The depth a slice view cuts: its Z, or the Y or X a side view cuts
+    Z,
+    T,
+    Contrast,
+    Colormap,
+}
+
+impl From<LinkPropertyValue> for LinkProperty {
+    fn from(value: LinkPropertyValue) -> Self {
+        match value {
+            LinkPropertyValue::Pan => LinkProperty::Pan,
+            LinkPropertyValue::Zoom => LinkProperty::Zoom,
+            LinkPropertyValue::Orientation => LinkProperty::Orientation,
+            LinkPropertyValue::Z => LinkProperty::Z,
+            LinkPropertyValue::T => LinkProperty::T,
+            LinkPropertyValue::Contrast => LinkProperty::Contrast,
+            LinkPropertyValue::Colormap => LinkProperty::Colormap,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LinkModeValue {
+    Linked,
+    Relative,
+    Off,
+}
+
+impl From<LinkModeValue> for LinkMode {
+    fn from(value: LinkModeValue) -> Self {
+        match value {
+            LinkModeValue::Linked => LinkMode::Linked,
+            LinkModeValue::Relative => LinkMode::Relative,
+            LinkModeValue::Off => LinkMode::Off,
+        }
+    }
+}
+
+/// The browser window a screenshot renders into.
+#[derive(clap::Args, Debug, Clone)]
+struct CaptureArgs {
+    /// Browser viewport width in CSS pixels
+    #[arg(long, default_value_t = 1200)]
+    width: u32,
+    /// Browser viewport height in CSS pixels
+    #[arg(long, default_value_t = 800)]
+    height: u32,
+    /// Device pixel ratio to render at, which multiplies the image's pixels
+    #[arg(long, default_value_t = 1.0, value_name = "RATIO")]
+    device_pixel_ratio: f64,
+    /// Leave each view's scale bar out of the capture
+    #[arg(long)]
+    no_scale_bar: bool,
+}
+
+impl CaptureArgs {
+    fn options(&self) -> CaptureOptions {
+        CaptureOptions {
+            width: self.width,
+            height: self.height,
+            device_pixel_ratio: self.device_pixel_ratio,
+            scale_bar: !self.no_scale_bar,
+        }
     }
 }
 
@@ -1139,21 +1371,26 @@ enum ViewerCommand {
         from_peer: u64,
     },
     /// Capture a browser screenshot of this viewer profile or an explicit live peer
+    ///
+    /// Writes the viewer page, its panels around the canvas, once every view
+    /// has settled. --view writes one view alone instead, and --each-view the
+    /// canvas alone with each view beside it as `<stem>-view-<N>.png`, all
+    /// from one load. Views are counted from 0 in the layout's order, as
+    /// `viewer state` lists them.
     Screenshot {
         /// PNG output path
         output: String,
         /// Capture an explicit live peer's current view instead of the viewer profile
         #[arg(long, value_name = "CLIENT_ID")]
         from_peer: Option<u64>,
-        /// Browser viewport width in pixels
-        #[arg(long, default_value_t = 1200)]
-        width: u32,
-        /// Browser viewport height in pixels
-        #[arg(long, default_value_t = 800)]
-        height: u32,
-        /// Leave each view's scale bar out of the capture
+        /// Capture only the view at this place in the layout, counted from 0
+        #[arg(long, value_name = "N", conflicts_with = "each_view")]
+        view: Option<usize>,
+        /// Write the canvas alone to OUTPUT, and each view it shows beside it
         #[arg(long)]
-        no_scale_bar: bool,
+        each_view: bool,
+        #[command(flatten)]
+        capture: CaptureArgs,
         /// Seconds to wait for workspace state and browser render
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -2459,6 +2696,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 dataset,
                 offset,
                 scale,
+                rotate,
                 reset,
                 timeout_seconds,
             } => {
@@ -2477,6 +2715,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let change = TransformChange {
                     offset: *offset,
                     scale: *scale,
+                    rotate: *rotate,
                     reset: *reset,
                 };
                 let result = DatasetTransformClient::new(target.ws_url.clone(), token)
@@ -2493,6 +2732,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     target,
                     dataset: result.dataset,
                     seq: result.seq,
+                    rotation_degrees: rotation_degrees(result.user_transform.rotation),
                     user_transform: result.user_transform,
                     units: result.units,
                 };
@@ -2807,13 +3047,15 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             viewer_profile,
             from_peer,
             timeout_seconds,
+            view,
             command,
         } => {
             emit_viewport_command(
                 &cli,
                 &config,
                 output,
-                command.viewport_command()?,
+                command.request(*view)?,
+                command.screenshot(),
                 viewer_profile,
                 *from_peer,
                 *timeout_seconds,
@@ -2824,13 +3066,19 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             viewer_profile,
             from_peer,
             timeout_seconds,
+            view,
             command,
         } => {
+            let request = ViewRequest {
+                view: *view,
+                change: ViewChange::Command(command.viewport_command()?),
+            };
             emit_viewport_command(
                 &cli,
                 &config,
                 output,
-                command.viewport_command()?,
+                request,
+                None,
                 viewer_profile,
                 *from_peer,
                 *timeout_seconds,
@@ -3320,15 +3568,25 @@ async fn emit_saved_view_command(
     Ok(())
 }
 
+// One argument per thing the command line names; bundling them would only
+// move the list into a struct built at the one call site.
+#[allow(clippy::too_many_arguments)]
 async fn emit_viewport_command(
     cli: &Cli,
     config: &CliConfig,
     output: Output,
-    command: ViewportCommand,
+    request: ViewRequest,
+    screenshot: Option<(&str, &CaptureArgs)>,
     viewer_profile: &str,
     from_peer: Option<u64>,
     timeout_seconds: u64,
 ) -> Result<(), CliError> {
+    if screenshot.is_some() && from_peer.is_some() {
+        return Err(CliError::config(
+            "--screenshot captures the viewer profile; drop --from-peer, or capture the peer \
+             with `viewer screenshot --from-peer`",
+        ));
+    }
     let server = resolve_server(cli.server.as_deref(), config)?;
     let token = resolve_token(&server.url, config);
     let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
@@ -3345,7 +3603,7 @@ async fn emit_viewport_command(
         let view_client = ViewWorkspaceClient::new(target.ws_url.clone(), token);
         let result = view_client
             .apply(
-                command,
+                request,
                 Some(from_peer),
                 Duration::from_secs(timeout_seconds),
             )
@@ -3359,26 +3617,67 @@ async fn emit_viewport_command(
         output.print_either(&output_payload, || format_view_apply_human(&output_payload))?;
     } else {
         let view_client =
-            ViewerProfileClient::new(server.url.clone(), target.ws_url.clone(), token);
+            ViewerProfileClient::new(server.url.clone(), target.ws_url.clone(), token.clone());
+        let wait = Duration::from_secs(timeout_seconds);
         let result = view_client
-            .apply(
-                &workspace,
-                viewer_profile,
-                command,
-                Duration::from_secs(timeout_seconds),
-            )
+            .apply(&workspace, viewer_profile, request, wait)
             .await?;
-        let output_payload = ViewerProfileOutput {
-            server,
-            workspace,
-            target,
-            result,
+        let captured = match screenshot {
+            Some((path, capture)) => {
+                let url = viewer_profile_web_url(&target, viewer_profile)?;
+                capture_viewer(
+                    &url,
+                    token.as_ref(),
+                    path,
+                    capture.options(),
+                    CaptureParts::CanvasAndViews,
+                    &result.views,
+                    wait,
+                )
+                .await?
+            }
+            None => Vec::new(),
+        };
+        let output_payload = ViewChangeOutput {
+            profile: ViewerProfileOutput {
+                server,
+                workspace,
+                target,
+                result,
+            },
+            captured,
         };
         output.print_either(&output_payload, || {
-            format_viewer_profile_human(&output_payload)
+            let mut human = format_viewer_profile_human(&output_payload.profile);
+            human.push_str(&format_captured_human(&output_payload.captured));
+            human
         })?;
     }
     Ok(())
+}
+
+/// A viewer profile change, with what `--screenshot` wrote.
+#[derive(Debug, serde::Serialize)]
+struct ViewChangeOutput {
+    #[serde(flatten)]
+    profile: ViewerProfileOutput,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    captured: Vec<CapturedImage>,
+}
+
+fn format_captured_human(captured: &[CapturedImage]) -> String {
+    captured
+        .iter()
+        .map(|image| {
+            let what = image
+                .view
+                .map_or_else(String::new, |view| format!(" view {view}"));
+            format!(
+                "\nCaptured{what}: {} ({}x{})",
+                image.output, image.pixels[0], image.pixels[1]
+            )
+        })
+        .collect()
 }
 
 async fn emit_dataset_presence_command(
@@ -3539,69 +3838,68 @@ async fn emit_viewer_command(
         ViewerCommand::Screenshot {
             output: output_path,
             from_peer,
-            width,
-            height,
-            no_scale_bar,
+            view,
+            each_view,
+            capture,
             timeout_seconds: screenshot_timeout_seconds,
         } => {
             let wait = Duration::from_secs(screenshot_timeout_seconds.unwrap_or(timeout_seconds));
-            if from_peer.is_some() {
+            let parts = match (view, each_view) {
+                (Some(view), _) => CaptureParts::View(*view),
+                (None, true) => CaptureParts::CanvasAndViews,
+                (None, false) => CaptureParts::Page,
+            };
+            let (url, views, source) = if from_peer.is_some() {
                 let result = view_client
                     .source_state(&workspace, profile, *from_peer, None, wait)
                     .await?;
                 let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
-                capture_viewer_screenshot(
-                    &url,
-                    token.as_ref(),
-                    output_path,
-                    (*width, *height),
-                    !*no_scale_bar,
-                    wait,
-                )
-                .await?;
-                let source = result.source.clone();
-                let payload = serde_json::json!({
-                    "server": server,
-                    "workspace": workspace,
-                    "target": target,
-                    "source": source,
-                    "url": url,
-                    "output": output_path,
-                    "width": width,
-                    "height": height,
-                });
-                output.print_either(&payload, || {
-                    format!(
-                        "Captured viewer screenshot: {output_path}\nSource: {}\nURL: {url}",
-                        format_diagnostic_source(&result.source)
-                    )
-                })?;
+                (url, result.views, Some(result.source))
             } else {
                 let result = view_client.state(&workspace, profile, wait).await?;
-                let url = viewer_profile_web_url(&target, profile)?;
-                capture_viewer_screenshot(
-                    &url,
-                    token.as_ref(),
-                    output_path,
-                    (*width, *height),
-                    !*no_scale_bar,
-                    wait,
+                (
+                    viewer_profile_web_url(&target, profile)?,
+                    result.views,
+                    None,
                 )
-                .await?;
-                let payload = serde_json::json!({
-                    "server": server,
-                    "workspace": workspace,
-                    "target": target,
-                    "profile": result.profile,
-                    "url": url,
-                    "output": output_path,
-                    "width": width,
-                    "height": height,
-                });
-                output.print_either(&payload, || {
-                    format!("Captured viewer screenshot: {output_path}\nURL: {url}")
-                })?;
+            };
+            let captured = capture_viewer(
+                &url,
+                token.as_ref(),
+                output_path,
+                capture.options(),
+                parts,
+                &views,
+                wait,
+            )
+            .await?;
+            let mut payload = serde_json::json!({
+                "server": server,
+                "workspace": workspace,
+                "target": target,
+                "url": url,
+                "output": output_path,
+                "width": capture.width,
+                "height": capture.height,
+                "device_pixel_ratio": capture.device_pixel_ratio,
+                "captured": captured,
+            });
+            match &source {
+                Some(source) => payload["source"] = serde_json::json!(source),
+                None => payload["profile"] = serde_json::json!(profile),
             }
+            if let Some(view) = view {
+                payload["view"] = serde_json::json!(view);
+            }
+            output.print_either(&payload, || {
+                let mut human = format!("Captured viewer screenshot: {output_path}");
+                if let Some(source) = &source {
+                    human.push_str(&format!("\nSource: {}", format_diagnostic_source(source)));
+                }
+                human.push_str(&format!("\nURL: {url}"));
+                human.push_str(&format_captured_human(&captured));
+                human
+            })?;
         }
         ViewerCommand::Overview {
             output: output_path,
@@ -3623,12 +3921,13 @@ async fn emit_viewer_command(
                     )
                     .await?;
                 let url = viewer_inline_view_web_url(&target, &result.saved_view)?;
-                capture_viewer_screenshot(
+                capture_viewer(
                     &url,
                     token.as_ref(),
                     output_path,
-                    (*width, *height),
-                    !*no_scale_bar,
+                    capture_options(*width, *height, !*no_scale_bar),
+                    CaptureParts::Page,
+                    &result.views,
                     wait,
                 )
                 .await?;
@@ -3654,12 +3953,13 @@ async fn emit_viewer_command(
                     .overview(&workspace, profile, [*width, *height], wait)
                     .await?;
                 let url = viewer_profile_web_url(&target, profile)?;
-                capture_viewer_screenshot(
+                capture_viewer(
                     &url,
                     token.as_ref(),
                     output_path,
-                    (*width, *height),
-                    !*no_scale_bar,
+                    capture_options(*width, *height, !*no_scale_bar),
+                    CaptureParts::Page,
+                    &result.views,
                     wait,
                 )
                 .await?;
@@ -4799,40 +5099,22 @@ fn viewer_inline_view_web_url(
     Ok(url.to_string())
 }
 
-async fn capture_viewer_screenshot(
-    url: &str,
-    token: Option<&EffectiveToken>,
-    output_path: &str,
-    (width, height): (u32, u32),
-    scale_bar: bool,
-    wait: Duration,
-) -> Result<(), CliError> {
-    if width == 0 || height == 0 {
-        return Err(CliError::config(
-            "viewer screenshot width and height must be positive",
-        ));
-    }
-    let url = montage::with_scale_bar_param(url, scale_bar);
-
-    browser::with_browser(capture_viewport(width, height), wait, async |browser| {
-        let mut page = browser.open_page(&url, token, wait).await?;
-        let png = page.screenshot_png(wait).await?;
-        if let Some(parent) = Path::new(output_path).parent()
-            && !parent.as_os_str().is_empty()
-        {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(output_path, png).await?;
-        Ok(())
-    })
-    .await
-}
-
-/// Viewport for the image-producing captures (`viewer screenshot`,
+/// Viewport for the image-producing captures (`viewer overview`,
 /// `dataset montage`). Their device pixel ratio stays 1: it decides the output
 /// image's pixel size, not the workload the renderer is put under.
 fn capture_viewport(width: u32, height: u32) -> Viewport {
     Viewport::new(width, height, 1.0)
+}
+
+/// [`capture_viewport`] as a viewer capture takes it.
+fn capture_options(width: u32, height: u32, scale_bar: bool) -> CaptureOptions {
+    let viewport = capture_viewport(width, height);
+    CaptureOptions {
+        width,
+        height,
+        device_pixel_ratio: viewport.device_scale_factor,
+        scale_bar,
+    }
 }
 
 /// Render many view URLs in ONE headless browser session and return a PNG per
@@ -5811,13 +6093,15 @@ mod tests {
                 viewer_profile,
                 from_peer,
                 timeout_seconds,
+                view,
                 command,
             } => {
                 assert_eq!(viewer_profile, "default");
                 assert_eq!(from_peer, Some(7));
                 assert_eq!(timeout_seconds, 4);
-                match command.viewport_command().unwrap() {
-                    ViewportCommand::Pan { dx, dy } => {
+                assert_eq!(view, None);
+                match command.change().unwrap() {
+                    ViewChange::Command(ViewportCommand::Pan { dx, dy }) => {
                         assert_eq!(dx, -10.5);
                         assert_eq!(dy, -2.25);
                     }
@@ -5829,11 +6113,84 @@ mod tests {
     }
 
     #[test]
+    fn view_commands_name_views_by_place() {
+        let layout = parse(&[
+            "view",
+            "layout",
+            "four-up",
+            "a",
+            "--screenshot",
+            "shots/four.png",
+            "--device-pixel-ratio",
+            "2",
+        ]);
+        let Command::View { view, command, .. } = layout.command else {
+            panic!("expected view layout");
+        };
+        let request = command.request(view).unwrap();
+        assert!(matches!(
+            request.change,
+            ViewChange::Layout { layout: ViewLayout::FourUp, ref datasets } if datasets == &["a"]
+        ));
+        let (path, capture) = command.screenshot().unwrap();
+        assert_eq!((path, capture.device_pixel_ratio), ("shots/four.png", 2.0));
+        let underscored = parse(&["view", "layout", "four_up"]);
+        assert!(matches!(underscored.command, Command::View { .. }));
+
+        let show = parse(&["view", "show", "b", "c", "--view", "1", "--keep"]);
+        let Command::View { view, command, .. } = show.command else {
+            panic!("expected view show");
+        };
+        let request = command.request(view).unwrap();
+        assert_eq!(request.view, Some(1));
+        assert!(
+            matches!(request.change, ViewChange::Show { keep: true, ref datasets } if datasets.len() == 2)
+        );
+
+        let link = parse(&["view", "link", "zoom", "relative", "--view", "1"]);
+        let Command::View { view, command, .. } = link.command else {
+            panic!("expected view link");
+        };
+        let request = command.request(view).unwrap();
+        assert_eq!(request.view, Some(1));
+        assert!(matches!(
+            request.change,
+            ViewChange::Command(ViewportCommand::SetViewLink {
+                property: LinkProperty::Zoom,
+                mode: LinkMode::Relative
+            })
+        ));
+
+        let active = parse(&["view", "active", "1", "--view", "0"]);
+        let Command::View { view, command, .. } = active.command else {
+            panic!("expected view active");
+        };
+        assert_eq!(command.request(view).unwrap_err().kind, ErrorKind::Config);
+
+        let camera = parse(&["camera", "mode", "arcball", "--view", "3"]);
+        assert!(matches!(
+            camera.command,
+            Command::Camera { view: Some(3), .. }
+        ));
+
+        let refused = Cli::try_parse_from([
+            "lucida",
+            "viewer",
+            "screenshot",
+            "out.png",
+            "--view",
+            "1",
+            "--each-view",
+        ]);
+        assert!(refused.is_err());
+    }
+
+    #[test]
     fn view_slice_and_z_range_map_to_viewport_commands() {
         let slice = parse(&["view", "slice", "t", "12"]);
         match slice.command {
-            Command::View { command, .. } => match command.viewport_command().unwrap() {
-                ViewportCommand::SetT { t } => assert_eq!(t, 12),
+            Command::View { command, .. } => match command.change().unwrap() {
+                ViewChange::Command(ViewportCommand::SetT { t }) => assert_eq!(t, 12),
                 _ => panic!("expected set t"),
             },
             _ => panic!("expected view slice"),
@@ -5841,8 +6198,8 @@ mod tests {
 
         let range = parse(&["view", "z-range", "3", "9"]);
         match range.command {
-            Command::View { command, .. } => match command.viewport_command().unwrap() {
-                ViewportCommand::SetZRange { start, end } => {
+            Command::View { command, .. } => match command.change().unwrap() {
+                ViewChange::Command(ViewportCommand::SetZRange { start, end }) => {
                     assert_eq!(start, 3);
                     assert_eq!(end, 9);
                 }
@@ -6278,18 +6635,19 @@ mod tests {
                     ViewerCommand::Screenshot {
                         output,
                         from_peer,
-                        width,
-                        height,
-                        no_scale_bar,
+                        view,
+                        each_view,
+                        capture,
                         timeout_seconds,
                     },
                 ..
             } => {
                 assert_eq!(output, "/tmp/view.png");
                 assert_eq!(from_peer, Some(9));
-                assert_eq!(width, 900);
-                assert_eq!(height, 700);
-                assert!(!no_scale_bar);
+                assert_eq!((view, each_view), (None, false));
+                assert_eq!((capture.width, capture.height), (900, 700));
+                assert_eq!(capture.device_pixel_ratio, 1.0);
+                assert!(!capture.no_scale_bar);
                 assert_eq!(timeout_seconds, Some(60));
             }
             _ => panic!("expected viewer screenshot"),

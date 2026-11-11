@@ -320,6 +320,7 @@ describe("the worker's pixel probe", () => {
       memberId: "img:label:regions",
       t: 0,
       plane: 0,
+      axis: "z",
       width: 40,
       height: 40,
     };

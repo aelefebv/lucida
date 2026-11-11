@@ -146,6 +146,8 @@ export interface LayerInfo {
   physicalScale: boolean;
   /** Where someone put the layer by hand, or `null` where it sits as its metadata places it. */
   userTransform: UserTransform | null;
+  /** Its rotation by hand as degrees about X, then Y, then Z. */
+  rotationDegrees: readonly [number, number, number];
   /** The length unit each axis declares, `[x, y, z]`, which an offset is in. */
   units: readonly [string | null, string | null, string | null];
 }
@@ -211,6 +213,9 @@ interface Props {
   onSetUserTransform?: (id: string, from: UserTransform, to: UserTransform) => void;
   /** Put a layer back where its metadata places it. */
   onResetUserTransform?: (id: string) => void;
+  /** Turn a layer to degrees about X, then Y, then Z, about its center, from
+   *  where it was: the transform that placed it, or null where nothing changed. */
+  onTurnUserTransform?: (id: string, from: UserTransform, degrees: [number, number, number]) => UserTransform | null;
 }
 
 const CHANNEL_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const satisfies readonly KeyCombo[];
@@ -884,18 +889,20 @@ function Advanced(props: LayerRowProps) {
             <p
               className="lc-level-meta"
               aria-label={`${layer.name} physical scale`}
-              title="The data names no length units, so it is placed by its declared scale alone and may not line up with data that does. Give it a scale under Position and size to line it up by hand."
+              title="The data names no length units, so it is placed by its declared scale alone and may not line up with data that does. Give it a scale under Placement to line it up by hand."
             >
               No physical scale
             </p>
           )}
-          {props.onSetUserTransform && props.onResetUserTransform && (
+          {props.onSetUserTransform && props.onResetUserTransform && props.onTurnUserTransform && (
             <UserTransformFields
               name={layer.name}
               transform={layer.userTransform}
+              rotation={layer.rotationDegrees}
               units={layer.units}
               canEdit={props.canEdit}
               onChange={(from, to) => props.onSetUserTransform?.(layer.id, from, to)}
+              onTurn={(from, degrees) => props.onTurnUserTransform?.(layer.id, from, degrees) ?? null}
               onReset={() => props.onResetUserTransform?.(layer.id)}
             />
           )}

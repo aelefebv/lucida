@@ -24,7 +24,7 @@ import "./ToolPalette.css";
 
 const TOOL_BUTTONS: readonly { tool: Tool; label: string; icon: Icon; combo: KeyCombo }[] = [
   { tool: "pan", label: "Pan tool", icon: HandIcon, combo: "V" },
-  { tool: "move", label: "Move and scale tool", icon: ArrowsOutCardinalIcon, combo: "T" },
+  { tool: "move", label: "Move, scale and rotate tool", icon: ArrowsOutCardinalIcon, combo: "T" },
   { tool: "point", label: "Point tool", icon: MapPinIcon, combo: "P" },
   { tool: "line", label: "Line tool", icon: LineSegmentIcon, combo: "L" },
   { tool: "box", label: "Box tool", icon: BoundingBoxIcon, combo: "B" },

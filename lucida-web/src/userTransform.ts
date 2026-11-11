@@ -2,7 +2,7 @@
  * Where a person put a dataset by hand. lucida-core composes the transform
  * onto the dataset's declared placement and does every view's math with the
  * result; the web reads the transform, turns a gesture into a map of the scene
- * frame, and asks the scene what transform that map makes.
+ * frame or a turn, and asks the scene what transform that makes.
  */
 import type { WasmScene } from "lucida-core";
 import type { SetUserTransformCommand } from "./commands.ts";
@@ -49,22 +49,33 @@ export function readUnits(
   return JSON.parse(scene.dataset_units(datasetId)) as [string | null, string | null, string | null];
 }
 
-/** A map of the scene frame, `offset + point * scale` on each axis. */
+/** A map of the scene frame, `linear · point + offset`, `linear` by rows. */
 export interface SceneMap {
-  scale: Triple;
+  linear: readonly [Triple, Triple, Triple];
   offset: Triple;
 }
 
 /** The scene-frame map that moves everything by `delta`. */
 export function moveBy(delta: Triple): SceneMap {
-  return { scale: [1, 1, 1], offset: delta };
+  return { linear: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], offset: delta };
 }
 
 /** The scene-frame map that stretches by `factor` about `anchor`, which stays put. */
 export function scaleAbout(anchor: Triple, factor: Triple): SceneMap {
   return {
-    scale: factor,
+    linear: [[factor[0], 0, 0], [0, factor[1], 0], [0, 0, factor[2]]],
     offset: [0, 1, 2].map((i) => anchor[i] * (1 - factor[i])) as Triple,
+  };
+}
+
+/** `inner`, then `outer`. */
+export function thenMap(inner: SceneMap, outer: SceneMap): SceneMap {
+  const row = (r: number): Triple =>
+    [0, 1, 2].map((c) => [0, 1, 2].reduce((sum, k) => sum + outer.linear[r][k] * inner.linear[k][c], 0)) as Triple;
+  return {
+    linear: [row(0), row(1), row(2)],
+    offset: [0, 1, 2].map((r) =>
+      outer.offset[r] + [0, 1, 2].reduce((sum, k) => sum + outer.linear[r][k] * inner.offset[k], 0)) as Triple,
   };
 }
 
@@ -82,9 +93,49 @@ export function userTransformAfter(
   const json = scene.user_transform_after(
     datasetId,
     JSON.stringify(from),
-    new Float64Array(map.scale),
+    new Float64Array(map.linear.flat()),
     new Float64Array(map.offset),
   );
+  return json ? (JSON.parse(json) as UserTransform) : null;
+}
+
+/** `datasetId`'s rotation by hand as degrees about X, then Y, then Z. */
+export function readRotationDegrees(
+  scene: Pick<WasmScene, "dataset_rotation_degrees">,
+  datasetId: string,
+): Triple {
+  const [x = 0, y = 0, z = 0] = scene.dataset_rotation_degrees(datasetId);
+  return [x, y, z];
+}
+
+/**
+ * `from`, a transform of `datasetId`, turned to `degrees` about X, then Y,
+ * then Z, about the dataset's center, which stays put. Null for a dataset
+ * the scene can't turn.
+ */
+export function userTransformTurned(
+  scene: Pick<WasmScene, "user_transform_turned">,
+  datasetId: string,
+  from: UserTransform,
+  degrees: Triple,
+): UserTransform | null {
+  const json = scene.user_transform_turned(datasetId, JSON.stringify(from), new Float64Array(degrees));
+  return json ? (JSON.parse(json) as UserTransform) : null;
+}
+
+/**
+ * `from` turned by `angle` radians in `view`'s plane, from its across axis
+ * toward its down axis, about the dataset's center. Null for a dataset the
+ * scene can't turn.
+ */
+export function userTransformTurnedInView(
+  scene: Pick<WasmScene, "user_transform_turned_in_view">,
+  view: number,
+  datasetId: string,
+  from: UserTransform,
+  angle: number,
+): UserTransform | null {
+  const json = scene.user_transform_turned_in_view(view, datasetId, JSON.stringify(from), angle);
   return json ? (JSON.parse(json) as UserTransform) : null;
 }
 

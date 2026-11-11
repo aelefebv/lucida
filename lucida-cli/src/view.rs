@@ -10,10 +10,12 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
     AxisReading, BlendMode, ChannelSettings, Colormap, CutReach, DatasetDisplaySettings,
-    DisplayState, DocumentState, RenderMode, Scene, declared_channels,
+    DisplayState, DocumentState, RenderMode, Scene, ViewsRecord, declared_channels,
 };
-use lucida_core::view::AxisPositions;
-use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
+use lucida_core::view::{AxisPositions, ViewDatasets, ViewLayout};
+use lucida_core::viewer_profile::{
+    FITTED_VIEWPORT, FrameError, LinksReading, ProfileCommandError, ProfileScene,
+};
 use lucida_protocol::{GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedLevelSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -42,12 +44,26 @@ pub struct ViewApplyResult {
     pub snapshot_seq: u64,
     pub own_client_id: ClientId,
     pub source: ViewPresenceSource,
-    pub command: ViewportCommand,
+    /// The viewport command applied, absent for a change that names views
+    /// by their place, such as a layout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<ViewportCommand>,
+    #[serde(skip)]
+    pub label: &'static str,
+    /// The active view's camera, axis positions and cut.
     pub camera: Camera,
     pub view: AxisPositions,
     /// Where the view stands along the axis its slice plane cuts.
     pub cut: AxisReading,
     pub display: DisplayState,
+    /// Every view, in the form a saved view records them.
+    pub views: ViewsRecord,
+    /// How the two views of a layout of two link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<LinksReading>,
+    /// Every view, for the presence the result is sent as.
+    #[serde(skip)]
+    pub presence_views: Option<ViewsRecord>,
     #[serde(skip)]
     pub break_follow: bool,
 }
@@ -127,12 +143,20 @@ pub struct ViewerProfileResult {
     pub seed_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<ViewportCommand>,
+    #[serde(skip)]
+    pub label: Option<&'static str>,
+    /// The active view's camera, axis positions, cut and layers.
     pub camera: Camera,
     pub view: AxisPositions,
     /// Where the view stands along the axis its slice plane cuts.
     pub cut: AxisReading,
     pub display: DisplayState,
     pub layers: Vec<LayerState>,
+    /// Every view, in the form a saved view records them.
+    pub views: ViewsRecord,
+    /// How the two views of a layout of two link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<LinksReading>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,12 +164,18 @@ pub struct ViewerSourceResult {
     pub snapshot_seq: u64,
     pub own_client_id: ClientId,
     pub source: DiagnosticViewSource,
+    /// The active view's camera, axis positions, cut and layers.
     pub camera: Camera,
     pub view: AxisPositions,
     /// Where the view stands along the axis its slice plane cuts.
     pub cut: AxisReading,
     pub display: DisplayState,
     pub layers: Vec<LayerState>,
+    /// Every view, in the form a saved view records them.
+    pub views: ViewsRecord,
+    /// How the two views of a layout of two link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub links: Option<LinksReading>,
     #[serde(skip)]
     pub saved_view: SavedView,
 }
@@ -432,6 +462,111 @@ pub enum ViewPresenceSourceKind {
     Peer,
 }
 
+/// What a `view` or `camera` command changes. Views are named by their place
+/// in the layout, from 0, as the trace driver's `target` step names them.
+#[derive(Debug, Clone)]
+pub enum ViewChange {
+    /// One viewport command, such as a pan, a mode switch or a link.
+    Command(ViewportCommand),
+    /// Divide the canvas, each named dataset moved into the view at its
+    /// place; four-up shows them all in every view.
+    Layout {
+        layout: ViewLayout,
+        datasets: Vec<String>,
+    },
+    /// Show datasets in the request's view: moved there and out of every
+    /// other view, or with `keep` as well as wherever they show.
+    Show { datasets: Vec<String>, keep: bool },
+    /// Make the request's view the active one.
+    Activate,
+    /// Show the view at this place alone across the canvas, or every view
+    /// again with `None`.
+    Maximize(Option<usize>),
+}
+
+/// A change, and the view it acts in, which becomes the active view first as
+/// a press there makes it.
+#[derive(Debug, Clone)]
+pub struct ViewRequest {
+    pub view: Option<usize>,
+    pub change: ViewChange,
+}
+
+impl From<ViewportCommand> for ViewRequest {
+    fn from(command: ViewportCommand) -> Self {
+        Self {
+            view: None,
+            change: ViewChange::Command(command),
+        }
+    }
+}
+
+impl ViewRequest {
+    fn apply(&self, stored: &mut ProfileScene) -> Result<(), CliError> {
+        let ids = match &self.change {
+            // In order and as named, since a layout shows each in the view
+            // at its place.
+            ViewChange::Layout { datasets, .. } | ViewChange::Show { datasets, .. } => datasets
+                .iter()
+                .map(|selector| resolve_dataset_id(&stored.scene.document, selector))
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => Vec::new(),
+        };
+        let view = self.view;
+        let named = |what: &str| {
+            view.ok_or_else(|| CliError::config(format!("name the view {what} with --view N")))
+        };
+        let applied = match &self.change {
+            ViewChange::Command(command) => stored.apply_in(view, command.clone()),
+            ViewChange::Layout { layout, .. } => {
+                steer(stored, view).and_then(|()| stored.lay_out(*layout, &ids))
+            }
+            ViewChange::Show { keep, .. } => {
+                let at = named("to show datasets in")?;
+                steer(stored, view).and_then(|()| stored.show_in(at, &ids, *keep))
+            }
+            ViewChange::Activate => {
+                named("to make active")?;
+                steer(stored, view)
+            }
+            ViewChange::Maximize(shown) => steer(stored, view).and_then(|()| {
+                let view = shown.map(|index| stored.view_id(index)).transpose()?;
+                stored.apply(ViewportCommand::MaximizeView { view })
+            }),
+        };
+        applied.map_err(profile_command_error)
+    }
+
+    /// The viewport command the change is, when it is one.
+    fn command(&self) -> Option<ViewportCommand> {
+        match &self.change {
+            ViewChange::Command(command) => Some(command.clone()),
+            _ => None,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match &self.change {
+            ViewChange::Command(command) => viewport_command_label(command),
+            ViewChange::Layout { .. } => "view layout",
+            ViewChange::Show { .. } => "view show",
+            ViewChange::Activate => "view active",
+            ViewChange::Maximize(_) => "view maximize",
+        }
+    }
+}
+
+/// Make the view at `view`'s place the active one, as a press there does.
+fn steer(stored: &mut ProfileScene, view: Option<usize>) -> Result<(), ProfileCommandError> {
+    match view {
+        Some(index) => {
+            let view = stored.view_id(index)?;
+            stored.apply(ViewportCommand::SetActiveView { view })
+        }
+        None => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceViewerProfileRecord {
     pub workspace_id: String,
@@ -477,7 +612,7 @@ impl ViewWorkspaceClient {
 
     pub async fn apply(
         &self,
-        command: ViewportCommand,
+        request: ViewRequest,
         from_peer: Option<ClientId>,
         wait: Duration,
     ) -> Result<ViewApplyResult, CliError> {
@@ -485,7 +620,7 @@ impl ViewWorkspaceClient {
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
-        let result = apply_presence_command(&snapshot, command, from_peer)?;
+        let result = apply_presence_command(&snapshot, request, from_peer)?;
 
         if result.break_follow {
             send_client_message(&mut write, &ClientMessage::Follow { target: None }).await?;
@@ -654,7 +789,7 @@ impl ViewerProfileClient {
         &self,
         workspace: &WorkspaceRecord,
         profile: &str,
-        command: ViewportCommand,
+        request: ViewRequest,
         wait: Duration,
     ) -> Result<ViewerProfileResult, CliError> {
         let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
@@ -665,9 +800,7 @@ impl ViewerProfileClient {
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
         let mut stored = ProfileScene::open(&snapshot.document, &record.view);
-        stored
-            .apply(command.clone())
-            .map_err(profile_command_error)?;
+        request.apply(&mut stored)?;
         let record = self
             .upsert_profile(workspace, profile, None, &stored.saved_view())
             .await?;
@@ -681,12 +814,15 @@ impl ViewerProfileClient {
             &ClientMessage::Presence {
                 camera: scene.active_view().camera.clone(),
                 view: scene.active_view().axes.clone(),
+                views: scene.record_views(false),
                 display: scene.display,
             },
         )
         .await?;
 
-        Ok(viewer_profile_result(&snapshot, record, Some(command)))
+        let mut result = viewer_profile_result(&snapshot, record, request.command());
+        result.label = Some(request.label());
+        Ok(result)
     }
 
     pub async fn dataset_state(
@@ -770,6 +906,7 @@ impl ViewerProfileClient {
             &ClientMessage::Presence {
                 camera: scene.active_view().camera.clone(),
                 view: scene.active_view().axes.clone(),
+                views: scene.record_views(false),
                 display: scene.display,
             },
         )
@@ -985,9 +1122,9 @@ impl ViewerProfileClient {
 }
 
 pub fn format_view_apply_human(output: &ViewApplyOutput) -> String {
-    format!(
+    let mut human = format!(
         "Updated presence: {}\nWorkspace: {} ({})\nClient: {}\nSource: {}\nCamera: {}\nView: {}\nPosition: {}",
-        viewport_command_label(&output.result.command),
+        output.result.label,
         output.workspace.name,
         output.workspace.id,
         output.result.own_client_id,
@@ -995,7 +1132,12 @@ pub fn format_view_apply_human(output: &ViewApplyOutput) -> String {
         format_camera(&output.result.camera),
         format_view(&output.result.view),
         format_reading(&output.result.cut)
-    )
+    );
+    if let Some(views) = format_views(&output.result.views, output.result.links.as_ref()) {
+        human.push('\n');
+        human.push_str(&views);
+    }
+    human
 }
 
 pub fn format_dataset_presence_human(output: &DatasetPresenceOutput) -> String {
@@ -1136,13 +1278,13 @@ pub fn format_debug_state_human(output: &DebugStateOutput) -> String {
 }
 
 pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
-    let header = if let Some(command) = &output.result.command {
-        format!(
-            "Updated viewer profile: {}",
-            viewport_command_label(command)
-        )
-    } else {
-        "Viewer profile".to_string()
+    let label = output
+        .result
+        .label
+        .or(output.result.command.as_ref().map(viewport_command_label));
+    let header = match label {
+        Some(label) => format!("Updated viewer profile: {label}"),
+        None => "Viewer profile".to_string(),
     };
     let seed = output
         .result
@@ -1162,6 +1304,10 @@ pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
         format!("View: {}", format_view(&output.result.view)),
         format!("Position: {}", format_reading(&output.result.cut)),
     ];
+    lines.extend(format_views(
+        &output.result.views,
+        output.result.links.as_ref(),
+    ));
     if output.result.layers.is_empty() {
         lines.push("No datasets loaded".to_string());
     } else {
@@ -1186,12 +1332,83 @@ pub fn format_viewer_source_human(output: &ViewerSourceOutput) -> String {
         format!("View: {}", format_view(&output.result.view)),
         format!("Position: {}", format_reading(&output.result.cut)),
     ];
+    lines.extend(format_views(
+        &output.result.views,
+        output.result.links.as_ref(),
+    ));
     if output.result.layers.is_empty() {
         lines.push("No datasets loaded".to_string());
     } else {
         lines.push(format_layers(&output.result.layers));
     }
     lines.join("\n")
+}
+
+/// The layout, each view and the links, or nothing for one view of every
+/// dataset, which the camera and view lines describe already. The camera,
+/// view and layer lines are the active view's.
+fn format_views(views: &ViewsRecord, links: Option<&LinksReading>) -> Option<String> {
+    let alone = views.views.len() == 1
+        && views
+            .views
+            .iter()
+            .all(|view| view.datasets == ViewDatasets::All && view.comparison.is_none());
+    if alone {
+        return None;
+    }
+    let layout = serde_json::to_value(views.layout)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let mut lines = vec![format!(
+        "Layout: {layout}, view {} active{}",
+        views.active,
+        views
+            .maximized
+            .map(|view| format!(", view {view} maximized"))
+            .unwrap_or_default()
+    )];
+    for (at, view) in views.views.iter().enumerate() {
+        let shows = match &view.datasets {
+            ViewDatasets::All => "every dataset".to_string(),
+            ViewDatasets::Only(ids) if ids.is_empty() => "nothing".to_string(),
+            ViewDatasets::Only(ids) => ids
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        lines.push(format!(
+            "  view {at}: {} shows {shows}",
+            format_camera(&view.camera)
+        ));
+    }
+    if let Some(links) = links {
+        let modes = links
+            .properties
+            .iter()
+            .map(|link| match link.unlinkable {
+                Some(_) => format!("{}={} (cannot apply now)", link.property, link.mode),
+                None => format!("{}={}", link.property, link.mode),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let basis = views
+            .links
+            .as_ref()
+            .and_then(|record| serde_json::to_value(record.basis).ok())
+            .and_then(|value| value.as_str().map(|basis| format!(" in the {basis} basis")))
+            .unwrap_or_default();
+        lines.push(format!("Links{basis}: {modes}"));
+        for placed in &links.notices {
+            let notices = serde_json::to_string(&placed.notices).unwrap_or_default();
+            lines.push(format!(
+                "  view {} is past its data: {notices}",
+                placed.view
+            ));
+        }
+    }
+    Some(lines.join("\n"))
 }
 
 /// The level pin as the human output names it. An absent pin means the
@@ -1262,9 +1479,10 @@ fn format_layers(layers: &[LayerState]) -> String {
 
 fn apply_presence_command(
     snapshot: &WorkspaceSnapshot,
-    command: ViewportCommand,
+    request: impl Into<ViewRequest>,
     from_peer: Option<ClientId>,
 ) -> Result<ViewApplyResult, CliError> {
+    let request = request.into();
     let own_presence = find_presence(snapshot, snapshot.your_id).ok_or_else(|| {
         CliError::new(
             ErrorKind::Protocol,
@@ -1280,9 +1498,8 @@ fn apply_presence_command(
     })?;
 
     let mut stored = ProfileScene::from(scene_from_presence(&snapshot.document, source_presence));
-    stored
-        .apply(command.clone())
-        .map_err(profile_command_error)?;
+    request.apply(&mut stored)?;
+    let links = stored.links();
     let scene = stored.scene;
 
     Ok(ViewApplyResult {
@@ -1296,10 +1513,14 @@ fn apply_presence_command(
                 ViewPresenceSourceKind::Peer
             },
         },
-        command,
+        command: request.command(),
+        label: request.label(),
         camera: scene.active_view().camera.clone(),
         view: scene.active_view().axes.clone(),
         cut: scene.cut_reading(scene.active_view().id()),
+        views: scene.views_record(false),
+        links,
+        presence_views: scene.record_views(false),
         display: scene.display,
         break_follow: own_presence.following.is_some(),
     })
@@ -1402,7 +1623,8 @@ pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceS
         .camera
         .as_ref()
         .map_or(FITTED_VIEWPORT, Camera::viewport);
-    let mut scene = Scene::new(viewport);
+    let canvas = presence.views.as_ref().and_then(ViewsRecord::canvas);
+    let mut scene = Scene::new(canvas.unwrap_or(viewport));
     if let (Some(order), Some(settings)) = (&presence.dataset_order, &presence.dataset_settings) {
         scene.dataset_order = order.clone();
         scene.dataset_settings = settings.clone();
@@ -1416,6 +1638,10 @@ pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceS
             scene.active_view_mut().camera.sanitize();
             scene.active_view_mut().axes = view.clone();
             scene.display = display.clone();
+            if let Some(views) = &presence.views {
+                // A peer's presence is in this document's spaces already.
+                scene.import_views(Some(views), None, false);
+            }
         }
         // An empty workspace has nothing to frame and keeps the blank camera.
         _ => {
@@ -1978,7 +2204,9 @@ fn viewer_profile_result(
     record: WorkspaceViewerProfileRecord,
     command: Option<ViewportCommand>,
 ) -> ViewerProfileResult {
-    let scene = ProfileScene::open(&snapshot.document, &record.view).scene;
+    let stored = ProfileScene::open(&snapshot.document, &record.view);
+    let links = stored.links();
+    let scene = stored.scene;
     let layers = layer_states(&scene);
     ViewerProfileResult {
         snapshot_seq: snapshot.seq,
@@ -1989,9 +2217,12 @@ fn viewer_profile_result(
         updated_at: record.updated_at,
         seed_source: record.seed_source,
         command,
+        label: None,
         camera: scene.active_view().camera.clone(),
         view: scene.active_view().axes.clone(),
         cut: scene.cut_reading(scene.active_view().id()),
+        views: scene.views_record(true),
+        links,
         display: scene.display,
         layers,
     }
@@ -2002,7 +2233,8 @@ fn viewer_source_result(
     source: DiagnosticViewSource,
     scene: Scene,
 ) -> ViewerSourceResult {
-    let saved_view = ProfileScene::from(scene.clone()).saved_view();
+    let stored = ProfileScene::from(scene.clone());
+    let (saved_view, links) = (stored.saved_view(), stored.links());
     let layers = layer_states(&scene);
     ViewerSourceResult {
         snapshot_seq: snapshot.seq,
@@ -2011,8 +2243,10 @@ fn viewer_source_result(
         camera: scene.active_view().camera.clone(),
         view: scene.active_view().axes.clone(),
         cut: scene.cut_reading(scene.active_view().id()),
+        views: scene.views_record(true),
         display: scene.display,
         layers,
+        links,
         saved_view,
     }
 }
@@ -2022,6 +2256,7 @@ fn presence_message(result: &ViewApplyResult) -> ClientMessage {
         camera: result.camera.clone(),
         view: result.view.clone(),
         display: result.display.clone(),
+        views: result.presence_views.clone(),
     }
 }
 
@@ -2384,6 +2619,7 @@ mod tests {
             })),
             view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
+            views: None,
             following: None,
             cursor: None,
             dataset_order: Some(Vec::new()),
@@ -2583,6 +2819,7 @@ mod tests {
                 updated_at: "2026-06-07T00:01:00Z".to_string(),
                 seed_source: Some("workspace_snapshot".to_string()),
                 command: None,
+                label: None,
                 camera: Camera::Slice(Slice {
                     center: [0.0, 0.0],
                     zoom: 1.0,
@@ -2602,6 +2839,8 @@ mod tests {
                 },
                 display: DisplayState::default(),
                 layers: Vec::new(),
+                views: Scene::new([800, 600]).views_record(true),
+                links: None,
             },
         };
 
@@ -2609,6 +2848,101 @@ mod tests {
 
         assert!(human.contains("Updated: 2026-06-07T00:01:00Z"));
         assert!(human.contains("Position: Z 4/40 at 1.0070 mm"));
+    }
+
+    #[test]
+    fn a_layout_shows_each_named_dataset_in_its_view_and_reports_every_view() {
+        let request = ViewRequest {
+            view: None,
+            change: ViewChange::Layout {
+                layout: ViewLayout::Columns,
+                datasets: vec!["demo.zarr".into(), "wds-other".into()],
+            },
+        };
+        let result = apply_presence_command(&display_snapshot(), request, None).unwrap();
+        assert_eq!(result.views.layout, ViewLayout::Columns);
+        let shows: Vec<_> = result.views.views.iter().map(|v| &v.datasets).collect();
+        assert_eq!(
+            shows,
+            vec![
+                &ViewDatasets::Only(vec![DatasetId::from("wds-test")]),
+                &ViewDatasets::Only(vec![DatasetId::from("wds-other")])
+            ]
+        );
+        assert!(result.links.is_some());
+        assert_eq!(result.label, "view layout");
+        let value = serde_json::to_value(&result).unwrap();
+        assert!(value.get("command").is_none());
+        assert_eq!(value["views"]["layout"], "columns");
+        assert_eq!(value["links"]["properties"][0]["property"], "pan");
+        // Presence carries the same views.
+        assert_eq!(result.presence_views.as_ref(), Some(&result.views));
+    }
+
+    #[test]
+    fn a_command_in_a_named_view_steers_it_and_showing_needs_a_view() {
+        let snapshot = display_snapshot();
+        let layout = ViewRequest {
+            view: None,
+            change: ViewChange::Layout {
+                layout: ViewLayout::Columns,
+                datasets: vec!["wds-test".into(), "wds-other".into()],
+            },
+        };
+        let laid_out = apply_presence_command(&snapshot, layout, None).unwrap();
+        let mut presence = presence(7, [0.0, 0.0]);
+        presence.camera = Some(laid_out.camera.clone());
+        presence.views = laid_out.presence_views.clone();
+        let snapshot = WorkspaceSnapshot {
+            peers: vec![presence],
+            ..snapshot
+        };
+        let arcball = ViewRequest {
+            view: Some(1),
+            change: ViewChange::Command(ViewportCommand::SetMode3D),
+        };
+        let result = apply_presence_command(&snapshot, arcball, None).unwrap();
+        assert_eq!(result.views.active, 1);
+        assert!(matches!(result.views.views[1].camera, Camera::Arcball(_)));
+        assert!(matches!(result.views.views[0].camera, Camera::Slice(_)));
+
+        let show = ViewRequest {
+            view: None,
+            change: ViewChange::Show {
+                datasets: vec!["wds-test".into()],
+                keep: true,
+            },
+        };
+        let error = apply_presence_command(&snapshot, show, None).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Config);
+        let past = ViewRequest {
+            view: Some(2),
+            change: ViewChange::Activate,
+        };
+        let error = apply_presence_command(&snapshot, past, None).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::MissingResource);
+    }
+
+    #[test]
+    fn human_output_lists_the_views_only_when_there_are_several() {
+        let one = Scene::new([800, 600]).views_record(true);
+        assert_eq!(format_views(&one, None), None);
+        let request = ViewRequest {
+            view: None,
+            change: ViewChange::Layout {
+                layout: ViewLayout::Columns,
+                datasets: vec!["wds-test".into(), "wds-other".into()],
+            },
+        };
+        let result = apply_presence_command(&display_snapshot(), request, None).unwrap();
+        let human = format_views(&result.views, result.links.as_ref()).unwrap();
+        assert!(
+            human.starts_with("Layout: columns, view 0 active"),
+            "{human}"
+        );
+        assert!(human.contains("view 1: "), "{human}");
+        assert!(human.contains("shows wds-other"), "{human}");
+        assert!(human.contains("Links"), "{human}");
     }
 
     #[test]

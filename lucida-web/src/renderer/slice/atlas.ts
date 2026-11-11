@@ -49,9 +49,11 @@ import {
 export interface LabelSlicePool {
   /** The label overlay's member id. */
   memberId: string;
-  /** The chunk-T and the plane of the label level the pool holds. */
+  /** The chunk-T, and the plane of the label level along {@link axis}, the pool holds. */
   t: number;
   plane: number;
+  /** The axis the pool's plane is cut along. Its texture is that plane, across by down. */
+  axis: SpatialAxis;
   texture: GPUTexture; // r32uint, size [width, height]
   /**
    * One entry per chunk cell of the plane, mapping the cell to itself, so a
@@ -102,9 +104,10 @@ export function resetLabelSliceAllocWarnings(): void {
 }
 
 /**
- * Get or create the label slice pool for `memberId`'s plane `plane` at
- * chunk-T `t`, sized to the level's 2D dims clamped to the device's max 2D
- * texture dimension. Reused in place while the dims are unchanged.
+ * Get or create the label slice pool for `memberId`'s plane `plane` along
+ * `axis` at chunk-T `t`, sized to that plane's dims at the level, across by
+ * down, clamped to the device's max 2D texture dimension. Reused in place
+ * while the dims are unchanged.
  *
  * Returns `null` when the texture or indirection buffer fails to allocate,
  * after unwinding any partial allocation, so the caller skips the label, for
@@ -121,6 +124,7 @@ export function getOrCreateLabelSlicePool(
   height: number,
   chunkX: number,
   chunkY: number,
+  axis: SpatialAxis = "z",
 ): LabelSlicePool | null {
   const limit = getDeviceLimits(ctx.device).maxTextureDimension2D;
   const w = Math.max(1, Math.min(width, limit));
@@ -129,7 +133,7 @@ export function getOrCreateLabelSlicePool(
   const cy = Math.max(1, chunkY);
 
   const pools = ctx.state.labelSlicePools;
-  const poolKey = labelSlicePoolKey(memberId, t, plane);
+  const poolKey = labelSlicePoolKey(memberId, t, plane, axis);
   const existing = pools.get(poolKey);
   if (existing && existing.width === w && existing.height === h && existing.chunkX === cx && existing.chunkY === cy) {
     existing.datasetId = datasetId;
@@ -137,12 +141,12 @@ export function getOrCreateLabelSlicePool(
   }
   if (existing) removeLabelSlicePool(ctx, poolKey, "freed");
 
-  const sizeKey = `${memberId}|${w}x${h}`;
+  const sizeKey = `${memberId}|${axis}|${w}x${h}`;
   if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
-  if (!reserveGpuBytes(ctx, w * h * LABEL_SLICE_BYTES_PER_TEXEL)) return null;
 
   const grid: CellGrid = { x: Math.ceil(w / cx), y: Math.ceil(h / cy), z: 1 };
   const indirection = identityIndirection(grid.x * grid.y);
+  if (!reserveGpuBytes(ctx, w * h * LABEL_SLICE_BYTES_PER_TEXEL + indirection.byteLength)) return null;
   let texture: GPUTexture | undefined;
   let indirectionBuf: GPUBuffer;
   try {
@@ -180,7 +184,7 @@ export function getOrCreateLabelSlicePool(
   ctx.device.queue.writeBuffer(indirectionBuf, 0, indirection);
 
   const pool: LabelSlicePool = {
-    memberId, t, plane,
+    memberId, t, plane, axis,
     texture, indirectionBuf, indirection, markedFailed: new Set(),
     chunkX: cx, chunkY: cy, grid,
     keys: new Map(), planes: new Map(), datasetId, width: w, height: h,
@@ -192,9 +196,10 @@ export function getOrCreateLabelSlicePool(
 /** Bytes one `r32uint` label texel holds. */
 const LABEL_SLICE_BYTES_PER_TEXEL = 4;
 
-/** The bytes a label slice pool's texture holds. */
+/** The bytes a label slice pool holds on the GPU: everything {@link destroyLabelSlicePool} frees. */
 export function labelSlicePoolBytes(pool: LabelSlicePool): number {
-  return pool.width * pool.height * LABEL_SLICE_BYTES_PER_TEXEL;
+  return pool.width * pool.height * LABEL_SLICE_BYTES_PER_TEXEL + pool.indirection.byteLength +
+    (pool.descBuffer?.size ?? 0) + (pool.labelColorBuffer?.size ?? 0);
 }
 
 /** The cell a label slice chunk at grid `(x, y)` is written to, as {@link LabelSlicePool.keys} keys it. */
@@ -205,7 +210,8 @@ export function labelCellKey(x: number, y: number): number {
 /**
  * Mark the cells of the plane `at` whose chunk failed for good, unless the
  * pool holds that very chunk there. Without the mark such a cell would show
- * the plane it last held, or nothing. Returns whether the marks changed.
+ * the plane it last held, or nothing. `at.z` is the chunk along the pool's
+ * axis. Returns whether the marks changed.
  */
 export function markLabelSliceFailed(
   ctx: WorkerCtx,
@@ -213,7 +219,7 @@ export function markLabelSliceFailed(
   pool: LabelSlicePool,
   at: { level: number; t: number; z: number },
 ): boolean {
-  const failed = failedCellsAt(failedKeysForImage(ctx.state, memberId), pool.grid, { ...at, c: 0 });
+  const failed = failedCellsAt(failedKeysForImage(ctx.state, memberId), pool.grid, { ...at, c: 0 }, pool.axis);
   const changed = applyFailedMarks(
     pool.indirection,
     pool.markedFailed,
@@ -247,7 +253,7 @@ export function removeLabelSlicePool(ctx: WorkerCtx, poolKey: string, reason: Ch
 
 function postLabelSliceLost(ctx: WorkerCtx, pool: LabelSlicePool, reason: ChunkFeedbackReason): void {
   postChunkResidency(
-    ctx, pool.memberId, "slice", LABEL_TIER, "lost", [...pool.keys.values()], reason, { axis: "z", plane: pool.plane },
+    ctx, pool.memberId, "slice", LABEL_TIER, "lost", [...pool.keys.values()], reason, { axis: pool.axis, plane: pool.plane },
   );
 }
 

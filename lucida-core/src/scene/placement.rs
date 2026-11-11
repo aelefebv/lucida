@@ -3,7 +3,9 @@
 
 use lucida_content::{DatasetId, EntityId, SpatialAxis};
 
-use crate::camera::{Camera, Framing, VisibleRegion};
+use crate::camera::{
+    Camera, Framing, VisibleRegion, quat_from_axis_angle, quat_multiply, quat_normalize,
+};
 use crate::placement::{
     Affine, CameraSpace, LineUp, SceneFrame, SpaceMap, UserTransform, WorldSpace, boxes_overlap,
     member_cube_to_frame,
@@ -88,6 +90,56 @@ impl Scene {
         let derived = self.derived.get(dataset_id)?;
         let declared = self.declared_placement(dataset_id)?;
         Some(from.then_in_scene(&derived.frame, &declared, map))
+    }
+
+    /// `from`, a user transform of `dataset_id`, turned to `rotation` about
+    /// the dataset's center, which stays where `from` draws it. A person
+    /// turns a dataset about its center, as the rotation fields and a turn
+    /// on the canvas do, though the transform records its turn about the
+    /// frame's origin. `None` for a dataset the scene doesn't hold or one
+    /// with no levels.
+    pub fn user_transform_turned(
+        &self,
+        dataset_id: &DatasetId,
+        from: &UserTransform,
+        rotation: [f64; 4],
+    ) -> Option<UserTransform> {
+        let derived = self.derived.get(dataset_id)?;
+        let (min, max) = derived.members.iter().filter_map(frame_box).reduce(
+            |(a_min, a_max), (b_min, b_max)| {
+                (
+                    std::array::from_fn(|i| a_min[i].min(b_min[i])),
+                    std::array::from_fn(|i| a_max[i].max(b_max[i])),
+                )
+            },
+        )?;
+        let center = std::array::from_fn(|i| (min[i] + max[i]) / 2.0);
+        Some(from.turned_to(&derived.frame, rotation, center))
+    }
+
+    /// `from` turned by `angle` radians in `plane`, from its across axis
+    /// toward its down axis, about the dataset's center: the turn a drag
+    /// around it on a slice view of that plane makes. The scene frame
+    /// measures every axis alike, so a turn in it is the same turn of the
+    /// dataset's physical extents, and it follows the dataset's own.
+    pub fn user_transform_turned_in_plane(
+        &self,
+        dataset_id: &DatasetId,
+        from: &UserTransform,
+        plane: SlicePlane,
+        angle: f64,
+    ) -> Option<UserTransform> {
+        let [across, down, _] = plane.axes().map(SpatialAxis::xyz);
+        let unit = |a: usize| std::array::from_fn::<f64, 3, _>(|i| f64::from(u8::from(i == a)));
+        let (u, v) = (unit(across), unit(down));
+        let axis = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let turn = quat_from_axis_angle(axis, angle);
+        let rotation = quat_normalize(quat_multiply(turn, from.rotation));
+        self.user_transform_turned(dataset_id, from, rotation)
     }
 
     /// Follow a dataset a person moved by hand. Where they put it is what
@@ -490,12 +542,13 @@ mod tests {
     use lucida_content::{DatasetId, PhysicalSpace};
 
     use super::super::test_helpers::make_dataset_opened_with_shape;
-    use crate::camera::{Camera, Framing};
+    use crate::camera::{Camera, Framing, quat_multiply};
     use crate::command::{DocumentCommand, ViewportCommand};
     use crate::framing::PlaneBox;
     use crate::placement::{Affine, LineUp, UserTransform};
     use crate::saved_view::SavedView;
     use crate::scene::{CutReach, FrameTarget, Scene};
+    use crate::slice_plane::SlicePlane;
 
     /// A single image of `shape` `[z, y, x]` samples, each `spacing` long in
     /// `unit`, its origin at `origin`. All three are `[z, y, x]`.
@@ -851,17 +904,18 @@ mod tests {
         );
     }
 
-    /// Turn `id` by `rotation` by hand. A scene takes no command that turns
-    /// a dataset yet, so this writes the record a turn would.
+    /// Turn `id` by `rotation` by hand, about its frame's origin.
     fn turn_by_hand(scene: &mut Scene, id: &str, rotation: [f64; 4]) {
-        scene.document.user_transforms.insert(
-            DatasetId::from(id),
-            UserTransform {
-                rotation,
-                ..UserTransform::IDENTITY
-            },
+        scene.apply(
+            DocumentCommand::SetUserTransform {
+                dataset_id: DatasetId::from(id),
+                transform: UserTransform {
+                    rotation,
+                    ..UserTransform::IDENTITY
+                },
+            }
+            .into(),
         );
-        scene.dataset_moved();
     }
 
     /// A turn of `radians` about `axis` (0, 1 or 2) as a unit quaternion.
@@ -1200,6 +1254,60 @@ mod tests {
         assert!(close(scene.placement(&b).unwrap().apply(p), expected));
         let gone = DatasetId::from("gone");
         assert!(scene.user_transform_after(&gone, &from, &map).is_none());
+    }
+
+    #[test]
+    fn a_turn_by_hand_keeps_the_dataset_center_where_it_was() {
+        use std::f64::consts::FRAC_PI_2;
+        let mut scene = a_then_b();
+        let b = DatasetId::from("b");
+        place_by_hand(&mut scene, "b", [1_000.0, 0.0, 0.0], [1.5; 3]);
+        let from = *scene.user_transform(&b).unwrap();
+        // The middle of B's 256 x 256 x 32 samples.
+        let center = [128.0, 128.0, 16.0];
+        let held = scene.placement(&b).unwrap().apply(center);
+        let same = |a: [f64; 4], b: [f64; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-12);
+
+        // A quarter turn on an XY view takes X toward Y: +90 degrees about Z.
+        let after = scene
+            .user_transform_turned_in_plane(&b, &from, SlicePlane::Xy, FRAC_PI_2)
+            .unwrap();
+        assert!(same(after.rotation, turn(2, FRAC_PI_2)));
+        scene.apply(
+            DocumentCommand::SetUserTransform {
+                dataset_id: b.clone(),
+                transform: after,
+            }
+            .into(),
+        );
+        assert_eq!(scene.user_transform(&b), Some(&after));
+        let placed = scene.placement(&b).unwrap();
+        assert!(close(placed.apply(center), held));
+        let x_axis = placed.column(0);
+        assert!(x_axis[0].abs() < 1e-9 && x_axis[1] > 0.0);
+        // Its footprint on the XY view turns with it about the same middle:
+        // the X edge runs down the screen, the Y edge back across it.
+        let view = scene.active_view().id();
+        let [origin, along_x, along_y] = scene.dataset_plane_quad(view, "b").unwrap();
+        assert!(along_x[0].abs() < 1e-9 && along_x[1] > 0.0);
+        assert!(along_y[1].abs() < 1e-9 && along_y[0] < 0.0);
+        let middle = [0, 1].map(|i| origin[i] + (along_x[i] + along_y[i]) / 2.0);
+        assert!((middle[0] - held[0]).abs() < 1e-9 && (middle[1] - held[1]).abs() < 1e-9);
+
+        // On an XZ view, X toward Z turns about -Y, after the turn it had.
+        let tilted = scene
+            .user_transform_turned_in_plane(&b, &after, SlicePlane::Xz, 0.3)
+            .unwrap();
+        assert!(same(
+            tilted.rotation,
+            quat_multiply(turn(1, -0.3), after.rotation)
+        ));
+        let gone = DatasetId::from("gone");
+        assert!(
+            scene
+                .user_transform_turned(&gone, &from, after.rotation)
+                .is_none()
+        );
     }
 
     #[test]

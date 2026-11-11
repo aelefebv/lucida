@@ -1,6 +1,9 @@
 // TypeScript mirror of `lucida_core::saved_view::SavedView`. The wire format
 // is the contract, so keep this in step with `lucida-core/src/saved_view.rs`.
 import type { SlicePlane } from "../renderer/slicePlane.ts";
+import type { Comparison } from "../comparison.ts";
+import type { LinkMode, LinkProperty, ViewLayoutName } from "../commands.ts";
+import type { LinkBasis } from "../viewLinks.ts";
 
 /** Version 2 moved solo onto each layer, and version 3 made axis positions
  *  places; see `SAVED_VIEW_VERSION` in Rust. */
@@ -21,6 +24,9 @@ export interface SliceCamera {
   framing?: CameraFraming;
   /** The plane the view cuts. Absent for XY, which every older view was. */
   plane?: SlicePlane;
+  /** The plane drawn with its axes swapped on screen, as four-up's YZ view
+   *  is. Absent when not. */
+  transposed?: boolean;
 }
 
 export interface ArcballCamera {
@@ -118,6 +124,38 @@ export interface ViewState {
   c?: number;
   /** The scene-wide composite flag of such a view, with `c`. */
   multi_channel?: boolean;
+}
+
+/** One view of a layout. See `ViewRecord` in
+ *  `lucida-core/src/scene/views_record.rs`. */
+export interface ViewRecord {
+  /** Its 2D or 3D mode, slice plane and transposed flag are its camera's. */
+  camera: Camera;
+  axes: ViewState;
+  /** Every dataset, or these alone. */
+  datasets: "all" | { only: DatasetId[] };
+  comparison?: Comparison;
+}
+
+/** How two views link: each property's mode, for the pair of datasets they
+ *  linked by, in the basis that pair compares in. */
+export interface LinksRecord {
+  datasets: [DatasetId, DatasetId];
+  basis: LinkBasis;
+  /** A property left out is off. */
+  modes: Partial<Record<LinkProperty, LinkMode>>;
+}
+
+/** Every view of a layout, as `WasmScene.export_views` writes it. See
+ *  `ViewsRecord` in `lucida-core/src/scene/views_record.rs`. */
+export interface ViewsRecord {
+  layout: ViewLayoutName;
+  /** Which of `views` commands steer. */
+  active: number;
+  /** Which of `views` is shown alone, if one is. */
+  maximized?: number;
+  views: ViewRecord[];
+  links?: LinksRecord;
 }
 
 export interface DisplayState {
@@ -226,4 +264,8 @@ export interface SavedView {
    *  placement and a restore leaves the document's. After `camera_space`, as
    *  in Rust. */
   user_transforms?: Record<DatasetId, UserTransform>;
+  /** Every view and how they link. `camera` and `view` are the active
+   *  view's, which a restore gives it last. Absent, the view is one view of
+   *  every dataset. Last, as in Rust. */
+  views?: ViewsRecord;
 }

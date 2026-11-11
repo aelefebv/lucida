@@ -7,11 +7,16 @@ use std::fmt;
 
 use indexmap::IndexMap;
 use lucida_content::{DatasetId, LayoutId};
+use serde::Serialize;
 
 use crate::camera::Camera;
 use crate::command::{Command, ViewportCommand};
 use crate::saved_view::{SAVED_VIEW_VERSION, SavedView};
-use crate::scene::{DocumentState, FrameTarget, Scene};
+use crate::scene::{
+    DocumentState, FrameTarget, LinkMode, LinkNotice, LinkProperty, PropertyLink, Scene,
+    Unlinkable, ViewsRecord,
+};
+use crate::view::{View, ViewDatasets, ViewId, ViewLayout};
 
 /// The canvas a view is framed for when no client has reported one.
 pub const FITTED_VIEWPORT: [u32; 2] = [1440, 900];
@@ -31,7 +36,8 @@ impl ProfileScene {
     /// the settings a freshly opened dataset gets, and entries for datasets
     /// the document no longer holds are dropped.
     pub fn open(document: &DocumentState, view: &SavedView) -> Self {
-        let mut scene = Scene::new(view.camera.viewport());
+        let canvas = view.views.as_ref().and_then(ViewsRecord::canvas);
+        let mut scene = Scene::new(canvas.unwrap_or(view.camera.viewport()));
         let active = scene.active_view_mut();
         active.camera = view.camera.clone();
         // A stored camera must not hand the scene a state its own mutators
@@ -45,6 +51,13 @@ impl ProfileScene {
         // The camera's numbers are in the spaces the view was saved in.
         if let Some(from) = &view.camera_space {
             scene.carry_placed_cameras(from);
+        }
+        if let Some(views) = &view.views {
+            scene.import_views(Some(views), view.camera_space.as_ref(), true);
+            // The view's own camera and axis positions are the active view's,
+            // and a restore gives them to it last, as a page does.
+            let (camera, axes) = (view.camera_in(&scene), view.view_in(&scene));
+            scene.import_presence(camera, axes, view.display.clone());
         }
         let auto_contrast = view
             .auto_contrast
@@ -135,7 +148,141 @@ impl ProfileScene {
             // A profile holds how the viewer looks, so a page opening it
             // draws each dataset where the document puts it now.
             user_transforms: None,
+            views: scene.record_views(true),
         }
+    }
+
+    /// The id of the view at `index` in the layout's order, from 0. A
+    /// client holding no live viewer names views by their place, since a
+    /// view's id lasts only as long as the scene that holds it.
+    pub fn view_id(&self, index: usize) -> Result<ViewId, ProfileCommandError> {
+        let views = self.scene.views();
+        views
+            .get(index)
+            .map(View::id)
+            .ok_or(ProfileCommandError::ViewOutOfRange {
+                requested: index,
+                count: views.len(),
+            })
+    }
+
+    /// Apply `command` to the view at `view`'s place in the layout, which
+    /// becomes the active view first as a press there makes it, or to the
+    /// active view with `None`. Nothing changes when the command is refused.
+    pub fn apply_in(
+        &mut self,
+        view: Option<usize>,
+        command: ViewportCommand,
+    ) -> Result<(), ProfileCommandError> {
+        let Some(index) = view else {
+            return self.apply(command);
+        };
+        let (was, view) = (self.scene.active_view().id(), self.view_id(index)?);
+        self.apply(ViewportCommand::SetActiveView { view })?;
+        self.apply(command).inspect_err(|_| {
+            self.scene
+                .apply(Command::Viewport(ViewportCommand::SetActiveView {
+                    view: was,
+                }));
+        })
+    }
+
+    /// Divide the canvas as `layout` does, then show each of `show` in the
+    /// view at its place, moved there as a layer dropped on the view moves.
+    /// Four-up shows one set of datasets in all four views, so there `show`
+    /// is that set. Nothing changes when a dataset is unknown or `show`
+    /// names more datasets than the layout has views.
+    pub fn lay_out(
+        &mut self,
+        layout: ViewLayout,
+        show: &[DatasetId],
+    ) -> Result<(), ProfileCommandError> {
+        for id in show {
+            self.known_dataset(&id.0)?;
+        }
+        let count = layout.rects().len();
+        if layout != ViewLayout::FourUp && show.len() > count {
+            return Err(ProfileCommandError::ViewOutOfRange {
+                requested: show.len() - 1,
+                count,
+            });
+        }
+        if layout == ViewLayout::FourUp && !show.is_empty() {
+            let datasets = ViewDatasets::Only(show.to_vec());
+            if self.scene.view_layout() == layout {
+                let views: Vec<ViewId> = self.scene.views().iter().map(View::id).collect();
+                for view in views {
+                    let datasets = datasets.clone();
+                    self.apply(ViewportCommand::SetViewDatasets { view, datasets })?;
+                }
+                return Ok(());
+            }
+            // Dividing the canvas four-up gives the other views what the
+            // active view shows.
+            let view = self.scene.active_view().id();
+            self.apply(ViewportCommand::SetViewDatasets { view, datasets })?;
+            return self.apply(ViewportCommand::SetViewLayout { layout });
+        }
+        self.apply(ViewportCommand::SetViewLayout { layout })?;
+        for (index, id) in show.iter().enumerate() {
+            self.show_in(index, std::slice::from_ref(id), false)?;
+        }
+        Ok(())
+    }
+
+    /// Show `datasets` in the view at `view`'s place: moved there and out of
+    /// every other view, or with `keep` as well as wherever they show, as
+    /// the layer menu's "Show in both views" does.
+    pub fn show_in(
+        &mut self,
+        view: usize,
+        datasets: &[DatasetId],
+        keep: bool,
+    ) -> Result<(), ProfileCommandError> {
+        let id = self.view_id(view)?;
+        for dataset in datasets {
+            self.known_dataset(&dataset.0)?;
+        }
+        if !keep {
+            for dataset_id in datasets {
+                self.apply(ViewportCommand::MoveDatasetToView {
+                    view: id,
+                    dataset_id: dataset_id.clone(),
+                })?;
+            }
+            return Ok(());
+        }
+        let ViewDatasets::Only(shown) = &self.scene.views()[view].datasets else {
+            // It shows every dataset already.
+            return Ok(());
+        };
+        let mut ids = shown.clone();
+        ids.extend(datasets.iter().filter(|d| !shown.contains(d)).cloned());
+        self.apply(ViewportCommand::SetViewDatasets {
+            view: id,
+            datasets: ViewDatasets::Only(ids),
+        })
+    }
+
+    /// How the two views of a layout of two link as they stand, each view
+    /// named by its place in the layout. `None` with other than two views.
+    pub fn links(&self) -> Option<LinksReading> {
+        let scene = &self.scene;
+        let state = scene.links()?;
+        Some(LinksReading {
+            properties: state.properties,
+            notices: state
+                .notices
+                .into_iter()
+                .filter(|shown| !shown.notices.is_empty())
+                .filter_map(|shown| {
+                    Some(PlacedLinkNotices {
+                        view: scene.view_index(shown.view)?,
+                        notices: shown.notices,
+                    })
+                })
+                .collect(),
+        })
     }
 
     /// `order` first, then every dataset it leaves out, in their current
@@ -215,6 +362,7 @@ impl ProfileScene {
             }
             _ => {}
         }
+        self.check_views(command)?;
         if let Some(bounds) = visible_index_bounds(scene) {
             match command {
                 ViewportCommand::SetZ { z } if *z >= bounds.z => {
@@ -318,6 +466,77 @@ impl ProfileScene {
         Ok(())
     }
 
+    /// A view command must name a view and datasets the scene holds, and a
+    /// link must be one the views can take, since the scene drops any other
+    /// silently and a caller would read an unchanged view as a changed one.
+    fn check_views(&self, command: &ViewportCommand) -> Result<(), ProfileCommandError> {
+        use ProfileCommandError as E;
+        let scene = &self.scene;
+        match command {
+            ViewportCommand::SetActiveView { view } => {
+                self.known_view(*view)?;
+            }
+            ViewportCommand::SetViewDatasets { view, datasets } => {
+                self.known_view(*view)?;
+                if let ViewDatasets::Only(ids) = datasets {
+                    for id in ids {
+                        self.known_dataset(&id.0)?;
+                    }
+                }
+            }
+            ViewportCommand::MoveDatasetToView { view, dataset_id } => {
+                self.known_view(*view)?;
+                self.known_dataset(&dataset_id.0)?;
+            }
+            ViewportCommand::MaximizeView { view: Some(view) } => {
+                self.known_view(*view)?;
+                if scene.views().len() < 2 {
+                    return Err(E::InvalidValue("one view already fills the canvas".into()));
+                }
+            }
+            ViewportCommand::SetViewLink { property, mode } => {
+                let Some(links) = scene.links() else {
+                    return Err(E::CannotLink(format!(
+                        "a link joins two views, and the layout has {}",
+                        scene.views().len()
+                    )));
+                };
+                if *property == LinkProperty::Colormap && *mode == LinkMode::Relative {
+                    return Err(E::InvalidValue(
+                        "a colormap is linked or off; it keeps no offset".into(),
+                    ));
+                }
+                let unlinkable = links
+                    .properties
+                    .iter()
+                    .find(|link| link.property == *property)
+                    .and_then(|link| link.unlinkable);
+                // A property the cameras don't share yet keeps its mode for
+                // when they do, as the link popover keeps it.
+                match unlinkable {
+                    Some(Unlinkable::Empty) => {
+                        return Err(E::CannotLink("each view needs a dataset to link".into()));
+                    }
+                    Some(Unlinkable::Shared) => {
+                        return Err(E::CannotLink(
+                            "both views show one dataset, so its channels share one setting".into(),
+                        ));
+                    }
+                    Some(Unlinkable::Cameras) | None => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn known_view(&self, view: ViewId) -> Result<(), ProfileCommandError> {
+        match self.scene.view(view) {
+            Some(_) => Ok(()),
+            None => Err(ProfileCommandError::UnknownView(view)),
+        }
+    }
+
     fn known_dataset(
         &self,
         dataset_id: &str,
@@ -339,6 +558,23 @@ impl From<Scene> for ProfileScene {
             auto_contrast: IndexMap::new(),
         }
     }
+}
+
+/// How two views link, as [`ProfileScene::links`] reads it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LinksReading {
+    /// Each property's mode, and why it can't apply now if it can't.
+    pub properties: Vec<PropertyLink>,
+    /// Where the links take a view past every dataset it shows.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<PlacedLinkNotices>,
+}
+
+/// One view's link notices, the view by its place in the layout.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlacedLinkNotices {
+    pub view: usize,
+    pub notices: Vec<LinkNotice>,
 }
 
 /// Why [`ProfileScene::apply`] refused a command.
@@ -373,11 +609,21 @@ pub enum ProfileCommandError {
         requested: u32,
         count: u32,
     },
+    /// A view by its place in the layout, past the layout's last.
+    ViewOutOfRange {
+        requested: usize,
+        count: usize,
+    },
+    /// A view id the scene does not hold.
+    UnknownView(ViewId),
+    /// A link the views as they stand cannot take.
+    CannotLink(String),
 }
 
 impl ProfileCommandError {
-    /// Whether the command names a dataset, channel or label the workspace
-    /// lacks, as against asking for a value or mode that is never valid.
+    /// Whether the command names a dataset, channel, label or view the
+    /// workspace or layout lacks, as against asking for a value or mode that
+    /// is never valid.
     pub fn is_missing_resource(&self) -> bool {
         matches!(
             self,
@@ -385,6 +631,8 @@ impl ProfileCommandError {
                 | Self::NoChannels(_)
                 | Self::ChannelOutOfRange { .. }
                 | Self::LabelOutOfRange { .. }
+                | Self::ViewOutOfRange { .. }
+                | Self::UnknownView(_)
         )
     }
 }
@@ -428,6 +676,12 @@ impl fmt::Display for ProfileCommandError {
                 f,
                 "dataset {dataset_id:?} has {count} labels; label {requested} was requested"
             ),
+            Self::ViewOutOfRange { requested, count } => write!(
+                f,
+                "the layout has {count} view(s), counted from 0; view {requested} was requested"
+            ),
+            Self::UnknownView(id) => write!(f, "the scene holds no view with id {}", id.0),
+            Self::CannotLink(reason) => f.write_str(reason),
         }
     }
 }
@@ -707,6 +961,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_view_of_several_views_opens_and_stores_them_as_they_were() {
+        use crate::view::{ViewDatasets, ViewLayout};
+        let mut profile = opened();
+        profile
+            .apply(ViewportCommand::SetViewLayout {
+                layout: ViewLayout::Columns,
+            })
+            .unwrap();
+        let second = profile.scene.views()[1].id();
+        profile
+            .apply(ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets: ViewDatasets::All,
+            })
+            .unwrap();
+        profile
+            .apply(ViewportCommand::SetActiveView { view: second })
+            .unwrap();
+        profile.apply(ViewportCommand::SetT { t: 1 }).unwrap();
+        let view = profile.saved_view();
+        let views = view.views.as_ref().expect("two views");
+        assert_eq!((views.layout, views.active), (ViewLayout::Columns, 1));
+        assert_eq!(views.canvas(), Some(FITTED_VIEWPORT));
+
+        let reopened = ProfileScene::open(&document(), &view);
+        assert_eq!(reopened.saved_view(), view);
+        assert_eq!(reopened.scene.active_view().axes.t, 1);
+    }
+
+    #[test]
     fn opening_drops_datasets_the_document_no_longer_holds() {
         let mut view = opened().saved_view();
         view.dataset_order.push(DatasetId("wds-gone".into()));
@@ -939,5 +1223,232 @@ mod tests {
             .unwrap();
         let view = profile.saved_view();
         assert_eq!(ProfileScene::open(&document(), &view).saved_view(), view);
+    }
+
+    /// `document()`'s dataset and a second of the same shape, so the two
+    /// views of a layout of two link by default.
+    fn two() -> ProfileScene {
+        let mut document = document();
+        document.apply(DocumentCommand::DatasetOpened(
+            make_dataset_opened_with_shape(
+                "wds-b",
+                "b.zarr",
+                3,
+                [2, 3, 40, 512, 256],
+                [1, 1, 16, 64, 64],
+                1,
+            ),
+        ));
+        ProfileScene::fitted(&document)
+    }
+
+    fn ids(names: &[&str]) -> Vec<DatasetId> {
+        names.iter().map(|name| DatasetId((*name).into())).collect()
+    }
+
+    fn shown(profile: &ProfileScene) -> Vec<ViewDatasets> {
+        let views = profile.scene.views();
+        views.iter().map(|view| view.datasets.clone()).collect()
+    }
+
+    #[test]
+    fn a_layout_shows_each_named_dataset_in_its_own_view() {
+        let mut profile = two();
+        profile
+            .lay_out(ViewLayout::Columns, &ids(&["wds-a", "wds-b"]))
+            .unwrap();
+        assert_eq!(
+            shown(&profile),
+            vec![
+                ViewDatasets::Only(ids(&["wds-a"])),
+                ViewDatasets::Only(ids(&["wds-b"]))
+            ]
+        );
+        let links = profile.links().expect("two views link");
+        let zoom = links
+            .properties
+            .iter()
+            .find(|link| link.property == LinkProperty::Zoom)
+            .unwrap();
+        assert_eq!((zoom.mode, zoom.unlinkable), (LinkMode::Linked, None));
+
+        let record = profile.saved_view().views.expect("two views record");
+        assert_eq!(record.layout, ViewLayout::Columns);
+        assert_eq!(profile.scene.views_record(true), record);
+    }
+
+    #[test]
+    fn four_up_shows_the_named_datasets_in_every_view() {
+        let mut profile = two();
+        let only_b = ViewDatasets::Only(ids(&["wds-b"]));
+        profile
+            .lay_out(ViewLayout::FourUp, &ids(&["wds-b"]))
+            .unwrap();
+        assert_eq!(shown(&profile), vec![only_b.clone(); 4]);
+        profile
+            .lay_out(ViewLayout::FourUp, &ids(&["wds-a"]))
+            .unwrap();
+        assert_eq!(
+            shown(&profile),
+            vec![ViewDatasets::Only(ids(&["wds-a"])); 4]
+        );
+    }
+
+    #[test]
+    fn a_view_past_the_layout_or_an_unknown_dataset_changes_nothing() {
+        let mut profile = two();
+        let before = profile.saved_view();
+        let refused = profile.lay_out(ViewLayout::Columns, &ids(&["wds-a", "wds-b", "wds-a"]));
+        assert_eq!(
+            refused,
+            Err(ProfileCommandError::ViewOutOfRange {
+                requested: 2,
+                count: 2
+            })
+        );
+        assert!(refused.unwrap_err().is_missing_resource());
+        let unknown = profile.lay_out(ViewLayout::Columns, &ids(&["wds-gone"]));
+        assert_eq!(
+            unknown,
+            Err(ProfileCommandError::UnknownDataset("wds-gone".into()))
+        );
+        assert_eq!(profile.saved_view(), before);
+        assert_eq!(
+            profile.view_id(1),
+            Err(ProfileCommandError::ViewOutOfRange {
+                requested: 1,
+                count: 1
+            })
+        );
+        let stray = ViewportCommand::SetActiveView { view: ViewId(9) };
+        assert_eq!(
+            profile.apply(stray),
+            Err(ProfileCommandError::UnknownView(ViewId(9)))
+        );
+    }
+
+    #[test]
+    fn a_command_in_a_named_view_makes_it_active_unless_refused() {
+        let mut profile = two();
+        profile
+            .lay_out(ViewLayout::Columns, &ids(&["wds-a", "wds-b"]))
+            .unwrap();
+        profile
+            .apply_in(Some(1), ViewportCommand::SetMode3D)
+            .unwrap();
+        assert_eq!(
+            profile.scene.view_index(profile.scene.active_view().id()),
+            Some(1)
+        );
+        assert!(matches!(
+            profile.scene.views()[1].camera,
+            Camera::Arcball(_)
+        ));
+        assert!(matches!(profile.scene.views()[0].camera, Camera::Slice(_)));
+
+        profile
+            .apply_in(Some(1), ViewportCommand::SetMode2D)
+            .unwrap();
+        profile
+            .apply_in(Some(0), ViewportCommand::SetMode3D)
+            .unwrap();
+        let pan = ViewportCommand::Pan { dx: 5.0, dy: 0.0 };
+        let refused = profile.apply_in(Some(0), pan);
+        assert!(matches!(
+            refused,
+            Err(ProfileCommandError::NeedsSliceCamera { .. })
+        ));
+        let pan = ViewportCommand::Pan { dx: 5.0, dy: 0.0 };
+        profile.apply_in(Some(1), pan.clone()).unwrap();
+        profile
+            .apply_in(Some(1), ViewportCommand::SetMode3D)
+            .unwrap();
+        assert_eq!(
+            profile.scene.view_index(profile.scene.active_view().id()),
+            Some(1)
+        );
+        assert!(profile.apply_in(Some(0), pan).is_err());
+        assert_eq!(
+            profile.scene.view_index(profile.scene.active_view().id()),
+            Some(1),
+            "a refused command leaves the active view where it was"
+        );
+    }
+
+    #[test]
+    fn a_link_needs_two_views_each_showing_a_dataset() {
+        let mut profile = two();
+        let link = |mode| ViewportCommand::SetViewLink {
+            property: LinkProperty::Pan,
+            mode,
+        };
+        assert!(matches!(
+            profile.apply(link(LinkMode::Off)),
+            Err(ProfileCommandError::CannotLink(_))
+        ));
+        profile
+            .lay_out(ViewLayout::Columns, &ids(&["wds-a", "wds-b"]))
+            .unwrap();
+        profile.apply(link(LinkMode::Off)).unwrap();
+        assert_eq!(
+            profile.saved_view().views.unwrap().links.unwrap().modes.pan,
+            LinkMode::Off
+        );
+        let relative_colormap = ViewportCommand::SetViewLink {
+            property: LinkProperty::Colormap,
+            mode: LinkMode::Relative,
+        };
+        assert!(matches!(
+            profile.apply(relative_colormap),
+            Err(ProfileCommandError::InvalidValue(_))
+        ));
+
+        // Both views showing every dataset link by the same one.
+        let view = profile.view_id(1).unwrap();
+        profile
+            .apply(ViewportCommand::SetViewDatasets {
+                view,
+                datasets: ViewDatasets::All,
+            })
+            .unwrap();
+        let view = profile.view_id(0).unwrap();
+        profile
+            .apply(ViewportCommand::SetViewDatasets {
+                view,
+                datasets: ViewDatasets::All,
+            })
+            .unwrap();
+        let shared = ViewportCommand::SetViewLink {
+            property: LinkProperty::Contrast,
+            mode: LinkMode::Linked,
+        };
+        assert!(matches!(
+            profile.apply(shared),
+            Err(ProfileCommandError::CannotLink(_))
+        ));
+    }
+
+    #[test]
+    fn showing_a_dataset_kept_where_it_is_adds_it() {
+        let mut profile = two();
+        profile
+            .lay_out(ViewLayout::Columns, &ids(&["wds-a", "wds-b"]))
+            .unwrap();
+        profile.show_in(1, &ids(&["wds-a"]), true).unwrap();
+        assert_eq!(
+            shown(&profile),
+            vec![
+                ViewDatasets::Only(ids(&["wds-a"])),
+                ViewDatasets::Only(ids(&["wds-b", "wds-a"]))
+            ]
+        );
+        profile.show_in(0, &ids(&["wds-b"]), false).unwrap();
+        assert_eq!(
+            shown(&profile),
+            vec![
+                ViewDatasets::Only(ids(&["wds-a", "wds-b"])),
+                ViewDatasets::Only(ids(&["wds-a"]))
+            ]
+        );
     }
 }

@@ -4,7 +4,7 @@ use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, PeerIdentity, PresenceState, ServerMessage};
-use lucida_core::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
+use lucida_core::scene::{DatasetDisplaySettings, DisplayState, DocumentState, ViewsRecord};
 use lucida_core::view::AxisPositions;
 use lucida_protocol::{
     DatasetOpenFailureDiagnostic, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot,
@@ -205,11 +205,13 @@ impl Session {
         camera: Camera,
         view: AxisPositions,
         display: DisplayState,
+        views: Option<ViewsRecord>,
     ) {
         if let Some(presence) = self.clients.get_mut(&id) {
             presence.camera = Some(camera);
             presence.view = Some(view);
             presence.display = Some(display);
+            presence.views = views;
         }
     }
 
@@ -549,6 +551,7 @@ mod tests {
             Camera::new_2d([1024, 768]),
             AxisPositions::new(),
             DisplayState::default(),
+            None,
         );
         let presence = session.clients.get(&4).unwrap();
         assert_eq!(presence.camera.as_ref().unwrap().viewport(), [1024, 768]);

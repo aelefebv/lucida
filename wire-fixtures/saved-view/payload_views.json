@@ -1,0 +1,192 @@
+{
+  "view": {
+    "v": 3,
+    "datasets": [
+      "gs://lucida-fixtures/sample-plane.zarr",
+      "gs://lucida-fixtures/sample-volume.zarr"
+    ],
+    "active_layouts": {},
+    "camera": {
+      "mode": "slice",
+      "center": [
+        1024.5,
+        -512.25
+      ],
+      "zoom": 1.5,
+      "viewport": [
+        1920,
+        1080
+      ]
+    },
+    "view": {
+      "z": {
+        "start": 10.0,
+        "end": 14.0
+      },
+      "t": 2,
+      "y": -6.5
+    },
+    "display": {
+      "contrast_min": 0.0,
+      "contrast_max": 65535.0,
+      "gamma": 1.0
+    },
+    "dataset_order": [
+      "wds-0f3a",
+      "wds-7c21"
+    ],
+    "dataset_settings": {
+      "wds-0f3a": {
+        "visible": true,
+        "opacity": 1.0,
+        "contrast_min": 0.0,
+        "contrast_max": 65535.0,
+        "gamma": 1.0,
+        "blend_mode": "alpha",
+        "render_mode": "translucent",
+        "channel_settings": [
+          {
+            "visible": true,
+            "colormap": "gray",
+            "contrast_min": 0.0,
+            "contrast_max": 4000.0,
+            "gamma": 1.0
+          }
+        ],
+        "label_settings": [
+          {
+            "visible": true,
+            "opacity": 0.35
+          }
+        ],
+        "channel_blend_mode": "additive",
+        "label_names": [
+          "region-a"
+        ]
+      },
+      "wds-7c21": {
+        "visible": true,
+        "opacity": 0.8,
+        "contrast_min": 0.0,
+        "contrast_max": 65535.0,
+        "gamma": 1.0,
+        "blend_mode": "alpha",
+        "render_mode": "translucent",
+        "channel_settings": [
+          {
+            "visible": true,
+            "colormap": "magenta",
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0
+          },
+          {
+            "visible": true,
+            "colormap": "green",
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0,
+            "name": "Region B"
+          },
+          {
+            "visible": true,
+            "colormap": "cyan",
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0
+          }
+        ],
+        "label_settings": [],
+        "channel_blend_mode": "additive",
+        "solo": 1
+      }
+    },
+    "auto_contrast": {
+      "wds-0f3a": false
+    },
+    "views": {
+      "layout": "columns",
+      "active": 1,
+      "views": [
+        {
+          "camera": {
+            "mode": "slice",
+            "center": [
+              1024.5,
+              -512.25
+            ],
+            "zoom": 1.5,
+            "viewport": [
+              1920,
+              1080
+            ]
+          },
+          "axes": {
+            "z": {
+              "start": 4.0,
+              "end": 5.0
+            },
+            "t": 0
+          },
+          "datasets": {
+            "only": [
+              "wds-0f3a"
+            ]
+          }
+        },
+        {
+          "camera": {
+            "mode": "slice",
+            "center": [
+              1024.5,
+              -512.25
+            ],
+            "zoom": 1.5,
+            "viewport": [
+              1920,
+              1080
+            ]
+          },
+          "axes": {
+            "z": {
+              "start": 10.0,
+              "end": 14.0
+            },
+            "t": 2,
+            "y": -6.5
+          },
+          "datasets": {
+            "only": [
+              "wds-0f3a",
+              "wds-7c21"
+            ]
+          },
+          "comparison": {
+            "a": "wds-0f3a",
+            "b": "wds-7c21",
+            "mode": "swipe",
+            "divider": 0.25,
+            "showing": "a"
+          }
+        }
+      ],
+      "links": {
+        "datasets": [
+          "wds-0f3a",
+          "wds-7c21"
+        ],
+        "basis": "physical",
+        "modes": {
+          "pan": "linked",
+          "zoom": "linked",
+          "orientation": "off",
+          "z": "off",
+          "t": "off",
+          "contrast": "off",
+          "colormap": "off"
+        }
+      }
+    }
+  },
+  "payload": "H4sIAAAAAAAA_7VUwW7bMAz9lYFnO5GdeOt83CfsWgQBY8uJMFkyJNmJE-jfR6ltrADr2ksPAWSK5HuPj8oNcHR632jlDFoH9Q3Orc1Zt0GoO5SW-wwa7LnBcNdw5biB-rlg5XZVZXlVlKuy2mXQ65ZDDVaKhkMGk-DnQRsXUn-WLCvYE6Osq9Y91MWqoq4tOrTc7bVpY8sFOIvHH01ZwG7Jo58T6mgfORKnEyrFZXL_TEEttelxIEpHgzO1fJO47_EC9ZYx5qm5xAOVKhIY6sDwo9AqR7hfPXTVAzbCzVCz1aYKIq04SJLtzMj9zie83-HlsxsEMKL1O0J9-wUU8_-Co1iC95SBJU00PL_MLnI-2nq9lmMjWsw7cXGj4XZtsR8kzweJiq-uaAxN4H-Jk5Zj_5pJwBPUmxcTgxJyscyAaOTfyXO4hhhXLXHZEiuHweaCBV6hIhqEjRMTySyCsFmPlBE8GXtliYkU6k9MO6AVdIDhNFvRoIRHae9sRNi1WJ64rLsuMfke0EbQyqKjUd9jA4Zz4MBb-lySr8sp7ulbTqKMlgAvL-BUx9JhVPdZbP1XP5pIQCs5P0xp58N-Jfw-6drXUG10P6ARNkyeWFFxYufh9TNaSrLEJOK_ACO0BewshgBmT_pMj4IiCB_NIN0UT2_S_wWtfMSI4gQAAA"
+}

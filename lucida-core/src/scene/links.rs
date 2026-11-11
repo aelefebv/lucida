@@ -98,7 +98,7 @@ impl std::fmt::Display for LinkMode {
 }
 
 /// What linked positions and sizes compare in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkBasis {
     /// Physical lengths, as the scene frame places both datasets.
@@ -159,6 +159,67 @@ pub struct LinksState {
     /// when both show one dataset.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<ChannelPair>,
+}
+
+/// The links as a saved view or a presence records them. What a relative
+/// link keeps is left out: a restore takes it from the views as restored,
+/// which stand at that offset already.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinksRecord {
+    /// The dataset each view linked by. The modes belong to this pair, so a
+    /// restore whose views link by another takes that pair's defaults.
+    pub datasets: [DatasetId; 2],
+    /// What the pair compared in. It follows from the pair, so it says how
+    /// to read the record rather than choosing anything.
+    pub basis: LinkBasis,
+    pub modes: LinkModes,
+}
+
+/// Each property's mode. One a record leaves out is off, as a property
+/// added after the record was written reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LinkModes {
+    pub pan: LinkMode,
+    pub zoom: LinkMode,
+    pub orientation: LinkMode,
+    pub z: LinkMode,
+    pub t: LinkMode,
+    pub contrast: LinkMode,
+    pub colormap: LinkMode,
+}
+
+impl LinkModes {
+    fn from_array(modes: [LinkMode; 7]) -> Self {
+        let [pan, zoom, orientation, z, t, contrast, colormap] = modes;
+        Self {
+            pan,
+            zoom,
+            orientation,
+            z,
+            t,
+            contrast,
+            colormap,
+        }
+    }
+
+    /// The modes in [`LinkProperty::ALL`]'s order. A relative colormap,
+    /// which no control sets, reads as off.
+    fn to_array(self) -> [LinkMode; 7] {
+        let colormap = match self.colormap {
+            LinkMode::Relative => LinkMode::Off,
+            mode => mode,
+        };
+        [
+            self.pan,
+            self.zoom,
+            self.orientation,
+            self.z,
+            self.t,
+            self.contrast,
+            colormap,
+        ]
+    }
 }
 
 /// The views' links: each property's mode, and what a relative one keeps.
@@ -524,6 +585,49 @@ impl Scene {
             followed.add(self.settle_link(property, leader));
         }
         followed
+    }
+
+    /// The links as a saved view records them, or `None` until the views
+    /// link by a pair.
+    pub(super) fn links_record(&self) -> Option<LinksRecord> {
+        let pair = self.links.pair()?;
+        Some(LinksRecord {
+            basis: self.link_basis(&pair),
+            datasets: pair,
+            modes: LinkModes::from_array(self.links.modes),
+        })
+    }
+
+    /// Link the views, just restored, as `record` says, when they link by the
+    /// pair it was recorded for in the same basis; otherwise as a new pair
+    /// would ([`Self::refresh_links`]). The views stand where they were
+    /// recorded, so a linked property moves nothing, and a relative one
+    /// keeps the offset they stand at. Returns what that moved in the views.
+    pub(super) fn restore_links(&mut self, record: Option<&LinksRecord>) -> Followed {
+        let references = self.link_references();
+        let applies = |record: &&LinksRecord| {
+            references == record.datasets.clone().map(Some)
+                && self.link_basis(&record.datasets) == record.basis
+        };
+        let Some(record) = record.filter(applies) else {
+            return self.refresh_links();
+        };
+        let modes = record.modes.to_array();
+        if self.links.references != references || self.links.modes != modes {
+            self.links = ViewLinks {
+                references,
+                modes,
+                offsets: [None; 7],
+                contrast_offsets: Vec::new(),
+            };
+            self.epochs.links += 1;
+        }
+        for property in LinkProperty::ALL {
+            if self.links.modes[property.index()] == LinkMode::Relative {
+                self.settle_link(property, self.active);
+            }
+        }
+        Followed::default()
     }
 
     /// The active view as it stands before `cmd`, for the other view to

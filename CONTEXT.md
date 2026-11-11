@@ -332,9 +332,12 @@ saved view records the one its camera was saved in.
 _Avoid_: world (unqualified; world space is the volume cameras' view of it)
 
 **User transform**:
-Where a person put a dataset by hand: a move and a per-axis scale on top of
-where its declared frame places it in the scene frame. It changes no data and
-persists with the workspace.
+Where a person put a dataset by hand: a move, a per-axis scale and a rotation
+on top of where its declared frame places it in the scene frame. It changes no
+data and persists with the workspace. A person reads and sets the rotation as
+degrees about X, then Y, then Z, each about the axis the turns before it left
+(intrinsic X-Y-Z), and turns a dataset about its center; the record holds a
+quaternion about the frame's origin.
 _Avoid_: transform (unqualified; a manifest's coordinate transforms are declared)
 
 **Slice plane**:

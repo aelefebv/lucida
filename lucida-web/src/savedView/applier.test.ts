@@ -365,7 +365,7 @@ describe("SavedViewApplier", () => {
       user_transforms: record,
     });
 
-    const restoring = { restorePlacement: true };
+    const restoring = { chosen: true };
 
     it("puts each dataset where a chosen view recorded it, sends the change and says what moved", async () => {
       const { scene } = createScene(["wds-a", "wds-b"]);
@@ -438,6 +438,55 @@ describe("SavedViewApplier", () => {
       const { scene } = createScene(["wds-a", "wds-b"]);
       await applierFor(scene, "broadcast").apply(view, restoring);
       expect(scene.dataset_placement("wds-b")).toEqual(saved.scene.dataset_placement("wds-b"));
+    });
+  });
+
+  describe("views", () => {
+    const applierOn = (scene: WasmScene) =>
+      new SavedViewApplier(bridge, () => scene, fakeIdForUrl, 30_000, "workspace-dataset-id", "broadcast");
+    const write = (scene: WasmScene, command: object) => scene.apply_command(JSON.stringify(command));
+
+    it("lays the views out as the view recorded them, and as one view for a view that recorded none", async () => {
+      const saved = createScene(["wds-a", "wds-b"]);
+      write(saved.scene, { type: "set_view_layout", layout: "grid" });
+      const third = saved.scene.view_ids()[2];
+      write(saved.scene, { type: "move_dataset_to_view", view: third, dataset_id: "wds-b" });
+      write(saved.scene, { type: "set_active_view", view: third });
+      write(saved.scene, { type: "set_mode_arcball" });
+      const view = buildCapture({
+        scene: saved.scene,
+        urlByDatasetId: new Map(),
+        datasetReferenceMode: "workspace-dataset-id",
+      });
+      expect(view.views?.layout).toBe("grid");
+      expect(view.views?.active).toBe(2);
+
+      const { scene } = createScene(["wds-a", "wds-b"]);
+      await applierOn(scene).apply(view);
+      expect(scene.view_layout()).toBe("grid");
+      expect(scene.active_view()).toBe(scene.view_ids()[2]);
+      expect(scene.view_camera_mode(scene.active_view())).toBe("arcball");
+      expect(JSON.parse(scene.drawn_datasets(scene.active_view()))).toEqual(["wds-b"]);
+      expect(
+        buildCapture({ scene, urlByDatasetId: new Map(), datasetReferenceMode: "workspace-dataset-id" }).views,
+      ).toEqual(view.views);
+
+      await applierOn(scene).apply(emptyView());
+      expect(scene.view_layout()).toBe("single");
+      expect(scene.view_ids()).toHaveLength(1);
+    });
+
+    it("brings comparisons back only for a view someone chose", async () => {
+      const { scene } = createScene(["wds-a"]);
+      const imported: { comparisons: boolean }[] = [];
+      const importViews = scene.import_views.bind(scene);
+      scene.import_views = (json: string) => {
+        imported.push(JSON.parse(json));
+        importViews(json);
+      };
+      await applierOn(scene).apply(emptyView());
+      await applierOn(scene).apply(emptyView(), { chosen: true });
+      expect(imported.map((i) => i.comparisons)).toEqual([false, true]);
     });
   });
 

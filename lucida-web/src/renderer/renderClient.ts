@@ -558,6 +558,7 @@ export class RenderClient implements UploadClient {
     chunkY: number,
     plane: number,
     epochs: SceneEpochs,
+    sliceAxis: SpatialAxis = "z",
   ) {
     // As in `sliceChunkData`, each buffer is a plane cut for the worker.
     const transferList = chunks.map(chunk => chunk.data);
@@ -576,6 +577,7 @@ export class RenderClient implements UploadClient {
         levelWidth, levelHeight,
         chunkX, chunkY,
         plane,
+        ...(sliceAxis !== "z" ? { sliceAxis } : {}),
       },
       transferList,
     );

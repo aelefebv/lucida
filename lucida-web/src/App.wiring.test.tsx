@@ -73,6 +73,9 @@ vi.mock("lucida-core", () => {
     dataset_user_transform() {
       return "null";
     }
+    dataset_rotation_degrees() {
+      return new Float64Array([0, 0, 0]);
+    }
     user_transforms() {
       return "{}";
     }
@@ -200,6 +203,10 @@ vi.mock("lucida-core", () => {
     camera_space() {
       return "null";
     }
+    export_views() {
+      return "null";
+    }
+    import_views(_json: string) {}
     import_presence(json: string) {
       const presence = JSON.parse(json) as {
         camera?: unknown;

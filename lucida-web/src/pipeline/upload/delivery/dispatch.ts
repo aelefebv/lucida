@@ -216,15 +216,16 @@ export function dispatchChunkDelivery(
 }
 
 /**
- * Deliver the one Z-plane of a uint32 label chunk that the slice view needs
- * to the r32uint label pool. A 3D label chunk is ~8 MB though the worker
- * draws one ~64 KB plane, and labels sort after intensity, so sending the
- * whole chunk would starve them of upload budget.
+ * Deliver the one plane of a uint32 label chunk that the slice view needs to
+ * the r32uint label pool, in the frame of the plane drawn, as the image's
+ * planes go. A 3D label chunk is ~8 MB though the worker draws one ~64 KB
+ * plane, and labels sort after intensity, so sending the whole chunk would
+ * starve them of upload budget.
  *
- * Posts nothing, and says why, when geometry is missing or the chunk covers
- * a different Z-chunk than the current view. A delivery of some planes of a
- * chunk that lacks the plane is `other-plane`: the plan asks for the plane
- * again.
+ * Posts nothing, and says why, when geometry is missing or the chunk lies
+ * along the cut at another chunk than the current view's. A delivery of some
+ * planes of a chunk that lacks the plane is `other-plane`: the plan asks for
+ * the plane again.
  */
 export function dispatchLabelChunkDelivery(
   client: UploadClient,
@@ -233,22 +234,25 @@ export function dispatchLabelChunkDelivery(
   cut: PoolCut | null,
   epochs: SceneEpochs,
 ): Dispatched | DispatchSkip {
-  // A label overlay draws only on an XY cut, from the plane of its level the
-  // cut names.
-  if (cut !== null && cut.axis !== "z") return "other-plane";
   const levelMeta = meta.levels[delivery.level];
   if (!levelMeta || cut === null) return "no-meta";
-  const [, , , levelHeight, levelWidth] = levelMeta.shape;
+  const { axis, plane: levelPlane } = cut;
+  const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-  const levelZ = cut.plane;
-  const cz = Math.max(chunkZ, 1);
-  // This chunk covers a different Z-chunk than the current view — the right
-  // one is requested separately; drop this stale plane.
-  if (delivery.z !== Math.floor(levelZ / cz)) return "other-plane";
-  const localZ = levelZ - delivery.z * cz;
+  // The chunk's place and shape across the plane, down it, and along the cut.
+  const [cu, cv, cw] = toPlaneFrame([delivery.x, delivery.y, delivery.z], axis);
+  const [levelU, levelV] = toPlaneFrame([levelWidth, levelHeight, levelDepth], axis);
+  const [chunkU, chunkV, chunkW] = toPlaneFrame([chunkX, chunkY, chunkZ], axis);
+  const depth = Math.max(chunkW, 1);
+  // The right chunk along the cut is requested on its own; drop this one.
+  if (cw !== Math.floor(levelPlane / depth)) return "other-plane";
+  const local = levelPlane - cw * depth;
   const held = delivery.planes;
-  if (held && (localZ < held[0] || localZ >= held[1])) return "other-plane";
-  const plane = cutPlane(delivery.data, delivery.dataType, localZ, chunkY * chunkX, held?.[0]);
+  if (held && (delivery.planeAxis ?? "z") !== axis) return "other-plane";
+  if (held && (local < held[0] || local >= held[1])) return "other-plane";
+  const plane = axis === "z"
+    ? cutPlane(delivery.data, delivery.dataType, local, chunkY * chunkX, held?.[0])
+    : cutSidePlane(delivery.data, delivery.dataType, axis, local, [chunkZ, chunkY, chunkX], held);
   if (!plane) return "no-meta";
   const memberId = delivery.imageId;
   const bytes = plane.byteLength;
@@ -259,20 +263,21 @@ export function dispatchLabelChunkDelivery(
     [{
       data: plane,
       dataType: delivery.dataType,
-      x: delivery.x,
-      y: delivery.y,
+      x: cu,
+      y: cv,
       z: 0,
       key: delivery.chunkKey,
     }],
     delivery.level,
     delivery.t,
     delivery.c,
-    levelWidth,
-    levelHeight,
-    chunkX,
-    chunkY,
-    levelZ,
+    levelU,
+    levelV,
+    chunkU,
+    chunkV,
+    levelPlane,
     epochs,
+    axis,
   );
   return { memberId, bytes };
 }

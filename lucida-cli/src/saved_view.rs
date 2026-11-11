@@ -801,6 +801,7 @@ where
             camera: view.camera.clone(),
             view: view.view.clone(),
             display: view.display.clone(),
+            views: view.views.clone(),
         },
     )
     .await?;
@@ -1094,6 +1095,7 @@ mod tests {
             })),
             view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),
+            views: None,
             following: None,
             cursor: None,
             dataset_order: Some(Vec::new()),

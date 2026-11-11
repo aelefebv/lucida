@@ -8,13 +8,14 @@ import {
   readUserTransform,
   sameUserTransform,
   setUserTransformCommand,
+  userTransformTurned,
   type UserTransform,
 } from "../userTransform.ts";
 import type { PlacementChange } from "../savedView/applier.ts";
 import { toast } from "../ui/toastQueue.ts";
 import type { EditHistoryControls } from "./useEditHistory.ts";
 
-/** What places a dataset by hand: the Move and scale tool and the layer's fields. */
+/** What places a dataset by hand: the Move, scale and rotate tool and the layer's fields. */
 export interface UserTransformActions {
   /** Whether this member may place datasets, which changes the shared workspace. */
   canEdit: boolean;
@@ -26,6 +27,10 @@ export interface UserTransformActions {
   /** Place `datasetId` at `to` for everyone, from `from`, as one step undo
    *  takes back. Nothing when the two are the same. */
   commit(datasetId: string, from: UserTransform, to: UserTransform): void;
+  /** Turn `datasetId` to `degrees` about X, then Y, then Z, about its
+   *  center, from `from`, as one step undo takes back: the transform that
+   *  placed it, or null where nothing did. */
+  turnTo(datasetId: string, from: UserTransform, degrees: [number, number, number]): UserTransform | null;
   /** Put `datasetId` back where its metadata places it. */
   reset(datasetId: string): void;
   /** Make placements a chosen saved view just restored one step undo takes
@@ -85,6 +90,12 @@ export function useUserTransforms({
       current,
       preview,
       commit,
+      turnTo(datasetId, from, degrees) {
+        const scene = engine.scene();
+        const to = scene && canEdit ? userTransformTurned(scene, datasetId, from, degrees) : null;
+        if (to) commit(datasetId, from, to);
+        return to;
+      },
       reset(datasetId) {
         commit(datasetId, current(datasetId), IDENTITY_USER_TRANSFORM);
       },

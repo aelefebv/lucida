@@ -379,7 +379,7 @@ function settleMarch<A extends ProbeAtlas>(
  */
 function probeSliceLabel(ctx: WorkerCtx, view: number, hit: SliceHit, samples: ProbeSample[], reads: TexelReads): void {
   const chunk = hit.label?.chunk;
-  const pool = chunk && ctx.state.labelSlicePools.get(labelSlicePoolKey(hit.memberId, chunk.t, chunk.plane));
+  const pool = chunk && ctx.state.labelSlicePools.get(labelSlicePoolKey(hit.memberId, chunk.t, chunk.plane, chunk.axis));
   if (!pool || !hit.label) return;
   const readable: ReadablePool = {
     texture: pool.texture,
@@ -400,8 +400,10 @@ function probeSliceLabel(ctx: WorkerCtx, view: number, hit: SliceHit, samples: P
   const location = locateSample([source], null, hit.uv, "slice");
   const written = location.kind !== "resident"
     || pool.planes.has(labelCellKey(Math.floor(location.texel[0] / pool.chunkX), Math.floor(location.texel[1] / pool.chunkY)));
-  const position = levelZeroPosition(hit.uv, [1, hit.label.dataH, hit.label.dataW], "slice");
-  position[2] = drawOf(ctx.state, pool.datasetId, view)?.cold.currentZ ?? 0;
+  const planePosition = levelZeroPosition(hit.uv, [1, hit.label.dataH, hit.label.dataW], "slice");
+  planePosition[2] = drawOf(ctx.state, pool.datasetId, view)?.cold.currentZ ?? 0;
+  // As for an image: the readout names the source's own X, Y and Z.
+  const position = fromPlaneFrame(planePosition, pool.axis);
   const sample: ProbeSample = {
     datasetId: pool.datasetId,
     entityId: hit.label.entityId ?? "",
