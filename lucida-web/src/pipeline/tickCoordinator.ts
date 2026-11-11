@@ -626,8 +626,9 @@ export class TickCoordinator {
    * diffs against. Set when a full cold state or a delta goes out. The scrub
    * and display fast paths never change the active set, so they leave it. A
    * view that no longer draws the dataset is dropped, and a removed dataset
-   * drops every view, so a view drawing it again re-syncs with a full send,
-   * as does a view now drawing it in the other mode.
+   * or one no view plans drops every view, so a view drawing it again
+   * re-syncs with a full send, as does a view now drawing it in the other
+   * mode. Its keys are the datasets the worker holds a plan for.
    */
   private readonly heldActiveSets = new Map<string, Map<number, { mode: PoolMode; activeSet: ActiveSetEntry[] }>>();
   private requestEpoch = 0;
@@ -693,6 +694,20 @@ export class TickCoordinator {
     if (shortfallOf(admitDatasetPlans(ctx, last.plans, report)) >= last.short) return false;
     this.capacityReplanOwed = true;
     return true;
+  }
+
+  /**
+   * Tell the worker of each dataset it holds a plan for that no view plans
+   * now, so it wants none of its chunks: they keep their slots for a quick
+   * return, and are the first to go when a planned dataset needs room.
+   */
+  private releaseUnplanned(ctx: TickContext, planned: readonly PlannedDataset[]): void {
+    const plannedIds = new Set(planned.map((dataset) => dataset.dsId));
+    for (const dsId of [...this.heldActiveSets.keys()]) {
+      if (plannedIds.has(dsId) || !ctx.datasets.has(dsId)) continue;
+      this.heldActiveSets.delete(dsId);
+      this.uploader.sendDatasetUnplanned(ctx, dsId);
+    }
   }
 
   /** Tear down subscriptions held by this orchestrator. */
@@ -947,6 +962,7 @@ export class TickCoordinator {
     // Rebuild the display-only fast-path signatures from scratch: datasets
     // that no longer plan (turned invisible / scrolled fully out) drop out.
     this.lastRebuildByDataset.clear();
+    this.releaseUnplanned(ctx, plannedDatasets);
 
     const admissions = this.admit(
       ctx,

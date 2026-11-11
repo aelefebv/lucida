@@ -790,6 +790,17 @@ export interface FailedChunksMessage {
 }
 
 /**
+ * No view plans the dataset any more: it is hidden, set aside, or in no view
+ * on screen. The worker keeps what it holds of it but wants none of it, so
+ * its slots are the first to go when a planned dataset needs room, and stay
+ * for a quick return while none does. Its next cold state wants them again.
+ */
+export interface DatasetUnplannedMessage {
+  type: "datasetUnplanned";
+  datasetId: string;
+}
+
+/**
  * Read what the last frame drew under one canvas point: for each visible
  * channel and label overlay of each entity there, the resident sample and the
  * level it came from. `x` and `y` are fractions of the canvas, so the page
@@ -827,6 +838,7 @@ export type MainToWorkerMessage =
   | ColdStateSelectionMessage
   | ColdStateDeltaMessage
   | FailedChunksMessage
+  | DatasetUnplannedMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
   | AbandonFrameMessage

@@ -216,6 +216,23 @@ function poolKeysOf(ctx: WorkerCtx, datasetId: string): string[] {
     .sort();
 }
 
+describe("a dataset no view plans", () => {
+  it("keeps its pools and the chunks they hold, wanting none of them", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    await dispatchMessage(ctx, cold("ds1"));
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    const pool = ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!;
+    posts.length = 0;
+
+    await dispatchMessage(ctx, { type: "datasetUnplanned", datasetId: "ds1" });
+
+    expect(pool.slots.size).toBe(1);
+    expect(drawOf(ctx.state, "ds1", 0)!.wanted.size).toBe(0);
+    expect(posts).toEqual([]);
+  });
+});
+
 describe("removing a dataset", () => {
   it("destroys every texture and buffer it allocated, and leaves another dataset's alone", async () => {
     const gpu = trackingDevice();
