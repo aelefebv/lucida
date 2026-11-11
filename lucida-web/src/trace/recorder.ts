@@ -8,6 +8,7 @@
  * unexplained stall to be blamed on the monitor.
  */
 
+import type { ViewSettle } from "../pipeline/viewSettle.ts";
 import { buildIdentity } from "./buildInfo.ts";
 import { LagRecord } from "./lagRecord.ts";
 import { computeCoverage } from "./coverage.ts";
@@ -270,6 +271,11 @@ interface OpenInterval {
    * the view wants before the page has replanned.
    */
   wantedSetMetAtMs: number | null;
+  /**
+   * With several views, when each last came to settle (null while it has
+   * not) and its latest coverage, by view.
+   */
+  views: Map<number, { settledAtMs: number | null; wanted: number; short: number }>;
 }
 
 interface ClosedInterval {
@@ -822,6 +828,7 @@ export class TraceRecorder {
     const run = this.open;
     if (!run?.cause) return;
     run.wantedSetMetAtMs = null;
+    for (const view of run.views.values()) view.settledAtMs = null;
     (run.lag ??= new LagRecord()).noteInput(input, atMs);
   }
 
@@ -909,6 +916,22 @@ export class TraceRecorder {
    * has held for the hold window, so a momentary lull between two bursts of
    * arrivals does not end the run early.
    */
+  /**
+   * Each view's settle, with several views. A view keeps the time it last
+   * came to settle until it unsettles, as the run's wanted set does.
+   */
+  noteViewSettles(settles: readonly ViewSettle[]): void {
+    const run = this.open;
+    if (!run || !this.isRunOpen) return;
+    for (const { view, settled, wanted, short } of settles) {
+      const entry = run.views.get(view) ?? { settledAtMs: null, wanted, short };
+      entry.wanted = wanted;
+      entry.short = short;
+      entry.settledAtMs = settled ? entry.settledAtMs ?? this.now() : null;
+      run.views.set(view, entry);
+    }
+  }
+
   noteQuiescence(state: SettleState): void {
     this.lastQuiescence = state;
     // Settling ends a labelled run. The unlabelled interval has nothing to
@@ -1712,6 +1735,7 @@ export class TraceRecorder {
       errors: [],
       errorsDropped: 0,
       wantedSetMetAtMs: null,
+      views: new Map(),
     };
     // A fresh interval preallocates its buffers, so opening one spends from
     // the resident budget before it has recorded anything. Evict here as well
@@ -1805,6 +1829,14 @@ export class TraceRecorder {
         timeoutMs: this.timeoutMs,
         outstandingAtSettle: run.environment.captureOutstanding(),
         wantedSetMetAtUs: run.wantedSetMetAtMs === null ? null : this.offsetUs(run, run.wantedSetMetAtMs),
+        ...(run.views.size > 0 && {
+          views: [...run.views].map(([view, { settledAtMs, wanted, short }]) => ({
+            view,
+            settledAtUs: settledAtMs === null ? null : this.offsetUs(run, settledAtMs),
+            wanted,
+            short,
+          })),
+        }),
         connections: run.connections,
       },
     });

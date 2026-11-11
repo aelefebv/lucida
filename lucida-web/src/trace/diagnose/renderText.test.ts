@@ -80,6 +80,23 @@ function numericTokens(text: string): string[] {
   return [...text.replace(/(\d),(?=\d{3}\b)/g, "$1").matchAll(/\d+(?:\.\d+)?/g)].map((m) => m[0]);
 }
 
+describe("the views line", () => {
+  it("says when each view settled and how much of what it asked for it covers", () => {
+    const run = healthyLocalOpen();
+    run.header.views = [
+      { view: 0, settledAtUs: 812 * MS, wanted: 384, short: 0 },
+      { view: 3, settledAtUs: null, wanted: 377, short: 67 },
+    ];
+    const line = renderDiagnostic(diagnoseRun(run)).text.split("\n").find((l) => l.startsWith("views"));
+    expect(line).toBe(
+      "views     view 1 (id 0) settled at 812 ms, covers all 384 it asked for · " +
+        "view 2 (id 3) not settled, covers 310 of 377, short of room for the rest",
+    );
+    // One view's settle is the run's, and prints no line.
+    expect(renderDiagnostic(DOCUMENTS.healthy).text).not.toContain("views     ");
+  });
+});
+
 describe("the GPU memory line", () => {
   it("states the peak against its budget, the last reading, a halved budget, and the slots held", () => {
     const line = renderDiagnostic(DOCUMENTS.gpuMemory).text.split("\n").find((l) => l.startsWith("gpu mem"));

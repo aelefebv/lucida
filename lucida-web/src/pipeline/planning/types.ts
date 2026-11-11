@@ -244,6 +244,12 @@ export interface RequestPlan {
   shortfall?: Record<ResidencyTier, number>;
   /** Detail budget the coarse tier took to hold what admission admitted. */
   coarseLoanBytes?: number;
+  /**
+   * With several views, each view's own detail and coarse requests, before
+   * two views' requests for one chunk fold into one. What admission lets
+   * through of these is the view's coverage.
+   */
+  byView?: ReadonlyMap<number, readonly ChunkRequest[]>;
 }
 
 /**

@@ -65,16 +65,22 @@ function emitLanes(
   views: readonly ViewLanes[],
   stats: PlanStats,
   config: PlanningConfig,
-): ChunkRequest[] {
+): { requests: ChunkRequest[]; byView?: Map<number, ChunkRequest[]> } {
   const lanes = new LaneRequests();
+  // With several views, what each asks for of its own, which its coverage
+  // is counted against: its detail and coarse lanes, before two views'
+  // requests for one chunk fold into one.
+  const byView = views.length > 1 ? new Map<number, ChunkRequest[]>() : undefined;
   for (const { view, activeSet, zoomDirection, cutStep } of views) {
     const input = { ...view, datasetId: snapshot.datasetId };
     const entityById = new Map<string, EntitySnapshot>();
     for (const entity of view.entities) entityById.set(entity.entityId, entity);
     const chunks = enumeratePlanChunks(activeSet, input, entityById, config, zoomDirection);
+    const from = lanes.count;
     emitDetailLane(chunks, input, stats, lanes, config);
     emitPrefetchLane(chunks, input, stats, lanes, config, cutStep);
     emitCoarseLane(chunks, input, stats, lanes, config);
+    byView?.set(view.view, lanes.since(from).filter((req) => req.lane !== "prefetch"));
   }
 
   // Minimap goes last: its bulk lane ranks behind every band above it.
@@ -89,7 +95,17 @@ function emitLanes(
   );
 
   const requests = lanes.finish();
-  return views.length > 1 ? distinctRequests(requests) : requests;
+  return byView ? { requests: distinctRequests(requests), byView } : { requests };
+}
+
+/**
+ * What makes two requests ask for one thing: the chunk, its tier, the pools
+ * it fills, and the planes drawn from it.
+ */
+export function requestIdentity(req: ChunkRequest): string {
+  return [
+    req.imageId, req.tier, req.mode, req.chunkKey, req.planeAxis ?? "", req.plane ?? "", req.planes?.join(",") ?? "",
+  ].join("|");
 }
 
 /**
@@ -100,9 +116,7 @@ function emitLanes(
 function distinctRequests(requests: ChunkRequest[]): ChunkRequest[] {
   const seen = new Set<string>();
   return requests.filter((req) => {
-    const key = [
-      req.imageId, req.tier, req.mode, req.chunkKey, req.planeAxis ?? "", req.plane ?? "", req.planes?.join(",") ?? "",
-    ].join("|");
+    const key = requestIdentity(req);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -162,7 +176,7 @@ export function emitPlanRequests(
       cutStep: isCutStep(before.previousCut, view.selection, config.sliceBandPlanes),
     };
   });
-  return emitLanes(snapshot, views, stats, config);
+  return emitLanes(snapshot, views, stats, config).requests;
 }
 
 /**
@@ -217,7 +231,7 @@ export function plan(
       cutStep: isCutStep(before.previousCut, view.selection, config.sliceBandPlanes),
     };
   });
-  const requests = emitLanes(snapshot, lanes, stats, config);
+  const { requests, byView } = emitLanes(snapshot, lanes, stats, config);
   const activeSet = mergeActiveSets(lanes.map((view) => view.activeSet));
 
   const epochs: SceneEpochs = {
@@ -226,5 +240,5 @@ export function plan(
   };
 
   const nextState: PlanningState = { previousActiveSet: activeSet, views };
-  return { requests, activeSet, epochs, stats, nextState };
+  return { requests, activeSet, epochs, stats, nextState, ...(byView && { byView }) };
 }

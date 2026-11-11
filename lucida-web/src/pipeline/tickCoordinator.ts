@@ -44,6 +44,7 @@ import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
 import { admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
+import { tallyViewCoverage, type ViewCoverage } from "./planning/viewCoverage.ts";
 import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
 import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
@@ -530,6 +531,7 @@ function isStructural(causes: readonly ColdStateCauseKey[]): boolean {
 
 export class TickCoordinator {
   private readonly uploader: Uploader;
+  private lastViewCoverage: ReadonlyMap<number, ViewCoverage> | null = null;
 
   /**
    * Per-dataset opaque planner carry-forward state. Stores
@@ -992,10 +994,20 @@ export class TickCoordinator {
       ctx,
       plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
     );
+    // With several views, how much of what each asks for admission let in.
+    const viewCoverage = views.length > 1 ? new Map<number, ViewCoverage>() : null;
     for (const [index, planned] of plannedDatasets.entries()) {
       const { dsId, dsSettings, forms } = planned;
       const { layer, snapshot: { visibleRegion, selection } } = forms[0].views[0];
       const admission = admissions[index];
+      if (viewCoverage) {
+        // A dataset one view plans asks for what its plan asks for.
+        const byView = planned.result.byView ?? new Map([[
+          planned.views[0].view.id,
+          planned.result.requests.filter((req) => req.lane === "detail" || req.lane === "coarse"),
+        ]]);
+        tallyViewCoverage(viewCoverage, byView, admission.admitted);
+      }
       const result: RequestPlan = {
         ...planned.result,
         requests: admission.admitted,
@@ -1157,6 +1169,7 @@ export class TickCoordinator {
       });
     }
 
+    this.lastViewCoverage = viewCoverage;
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
     this.cachedResult = {
@@ -1750,6 +1763,14 @@ export class TickCoordinator {
   /** Per-dataset snapshot of the most recent `plan()` output. Live Map — do not mutate. */
   getLastPlans(): ReadonlyMap<string, RequestPlan> {
     return this._lastPlanByDataset;
+  }
+
+  /**
+   * With several views, each one's coverage as of the last full plan; null
+   * with one view, whose coverage is the page's.
+   */
+  viewCoverage(): ReadonlyMap<number, ViewCoverage> | null {
+    return this.lastViewCoverage;
   }
 
   /**

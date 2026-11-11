@@ -24,6 +24,8 @@ export interface ViewLayoutActions {
   move(view: number, datasetId: string): void;
   /** Show `datasetId` in every view, as well as what each shows. */
   showEverywhere(datasetId: string): void;
+  /** Show these datasets in `view` as well as what it shows. */
+  add(view: number, datasetIds: readonly string[]): void;
   /** Show `view` alone across the canvas, or every view again with null. */
   maximize(view: number | null): void;
 }
@@ -55,16 +57,18 @@ export function viewLayoutActions(
       dataset_id: datasetId,
     })),
     showEverywhere: (datasetId) => write((s) => {
-      for (const view of s.view_ids()) {
-        const shows = JSON.parse(s.view_datasets(view)) as "all" | { only: string[] } | null;
-        if (shows === null || shows === "all" || shows.only.includes(datasetId)) continue;
-        applyViewportCommand(s, {
-          type: "set_view_datasets",
-          view,
-          datasets: { only: [...shows.only, datasetId] },
-        });
-      }
+      for (const view of s.view_ids()) addTo(s, view, [datasetId]);
     }),
+    add: (view, datasetIds) => write((s) => addTo(s, view, datasetIds)),
     maximize: (view) => write((s) => applyViewportCommand(s, { type: "maximize_view", view })),
   };
+}
+
+/** Show `datasetIds` in `view` as well as what it shows. */
+function addTo(scene: WasmScene, view: number, datasetIds: readonly string[]): void {
+  const shows = JSON.parse(scene.view_datasets(view)) as "all" | { only: string[] } | null;
+  if (shows === null || shows === "all") return;
+  const added = datasetIds.filter((id) => !shows.only.includes(id));
+  if (added.length === 0) return;
+  applyViewportCommand(scene, { type: "set_view_datasets", view, datasets: { only: [...shows.only, ...added] } });
 }
