@@ -1524,6 +1524,13 @@ export class CpuCache {
     this.updateConfig({ ...this.ownKnobValues, ...knobs });
   }
 
+  /** Whether the store `req`'s tier fills holds its chunk whole. */
+  holdsWhole(req: ChunkRequest): boolean {
+    const store = req.tier === "coarse" ? this.overviewStore : this.chunkStore;
+    const entry = store.get(req.entityId, req.chunkKey);
+    return entry !== undefined && entry.planes === undefined;
+  }
+
   /** The whole chunk, searching detail then overview. */
   getCachedChunk(entityId: string, chunkKey: string): CachedChunk | null {
     const entry = this.wholeEntry(entityId, chunkKey);
