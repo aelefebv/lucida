@@ -602,13 +602,13 @@ export class TickCoordinator {
   }>();
   /**
    * Per-dataset cache of the camera-independent inputs to
-   * {@link buildViewSnapshot}: parsed `plane_positions` and the
-   * `imageSpecById` / `parentByEntityId` manifest maps. A view move leaves
-   * all three identical. An entry is valid only while both keys match:
-   *   - `epochKey`, the content|layout fingerprint and the plane the views
-   *     place members on. A reflow or add/remove that moves placement bumps
-   *     it, and so does a side view, which places a collection's tiles in
-   *     cells of their own.
+   * {@link buildViewSnapshot}: the `imageSpecById` / `parentByEntityId`
+   * manifest maps, and parsed `plane_positions` for each plane a view
+   * places members on, since a side view places a collection's tiles in
+   * cells of their own. A view move leaves all of them identical. An entry
+   * is valid only while both keys match:
+   *   - `epochKey`, the content|layout fingerprint. A reflow or
+   *     add/remove that moves placement bumps it.
    *   - `manifestRef`, the `ds.manifest` reference. Progressively generated
    *     levels swap in a new manifest object with no epoch bump, so
    *     reference identity is the only signal the manifest maps are stale.
@@ -616,9 +616,9 @@ export class TickCoordinator {
   private readonly snapshotInputCacheByDataset = new Map<string, {
     epochKey: string;
     manifestRef: DatasetManifest;
-    positions: Record<string, [number, number]>;
     imageSpecById: Map<string, ImageSpec>;
     parentByEntityId: Map<string, string | null>;
+    byPlane: Map<SlicePlane, SnapshotEntityDeps>;
   }>();
   /**
    * Per dataset and view, the cursor for the incremental view-query fold: the
@@ -640,8 +640,8 @@ export class TickCoordinator {
    * `view_query` at the same tick, so a Delta never folds onto a missing base.
    */
   private readonly viewDeltaCursor = new Map<string, Map<number, {
-    /** Identity of the snapshot-inputs entry (manifest maps + placement). */
-    basisInputs: object;
+    /** Identity of the snapshot inputs (manifest maps + placement). */
+    basisInputs: SnapshotEntityDeps;
     map: Map<string, EntitySnapshot>;
   }>>();
   /**
@@ -916,54 +916,15 @@ export class TickCoordinator {
         .sort((a, b) => holds(b) - holds(a));
       if (viewsOfDataset.length === 0) continue;
 
-      // Every view that draws a dataset holds it in one form, so each places
-      // its members as the first does. See `snapshotInputCacheByDataset` for
-      // why both keys are checked.
-      const placingView = viewsOfDataset[0];
-      const placingPlane = viewCutPlane(ctx, placingView) ?? "xy";
-      const snapshotInputEpochKey = `${currentEpochs.content}|${currentEpochs.layout}|${placingPlane}`;
-      let snapshotInputs = this.snapshotInputCacheByDataset.get(dsId);
-      if (
-        !snapshotInputs ||
-        snapshotInputs.epochKey !== snapshotInputEpochKey ||
-        snapshotInputs.manifestRef !== ds.manifest
-      ) {
-        const positions = JSON.parse(
-          ctx.scene.plane_positions(placingView.id, dsId),
-        ) as Record<string, [number, number]>;
-        const imageSpecById = new Map<string, ImageSpec>();
-        for (const img of ds.manifest.images) {
-          imageSpecById.set(img.image_id, img);
-        }
-        const parentByEntityId = new Map<string, string | null>();
-        for (const ent of ds.manifest.entities) {
-          parentByEntityId.set(ent.id, ent.parent ?? null);
-        }
-        snapshotInputs = {
-          epochKey: snapshotInputEpochKey,
-          manifestRef: ds.manifest,
-          positions,
-          imageSpecById,
-          parentByEntityId,
-        };
-        this.snapshotInputCacheByDataset.set(dsId, snapshotInputs);
-      }
-
-      // Fold the view delta instead of re-running `view_query`: O(delta)
-      // rather than O(N members) on a camera move, a level change included.
-      // `viewDeltaCursor` documents why the fold matches a full parse.
-      const deps: SnapshotEntityDeps = {
-        imageSpecById: snapshotInputs.imageSpecById,
-        parentByEntityId: snapshotInputs.parentByEntityId,
-        positions: snapshotInputs.positions,
-      };
       const planningStateForDataset = this.planningState.get(dsId)
         ?? initialPlanningState();
       const plannedViewsOfDataset: PlannedView[] = [];
       for (const view of viewsOfDataset) {
-        const entitiesOverride = this.foldViewDeltaEntities(
-          ctx.scene, view.id, dsId, deps, snapshotInputs,
-        );
+        // Fold the view delta instead of re-running `view_query`: O(delta)
+        // rather than O(N members) on a camera move, a level change included.
+        // `viewDeltaCursor` documents why the fold matches a full parse.
+        const deps = this.snapshotInputs(ctx, dsId, ds.manifest, currentEpochs, view);
+        const entitiesOverride = this.foldViewDeltaEntities(ctx.scene, view.id, dsId, deps);
         if (entitiesOverride === "skip") continue;
 
         // The builder skips `view_query` when given `entitiesOverride` but
@@ -976,11 +937,7 @@ export class TickCoordinator {
           dataset: ds,
           layer,
           mode: view.mode,
-          precomputed: {
-            positions: snapshotInputs.positions,
-            imageSpecById: snapshotInputs.imageSpecById,
-            parentByEntityId: snapshotInputs.parentByEntityId,
-          },
+          precomputed: deps,
           entitiesOverride,
         });
         if (!snapshot) continue;
@@ -1629,8 +1586,7 @@ export class TickCoordinator {
    * scene's `view_query_delta` onto the cursor for the two. Returns `"skip"`
    * when the view does not show the dataset or the dataset is not
    * registered, as the full `view_query` path does.
-   * `inputsRef` is the identity of the snapshot-inputs entry `deps` came
-   * from, which is the cursor's basis.
+   * The identity of `deps` is the cursor's basis.
    *
    * The result matches a fresh full build on the render-affecting fields
    * (`visible`, `targetLevel`, `kind`, `coarseLevel`, `parentId`). Continuous
@@ -1638,12 +1594,47 @@ export class TickCoordinator {
    * `centroidWorld`) may be stale on a carried-over record; none of them
    * feeds the active set.
    */
+  /**
+   * The camera-independent inputs to `view`'s snapshot of a dataset, the same
+   * object while they hold, so a view-query fold keeps its basis. Members are
+   * placed on the plane the view draws, a volume view placing them as an XY
+   * view does. See `snapshotInputCacheByDataset` for why both keys are checked.
+   */
+  private snapshotInputs(
+    ctx: TickContext,
+    dsId: string,
+    manifest: DatasetManifest,
+    epochs: SceneEpochs,
+    view: TickView,
+  ): SnapshotEntityDeps {
+    const epochKey = `${epochs.content}|${epochs.layout}`;
+    let entry = this.snapshotInputCacheByDataset.get(dsId);
+    if (!entry || entry.epochKey !== epochKey || entry.manifestRef !== manifest) {
+      const imageSpecById = new Map<string, ImageSpec>();
+      for (const img of manifest.images) imageSpecById.set(img.image_id, img);
+      const parentByEntityId = new Map<string, string | null>();
+      for (const ent of manifest.entities) parentByEntityId.set(ent.id, ent.parent ?? null);
+      entry = { epochKey, manifestRef: manifest, imageSpecById, parentByEntityId, byPlane: new Map() };
+      this.snapshotInputCacheByDataset.set(dsId, entry);
+    }
+    const plane = viewCutPlane(ctx, view) ?? "xy";
+    let inputs = entry.byPlane.get(plane);
+    if (!inputs) {
+      inputs = {
+        imageSpecById: entry.imageSpecById,
+        parentByEntityId: entry.parentByEntityId,
+        positions: JSON.parse(ctx.scene.plane_positions(view.id, dsId)) as Record<string, [number, number]>,
+      };
+      entry.byPlane.set(plane, inputs);
+    }
+    return inputs;
+  }
+
   private foldViewDeltaEntities(
     scene: TickContext["scene"],
     view: number,
     datasetId: string,
     deps: SnapshotEntityDeps,
-    inputsRef: object,
   ): EntitySnapshot[] | "skip" {
     // A reconstructed scene starts with an empty Rust cursor, so every
     // cursor held here belongs to a dead scene.
@@ -1671,7 +1662,7 @@ export class TickCoordinator {
     // Fold only onto a cursor with the same manifest/placement basis (see the
     // field doc). Otherwise reseed from the full query.
     const prev =
-      existing && existing.basisInputs === inputsRef ? existing.map : null;
+      existing && existing.basisInputs === deps ? existing.map : null;
 
     // Drop on throw. `view_query_delta` already advanced the Rust cursor, and
     // `makeEntitySnapshot` throws on a Tile with no parent edge. If a throw
@@ -1695,7 +1686,7 @@ export class TickCoordinator {
         next = applyViewQueryDelta(prev, delta, deps);
       }
 
-      cursors.set(view, { basisInputs: inputsRef, map: next });
+      cursors.set(view, { basisInputs: deps, map: next });
       return [...next.values()];
     } catch (e) {
       cursors.delete(view);

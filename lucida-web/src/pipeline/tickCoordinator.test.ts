@@ -1994,6 +1994,20 @@ describe("views of one dataset in two modes", () => {
     expect(requests.filter((req) => req.chunkKey === key).map((req) => req.mode).sort()).toEqual(["slice", "volume"]);
   });
 
+  it("places members on the plane each view draws: a side view's cells, the volume view's layout", () => {
+    const { scene, ctx, coldState } = makeTwoModes();
+    scene.slice_plane = (view: number) => (view === 0 ? "xz" : "xy");
+    scene.plane_positions = (view: number) =>
+      JSON.stringify({ "tile-0": view === 0 ? [72, 20] : [72, 40] });
+    new TickCoordinator(new Uploader()).planAndFetch(ctx, emptyMinimap);
+
+    const sent = coldState.mock.calls.map(([msg]) => msg as ColdStateMessage);
+    expect(sent.map((msg) => [msg.viewMode, msg.activeSet[0].layoutPositionVox])).toEqual([
+      ["slice", [72, 20]],
+      ["volume", [72, 40]],
+    ]);
+  });
+
   it("tells the worker the modes that still draw the dataset once one view leaves it", () => {
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
