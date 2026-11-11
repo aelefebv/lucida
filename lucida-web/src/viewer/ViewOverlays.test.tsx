@@ -100,17 +100,6 @@ describe("a view's overlays", () => {
     ]);
   });
 
-  it("leave the active view as it is when someone reads another view's notices", () => {
-    const notices: ViewLinkNotices[] = [{ view: 3, notices: [{ kind: "position" }] }];
-    const { activate, of } = overlays(new Map(), {}, notices);
-    const icon = of(3).querySelector(".lc-view-notices button") as HTMLElement;
-    fireEvent.pointerDown(icon);
-    fireEvent.focus(icon);
-    fireEvent.click(icon);
-    expect(activate).not.toHaveBeenCalled();
-    expect(icon.getAttribute("aria-expanded")).toBe("false");
-  });
-
   it("make their view the active one on a press or focus, before they act", () => {
     const { actions, activate, of } = overlays(new Map([[0, SWIPE], [3, SWIPE]]));
     const stop = (view: number) => of(view).querySelector('[aria-label="Stop comparing"]') as HTMLElement;
@@ -123,5 +112,16 @@ describe("a view's overlays", () => {
     expect(activate).toHaveBeenCalledTimes(2);
     fireEvent.click(stop(3));
     expect(actions.end).toHaveBeenCalled();
+  });
+
+  it("leave the active view as it is when someone reads another view's notices", () => {
+    const notices: ViewLinkNotices[] = [{ view: 3, notices: [{ kind: "position" }] }];
+    const { activate, of } = overlays(new Map(), {}, notices);
+    const icon = of(3).querySelector(".lc-view-notices button") as HTMLElement;
+    fireEvent.pointerDown(icon);
+    fireEvent.focus(icon);
+    fireEvent.click(icon);
+    expect(activate).not.toHaveBeenCalled();
+    expect(icon.getAttribute("aria-expanded")).toBe("false");
   });
 });

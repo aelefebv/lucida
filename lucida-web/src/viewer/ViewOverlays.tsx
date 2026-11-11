@@ -14,7 +14,7 @@
  * comparison controls, which steer the active view, steer the comparison
  * they show.
  */
-import { useSyncExternalStore, type SyntheticEvent } from "react";
+import { useSyncExternalStore } from "react";
 import { setAsideNote, type ComparisonActions } from "../comparison.ts";
 import { ComparisonBar, SwipeDivider } from "../components/Comparison.tsx";
 import type { SceneStore, ViewPane } from "../sceneStore.ts";
@@ -61,7 +61,7 @@ export function ViewOverlays({
       {views.map((pane) => {
         const comparison = comparisons.get(pane.id) ?? null;
         const [x, y, width, height] = pane.rect;
-        const select = (event: SyntheticEvent) => {
+        const select = (event: { target: EventTarget | null }) => {
           // Reading a view's notices steers nothing, and making a view that
           // follows the other the active one would end the link notices it shows.
           if (pane.active || (event.target instanceof Element && event.target.closest(".lc-view-notices"))) return;
