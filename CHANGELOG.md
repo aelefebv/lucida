@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.35.0](https://github.com/aelefebv/lucida/compare/v0.34.0...v0.35.0) (2026-11-11)
+
+
+### Features
+
+* a slice camera can draw its plane transposed, and four-up's YZ does ([#1537](https://github.com/aelefebv/lucida/issues/1537)) ([63e8955](https://github.com/aelefebv/lucida/commit/63e89553ff888a9dc208fefa0199eacbee452954))
+* four-up draws its planes as lines a drag moves ([#1539](https://github.com/aelefebv/lucida/issues/1539)) ([e9a7822](https://github.com/aelefebv/lucida/commit/e9a7822fc1c09fc755fc0e8f2c2d020bf6607bd6))
+* link contrast and colormap between the views' paired channels ([#1545](https://github.com/aelefebv/lucida/issues/1545)) ([4c8b11a](https://github.com/aelefebv/lucida/commit/4c8b11ac8c8578da1787f38421ace601e8ee5d99))
+* slice views cut a tilted dataset from its bricks ([#1543](https://github.com/aelefebv/lucida/issues/1543)) ([1bb7fcc](https://github.com/aelefebv/lucida/commit/1bb7fccc71c3334b93b6de02138780a85655b585))
+
+
+### Bug Fixes
+
+* **trace:** call a dominant phase bound, not a stall ([#1546](https://github.com/aelefebv/lucida/issues/1546)) ([1b092d0](https://github.com/aelefebv/lucida/commit/1b092d0ee9e2c812046b6d9ae458dac296df1055))
+
+
+### Performance
+
+* a four-up suite, settle and coverage next to one view ([#1541](https://github.com/aelefebv/lucida/issues/1541)) ([5029e66](https://github.com/aelefebv/lucida/commit/5029e6681049539255ad6dfae51a9fe395634350))
+
 ## [0.34.0](https://github.com/aelefebv/lucida/compare/v0.33.0...v0.34.0) (2026-11-11)
 
 
