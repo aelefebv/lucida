@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { comparisonActions, comparisonClip, intersectRects, lineUpReason, type ComparisonScene } from "./comparison.ts";
+import {
+  comparisonActions,
+  comparisonClip,
+  intersectRects,
+  lineUpReason,
+  setAsideNote,
+  type ComparisonScene,
+} from "./comparison.ts";
+import { resolvedLayer, resolvedLayers } from "./resolvedLayerFixtures.ts";
 import { clipVolumeLayers } from "./volumePath.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 
@@ -40,6 +48,18 @@ describe("where a compared dataset shows", () => {
       [0, 0, 400, 600],
     ]);
     expect(intersectRects([0, 0, 5, 5], [5, 0, 5, 5])).toBeNull();
+  });
+});
+
+describe("what the compare bar says of the layers set aside", () => {
+  it("counts the layers outside the pair that would otherwise draw", () => {
+    const pair = [resolvedLayer("a"), resolvedLayer("b")];
+    const aside = (id: string) => resolvedLayer(id, [0], { visible: false, set_aside: true });
+    // A layer hidden by its own setting was hidden already.
+    const hidden = resolvedLayer("hidden", [0], { visible: false });
+    expect(setAsideNote(resolvedLayers(...pair, hidden))).toBeNull();
+    expect(setAsideNote(resolvedLayers(...pair, aside("c"), hidden))).toBe("1 other layer hidden while comparing");
+    expect(setAsideNote(resolvedLayers(...pair, aside("c"), aside("d")))).toBe("2 other layers hidden while comparing");
   });
 });
 

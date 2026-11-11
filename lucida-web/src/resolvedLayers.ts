@@ -29,8 +29,14 @@ export type CutReach = "through" | "outside" | "every";
 /** Mirrors `lucida_core::scene::ResolvedLayer`. */
 export interface ResolvedLayer {
   dataset_id: string;
-  /** A hidden layer still lists the channels it would show. */
+  /**
+   * Whether the view draws the layer: its own visibility, unless the view's
+   * comparison sets it aside. A hidden layer still lists the channels it
+   * would show.
+   */
   visible: boolean;
+  /** Visible by its own setting, but outside the pair the view compares. */
+  set_aside: boolean;
   opacity: number;
   render_mode: "translucent" | "max_intensity";
   channel_count: number;

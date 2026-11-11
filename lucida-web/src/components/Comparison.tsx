@@ -27,9 +27,11 @@ interface BarProps {
   comparison: Comparison | null;
   actions: ComparisonActions;
   nameOf: (datasetId: string) => string;
+  /** What it says of the layers the comparison sets aside, or null for none. */
+  setAside: string | null;
 }
 
-export function ComparisonBar({ comparison, actions, nameOf }: BarProps) {
+export function ComparisonBar({ comparison, actions, nameOf, setAside }: BarProps) {
   // A running blink belongs to the pair it was started on, so a new
   // comparison starts still.
   const pair = comparison ? `${comparison.a}\n${comparison.b}` : null;
@@ -60,6 +62,7 @@ export function ComparisonBar({ comparison, actions, nameOf }: BarProps) {
       <span className="lc-comparison-names" title={`${nameOf(comparison.a)} and ${nameOf(comparison.b)}`}>
         {blinking ? nameOf(shown) : `${nameOf(comparison.a)} | ${nameOf(comparison.b)}`}
       </span>
+      {setAside && <span className="lc-comparison-aside">{setAside}</span>}
       <SegmentedControl<CompareMode>
         label="Compare by"
         size="sm"
