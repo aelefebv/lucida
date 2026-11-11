@@ -2,7 +2,7 @@
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { WasmScene } from "lucida-core";
 import type { PixelRect, TickContext, TickView, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { RESIDENCY_RENDER_INTERVAL_MS, viewRectInPixels } from "./renderLoopTypes.ts";
+import { GESTURE_HOLD_MS, RESIDENCY_RENDER_INTERVAL_MS, viewRectInPixels } from "./renderLoopTypes.ts";
 import { TickWake } from "./invalidation.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import { debugLog } from "./debug/logging.ts";
@@ -32,6 +32,9 @@ import { AutoContrastFitter, type AutoContrastListener } from "./pipeline/autoCo
 
 // Re-exported so imports of these types from the render loop keep working.
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
+
+/** The inputs that move a view: a gesture, while they keep landing. */
+const GESTURE_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "scrub", "plane"];
 
 export interface LucidaCaptureReadyState {
   ready: boolean;
@@ -157,6 +160,8 @@ export class RenderLoop implements TraceEnvironment {
   private drawnFactor = 1.0;
   /** An input landed since the last frame was dispatched, so the next one shows it. */
   private inputSinceFrame = false;
+  /** When the last pan, zoom, orbit or step along the cut landed. */
+  private lastGestureAt = -Infinity;
   /** The last frame dispatched at full quality: what it takes is what a settled frame costs. */
   private fullQualitySeq = 0;
   /**
@@ -635,6 +640,7 @@ export class RenderLoop implements TraceEnvironment {
    */
   markInput(input: InputKind, atMs?: number): void {
     if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
+    if (GESTURE_INPUTS.includes(input)) this.lastGestureAt = performance.now();
     settleSignal.restart();
     this.resolution.noteInput(this.client.lastFrameSeq());
     this.inputSinceFrame = true;
@@ -886,6 +892,7 @@ export class RenderLoop implements TraceEnvironment {
       resolutionScale: cappedPixelRatioScale(devicePixelRatio) * factor,
       marchStepScale: quality?.marchStepScale ?? marchStepScaleFor(renderScale),
       bands: quality?.bands ?? 1,
+      gesture: performance.now() - this.lastGestureAt < GESTURE_HOLD_MS,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
     };
