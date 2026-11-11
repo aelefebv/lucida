@@ -1,5 +1,6 @@
 //! How the two views of a layout follow each other. Pan, zoom, 3D
-//! orientation, the depth a slice view cuts and the timepoint link one by
+//! orientation, the depth a slice view cuts, the timepoint, and each
+//! channel's contrast and colormap ([`super::channel_links`]) link one by
 //! one. A linked property follows the steered view to the same value, a
 //! relative one keeps the offset it had when it was linked, and one that is
 //! off stays put.
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use lucida_content::{DatasetId, SpatialAxis};
 
 use super::Scene;
+use super::channel_links::ChannelPair;
 use super::link_notices::ViewLinkNotices;
 use crate::camera::{Camera, Framing};
 use crate::command::{Command, ViewportCommand};
@@ -30,19 +32,32 @@ pub enum LinkProperty {
     Orientation,
     Z,
     T,
+    /// Each channel's contrast window, between the channels that pair.
+    Contrast,
+    /// Each channel's colormap, between the channels that pair. Linked or
+    /// off: there is no offset between two colormaps to keep.
+    Colormap,
 }
 
 impl LinkProperty {
-    pub const ALL: [LinkProperty; 5] = [
+    pub const ALL: [LinkProperty; 7] = [
         LinkProperty::Pan,
         LinkProperty::Zoom,
         LinkProperty::Orientation,
         LinkProperty::Z,
         LinkProperty::T,
+        LinkProperty::Contrast,
+        LinkProperty::Colormap,
     ];
 
     fn index(self) -> usize {
         self as usize
+    }
+
+    /// Whether it links a setting of each dataset's channels rather than
+    /// something of the view.
+    fn is_channel(self) -> bool {
+        matches!(self, LinkProperty::Contrast | LinkProperty::Colormap)
     }
 }
 
@@ -54,6 +69,8 @@ impl std::fmt::Display for LinkProperty {
             LinkProperty::Orientation => "orientation",
             LinkProperty::Z => "z",
             LinkProperty::T => "t",
+            LinkProperty::Contrast => "contrast",
+            LinkProperty::Colormap => "colormap",
         })
     }
 }
@@ -100,6 +117,9 @@ pub enum Unlinkable {
     /// one plane or two orbit cameras, orientation two orbit cameras, and
     /// depth two slice views of one plane.
     Cameras,
+    /// Both views show one dataset, so its channels share one setting
+    /// already.
+    Shared,
 }
 
 /// Why two datasets compared in their own samples link by default: the
@@ -134,6 +154,11 @@ pub struct LinksState {
     pub properties: Vec<PropertyLink>,
     /// Where the links take each view past what it shows.
     pub notices: Vec<ViewLinkNotices>,
+    /// Which channel of the second view's dataset follows which of the
+    /// first's, for the channel links. Empty while a view shows nothing, or
+    /// when both show one dataset.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelPair>,
 }
 
 /// The views' links: each property's mode, and what a relative one keeps.
@@ -143,13 +168,16 @@ pub struct LinksState {
 pub(crate) struct ViewLinks {
     /// The dataset the first and the second view each link by.
     references: [Option<DatasetId>; 2],
-    modes: [LinkMode; 5],
-    offsets: [Option<Offset>; 5],
+    modes: [LinkMode; 7],
+    offsets: [Option<Offset>; 7],
+    /// What a relative contrast keeps for each pair, by the first channel:
+    /// the second's window against the first's, `[min, max]`.
+    contrast_offsets: Vec<(u32, [f64; 2])>,
 }
 
 impl ViewLinks {
     /// The datasets the views link by, once each shows one.
-    fn pair(&self) -> Option<[DatasetId; 2]> {
+    pub(super) fn pair(&self) -> Option<[DatasetId; 2]> {
         match &self.references {
             [Some(first), Some(second)] => Some([first.clone(), second.clone()]),
             _ => None,
@@ -383,12 +411,15 @@ fn set_link_value(view: &mut View, value: LinkValue) {
 pub(crate) struct Followed {
     pub camera: bool,
     pub axes: bool,
+    /// A channel's display settings, as a channel link carries them.
+    pub settings: bool,
 }
 
 impl Followed {
     fn add(&mut self, other: Followed) {
         self.camera |= other.camera;
         self.axes |= other.axes;
+        self.settings |= other.settings;
     }
 }
 
@@ -409,6 +440,7 @@ impl Scene {
         Some(LinksState {
             basis,
             alike: pair
+                .clone()
                 .filter(|_| basis == Some(LinkBasis::Voxel))
                 .and_then(|pair| self.alike(&pair)),
             properties,
@@ -419,6 +451,10 @@ impl Scene {
                     notices: self.link_notices(view),
                 })
                 .collect(),
+            channels: pair
+                .filter(|[first, second]| first != second)
+                .map(|pair| self.channel_pairs(&pair))
+                .unwrap_or_default(),
         })
     }
 
@@ -429,12 +465,20 @@ impl Scene {
         let Some(views) = self.linked_views() else {
             return;
         };
-        if self.unlinkable(property, views) == Some(Unlinkable::Empty) {
+        if matches!(
+            self.unlinkable(property, views),
+            Some(Unlinkable::Empty | Unlinkable::Shared)
+        ) || (property == LinkProperty::Colormap && mode == LinkMode::Relative)
+        {
             return;
         }
         self.links.modes[property.index()] = mode;
         self.links.offsets[property.index()] = None;
-        self.settle_link(property, self.active);
+        // A channel link set by hand brings the other dataset's channels to
+        // the active view's at once, which is a change of display settings.
+        if self.settle_link(property, self.active).settings {
+            self.epochs.selection += 1;
+        }
     }
 
     /// Take the defaults when the views link by a new pair of datasets: a
@@ -461,8 +505,9 @@ impl Scene {
         });
         self.links = ViewLinks {
             references,
-            modes: [LinkMode::Off; 5],
-            offsets: [None; 5],
+            modes: [LinkMode::Off; 7],
+            offsets: [None; 7],
+            contrast_offsets: Vec::new(),
         };
         self.epochs.links += 1;
         let (Some(views), Some(pair)) = (self.linked_views(), self.links.pair()) else {
@@ -583,7 +628,15 @@ impl Scene {
         }
     }
 
-    fn default_link_modes(&self, pair: &[DatasetId; 2]) -> [LinkMode; 5] {
+    fn default_link_modes(&self, pair: &[DatasetId; 2]) -> [LinkMode; 7] {
+        // The channel links, last, stay off until someone links them: two
+        // datasets' values rarely mean one thing.
+        let mut modes = [LinkMode::Off; 7];
+        modes[..5].copy_from_slice(&self.default_view_link_modes(pair));
+        modes
+    }
+
+    fn default_view_link_modes(&self, pair: &[DatasetId; 2]) -> [LinkMode; 5] {
         use LinkMode::*;
         let [first, second] = pair;
         // Pan, zoom, orientation, Z, T, as `LinkProperty::ALL` orders them.
@@ -635,8 +688,9 @@ impl Scene {
         property: LinkProperty,
         [first, second]: [ViewId; 2],
     ) -> Option<Unlinkable> {
-        if self.links.pair().is_none() {
-            return Some(Unlinkable::Empty);
+        let pair = self.links.pair()?;
+        if property.is_channel() {
+            return (pair[0] == pair[1]).then_some(Unlinkable::Shared);
         }
         match (
             self.view_value(first, property),
@@ -651,6 +705,15 @@ impl Scene {
     /// keeps their offset, and a linked one brings the other view to
     /// `leader`.
     fn settle_link(&mut self, property: LinkProperty, leader: ViewId) -> Followed {
+        if property.is_channel() {
+            let changed = self
+                .link_reference(leader)
+                .is_some_and(|dataset| self.settle_channel_link(property, dataset));
+            return Followed {
+                settings: changed,
+                ..Followed::default()
+            };
+        }
         match self.links.modes[property.index()] {
             LinkMode::Off => Followed::default(),
             LinkMode::Relative => {
@@ -728,12 +791,30 @@ impl Scene {
         let followed = Followed {
             camera: view.camera != camera,
             axes: view.axes != axes,
+            settings: false,
         };
         // A view moved to follow another is placed, as one steered is.
         if followed.camera && view.camera.framing() == Framing::Framed {
             view.camera.set_framing(Framing::Placed);
         }
         followed
+    }
+
+    pub(super) fn link_mode(&self, property: LinkProperty) -> LinkMode {
+        self.links.modes[property.index()]
+    }
+
+    /// What a relative contrast keeps for the pair whose first channel is
+    /// `first`: the second's window against the first's.
+    pub(super) fn contrast_offset(&self, first: u32) -> Option<[f64; 2]> {
+        let kept = &self.links.contrast_offsets;
+        kept.iter()
+            .find(|(channel, _)| *channel == first)
+            .map(|(_, offset)| *offset)
+    }
+
+    pub(super) fn set_contrast_offsets(&mut self, offsets: Vec<(u32, [f64; 2])>) {
+        self.links.contrast_offsets = offsets;
     }
 
     /// Whether `property` links the views as they stand: its mode isn't
@@ -945,6 +1026,8 @@ mod tests {
                 (Orientation, Linked, Some(Unlinkable::Cameras)),
                 (Z, Linked, None),
                 (T, Linked, None),
+                (Contrast, Off, None),
+                (Colormap, Off, None),
             ]
         );
     }
@@ -1164,7 +1247,10 @@ mod tests {
         side_by_side(&mut scene, "far");
         let [first, second] = views(&scene);
         let shown: Vec<LinkMode> = modes(&scene).into_iter().map(|(_, m, _)| m).collect();
-        assert_eq!(shown, vec![Relative, Linked, Linked, Relative, Off]);
+        assert_eq!(
+            shown,
+            vec![Relative, Linked, Linked, Relative, Off, Off, Off]
+        );
         let (center, _) = slice(&scene, second);
         assert!(
             center[0] > 500.0,
@@ -1202,7 +1288,9 @@ mod tests {
                 Some(Unlinkable::Cameras),
                 Some(Unlinkable::Cameras),
                 Some(Unlinkable::Cameras),
-                None
+                None,
+                None,
+                None,
             ]
         );
         let orbit_before = orbit(&scene, second);
@@ -1313,7 +1401,14 @@ mod tests {
         assert_eq!(links.basis, Some(LinkBasis::Voxel));
         assert_eq!(links.alike, Some(Alike::SameDataset));
         let shown: Vec<LinkMode> = modes(&scene).into_iter().map(|(_, m, _)| m).collect();
-        assert_eq!(shown, vec![Linked; 5]);
+        assert_eq!(
+            shown,
+            vec![Linked, Linked, Linked, Linked, Linked, Off, Off]
+        );
+        // Its channels share one setting already, so they can't link.
+        assert_eq!(modes(&scene)[5].2, Some(Unlinkable::Shared));
+        link(&mut scene, LinkProperty::Contrast, Linked);
+        assert_eq!(modes(&scene)[5].1, Off);
     }
 
     #[test]
