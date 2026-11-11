@@ -8,7 +8,6 @@ import {
   setAsideNote,
   type ComparisonScene,
 } from "./comparison.ts";
-import { resolvedLayer, resolvedLayers } from "./resolvedLayerFixtures.ts";
 import { clipVolumeLayers } from "./volumePath.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 
@@ -53,14 +52,10 @@ describe("where a compared dataset shows", () => {
 });
 
 describe("what the compare bar says of the layers set aside", () => {
-  it("counts the layers outside the pair that would otherwise draw", () => {
-    const pair = [resolvedLayer("a"), resolvedLayer("b")];
-    const aside = (id: string) => resolvedLayer(id, [0], { visible: false, set_aside: true });
-    // A layer hidden by its own setting was hidden already.
-    const hidden = resolvedLayer("hidden", [0], { visible: false });
-    expect(setAsideNote(resolvedLayers(...pair, hidden))).toBeNull();
-    expect(setAsideNote(resolvedLayers(...pair, aside("c"), hidden))).toBe("1 other layer hidden while comparing");
-    expect(setAsideNote(resolvedLayers(...pair, aside("c"), aside("d")))).toBe("2 other layers hidden while comparing");
+  it("counts them, and says nothing when there are none", () => {
+    expect(setAsideNote([])).toBeNull();
+    expect(setAsideNote(["c"])).toBe("1 other layer hidden while comparing");
+    expect(setAsideNote(["c", "d"])).toBe("2 other layers hidden while comparing");
   });
 });
 

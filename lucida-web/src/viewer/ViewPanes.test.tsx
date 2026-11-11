@@ -13,10 +13,10 @@ import { coverageMessage, withheldMessage } from "./withheld.ts";
 afterEach(cleanup);
 
 const LEFT: ViewPane = {
-  id: 0, shows: "all", draws: ["a"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, withheld: [],
+  id: 0, shows: "all", draws: ["a"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, withheld: [], setAside: [],
 };
 const RIGHT: ViewPane = {
-  id: 3, shows: [], draws: [], rect: [0.5, 0, 0.5, 1], cameraMode: "arcball", active: false, withheld: [],
+  id: 3, shows: [], draws: [], rect: [0.5, 0, 0.5, 1], cameraMode: "arcball", active: false, withheld: [], setAside: [],
 };
 
 function panes(views: ViewPane[], maximized: number | null = null) {

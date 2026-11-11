@@ -8,13 +8,19 @@ import type { ViewPane, WithheldDataset } from "../sceneStore.ts";
 import { coverageMessage, withheldMessage } from "./withheld.ts";
 import "./WithheldNotice.css";
 
+/** How much of what a view asks for fit in the memory the views share. */
+export interface Coverage {
+  wanted: number;
+  short: number;
+}
+
 interface Props {
   withheld: readonly WithheldDataset[];
   views: readonly ViewPane[];
   /** A dataset's name, as the layer panel shows it. */
   nameOf(datasetId: string): string;
   /** With several views, how much of what the view asks for fit in the memory they share. */
-  coverage?: { wanted: number; short: number };
+  coverage?: Coverage;
 }
 
 export function WithheldNotice({ withheld, views, nameOf, coverage }: Props) {

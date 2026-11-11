@@ -12,7 +12,8 @@ function fakeScene() {
     views: [0],
     active: 0,
     withheld: "[]",
-    comparison: null as unknown,
+    comparisons: {} as Record<number, unknown>,
+    setAside: [] as string[],
     links: null as unknown,
     epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0, comparison: 0, links: 0 },
   };
@@ -28,11 +29,12 @@ function fakeScene() {
     view_rect: (id: number) => (state.views.length === 1 ? [0, 0, 1, 1] : [state.views.indexOf(id) / 2, 0, 0.5, 1]),
     view_camera_mode: () => state.mode,
     withheld: (id: number) => (id === state.active ? "[]" : state.withheld),
+    set_aside: () => JSON.stringify(state.setAside),
     slice_plane: () => "xy",
     cut_index: () => state.z,
     resolved_layers: () => JSON.stringify(state.layers),
     camera_mode: () => state.mode,
-    comparison: () => JSON.stringify(state.comparison),
+    view_comparison: (id: number) => JSON.stringify(state.comparisons[id] ?? null),
     view_links: () => JSON.stringify(state.links),
     epochs: () => JSON.stringify(state.epochs),
   } as unknown as WasmScene;
@@ -94,23 +96,40 @@ describe("SceneStore", () => {
     expect(store.getView()).toBe(before);
   });
 
-  it("reads the comparison apart from the view, so a divider drag keeps the view's identity", () => {
+  it("reads each view's comparison apart from the view, so a divider drag keeps the view's identity", () => {
     const { scene, state } = fakeScene();
     const store = new SceneStore(() => scene);
     store.subscribe(() => {});
     const view = store.getView();
-    expect(store.getComparison()).toBeNull();
+    expect(store.getComparisons().size).toBe(0);
 
-    state.comparison = { a: "a", b: "b", mode: "swipe", divider: 0.4, showing: "a" };
+    state.comparisons[0] = { a: "a", b: "b", mode: "swipe", divider: 0.4, showing: "a" };
     state.epochs.comparison++;
     noteSceneWrite();
 
-    expect(store.getComparison()).toMatchObject({ divider: 0.4 });
+    expect(store.getComparisons().get(0)).toMatchObject({ divider: 0.4 });
     expect(store.getView()).toBe(view);
-    const comparison = store.getComparison();
+    const comparisons = store.getComparisons();
     state.epochs.view++;
     noteSceneWrite();
-    expect(store.getComparison()).toBe(comparison);
+    expect(store.getComparisons()).toBe(comparisons);
+
+    // A view that comes onto the canvas brings its comparison, which moved no epoch.
+    state.comparisons[1] = { a: "a", b: "b", mode: "blink", divider: 0.5, showing: "b" };
+    state.views = [0, 1];
+    state.epochs.layout++;
+    noteSceneWrite();
+    expect([...store.getComparisons().keys()]).toEqual([0, 1]);
+  });
+
+  it("says which layers each view's comparison sets aside", () => {
+    const { scene, state } = fakeScene();
+    const store = new SceneStore(() => scene);
+    store.subscribe(() => {});
+    state.setAside = ["c"];
+    state.epochs.selection++;
+    noteSceneWrite();
+    expect(store.getView().views[0].setAside).toEqual(["c"]);
   });
 
   it("reads the links when they change, and keeps them while nothing in them changed", () => {

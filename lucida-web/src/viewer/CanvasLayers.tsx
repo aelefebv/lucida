@@ -4,7 +4,7 @@
  * overlays. The view mode and selectors come from the scene store; the engine
  * supplies the scene, client, canvas, loop, and session.
  */
-import { lazy, Suspense, useCallback, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { viewSettleSignal } from "../pipeline/viewSettle.ts";
 import { AnnotationDraftOverlay } from "../components/AnnotationDraftOverlay.tsx";
 import { AnnotationOverlay } from "../components/AnnotationOverlay.tsx";
@@ -29,7 +29,8 @@ import type { DatasetState } from "../types.ts";
 import { useEngineParts } from "./engineParts.ts";
 import { useViewerLoop } from "./useViewerLoop.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
-import { WithheldNotice } from "./WithheldNotice.tsx";
+import { ViewOverlays } from "./ViewOverlays.tsx";
+import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
 import type { UserTransformActions } from "../hooks/useUserTransforms.ts";
@@ -111,6 +112,7 @@ export function CanvasLayers({
     readoutRef.current?.pressAt(at);
   }, [overlay3dRef]);
   const onViewportChanged = useCallback(() => requestRender(engine.loop(), "annotation_viewport"), [engine]);
+  const comparison = useMemo(() => comparisonActions(engine.scene, engine.loop), [engine]);
 
   // The viewers take the live session, scene, and canvas as values. The
   // states above re-render this when any of them arrives.
@@ -253,12 +255,6 @@ export function CanvasLayers({
             surface={surface}
           />
         )}
-        <WithheldNotice
-          withheld={pane.withheld}
-          views={views}
-          nameOf={nameOf}
-          coverage={settles.find((settle) => settle.view === pane.id)}
-        />
       </>
     );
   };
@@ -267,6 +263,17 @@ export function CanvasLayers({
       <ViewPanes views={views} maximized={maximized} actions={viewLayout} rootRef={setPanesRoot}>
         {paneContent}
       </ViewPanes>
+      {hasDatasets && (
+        <ViewOverlays
+          views={views}
+          store={engine.store}
+          actions={comparison}
+          nameOf={nameOf}
+          activate={viewLayout.activate}
+          coverageOf={(view) => settles.find((settle) => settle.view === view)}
+          byHand={(a, b) => (wasmScene ? placedByHandNote(readLineUpByHand(wasmScene, a, b), nameOf) : null)}
+        />
+      )}
       {viewers && panesRoot && (
         <PixelReadout
           ref={readoutRef}

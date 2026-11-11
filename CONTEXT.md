@@ -292,8 +292,9 @@ The view whose form one kind of a dataset's GPU pools holds: its slice pools
 hold one slice cut and its volume pools the whole volume, each at one
 timepoint. The two kinds are held at once, so a 2D and a 3D view of a dataset
 both draw it. The first view to draw a dataset from one kind holds it until
-it stops. Another view drawing from the same kind draws the dataset only
-while it wants the same form, and otherwise leaves it out and says why.
+it stops, or sets the dataset aside in a comparison. Another view drawing from
+the same kind draws the dataset only while it wants the same form, and
+otherwise leaves it out and says why.
 
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on

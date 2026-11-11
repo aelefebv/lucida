@@ -7,8 +7,6 @@ import {
 } from "@phosphor-icons/react";
 import { LayerPanel, type LayerViewPlacement } from "./components/LayerPanel.tsx";
 import { useSceneView } from "./hooks/useSceneView.ts";
-import { ComparisonBar, SwipeDivider } from "./components/Comparison.tsx";
-import { setAsideNote } from "./comparison.ts";
 import { Minimap } from "./components/Minimap.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { sceneClipDepth } from "./components/clipDepth.ts";
@@ -1164,15 +1162,6 @@ function Viewer({
                       {datasetStatus}
                     </Banner>
                   )}
-                  {hasData && (
-                    <ComparisonBar
-                      comparison={comparison.current}
-                      actions={comparison.actions}
-                      nameOf={comparison.nameOf}
-                      setAside={setAsideNote(dims.layers)}
-                      byHand={comparison.current && comparison.byHand(comparison.current.a, comparison.current.b)}
-                    />
-                  )}
                   {/* `#a=<id>` didn't resolve. A recipient without access fails
                       at the gate first, so this never confirms the annotation
                       existed. */}
@@ -1250,7 +1239,6 @@ function Viewer({
               viewLayout={viewLayout}
               userTransforms={userTransforms}
             />
-            <SwipeDivider comparison={comparison.current} actions={comparison.actions} nameOf={comparison.nameOf} />
           </CanvasStage>
           {developer.monitor && (
             // The dock overlays the canvas rather than resizing it, so opening

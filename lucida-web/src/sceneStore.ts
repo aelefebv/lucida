@@ -14,7 +14,7 @@
  * the selectors.
  */
 import type { WasmScene } from "lucida-core";
-import { readComparison, type Comparison } from "./comparison.ts";
+import { readViewComparison, type Comparison } from "./comparison.ts";
 import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { ViewMode } from "./types.ts";
 import type { SlicePlane } from "./renderer/slicePlane.ts";
@@ -50,6 +50,8 @@ export interface ViewPane {
   /** Whether commands steer it. */
   readonly active: boolean;
   readonly withheld: readonly WithheldDataset[];
+  /** The layers its comparison sets aside, in layer order. */
+  readonly setAside: readonly string[];
 }
 
 export interface SceneView {
@@ -95,11 +97,13 @@ const NO_SCENE_VIEW: SceneView = {
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
-  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, withheld: [] }],
+  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, withheld: [], setAside: [] }],
   layout: "single",
   maximized: null,
   links: null,
 };
+
+const NO_COMPARISONS: ReadonlyMap<number, Comparison> = new Map();
 
 /** The raw `resolved_layers()` answer each snapshot was parsed from, so an
  *  unchanged answer keeps the snapshot's identity. */
@@ -117,7 +121,7 @@ export class SceneStore {
   private scene: WasmScene | null = null;
   private epochs: ViewEpochs | null = null;
   private view: SceneView = NO_SCENE_VIEW;
-  private comparison: Comparison | null = null;
+  private comparisons: ReadonlyMap<number, Comparison> = NO_COMPARISONS;
   private readonly listeners = new Set<() => void>();
   private readonly getScene: () => WasmScene | null;
 
@@ -142,9 +146,9 @@ export class SceneStore {
    *  only when one of them does. */
   getView = (): SceneView => this.view;
 
-  /** The comparison the view shows, apart from the view so that a divider
-   *  drag re-renders only what draws the comparison. */
-  getComparison = (): Comparison | null => this.comparison;
+  /** The comparison each view on the canvas shows, by view id, apart from
+   *  the view so that a divider drag re-renders only what draws a comparison. */
+  getComparisons = (): ReadonlyMap<number, Comparison> => this.comparisons;
 
   /** The epochs as last read, or null without a scene. A new object each
    *  time one of them moves. */
@@ -164,8 +168,12 @@ export class SceneStore {
     this.scene = scene;
     this.epochs = epochs;
     const view = scene ? readView(scene, layersJson, this.view) : NO_SCENE_VIEW;
+    // A view that leaves the canvas or comes back takes its comparison with it.
+    const viewsMoved = view.views !== this.view.views;
     if (!sameView(view, this.view)) this.view = view;
-    if (comparisonMoved) this.comparison = scene ? readComparison(scene) : null;
+    if (comparisonMoved || viewsMoved) {
+      this.comparisons = scene ? readComparisons(scene, this.view.views) : NO_COMPARISONS;
+    }
     for (const listener of [...this.listeners]) listener();
   };
 }
@@ -239,6 +247,7 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
       cameraMode: (scene.view_camera_mode(id) || "slice") as CameraMode,
       active: id === active,
       withheld: JSON.parse(scene.withheld(id)) as WithheldDataset[],
+      setAside: JSON.parse(scene.set_aside(id)) as string[],
     };
   });
   return JSON.stringify(views) === JSON.stringify(previous) ? previous : views;
@@ -249,6 +258,16 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
 function readLinks(scene: WasmScene, previous: ViewLinks | null): ViewLinks | null {
   const links = readViewLinks(scene);
   return JSON.stringify(links) === JSON.stringify(previous) ? previous : links;
+}
+
+/** The comparison of each of `views` that shows one. */
+function readComparisons(scene: WasmScene, views: readonly ViewPane[]): ReadonlyMap<number, Comparison> {
+  const comparisons = new Map<number, Comparison>();
+  for (const view of views) {
+    const comparison = readViewComparison(scene, view.id);
+    if (comparison) comparisons.set(view.id, comparison);
+  }
+  return comparisons.size > 0 ? comparisons : NO_COMPARISONS;
 }
 
 function sameView(a: SceneView, b: SceneView): boolean {

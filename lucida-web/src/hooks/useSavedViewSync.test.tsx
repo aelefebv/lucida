@@ -52,6 +52,8 @@ interface MockScene {
   view_rect: () => number[];
   view_camera_mode: () => string;
   withheld: () => string;
+  set_aside: () => string;
+  view_comparison: () => string;
   slice_plane: () => string;
   cut_index: () => number;
   camera_mode: () => string;
@@ -94,6 +96,8 @@ function makeMockScene(): MockScene {
     view_rect: () => [0, 0, 1, 1],
     view_camera_mode: () => m.cameraModeVal,
     withheld: () => "[]",
+    set_aside: () => "[]",
+    view_comparison: () => "null",
     slice_plane: () => "xy",
     cut_index: () => m.zVal,
     camera_mode: () => m.cameraModeVal,
