@@ -80,6 +80,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
     cut_extent: () => (state.plane === "xy" ? depth : 1),
     t: () => state.t,
     slice_plane: () => state.plane,
+    transposed: () => false,
     cut_index: () => (state.plane === "xy" ? state.z : state.y),
     cut_reading: () => JSON.stringify({ position: state.z, count: depth, place: state.z + 0.5 }),
     camera_mode: () => "slice",

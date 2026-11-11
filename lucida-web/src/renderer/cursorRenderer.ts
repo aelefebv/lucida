@@ -126,6 +126,7 @@ export class CursorRenderer {
     zoom: number, cx: number, cy: number,
     canvasW: number, canvasH: number,
     timing?: PassTiming,
+    transposed = false,
   ): void {
     if (this.cursorCount === 0) return;
     const pipeline = requireCompiled(this.pipeline2D, "cursor renderer");
@@ -142,6 +143,7 @@ export class CursorRenderer {
     uniforms[23] = 0; // mode = 2D
     uniforms[24] = 1.0; // opacity_scale
     uniforms[25] = 6.0; // ray_width (unused)
+    uniforms[26] = transposed ? 1 : 0; // the plane drawn transposed
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
 
     const pass = encoder.beginRenderPass({

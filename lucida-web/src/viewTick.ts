@@ -119,7 +119,7 @@ export class ViewRedraws {
 function poseOf(ctx: TickContext, view: TickView): string {
   const { scene } = ctx;
   const camera = view.mode === "slice"
-    ? `${scene.zoom(view.id)}|${scene.center(view.id)}|${scene.slice_plane(view.id)}`
+    ? `${scene.zoom(view.id)}|${scene.center(view.id)}|${scene.slice_plane(view.id)}|${scene.transposed(view.id)}`
     : `${scene.inv_view_proj(view.id)}|${scene.clip_distance(view.id)}|${scene.clip_mode(view.id)}`;
   return `${view.mode}|${view.rect}|${ctx.renderScale}|${ctx.resolutionScale}|${camera}`;
 }

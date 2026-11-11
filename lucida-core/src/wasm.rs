@@ -629,6 +629,12 @@ impl WasmScene {
             .count
     }
 
+    /// Whether `view`'s slice camera draws its plane transposed, the plane's
+    /// down axis across the screen. Its center stays in the plane's frame.
+    pub fn transposed(&self, view: u32) -> bool {
+        matches!(self.camera_in(view), Some(Camera::Slice(slice)) if slice.transposed)
+    }
+
     pub fn zoom(&self, view: u32) -> f64 {
         self.camera_in(view).map_or(1.0, Camera::effective_zoom)
     }

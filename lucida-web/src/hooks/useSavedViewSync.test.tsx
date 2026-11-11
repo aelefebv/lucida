@@ -56,6 +56,7 @@ interface MockScene {
   set_aside: () => string;
   view_comparison: () => string;
   slice_plane: () => string;
+  transposed: () => boolean;
   cut_index: () => number;
   cut_reading: () => string;
   camera_mode: () => string;
@@ -102,6 +103,7 @@ function makeMockScene(): MockScene {
     set_aside: () => "[]",
     view_comparison: () => "null",
     slice_plane: () => "xy",
+    transposed: () => false,
     cut_index: () => m.zVal,
     cut_reading: () => JSON.stringify({ position: m.zVal, count: 1, place: m.zVal + 0.5 }),
     camera_mode: () => m.cameraModeVal,

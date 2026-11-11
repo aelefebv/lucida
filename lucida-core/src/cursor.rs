@@ -354,8 +354,7 @@ pub fn compute_peer_cursors(
                 }
 
                 if let Camera::Slice(v) = &local.camera {
-                    let sx = (cursor[0] - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
-                    let sy = (cursor[1] - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
+                    let [sx, sy] = v.to_screen([cursor[0], cursor[1]]);
                     output.labels.push(LabelOutput {
                         id: peer.id,
                         sx,
@@ -509,8 +508,7 @@ pub fn compute_peer_cursors(
 
                 // Always emit label so JS can show edge indicator
                 if let Camera::Slice(v) = &local.camera {
-                    let sx = (x_voxel - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
-                    let sy = (y_voxel - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
+                    let [sx, sy] = v.to_screen([x_voxel, y_voxel]);
                     output.labels.push(LabelOutput {
                         id: peer.id,
                         sx,

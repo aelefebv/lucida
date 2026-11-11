@@ -263,6 +263,7 @@ describe("input on the minimap", () => {
       camera_mode: () => "slice",
       active_view: () => 0,
       slice_plane: () => "xy",
+      transposed: () => false,
       center: () => state.center,
       zoom: () => 1,
       apply_command: (json: string) => {

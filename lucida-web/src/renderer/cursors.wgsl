@@ -6,7 +6,7 @@ struct Uniforms {
   view_proj: mat4x4f,  // 3D camera (64 bytes, offset 0)
   params: vec4f,       // x=canvas_w, y=canvas_h, z=arm_length, w=line_width (offset 64)
   camera_2d: vec4f,    // x=zoom, y=center_x, z=center_y, w=mode (0=2d,1=3d) (offset 80)
-  extra: vec4f,        // x=opacity_scale, y=ray_width (offset 96)
+  extra: vec4f,        // x=opacity_scale, y=ray_width, z=transposed (offset 96)
 };
 
 struct CursorInstance {
@@ -42,8 +42,12 @@ fn crosshair_vertex(cursor: CursorInstance, vid: u32) -> vec4f {
   let arm = u.params.z;
   let lw = u.params.w;
 
-  let base_x = (cursor.position.x - cx) * zoom * 2.0 / cw;
-  let base_y = -(cursor.position.y - cy) * zoom * 2.0 / ch;
+  // A transposed view draws the plane's down axis across the screen. Its
+  // center arrives turned already; the cursor, in the plane's frame, turns here.
+  let transposed = u.extra.z > 0.5;
+  let along = select(cursor.position.xy, cursor.position.yx, transposed) - vec2f(cx, cy);
+  let base_x = along.x * zoom * 2.0 / cw;
+  let base_y = -along.y * zoom * 2.0 / ch;
 
   let px = 2.0 / cw;
   let py = 2.0 / ch;

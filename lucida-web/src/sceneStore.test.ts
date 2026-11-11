@@ -31,6 +31,7 @@ function fakeScene() {
     view_camera_mode: () => state.mode,
     set_aside: () => JSON.stringify(state.setAside),
     slice_plane: () => "xy",
+    transposed: () => false,
     cut_index: () => state.z,
     cut_reading: () => JSON.stringify({ position: state.z, count: 1, place: state.z + 0.5, ...state.place }),
     resolved_layers: () => JSON.stringify(state.layers),

@@ -856,6 +856,7 @@ fn slice_camera() -> Camera {
         viewport: [1920, 1080],
         framing: lucida_core::camera::Framing::Placed,
         plane: lucida_core::slice_plane::SlicePlane::Xy,
+        transposed: false,
     })
 }
 
