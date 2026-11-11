@@ -650,8 +650,8 @@ describe("the trace seam", () => {
         calls.push(["blink", withUrl]);
         return Promise.resolve({ applied: true, reason: null });
       },
-      views: (layout, show) => {
-        calls.push(["views", layout, show]);
+      views: (layout, show, keep) => {
+        calls.push(["views", layout, show, keep]);
         return Promise.resolve({ applied: true, reason: null });
       },
     });

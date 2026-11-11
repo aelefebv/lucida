@@ -115,6 +115,20 @@ describe("a plan for several views", () => {
     expect(keys(both.requests)).toEqual([...keys(near.requests), ...keys(far.requests)].sort());
   });
 
+  it("keeps what each view asks for of its own, for its coverage", () => {
+    const near = plan(createSyntheticSnapshot({ views: [viewAt(0, 10)] }), createSyntheticState(), noPrefetch);
+    const both = plan(
+      createSyntheticSnapshot({ views: [viewAt(0, 10), viewAt(1, 80)] }),
+      createSyntheticState(),
+      noPrefetch,
+    );
+    const own = (requests: readonly ChunkRequest[]) => keys(requests.filter((req) => req.lane !== "minimap"));
+    expect(own(both.byView!.get(0)!)).toEqual(own(near.requests));
+    expect(both.byView!.get(1)!.length).toBeGreaterThan(0);
+    // One view's plan is the view's own.
+    expect(near.byView).toBeUndefined();
+  });
+
   it("holds every view's detail levels in one active set, finest first", () => {
     const { activeSet, nextState } = plan(
       createSyntheticSnapshot({ views: [viewAt(0, 40, 1), viewAt(1, 40, 0)] }),

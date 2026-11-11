@@ -8,7 +8,7 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import type { ViewPane } from "../sceneStore.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
 import { DATASET_DRAG_TYPE, isViewPane } from "./viewPane.ts";
-import { withheldMessage } from "./withheld.ts";
+import { coverageMessage, withheldMessage } from "./withheld.ts";
 
 afterEach(cleanup);
 
@@ -88,6 +88,14 @@ describe("with several views", () => {
     expect(actions.move).toHaveBeenCalledWith(3, "b");
     expect(rendered.getByText("Drag a layer here").parentElement).toBe(pane(3));
     expect(pane(0).textContent).not.toContain("Drag a layer here");
+  });
+});
+
+describe("a view that covers less", () => {
+  it("says how much of what it needs the shared memory left out", () => {
+    expect(coverageMessage(1200, 340)).toBe(
+      "This view shows less detail: 340 of the 1,200 chunks it needs don't fit in the memory the views share.",
+    );
   });
 });
 

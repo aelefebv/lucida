@@ -1,7 +1,8 @@
-/* At the view's top: the bottom of the stage holds the floating controls. */
+/* At the view's top: the bottom of the stage holds the floating controls,
+   and its top left the tool palette, which the left inset clears. */
 .lc-withheld-notice {
   position: absolute;
-  left: var(--lc-space-2);
+  left: calc(var(--lc-control-h) * 2 + var(--lc-space-4));
   right: var(--lc-space-2);
   top: var(--lc-space-2);
   display: flex;

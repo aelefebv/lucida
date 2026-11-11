@@ -214,6 +214,31 @@ describe("TraceRecorder run lifecycle", () => {
     }
   });
 
+  it("dates each view's settle and keeps its coverage, with several views", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.noteViewSettles([
+      { view: 0, settled: false, wanted: 4, short: 0 },
+      { view: 2, settled: false, wanted: 6, short: 2 },
+    ]);
+    advance(100);
+    recorder.noteViewSettles([
+      { view: 0, settled: true, wanted: 4, short: 0 },
+      { view: 2, settled: false, wanted: 6, short: 2 },
+    ]);
+    advance(200);
+    recorder.noteViewSettles([
+      { view: 0, settled: true, wanted: 4, short: 0 },
+      { view: 2, settled: true, wanted: 6, short: 2 },
+    ]);
+    recorder.closeRun("explicit");
+
+    expect(recorder.exportDocument().runs[0].header.views).toEqual([
+      { view: 0, settledAtUs: 100_000, wanted: 4, short: 0 },
+      { view: 2, settledAtUs: 300_000, wanted: 6, short: 2 },
+    ]);
+  });
+
   it("forgets the wanted set on input, which changes what the view wants", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);

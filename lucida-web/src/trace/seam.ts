@@ -353,7 +353,7 @@ export interface LucidaTraceSeam {
    * `"columns"` or `"rows"`, and move into each view, in order, the datasets
    * opened from the source URLs `show` lists for it.
    */
-  views(layout: string, show?: string[][]): Promise<StepOutcome>;
+  views(layout: string, show?: string[][], keep?: boolean): Promise<StepOutcome>;
   /**
    * Close the run in progress without exporting: the *Stop & analyse* path.
    *
@@ -543,7 +543,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       if (!controls) return noControls();
       return controls.blink(withUrl);
     },
-    views: async (layout: string, show: string[][] = []) => {
+    views: async (layout: string, show: string[][] = [], keep = false) => {
       const controls = scriptControls();
       if (!controls) return noControls();
       if (layout !== "single" && layout !== "columns" && layout !== "rows") {
@@ -551,7 +551,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       }
       const urls = Array.isArray(show) && show.every((urls) => Array.isArray(urls) && urls.every((url) => typeof url === "string"));
       if (!urls) return refused("a layout shows a list of source URLs for each view");
-      return controls.views(layout, show);
+      return controls.views(layout, show, keep === true);
     },
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),

@@ -452,6 +452,11 @@ export interface RunHeader extends RunConditions {
    */
   wantedSetMetAtUs?: number | null;
   /**
+   * With several views, each one's own settle and coverage, in layout order.
+   * Absent with one view, whose settle is the run's.
+   */
+  views?: RunViewSettle[];
+  /**
    * Every socket this interval spanned, oldest first. Empty before the page
    * has ever connected.
    */
@@ -1410,6 +1415,21 @@ export interface TraceCoverage {
   /** Run totals for the phases that are counted rather than timed, summed off the tick samples. */
   countedPhases: Record<CountedPhase, number>;
   limits: readonly CoverageLimit[];
+}
+
+/** One view's settle in a run with several views. */
+export interface RunViewSettle {
+  view: number;
+  /**
+   * Microseconds from run start at which every chunk admission let through
+   * for the view was held and on the GPU and nothing was left to draw, kept
+   * to the close. Null when it had not settled by the close.
+   */
+  settledAtUs: number | null;
+  /** Its own detail and coarse requests at the close. */
+  wanted: number;
+  /** Those admission left out for want of room: what the view covers less of. */
+  short: number;
 }
 
 export interface TraceRun {
