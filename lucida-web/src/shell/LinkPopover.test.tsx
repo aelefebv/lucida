@@ -25,13 +25,15 @@ const links: ViewLinks = {
   notices: [],
 };
 
-async function open(onChange = vi.fn(), shown: ViewLinks = links) {
-  render(<LinkPopover links={shown} onChange={onChange} />);
+async function open(onChange = vi.fn(), shown: ViewLinks = links, onChangeAll = vi.fn()) {
+  render(<LinkPopover links={shown} onChange={onChange} onChangeAll={onChangeAll} />);
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Link views" }));
   });
   return onChange;
 }
+
+const button = (name: string) => screen.getByRole("button", { name }) as HTMLButtonElement;
 
 const row = (property: string) => document.querySelector(`[data-link-property="${property}"]`) as HTMLElement;
 
@@ -108,6 +110,42 @@ describe("LinkPopover", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("links every property or none at once", async () => {
+    const onChangeAll = vi.fn();
+    await open(vi.fn(), links, onChangeAll);
+    await act(async () => {
+      fireEvent.click(button("Link all"));
+    });
+    expect(onChangeAll).toHaveBeenLastCalledWith("linked");
+    await act(async () => {
+      fireEvent.click(button("Unlink all"));
+    });
+    expect(onChangeAll).toHaveBeenLastCalledWith("off");
+  });
+
+  it("offers Link all only while a property the views can link isn't linked", async () => {
+    const linked: ViewLinks = {
+      ...links,
+      properties: links.properties.map((link) => (link.unlinkable ? link : { ...link, mode: "linked" })),
+    };
+    await open(vi.fn(), linked);
+    expect(button("Link all").disabled).toBe(true);
+    expect(button("Unlink all").disabled).toBe(false);
+  });
+
+  it("offers Unlink all only while a property it can set isn't off", async () => {
+    const off: ViewLinks = {
+      ...links,
+      properties: [
+        ...links.properties.map((link) => ({ ...link, mode: "off" as const })),
+        { property: "contrast", mode: "linked", unlinkable: "shared" },
+      ],
+    };
+    await open(vi.fn(), off);
+    expect(button("Unlink all").disabled).toBe(true);
+    expect(button("Link all").disabled).toBe(false);
+  });
+
   it("leaves the basis out while a view shows nothing", async () => {
     const empty: ViewLinks = {
       basis: null,
@@ -117,5 +155,7 @@ describe("LinkPopover", () => {
     await open(vi.fn(), empty);
     expect(screen.queryByText(/^In (samples|physical units)/)).toBeNull();
     expect(screen.getAllByText("Each view needs a layer to link.")).toHaveLength(5);
+    expect(button("Link all").disabled).toBe(true);
+    expect(button("Unlink all").disabled).toBe(true);
   });
 });

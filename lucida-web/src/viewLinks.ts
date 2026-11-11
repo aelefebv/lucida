@@ -88,6 +88,25 @@ export function isLinkMode(value: string): value is LinkMode {
   return Object.hasOwn(LINK_MODE_LABELS, value);
 }
 
+/** Whether a property's mode can be set now: not while a view shows nothing, or for channels one dataset shares. */
+export function isSettable(link: PropertyLink): boolean {
+  return link.unlinkable !== "empty" && link.unlinkable !== "shared";
+}
+
+/** What Link all and Unlink all set every property to. */
+export type EveryLinkMode = Extract<LinkMode, "linked" | "off">;
+
+/**
+ * The properties that setting every one to `mode` changes. Link all reaches
+ * the properties the two views can link as they stand and leaves one the
+ * cameras don't share in the mode it waits in; Unlink all turns off every
+ * one that can be set, waiting or not.
+ */
+export function everyLinkChanges(links: ViewLinks, mode: EveryLinkMode): LinkProperty[] {
+  const reaches = mode === "linked" ? (link: PropertyLink) => !link.unlinkable : isSettable;
+  return links.properties.filter((link) => link.mode !== mode && reaches(link)).map((link) => link.property);
+}
+
 /** Why `property` can't link now, as a sentence. */
 export function unlinkableReason(property: LinkProperty, unlinkable: Unlinkable): string {
   switch (unlinkable) {
