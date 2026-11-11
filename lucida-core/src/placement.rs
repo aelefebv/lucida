@@ -307,6 +307,16 @@ impl SceneFrame {
         }
     }
 
+    /// Where `place`, along axis `a` of this frame, lies in physical space,
+    /// in meters from the origin the dataset that fixed the frame declares
+    /// its place against, with the meters one unit of the frame measures.
+    /// `None` when that dataset declares no length units.
+    pub fn place_meters(&self, a: usize, place: f64) -> Option<(f64, f64)> {
+        let meters = self.reference.meters?;
+        let unit = self.reference.spacing[0] * meters[0];
+        Some((self.reference.origin[a] * meters[a] + place * unit, unit))
+    }
+
     /// The map from the frame of the dataset that fixed this one into it.
     pub fn place_reference(&self) -> Affine {
         self.place(&self.reference)

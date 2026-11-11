@@ -81,6 +81,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
     t: () => state.t,
     slice_plane: () => state.plane,
     cut_index: () => (state.plane === "xy" ? state.z : state.y),
+    cut_reading: () => JSON.stringify({ position: state.z, count: depth, place: state.z + 0.5 }),
     camera_mode: () => "slice",
   } as unknown as WasmScene;
   const loop = {

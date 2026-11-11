@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
+use lucida_content::SpatialAxis;
 use lucida_core::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::ViewportCommand;
 use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
-    BlendMode, ChannelSettings, Colormap, CutReach, DatasetDisplaySettings, DisplayState,
-    DocumentState, RenderMode, Scene, declared_channels,
+    AxisReading, BlendMode, ChannelSettings, Colormap, CutReach, DatasetDisplaySettings,
+    DisplayState, DocumentState, RenderMode, Scene, declared_channels,
 };
 use lucida_core::view::AxisPositions;
 use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
@@ -44,6 +45,8 @@ pub struct ViewApplyResult {
     pub command: ViewportCommand,
     pub camera: Camera,
     pub view: AxisPositions,
+    /// Where the view stands along the axis its slice plane cuts.
+    pub cut: AxisReading,
     pub display: DisplayState,
     #[serde(skip)]
     pub break_follow: bool,
@@ -126,6 +129,8 @@ pub struct ViewerProfileResult {
     pub command: Option<ViewportCommand>,
     pub camera: Camera,
     pub view: AxisPositions,
+    /// Where the view stands along the axis its slice plane cuts.
+    pub cut: AxisReading,
     pub display: DisplayState,
     pub layers: Vec<LayerState>,
 }
@@ -137,6 +142,8 @@ pub struct ViewerSourceResult {
     pub source: DiagnosticViewSource,
     pub camera: Camera,
     pub view: AxisPositions,
+    /// Where the view stands along the axis its slice plane cuts.
+    pub cut: AxisReading,
     pub display: DisplayState,
     pub layers: Vec<LayerState>,
     #[serde(skip)]
@@ -979,14 +986,15 @@ impl ViewerProfileClient {
 
 pub fn format_view_apply_human(output: &ViewApplyOutput) -> String {
     format!(
-        "Updated presence: {}\nWorkspace: {} ({})\nClient: {}\nSource: {}\nCamera: {}\nView: {}",
+        "Updated presence: {}\nWorkspace: {} ({})\nClient: {}\nSource: {}\nCamera: {}\nView: {}\nPosition: {}",
         viewport_command_label(&output.result.command),
         output.workspace.name,
         output.workspace.id,
         output.result.own_client_id,
         format_source(&output.result.source),
         format_camera(&output.result.camera),
-        format_view(&output.result.view)
+        format_view(&output.result.view),
+        format_reading(&output.result.cut)
     )
 }
 
@@ -1152,6 +1160,7 @@ pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
         format!("Updated: {}", output.result.updated_at),
         format!("Camera: {}", format_camera(&output.result.camera)),
         format!("View: {}", format_view(&output.result.view)),
+        format!("Position: {}", format_reading(&output.result.cut)),
     ];
     if output.result.layers.is_empty() {
         lines.push("No datasets loaded".to_string());
@@ -1175,6 +1184,7 @@ pub fn format_viewer_source_human(output: &ViewerSourceOutput) -> String {
         ),
         format!("Camera: {}", format_camera(&output.result.camera)),
         format!("View: {}", format_view(&output.result.view)),
+        format!("Position: {}", format_reading(&output.result.cut)),
     ];
     if output.result.layers.is_empty() {
         lines.push("No datasets loaded".to_string());
@@ -1289,6 +1299,7 @@ fn apply_presence_command(
         command,
         camera: scene.active_view().camera.clone(),
         view: scene.active_view().axes.clone(),
+        cut: scene.cut_reading(scene.active_view().id()),
         display: scene.display,
         break_follow: own_presence.following.is_some(),
     })
@@ -1980,6 +1991,7 @@ fn viewer_profile_result(
         command,
         camera: scene.active_view().camera.clone(),
         view: scene.active_view().axes.clone(),
+        cut: scene.cut_reading(scene.active_view().id()),
         display: scene.display,
         layers,
     }
@@ -1998,6 +2010,7 @@ fn viewer_source_result(
         source,
         camera: scene.active_view().camera.clone(),
         view: scene.active_view().axes.clone(),
+        cut: scene.cut_reading(scene.active_view().id()),
         display: scene.display,
         layers,
         saved_view,
@@ -2208,6 +2221,21 @@ fn format_camera(camera: &Camera) -> String {
             fly.viewport[0], fly.viewport[1], fly.position[0], fly.position[1], fly.position[2]
         ),
     }
+}
+
+/// A position as the viewer's scrubber reads it, counting from 1, with its
+/// physical coordinate when the scene measures one: `Z 4/40 at 1.0070 mm`.
+fn format_reading(reading: &AxisReading) -> String {
+    let axis = match reading.axis {
+        SpatialAxis::X => "X",
+        SpatialAxis::Y => "Y",
+        SpatialAxis::Z => "Z",
+    };
+    let mut text = format!("{axis} {}/{}", reading.position + 1, reading.count);
+    if let Some(length) = &reading.length {
+        text.push_str(&format!(" at {length}"));
+    }
+    text
 }
 
 fn format_view(view: &AxisPositions) -> String {
@@ -2562,6 +2590,14 @@ mod tests {
                     plane: lucida_core::slice_plane::SlicePlane::Xy,
                 }),
                 view: AxisPositions::new(),
+                cut: AxisReading {
+                    axis: SpatialAxis::Z,
+                    position: 3,
+                    count: 40,
+                    place: 7.0,
+                    length: Some("1.0070 mm".to_string()),
+                    length_width: Some(9),
+                },
                 display: DisplayState::default(),
                 layers: Vec::new(),
             },
@@ -2570,6 +2606,7 @@ mod tests {
         let human = format_viewer_profile_human(&output);
 
         assert!(human.contains("Updated: 2026-06-07T00:01:00Z"));
+        assert!(human.contains("Position: Z 4/40 at 1.0070 mm"));
     }
 
     #[test]
@@ -3027,7 +3064,7 @@ mod tests {
             _ => panic!("expected slice camera"),
         }
         let view = scene.active_view().id();
-        assert_eq!(scene.axis_index(view, lucida_content::SpatialAxis::Z), 2);
+        assert_eq!(scene.axis_index(view, SpatialAxis::Z), 2);
     }
 
     #[test]

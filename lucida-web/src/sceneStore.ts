@@ -64,6 +64,9 @@ export interface SceneView {
   readonly slicePlane: SlicePlane;
   /** The axis position along the slice plane's cut axis: `z` for an XY cut. */
   readonly cutIndex: number;
+  /** The place it cuts as a physical coordinate, with the characters the
+   *  widest one on its grid takes; null when the scene measures no length. */
+  readonly cutPlace: PlaceLabel | null;
   /** What each layer shows, by dataset id in panel order. */
   readonly layers: ResolvedLayers;
   readonly cameraMode: CameraMode;
@@ -77,6 +80,13 @@ export interface SceneView {
   readonly maximized: number | null;
   /** How the two views link, or null with one view. */
   readonly links: ViewLinks | null;
+}
+
+/** A place in the scene frame as a physical coordinate, such as `48.5 µm`. */
+export interface PlaceLabel {
+  readonly label: string;
+  /** The characters the widest coordinate on the same grid takes. */
+  readonly width: number;
 }
 
 /** The epochs that can move what a saved view records, the comparison's
@@ -98,6 +108,7 @@ const NO_SCENE_VIEW: SceneView = {
   t: 0,
   slicePlane: "xy",
   cutIndex: 0,
+  cutPlace: null,
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
@@ -226,6 +237,7 @@ function readView(scene: WasmScene, knownLayersJson: string | null, previous: Sc
     t: scene.t(),
     slicePlane: scene.slice_plane(scene.active_view()) as SlicePlane,
     cutIndex: scene.cut_index(scene.active_view()),
+    cutPlace: readCutPlace(scene, previous.cutPlace),
     layers,
     cameraMode,
     viewMode: cameraMode === "slice" ? "2d" : "3d",
@@ -258,6 +270,15 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
   return JSON.stringify(views) === JSON.stringify(previous) ? previous : views;
 }
 
+/** The active view's cut as a physical coordinate, keeping `previous` while
+ *  it reads the same. */
+function readCutPlace(scene: WasmScene, previous: PlaceLabel | null): PlaceLabel | null {
+  const reading = JSON.parse(scene.cut_reading(scene.active_view())) as { length?: string; length_width?: number };
+  if (reading.length === undefined) return null;
+  const width = reading.length_width ?? reading.length.length;
+  return previous?.label === reading.length && previous.width === width ? previous : { label: reading.length, width };
+}
+
 /** The links, keeping `previous` while nothing in them changed. Which
  *  properties can link follows the cameras, so they are read on every move. */
 function readLinks(scene: WasmScene, previous: ViewLinks | null): ViewLinks | null {
@@ -282,6 +303,7 @@ function sameView(a: SceneView, b: SceneView): boolean {
     a.t === b.t &&
     a.slicePlane === b.slicePlane &&
     a.cutIndex === b.cutIndex &&
+    a.cutPlace === b.cutPlace &&
     a.layers === b.layers &&
     a.cameraMode === b.cameraMode &&
     a.views === b.views &&

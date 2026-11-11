@@ -8,7 +8,7 @@ mod types;
 mod views;
 
 pub use comparison::{CompareMode, Comparison, Side};
-pub use cut_grid::CutGrid;
+pub use cut_grid::{AxisReading, CutGrid};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 use links::ViewLinks;

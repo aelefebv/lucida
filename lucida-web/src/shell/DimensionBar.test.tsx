@@ -196,6 +196,36 @@ describe("DimensionBar", () => {
     }
   });
 
+  it("shows where the cut stands as a physical coordinate beside its position", () => {
+    const bar = (cutPlace?: { label: string; width: number }) => (
+      <DimensionBar
+        viewMode="2d"
+        onViewModeToggle={() => {}}
+        split={false}
+        stacked={false}
+        onSplitToggle={() => {}}
+        slicePlane="xy"
+        onSlicePlaneChange={() => {}}
+        dimZ={96}
+        cut={48}
+        cutPlace={cutPlace}
+        dimCut={96}
+        onCutChange={() => {}}
+        t={0}
+        dimT={1}
+        onTChange={() => {}}
+        cameraMode="arcball"
+        onCameraModeToggle={() => {}}
+      />
+    );
+    const { rerender } = render(bar({ label: "48.5 µm", width: 7 }));
+    const readout = document.querySelector(".lc-dim-readout")!;
+    expect(readout.textContent).toBe("49 / 9648.5 µm");
+    expect((readout.querySelector(".lc-dim-place") as HTMLElement).style.minWidth).toBe("7ch");
+    rerender(bar());
+    expect(document.querySelector(".lc-dim-place")).toBeNull();
+  });
+
   it("steps Z and T from their keys, which the buttons name", () => {
     render(<Harness dimZ={10} dimT={5} z={4} t={2} />);
     press("PageDown");

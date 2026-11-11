@@ -971,6 +971,7 @@ function Viewer({
       onSlicePlaneChange={dims.handleSlicePlaneChange}
       dimZ={dims.dimZ}
       cut={dims.cutIndex}
+      cutPlace={dims.cutPlace}
       dimCut={dims.dimCut}
       onCutChange={dims.handleCutChange}
       t={dims.t}

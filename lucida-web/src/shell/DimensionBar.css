@@ -65,6 +65,13 @@
   text-align: right;
 }
 
+.lc-dim-place {
+  display: inline-block;
+  margin-left: var(--lc-space-2);
+  color: var(--lc-text-muted);
+  text-align: right;
+}
+
 .lc-camera-popover {
   display: flex;
   flex-direction: column;

@@ -32,7 +32,7 @@ export function useDimensions({
   bridgeCallbacksRef,
   loopRef,
 }: Params) {
-  const { z, t, viewMode, cameraMode, layers, slicePlane, cutIndex } = useSceneView(sceneStore);
+  const { z, t, viewMode, cameraMode, layers, slicePlane, cutIndex, cutPlace } = useSceneView(sceneStore);
 
   // The T slider is the union across all datasets, and the scene clamps it
   // into each shorter layer. `datasetsVersion` re-renders on every Map
@@ -151,7 +151,7 @@ export function useDimensions({
     viewMode, cameraMode,
     layers,
     dimZ, dimT,
-    slicePlane, cutIndex, dimCut,
+    slicePlane, cutIndex, cutPlace, dimCut,
     dimensionExtentsFor,
     labelNamesFor,
     handleViewModeToggle,
@@ -159,7 +159,7 @@ export function useDimensions({
     handleCutChange, handleSlicePlaneChange,
   }), [
     z, t, viewMode, cameraMode, layers, dimZ, dimT,
-    slicePlane, cutIndex, dimCut,
+    slicePlane, cutIndex, cutPlace, dimCut,
     dimensionExtentsFor, labelNamesFor, handleViewModeToggle,
     handleTChange, handleCutChange, handleSlicePlaneChange,
   ]);

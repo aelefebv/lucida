@@ -142,8 +142,9 @@ export function readoutBlocks(samples: readonly ProbeSample[], context: ReadoutC
 
 /**
  * A sample's place: the axes on screen as sample coordinates from 0, and the
- * axis the view stands at a position on as that axis position, counted from
- * 1 as its scrubber shows it.
+ * axis the view stands at a position on as the layer's own plane there,
+ * counted from 1. The scrubber counts positions of a grid every layer shares,
+ * so a layer placed or spaced apart from the grid reads its own number here.
  */
 function positionAxes(
   [x, y, z]: readonly number[],
