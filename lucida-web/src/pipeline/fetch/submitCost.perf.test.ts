@@ -59,6 +59,7 @@ function makeRequests(n: number): ChunkRequest[] {
       mode: "slice",
       priority: 2400 + i,
       chunkKey: "3/0/0/0/0/0",
+      cut: { axis: "z", plane: 0 },
     });
   }
   return out;
@@ -91,7 +92,7 @@ describe("submit cost at remote-fixture scale", () => {
     const plan = makePlan(requests);
 
     const submit = timeStep(() => cache.submit(plan), {
-      samples: 40,
+      samples: 80,
       warmup: 5,
       before: () => cache.onPlanRebuildStart(),
     });
