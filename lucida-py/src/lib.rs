@@ -162,6 +162,7 @@ impl PyScene {
             camera: self.inner.active_view().camera.clone(),
             view: self.inner.active_view().axes.clone(),
             display: self.inner.display.clone(),
+            views: self.inner.record_views(false),
         };
         serde_json::to_string(&msg).unwrap()
     }

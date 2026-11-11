@@ -302,7 +302,10 @@ export function useSavedViewSync({
       const moved =
         seen !== null &&
         epochs !== null &&
-        (epochs.view !== seen.view || epochs.selection !== seen.selection);
+        (epochs.view !== seen.view ||
+          epochs.selection !== seen.selection ||
+          epochs.comparison !== seen.comparison ||
+          epochs.links !== seen.links);
       seen = epochs;
       if (!moved) return;
       // A resize or a new pixel ratio moves the view with no control touched.

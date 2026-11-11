@@ -20,7 +20,9 @@ export function buildAnnotationView(scene: WasmScene): SavedView | null {
   try {
     // A pin restores how its author looked, never where datasets sit, which
     // the document holds; a view without the record leaves placement alone.
-    const { user_transforms: _placement, ...view } = buildCapture({
+    // Opening a pin steers the active view and leaves the layout, so its
+    // view keeps the active view's camera alone.
+    const { user_transforms: _placement, views: _views, ...view } = buildCapture({
       scene,
       // Empty on purpose: this mode never reads it, and a pin's view must not
       // embed source URLs.

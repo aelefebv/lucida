@@ -55,9 +55,14 @@ export interface ViewLayoutActions {
   link(property: LinkProperty, mode: LinkMode): void;
 }
 
+/**
+ * `changed` runs after every write, for what shares the views: presence and
+ * the URL.
+ */
 export function viewLayoutActions(
   scene: () => WasmScene | null,
   loop: () => InvalidationSink | null | undefined,
+  changed: () => void = () => {},
 ): ViewLayoutActions {
   const write = (edit: (scene: WasmScene) => void) => {
     const current = scene();
@@ -66,6 +71,7 @@ export function viewLayoutActions(
     // Every view the layout touches takes a new size, as a resize gives
     // one, and a link can move the other view.
     loop()?.markInput("resize");
+    changed();
   };
   return {
     layout: () => (scene()?.view_layout() as ViewLayoutName | undefined) ?? "single",

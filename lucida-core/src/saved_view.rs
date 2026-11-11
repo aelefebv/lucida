@@ -23,7 +23,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::camera::{Arcball, Camera, Framing};
 use crate::placement::{CameraSpace, UserTransform};
-use crate::scene::{DatasetDisplaySettings, DisplayState, Scene};
+use crate::scene::{DatasetDisplaySettings, DisplayState, Scene, ViewsRecord};
 use crate::view::AxisPositions;
 
 mod payload;
@@ -88,11 +88,11 @@ pub struct SavedView {
     #[serde(default)]
     pub active_layouts: IndexMap<DatasetId, LayoutId>,
 
-    /// 2D / arcball / fly camera. Reuses the same enum as
+    /// The active view's camera: 2D, arcball or fly. Reuses the same enum as
     /// [`crate::protocol::PresenceState`].
     pub camera: Camera,
 
-    /// Z slab + T + C selection. Reuses the same struct as
+    /// The active view's axis positions. Reuses the same struct as
     /// [`crate::protocol::PresenceState`].
     pub view: AxisPositions,
 
@@ -140,6 +140,14 @@ pub struct SavedView {
     /// display settings while placement stays the document's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_transforms: Option<IndexMap<DatasetId, UserTransform>>,
+
+    /// Every view, how they divide the canvas, and their links. `camera` and
+    /// `view` are the active one's, so a reader that knows one view shows
+    /// it, and a restore gives them to it last. Absent, the view is one view
+    /// of every dataset, as every view saved before this field was. One this
+    /// build cannot read, such as one from a newer build, reads as absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub views: Option<ViewsRecord>,
 }
 
 /// The JSON shape of [`SavedView`].
@@ -163,6 +171,8 @@ struct SavedViewWire {
     camera_space: Option<CameraSpace>,
     #[serde(default)]
     user_transforms: Option<IndexMap<DatasetId, UserTransform>>,
+    #[serde(default)]
+    views: Option<serde_json::Value>,
 }
 
 impl From<SavedViewWire> for SavedView {
@@ -199,6 +209,9 @@ impl From<SavedViewWire> for SavedView {
             auto_contrast: wire.auto_contrast,
             camera_space: wire.camera_space,
             user_transforms: wire.user_transforms,
+            views: wire
+                .views
+                .and_then(|views| serde_json::from_value(views).ok()),
         }
     }
 }
@@ -250,6 +263,7 @@ impl SavedView {
             auto_contrast: IndexMap::new(),
             camera_space: None,
             user_transforms: None,
+            views: None,
         }
     }
 
@@ -338,6 +352,9 @@ impl SavedView {
                 .drain(..)
                 .map(|(id, transform)| (mapped(remap, &id), transform))
                 .collect();
+        }
+        if let Some(views) = self.views.as_mut() {
+            views.remap_dataset_ids(remap);
         }
     }
 }
@@ -631,6 +648,66 @@ mod tests {
         v.user_transforms = Some(IndexMap::from([(moved, transform)]));
         v.remap_dataset_ids(&remap);
         assert_eq!(v.user_transform_of(&other), Some(transform));
+    }
+
+    /// Two views side by side, the second showing one dataset.
+    fn two_views() -> ViewsRecord {
+        use crate::scene::ViewRecord;
+        use crate::view::{ViewDatasets, ViewLayout};
+        let view = |datasets| ViewRecord {
+            camera: Camera::new_2d([512, 768]),
+            axes: AxisPositions::new(),
+            datasets,
+            comparison: None,
+        };
+        ViewsRecord {
+            layout: ViewLayout::Columns,
+            active: 1,
+            maximized: None,
+            views: vec![
+                view(ViewDatasets::All),
+                view(ViewDatasets::Only(vec![DatasetId("ds-aaaa".into())])),
+            ],
+            links: None,
+        }
+    }
+
+    #[test]
+    fn the_views_ride_last_and_only_when_recorded() {
+        let mut v = sample_view();
+        let without = serde_json::to_string(&v).unwrap();
+        assert!(!without.contains("\"views\""), "{without}");
+
+        v.views = Some(two_views());
+        let json = serde_json::to_string(&v).unwrap();
+        let record = serde_json::to_string(&two_views()).unwrap();
+        assert!(json.ends_with(&format!(r#","views":{record}}}"#)), "{json}");
+        assert_round_trips(&v);
+        let decoded: SavedView =
+            serde_json::from_value(decode_payload(&v.to_payload()).unwrap()).unwrap();
+        assert_eq!(decoded, v);
+
+        let mut remap = std::collections::HashMap::new();
+        remap.insert(DatasetId("ds-aaaa".into()), DatasetId("ds-copy".into()));
+        v.remap_dataset_ids(&remap);
+        assert_eq!(
+            v.views.unwrap().views[1].datasets,
+            crate::view::ViewDatasets::Only(vec![DatasetId("ds-copy".into())])
+        );
+    }
+
+    /// A newer build may record views this one cannot read, such as in a
+    /// layout it doesn't know. The view still opens, as the active view alone.
+    #[test]
+    fn views_this_build_cannot_read_read_as_one_view() {
+        let mut v = sample_view();
+        v.views = Some(two_views());
+        let json = serde_json::to_string(&v)
+            .unwrap()
+            .replace(r#""layout":"columns""#, r#""layout":"three_across""#);
+        let back: SavedView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.views, None);
+        assert_eq!(back.camera, v.camera);
     }
 
     #[test]
