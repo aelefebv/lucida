@@ -1,7 +1,9 @@
 /**
- * The Move and scale tool over a slice view: the selected layer's outline,
- * which a drag moves, and a handle on each corner, which a drag scales from
- * the opposite corner, alike on every axis unless Shift is held. A drag shows
+ * The Move, scale and rotate tool over a slice view: the selected layer's
+ * outline, which a drag moves; a handle on each corner, which a drag scales
+ * from the opposite corner along the layer's own edges, alike on every axis
+ * unless Shift is held; and a round handle past its top edge, which a drag
+ * around the layer turns about its center in the view's plane. A drag shows
  * the layer where it goes on this page alone; letting go places it for
  * everyone as one step that undo takes back, and Escape puts it back.
  */
@@ -12,13 +14,25 @@ import type { UserTransformActions } from "../hooks/useUserTransforms.ts";
 import { readPlacement } from "../placement.ts";
 import { cutAxis, xyz, type SlicePlane } from "../renderer/slicePlane.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
-import { userTransformAfter, type UserTransform } from "../userTransform.ts";
+import { userTransformAfter, userTransformTurnedInView, type UserTransform } from "../userTransform.ts";
 import { eventToWorld, makeWorldToScreen, type ViewSurface } from "./cameraProjection.ts";
-import { CORNERS, cornerPoint, moveMap, scaleMap, type Corner, type PlaneRect } from "./moveScaleGesture.ts";
+import {
+  CORNERS,
+  cornerPoint,
+  moveMap,
+  quadCenter,
+  scaleMap,
+  turnAngle,
+  type Corner,
+  type PlaneQuad,
+} from "./moveScaleGesture.ts";
 import "./MoveScaleOverlay.css";
 
 /** The smallest an outline may be scaled to, in CSS px. */
 const MIN_EXTENT_PX = 12;
+
+/** How far past the outline's top edge the turn handle sits, in CSS px. */
+const TURN_HANDLE_REACH_PX = 24;
 
 interface Props {
   datasetId: string;
@@ -32,11 +46,11 @@ interface Props {
 interface Drag {
   pointerId: number;
   target: Element;
-  grip: "move" | Corner;
+  grip: "move" | "turn" | Corner;
   from: UserTransform;
   latest: UserTransform;
   start: [number, number];
-  rect: PlaneRect;
+  quad: PlaneQuad;
   plane: SlicePlane;
   cutOrigin: number;
   /** One CSS pixel in the plane's units, at the press. */
@@ -44,9 +58,17 @@ interface Drag {
   endEscape: () => void;
 }
 
+/** `datasetId`'s footprint on `view`'s plane, or null where it has none. */
+function readPlaneQuad(scene: WasmScene, view: number, datasetId: string): PlaneQuad | null {
+  const q = scene.dataset_plane_quad(view, datasetId);
+  if (q.length < 6) return null;
+  return { origin: [q[0], q[1]], across: [q[2], q[3]], down: [q[4], q[5]] };
+}
+
 export function MoveScaleOverlay({ datasetId, name, scene, surface, actions }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  const turnRef = useRef<HTMLDivElement>(null);
   const handleRefs = useRef(new Map<Corner, HTMLDivElement>());
   const dragRef = useRef<Drag | null>(null);
   const actionsRef = useRef(actions);
@@ -59,26 +81,42 @@ export function MoveScaleOverlay({ datasetId, name, scene, surface, actions }: P
   useEffect(() => {
     const tick = () => {
       const box = boxRef.current;
-      if (!box) return;
-      const bounds = scene.dataset_plane_bounds(surface.view, datasetId);
-      if (bounds.length < 4) {
+      const turn = turnRef.current;
+      if (!box || !turn) return;
+      const quad = readPlaneQuad(scene, surface.view, datasetId);
+      if (!quad) {
         box.hidden = true;
+        turn.hidden = true;
         for (const handle of handleRefs.current.values()) handle.hidden = true;
         return;
       }
       const project = makeWorldToScreen(scene, surface);
-      const [x0, y0] = project([bounds[0], bounds[1]]);
-      const [x1, y1] = project([bounds[2], bounds[3]]);
+      const corner = (c: Corner) => project(cornerPoint(quad, c));
+      const origin = corner("nw");
+      const [ne, sw] = [corner("ne"), corner("sw")];
+      const across = [ne[0] - origin[0], ne[1] - origin[1]];
+      const down = [sw[0] - origin[0], sw[1] - origin[1]];
+      const width = Math.hypot(across[0], across[1]);
+      const height = Math.hypot(down[0], down[1]);
+      const unit = (v: number[], length: number) => (length > 0 ? [v[0] / length, v[1] / length] : [0, 0]);
+      const [ax, ay] = unit(across, width);
+      const [dx, dy] = unit(down, height);
+      // The box's own axes run along the outline's edges on screen, which a
+      // turn, or a view that draws its plane transposed, carries off the
+      // screen's.
       box.hidden = false;
-      box.style.transform = `translate(${x0}px, ${y0}px)`;
-      box.style.width = `${x1 - x0}px`;
-      box.style.height = `${y1 - y0}px`;
-      const rect: PlaneRect = [x0, y0, x1, y1];
-      for (const [corner, handle] of handleRefs.current) {
-        const [hx, hy] = cornerPoint(rect, corner);
+      box.style.width = `${width}px`;
+      box.style.height = `${height}px`;
+      box.style.transform = `matrix(${ax}, ${ay}, ${dx}, ${dy}, ${origin[0]}, ${origin[1]})`;
+      for (const [c, handle] of handleRefs.current) {
+        const [hx, hy] = corner(c);
         handle.hidden = false;
         handle.style.transform = `translate(${hx}px, ${hy}px)`;
       }
+      const top = [(origin[0] + ne[0]) / 2, (origin[1] + ne[1]) / 2];
+      turn.hidden = false;
+      turn.style.transform =
+        `translate(${top[0] - dx * TURN_HANDLE_REACH_PX}px, ${top[1] - dy * TURN_HANDLE_REACH_PX}px)`;
     };
     return frameClock.subscribe(tick);
   }, [scene, surface, datasetId]);
@@ -108,8 +146,8 @@ export function MoveScaleOverlay({ datasetId, name, scene, surface, actions }: P
       if (!target || e.button !== 0 || dragRef.current) return;
       e.stopPropagation();
       e.preventDefault();
-      const bounds = scene.dataset_plane_bounds(surface.view, datasetId);
-      if (bounds.length < 4) return;
+      const quad = readPlaneQuad(scene, surface.view, datasetId);
+      if (!quad) return;
       const plane = scene.slice_plane(surface.view) as SlicePlane;
       const from = actionsRef.current.current(datasetId);
       const placement = readPlacement(scene, datasetId);
@@ -120,7 +158,7 @@ export function MoveScaleOverlay({ datasetId, name, scene, surface, actions }: P
         from,
         latest: from,
         start: eventToWorld(scene, surface, e),
-        rect: [bounds[0], bounds[1], bounds[2], bounds[3]],
+        quad,
         plane,
         cutOrigin: placement.offset[xyz(cutAxis(plane))],
         pixel: devicePixelRatio / scene.zoom(surface.view),
@@ -141,15 +179,21 @@ export function MoveScaleOverlay({ datasetId, name, scene, surface, actions }: P
       e.stopPropagation();
       const now = eventToWorld(scene, surface, e);
       const cut = cutAxis(drag.plane);
-      const map = drag.grip === "move"
-        ? moveMap(drag.start, now, cut)
-        : scaleMap(drag.rect, drag.grip, drag.start, now, {
-          uniform: !e.shiftKey,
-          cut,
-          cutOrigin: drag.cutOrigin,
-          minExtent: MIN_EXTENT_PX * drag.pixel,
-        });
-      const next = userTransformAfter(scene, datasetId, drag.from, map);
+      let next: UserTransform | null;
+      if (drag.grip === "turn") {
+        const angle = turnAngle(quadCenter(drag.quad), drag.start, now);
+        next = userTransformTurnedInView(scene, surface.view, datasetId, drag.from, angle);
+      } else {
+        const map = drag.grip === "move"
+          ? moveMap(drag.start, now, cut)
+          : scaleMap(drag.quad, drag.grip, drag.start, now, {
+            uniform: !e.shiftKey,
+            cut,
+            cutOrigin: drag.cutOrigin,
+            minExtent: MIN_EXTENT_PX * drag.pixel,
+          });
+        next = userTransformAfter(scene, datasetId, drag.from, map);
+      }
       if (!next) return;
       drag.latest = next;
       actionsRef.current.preview(datasetId, next);
@@ -187,7 +231,7 @@ export function MoveScaleOverlay({ datasetId, name, scene, surface, actions }: P
         className="lc-move-scale-box"
         data-grip="move"
         role="img"
-        aria-label={`${name}: drag to move, drag a corner to scale`}
+        aria-label={`${name}: drag to move, drag a corner to scale, drag the round handle to rotate`}
         hidden
       />
       {CORNERS.map((corner) => (
@@ -203,6 +247,7 @@ export function MoveScaleOverlay({ datasetId, name, scene, surface, actions }: P
           hidden
         />
       ))}
+      <div ref={turnRef} className="lc-move-scale-turn" data-grip="turn" hidden />
     </div>
   );
 }

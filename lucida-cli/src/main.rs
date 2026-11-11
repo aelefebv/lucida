@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lucida_core::command::ViewportCommand;
+use lucida_core::placement::rotation_degrees;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
 use lucida_core::slice_plane::SlicePlane;
@@ -583,12 +584,12 @@ enum DatasetCommand {
         #[arg(long, default_value_t = 60)]
         timeout_seconds: u64,
     },
-    /// Show where a dataset was placed by hand, or move and scale it
+    /// Show where a dataset was placed by hand, or move, scale and rotate it
     ///
     /// The placement goes on top of where the dataset's metadata puts it and
     /// never changes the data. It is shared with everyone in the workspace,
-    /// as the viewer's Move and scale tool is. With no option, prints the
-    /// current placement.
+    /// as the viewer's Move, scale and rotate tool is. With no option, prints
+    /// the current placement.
     Transform {
         /// Workspace-local dataset id or unambiguous dataset name
         dataset: String,
@@ -598,8 +599,13 @@ enum DatasetCommand {
         /// Scale on the declared sample size: one number for every axis, or `x,y,z`
         #[arg(long, value_parser = parse_scale, value_name = "S|X,Y,Z")]
         scale: Option<[f64; 3]>,
+        /// Rotation `x,y,z` in degrees: about X, then Y, then Z, each about
+        /// the axis the turns before it left. The dataset turns about its
+        /// center, before any --offset or --scale sets those outright
+        #[arg(long, value_parser = parse_triple, allow_hyphen_values = true, value_name = "X,Y,Z")]
+        rotate: Option<[f64; 3]>,
         /// Put the dataset back where its metadata places it, before any
-        /// --offset or --scale
+        /// --rotate, --offset or --scale
         #[arg(long)]
         reset: bool,
         /// Seconds to wait for the workspace snapshot and acknowledgement
@@ -2459,6 +2465,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 dataset,
                 offset,
                 scale,
+                rotate,
                 reset,
                 timeout_seconds,
             } => {
@@ -2477,6 +2484,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let change = TransformChange {
                     offset: *offset,
                     scale: *scale,
+                    rotate: *rotate,
                     reset: *reset,
                 };
                 let result = DatasetTransformClient::new(target.ws_url.clone(), token)
@@ -2493,6 +2501,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     target,
                     dataset: result.dataset,
                     seq: result.seq,
+                    rotation_degrees: rotation_degrees(result.user_transform.rotation),
                     user_transform: result.user_transform,
                     units: result.units,
                 };

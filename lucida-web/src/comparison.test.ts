@@ -65,10 +65,10 @@ describe("why a pair can't be compared", () => {
   it("names the datasets that declare no scale", () => {
     expect(lineUpReason({ verdict: "yes" }, nameOf)).toBeNull();
     expect(lineUpReason({ verdict: "no_physical_scale", datasets: ["a"] }, nameOf)).toBe(
-      "A has no physical scale to line up by. Give it a scale under Position and size to line up by hand.",
+      "A has no physical scale to line up by. Give it a scale under Placement to line up by hand.",
     );
     expect(lineUpReason({ verdict: "no_physical_scale", datasets: ["a", "b"] }, nameOf)).toBe(
-      "A and B have no physical scale to line up by. Give them a scale under Position and size to line up by hand.",
+      "A and B have no physical scale to line up by. Give them a scale under Placement to line up by hand.",
     );
     expect(lineUpReason({ verdict: "apart" }, nameOf)).toBe("They don't overlap in physical space.");
   });

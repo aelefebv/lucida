@@ -5,7 +5,9 @@ use lucida_content::DatasetId;
 use crate::camera::{Arcball, Camera, ClipMode, Framing};
 use crate::command::{Command, ViewportCommand};
 use crate::framing::PlaneBox;
-use crate::placement::{Affine, CameraSpace, UserTransform};
+use crate::placement::{
+    Affine, CameraSpace, UserTransform, rotation_degrees, rotation_from_degrees,
+};
 use crate::saved_view::SavedView;
 use crate::scene::{
     CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene,
@@ -285,28 +287,91 @@ impl WasmScene {
     }
 
     /// The user transform `from_json` followed by the scene-frame map
-    /// `offset + point * scale` ([`Scene::user_transform_after`]), as JSON.
-    /// Empty for a dataset the scene doesn't hold.
+    /// `linear * point + offset`, `linear` nine numbers by rows
+    /// ([`Scene::user_transform_after`]), as JSON. Empty for a dataset the
+    /// scene doesn't hold.
     pub fn user_transform_after(
         &self,
         dataset_id: &str,
         from_json: &str,
-        scale: &[f64],
+        linear: &[f64],
         offset: &[f64],
     ) -> Result<String, JsError> {
-        let from: UserTransform =
-            serde_json::from_str(from_json).map_err(|e| JsError::new(&e.to_string()))?;
-        let (Ok(scale), Ok(offset)) = (<[f64; 3]>::try_from(scale), <[f64; 3]>::try_from(offset))
+        let from = parse_user_transform(from_json)?;
+        let (Ok(linear), Ok(offset)) = (<[f64; 9]>::try_from(linear), <[f64; 3]>::try_from(offset))
         else {
-            return Err(JsError::new("scale and offset take three numbers each"));
+            return Err(JsError::new(
+                "a map takes nine linear numbers and three offsets",
+            ));
+        };
+        let map = Affine {
+            linear: std::array::from_fn(|r| std::array::from_fn(|c| linear[3 * r + c])),
+            offset,
         };
         Ok(self
             .inner
-            .user_transform_after(
+            .user_transform_after(&DatasetId(dataset_id.to_string()), &from, &map)
+            .map(|after| serde_json::to_string(&after).unwrap())
+            .unwrap_or_default())
+    }
+
+    /// `dataset_id`'s rotation by hand as degrees about X, then Y, then Z
+    /// ([`rotation_degrees`]): `[0, 0, 0]` where it has none.
+    pub fn dataset_rotation_degrees(&self, dataset_id: &str) -> Vec<f64> {
+        let rotation = self
+            .inner
+            .user_transform(&DatasetId(dataset_id.to_string()))
+            .map_or(UserTransform::IDENTITY.rotation, |t| t.rotation);
+        rotation_degrees(rotation).to_vec()
+    }
+
+    /// The user transform `from_json` turned to `degrees` about X, then Y,
+    /// then Z, about the dataset's center ([`Scene::user_transform_turned`]),
+    /// as JSON. Empty for a dataset the scene can't turn.
+    pub fn user_transform_turned(
+        &self,
+        dataset_id: &str,
+        from_json: &str,
+        degrees: &[f64],
+    ) -> Result<String, JsError> {
+        let from = parse_user_transform(from_json)?;
+        let Ok(degrees) = <[f64; 3]>::try_from(degrees) else {
+            return Err(JsError::new("a rotation takes three angles, x, y and z"));
+        };
+        Ok(self
+            .inner
+            .user_transform_turned(
                 &DatasetId(dataset_id.to_string()),
                 &from,
-                &Affine::axis_aligned(scale, offset),
+                rotation_from_degrees(degrees),
             )
+            .map(|after| serde_json::to_string(&after).unwrap())
+            .unwrap_or_default())
+    }
+
+    /// The user transform `from_json` turned by `angle` radians in `view`'s
+    /// plane, from its across axis toward its down axis, about the dataset's
+    /// center ([`Scene::user_transform_turned_in_plane`]), as JSON. Empty
+    /// for a dataset the scene can't turn or an unknown view.
+    pub fn user_transform_turned_in_view(
+        &self,
+        view: u32,
+        dataset_id: &str,
+        from_json: &str,
+        angle: f64,
+    ) -> Result<String, JsError> {
+        let from = parse_user_transform(from_json)?;
+        Ok(self
+            .inner
+            .view(ViewId(view))
+            .and_then(|v| {
+                self.inner.user_transform_turned_in_plane(
+                    &DatasetId(dataset_id.to_string()),
+                    &from,
+                    v.slice_plane(),
+                    angle,
+                )
+            })
             .map(|after| serde_json::to_string(&after).unwrap())
             .unwrap_or_default())
     }
@@ -334,6 +399,15 @@ impl WasmScene {
         self.inner
             .dataset_plane_bounds(ViewId(view), dataset_id)
             .map_or_else(Vec::new, |b| vec![b.min[0], b.min[1], b.max[0], b.max[1]])
+    }
+
+    /// `dataset_id`'s footprint on `view`'s plane ([`Scene::dataset_plane_quad`]),
+    /// as `[origin across, origin down, across edge across, across edge down,
+    /// down edge across, down edge down]`; empty when it has none.
+    pub fn dataset_plane_quad(&self, view: u32, dataset_id: &str) -> Vec<f64> {
+        self.inner
+            .dataset_plane_quad(ViewId(view), dataset_id)
+            .map_or_else(Vec::new, |quad| quad.concat())
     }
 
     /// The comparison this view shows, as JSON, or `null`.
@@ -1432,4 +1506,8 @@ fn compare_mode(mode: &str) -> Result<CompareMode, JsError> {
             "a comparison is a swipe or a blink, not {other}"
         ))),
     }
+}
+
+fn parse_user_transform(json: &str) -> Result<UserTransform, JsError> {
+    serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))
 }

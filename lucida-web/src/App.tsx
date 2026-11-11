@@ -939,6 +939,7 @@ function Viewer({
       onCompare={comparison.compareWith}
       onSetUserTransform={userTransforms.commit}
       onResetUserTransform={userTransforms.reset}
+      onTurnUserTransform={userTransforms.turnTo}
       viewPlacement={layerViewPlacement}
       layoutRegistry={layoutRegistry}
       sendCommand={bridge.sendCommand}
