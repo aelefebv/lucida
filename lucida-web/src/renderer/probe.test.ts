@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { axisAlignedQuad } from "./sliceQuad.ts";
 import {
   clipPlaneHit,
   levelZeroPosition,
@@ -146,8 +147,8 @@ describe("sliceHits", () => {
   it("finds each member under the point at the UV of the pixel center it covers", () => {
     const frame = sliceFrame({
       layers: [
-        { datasetId: "img:ch0", dataW: 40, dataH: 40, blendMode: "additive", entityIndex: 0 },
-        { datasetId: "img:ch1", dataW: 40, dataH: 40, blendMode: "additive", entityIndex: 1 },
+        { datasetId: "img:ch0", quad: axisAlignedQuad(0, 0, 40, 40), blendMode: "additive", entityIndex: 0 },
+        { datasetId: "img:ch1", quad: axisAlignedQuad(0, 0, 40, 40), blendMode: "additive", entityIndex: 1 },
       ],
     });
     // Canvas pixel (60, 30) has its center at (60.5, 30.5): data (25.25, 15.25) at zoom 2 about (20, 20).
@@ -157,12 +158,27 @@ describe("sliceHits", () => {
     expect(hits[0].uv[1]).toBeCloseTo(15.25 / 40);
   });
 
+  it("reads a turned member's UV through its quad, and finds nothing past its edges", () => {
+    // A 40 x 40 member turned a quarter about its corner at (40, 0): its
+    // across edge points down the screen and its down edge to the left.
+    const quad = { origin: [40, 0] as [number, number], across: [0, 40] as [number, number], down: [-40, 0] as [number, number] };
+    const frame = sliceFrame({ layers: [{ datasetId: "img:ch0", quad, blendMode: "additive", entityIndex: 0 }] });
+    // Data (25.25, 15.25) lies 15.25 down the across edge and 14.75 along the down edge.
+    const [hit] = sliceHits(frame, 60.2 / 100, 30.9 / 80, none);
+    expect(hit.uv[0]).toBeCloseTo(15.25 / 40);
+    expect(hit.uv[1]).toBeCloseTo((40 - 25.25) / 40);
+    // Past the across edge's end: off the member, though a box along the
+    // scene's axes around a turned member could hold it.
+    const off = sliceFrame({ layers: [{ datasetId: "img:ch0", quad: { ...quad, across: [28.28, 28.28] }, blendMode: "additive", entityIndex: 0 }] });
+    expect(sliceHits(off, 99.5 / 100, 0.5 / 80, none)).toEqual([]);
+  });
+
   it("finds a label overlay under the point across the extent its quad spans", () => {
     const frame = sliceFrame({
       layers: [
-        { datasetId: "img:ch0", dataW: 40, dataH: 40, blendMode: "additive", entityIndex: 0 },
+        { datasetId: "img:ch0", quad: axisAlignedQuad(0, 0, 40, 40), blendMode: "additive", entityIndex: 0 },
         // A label covering 20x20 level-0 samples of its source, placed at (10, 10).
-        { datasetId: "img:label:regions", dataW: 20, dataH: 20, offsetX: 10, offsetY: 10, blendMode: "alpha", entityIndex: 0, entityId: "e", isLabel: true },
+        { datasetId: "img:label:regions", quad: axisAlignedQuad(10, 10, 20, 20), blendMode: "alpha", entityIndex: 0, entityId: "e", isLabel: true },
       ],
     });
     const [image, label] = sliceHits(frame, 60.2 / 100, 30.9 / 80, none);
@@ -176,7 +192,7 @@ describe("sliceHits", () => {
   });
 
   it("is the same point at any render resolution of the same view", () => {
-    const layers = [{ datasetId: "img:ch0", dataW: 40, dataH: 40, blendMode: "additive" as const, entityIndex: 0 }];
+    const layers = [{ datasetId: "img:ch0", quad: axisAlignedQuad(0, 0, 40, 40), blendMode: "additive" as const, entityIndex: 0 }];
     const one = sliceHits(sliceFrame({ layers }), 0.6, 0.4, none)[0].uv;
     const two = sliceHits(sliceFrame({ layers, zoom: 4, canvasW: 200, canvasH: 160 }), 0.6, 0.4, none)[0].uv;
     expect(two[0]).toBeCloseTo(one[0], 2);
@@ -186,8 +202,8 @@ describe("sliceHits", () => {
   it("misses a member the point is off, and places an offset member", () => {
     const frame = sliceFrame({
       layers: [
-        { datasetId: "a:ch0", dataW: 10, dataH: 10, blendMode: "additive", entityIndex: 0 },
-        { datasetId: "b:ch0", dataW: 10, dataH: 10, offsetX: 20, offsetY: 15, blendMode: "additive", entityIndex: 1 },
+        { datasetId: "a:ch0", quad: axisAlignedQuad(0, 0, 10, 10), blendMode: "additive", entityIndex: 0 },
+        { datasetId: "b:ch0", quad: axisAlignedQuad(20, 15, 10, 10), blendMode: "additive", entityIndex: 1 },
       ],
     });
     const hits = sliceHits(frame, 0.5, 0.5, none);
@@ -206,8 +222,7 @@ describe("sliceHits", () => {
     const frame = sliceFrame({
       layers: [{
         datasetId: "agg",
-        dataW: 40,
-        dataH: 40,
+        quad: axisAlignedQuad(0, 0, 40, 40),
         blendMode: "additive",
         entityIndex: 0,
         aggregate: { poolMemberId: "pool", count: 2, quads },

@@ -14,7 +14,7 @@ import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { comboFromEvent, useShortcut } from "../ui/shortcuts.ts";
 import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
-import { readPlacement, sceneToFrame } from "../placement.ts";
+import { readPlaneMap, sceneToFrame } from "../placement.ts";
 
 /** An arrow key pans by this share of the canvas's shorter side. */
 const KEY_PAN_FRACTION = 0.1;
@@ -215,7 +215,7 @@ function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFo
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       // A pin is stored in its dataset's frame, wherever the scene places it.
-      const placement = readPlacement(scene, datasetId);
+      const placement = readPlaneMap(scene, datasetId);
       const start = sceneToFrame(placement, press.world);
       const end = sceneToFrame(placement, eventToWorld(e));
       // Snapshot the author's view onto the pin so navigation can restore it.

@@ -1,4 +1,5 @@
 /** WebGPU pipeline for 2D slice rendering with GPU-side u16 normalization. */
+import { isAxisAlignedQuad, quadEdgeLengths, type SliceQuad } from "./sliceQuad.ts";
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import type { BlendMode } from "./layerCompositor.ts";
@@ -53,12 +54,8 @@ export interface AggregateDrawParams {
   quadData: ArrayBuffer;
   batches: AggregateBatch[];
   colormap: GPUTexture;
-  /** Layer transform inputs, as in {@link SliceRenderer.setTransform}. */
-  zoom: number;
-  cx: number;
-  cy: number;
-  dataW: number;
-  dataH: number;
+  /** Where the layer lies on screen, as in {@link SliceRenderer.setTransform}. */
+  placement: SliceLayerPlacement;
 }
 
 /** One member's draw within a {@link LayerGroupDraw}: what the per-member setters would have bound. */
@@ -69,12 +66,8 @@ export interface MemberDraw {
   colormap: GPUTexture;
   descriptorBuffer: GPUBuffer;
   entityIndex: number;
-  /** Member-local transform inputs, as in {@link SliceRenderer.setTransform}. */
-  zoom: number;
-  cx: number;
-  cy: number;
-  dataW: number;
-  dataH: number;
+  /** Where the member lies on screen, as in {@link SliceRenderer.setTransform}. */
+  placement: SliceLayerPlacement;
   /** The target pixels the member covers, `[x, y, width, height]`; the draw touches nothing else. */
   scissor: [number, number, number, number];
 }
@@ -91,6 +84,18 @@ export interface LayerGroupDraw {
   canvasH: number;
   aggregate: AggregateDrawParams | null;
   members: MemberDraw[];
+}
+
+/**
+ * Where a layer lies on screen: the slice camera, device pixels per scene
+ * unit and the scene point at the target's center, and the layer's quad in
+ * the scene frame.
+ */
+export interface SliceLayerPlacement {
+  zoom: number;
+  cx: number;
+  cy: number;
+  quad: SliceQuad;
 }
 
 /** Slot dims of each level pool binding, `[0, 0]` for an unbound slot. */
@@ -111,13 +116,9 @@ function levelSlotDimsOf(levels: ReadonlyArray<SlicePoolBinding | null>): LevelS
  * can never drift.
  */
 function buildSliceUniformData(
-  zoom: number,
-  cx: number,
-  cy: number,
+  placement: SliceLayerPlacement,
   canvasW: number,
   canvasH: number,
-  dataW: number,
-  dataH: number,
   levelSlotDims: LevelSlotDims,
   coarseSlotDims: [number, number],
   borderColor: RgbaColor,
@@ -126,7 +127,7 @@ function buildSliceUniformData(
   const uniformData = new Float32Array(SLICE_UNIFORM_SIZE / 4);
   writeSliceUniformData(
     uniformData, new Uint32Array(uniformData.buffer), 0,
-    zoom, cx, cy, canvasW, canvasH, dataW, dataH, levelSlotDims, coarseSlotDims, borderColor, pixelRatio,
+    placement, canvasW, canvasH, levelSlotDims, coarseSlotDims, borderColor, pixelRatio,
   );
   return uniformData;
 }
@@ -136,13 +137,9 @@ function writeSliceUniformData(
   f32: Float32Array,
   u32: Uint32Array,
   base: number,
-  zoom: number,
-  cx: number,
-  cy: number,
+  placement: SliceLayerPlacement,
   canvasW: number,
   canvasH: number,
-  dataW: number,
-  dataH: number,
   levelSlotDims: LevelSlotDims,
   coarseSlotDims: [number, number],
   borderColor: RgbaColor,
@@ -150,12 +147,36 @@ function writeSliceUniformData(
 ): void {
   f32.fill(0, base, base + SLICE_UNIFORM_SIZE / 4);
 
-  // mat4x4 in column-major order
-  f32[base + 0] = canvasW / (dataW * zoom);  // col0.x
-  f32[base + 5] = canvasH / (dataH * zoom);  // col1.y
+  // mat4x4 in column-major order: screen UV to the layer's UV.
+  const { zoom, quad } = placement;
+  const cx = placement.cx - quad.origin[0];
+  const cy = placement.cy - quad.origin[1];
+  if (isAxisAlignedQuad(quad)) {
+    const dataW = quad.across[0];
+    const dataH = quad.down[1];
+    f32[base + 0] = canvasW / (dataW * zoom);  // col0.x
+    f32[base + 5] = canvasH / (dataH * zoom);  // col1.y
+    f32[base + 12] = -0.5 * canvasW / (dataW * zoom) + cx / dataW; // col3.x
+    f32[base + 13] = -0.5 * canvasH / (dataH * zoom) + cy / dataH; // col3.y
+  } else {
+    // The scene point a screen UV lands on, read back into the quad's
+    // unit square through the inverse of its edges.
+    const [a, c] = quad.across;
+    const [b, d] = quad.down;
+    const det = a * d - b * c;
+    const [i00, i01, i10, i11] = [d / det, -b / det, -c / det, a / det];
+    const sx = canvasW / zoom;
+    const sy = canvasH / zoom;
+    const tx = cx - 0.5 * sx;
+    const ty = cy - 0.5 * sy;
+    f32[base + 0] = i00 * sx;  // col0.x
+    f32[base + 1] = i10 * sx;  // col0.y
+    f32[base + 4] = i01 * sy;  // col1.x
+    f32[base + 5] = i11 * sy;  // col1.y
+    f32[base + 12] = i00 * tx + i01 * ty; // col3.x
+    f32[base + 13] = i10 * tx + i11 * ty; // col3.y
+  }
   f32[base + 10] = 1;  // col2.z
-  f32[base + 12] = -0.5 * canvasW / (dataW * zoom) + cx / dataW; // col3.x
-  f32[base + 13] = -0.5 * canvasH / (dataH * zoom) + cy / dataH; // col3.y
   f32[base + 15] = 1;  // col3.w
 
   for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
@@ -173,8 +194,9 @@ function writeSliceUniformData(
   // to each member's fraction in the vertex stage), and the pixel ratio
   // that sizes the failed hatch.
   const sizeAt = base + SLICE_UNIFORM_OFFSETS.memberScreenSize / 4;
-  f32[sizeAt] = dataW * zoom;
-  f32[sizeAt + 1] = dataH * zoom;
+  const [edgeW, edgeH] = quadEdgeLengths(quad);
+  f32[sizeAt] = edgeW * zoom;
+  f32[sizeAt + 1] = edgeH * zoom;
   f32[sizeAt + 2] = pixelRatio;
   const [r, g, b, a] = borderColor;
   const borderAt = base + SLICE_UNIFORM_OFFSETS.borderColor / 4;
@@ -569,9 +591,10 @@ export class SliceRenderer {
     });
   }
 
-  setTransform(zoom: number, cx: number, cy: number, canvasW: number, canvasH: number, dataW: number, dataH: number) {
+  /** Place the next per-member draw: `placement` on a target `canvasW × canvasH`. */
+  setTransform(placement: SliceLayerPlacement, canvasW: number, canvasH: number) {
     const uniformData = buildSliceUniformData(
-      zoom, cx, cy, canvasW, canvasH, dataW, dataH,
+      placement, canvasW, canvasH,
       levelSlotDimsOf(this.levelBindings),
       this.coarseBinding ? [this.coarseBinding.slotsX, this.coarseBinding.slotsY] : [0, 0],
       this.tileBorderColor,
@@ -692,7 +715,7 @@ export class SliceRenderer {
     draws.forEach((draw, i) => {
       writeSliceUniformData(
         f32, u32, i * words,
-        draw.zoom, draw.cx, draw.cy, canvasW, canvasH, draw.dataW, draw.dataH,
+        draw.placement, canvasW, canvasH,
         levelSlotDimsOf(draw.levels),
         draw.coarse ? [draw.coarse.slotsX, draw.coarse.slotsY] : [0, 0],
         this.tileBorderColor,
@@ -796,9 +819,7 @@ export class SliceRenderer {
 
     const batchBindGroups = batches.map((batch, i) => {
       const uniformData = buildSliceUniformData(
-        params.zoom, params.cx, params.cy,
-        canvasW, canvasH,
-        params.dataW, params.dataH,
+        params.placement, canvasW, canvasH,
         levelSlotDimsOf(batch.levels),
         batch.coarse ? [batch.coarse.slotsX, batch.coarse.slotsY] : [0, 0],
         this.tileBorderColor,

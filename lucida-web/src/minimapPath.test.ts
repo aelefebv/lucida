@@ -294,7 +294,7 @@ describe("tickMinimap overview/overlay split", () => {
       // 36 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj, [35] topDown.
       minimap_camera: () => new Float32Array(36),
       member_positions: () => JSON.stringify({ m0: [0, 0] }),
-      dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
+      dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
       member_render_ids: () => JSON.stringify(["m0"]),
       member_render_matrices: () => new Float32Array(32),
       scene_model_matrix_for: () => new Float32Array(16),
@@ -381,7 +381,7 @@ describe("tickMinimap overview/overlay split", () => {
   it("hands the overlay each member's box placed in the scene frame", () => {
     const scene = makeScene();
     // Samples half a scene unit across, the frame starting at scene (50, 20).
-    scene.wasm.dataset_placement = () => new Float64Array([50, 20, 0, 0.5, 0.5, 1]);
+    scene.wasm.dataset_placement = () => new Float64Array([50, 20, 0, 0.5, 0, 0, 0, 0.5, 0, 0, 0, 1]);
     const overlay = vi.fn();
     tickMinimap(makeCtx(scene, "slice", { n: 0 }), makeState(overlay), 0);
     const [member] = overlay.mock.calls[0][0].members;

@@ -47,7 +47,7 @@ function makeScene() {
     resolved_layers: () => "[]",
     member_positions: () => JSON.stringify({ tile: [0, 0] }),
     active_view: () => 0,
-    dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
+    dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
     visible_region: () => {
       calls.region += 1;
       return JSON.stringify({

@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
   RENDER_ATTACHMENT: 0x10,
 };
 
+import { axisAlignedQuad } from "./sliceQuad.ts";
 import { SLICE_UNIFORM_SIZE, SliceRenderer, type LayerGroupDraw, type MemberDraw, type SlicePoolBinding } from "./sliceRenderer.ts";
 
 function makeDevice() {
@@ -58,7 +59,7 @@ describe("the slice renderer's member draws", () => {
     const descriptorBuffer = { destroy: vi.fn() } as unknown as GPUBuffer;
     const member = (entityIndex: number, cx: number, over: Partial<MemberDraw> = {}): MemberDraw => ({
       levels: [level], coarse, colormap, descriptorBuffer, entityIndex,
-      zoom: 1, cx, cy: 0, dataW: 10, dataH: 10, scissor: [0, 0, 10, 10],
+      placement: { zoom: 1, cx, cy: 0, quad: axisAlignedQuad(0, 0, 10, 10) }, scissor: [0, 0, 10, 10],
       ...over,
     });
     const group = (members: MemberDraw[]): LayerGroupDraw => ({
@@ -106,6 +107,27 @@ describe("the slice renderer's member draws", () => {
     expect([tx(0), tx(1), tx(2)]).toEqual([-5 + 3, -5 + 1, -5 + 2]);
     const refs = new Uint32Array(device.queue.writeBuffer.mock.calls.at(-1)![2] as ArrayBuffer);
     expect([refs[0], refs[64], refs[128]]).toEqual([2, 0, 1]);
+  });
+
+  it("places a turned member through its quad: the screen point of each corner reads that corner's UV", async () => {
+    const { device, frame, member } = await setup();
+    // At zoom 2 about (25, 25) on a 100 x 100 target, scene (x, y) is at
+    // screen UV ((x - 25) * 2 / 100 + 0.5, ...).
+    const quad = { origin: [20, 10] as [number, number], across: [8, 6] as [number, number], down: [-3, 4] as [number, number] };
+    frame([member(0, 25, { placement: { zoom: 2, cx: 25, cy: 25, quad } })]);
+    const m = new Float32Array(device.queue.writeBuffer.mock.calls.at(-2)![2] as ArrayBuffer);
+    const uvAt = (x: number, y: number) => {
+      const [sx, sy] = [(x - 25) * 2 / 100 + 0.5, (y - 25) * 2 / 100 + 0.5];
+      return [m[0] * sx + m[4] * sy + m[12], m[1] * sx + m[5] * sy + m[13]];
+    };
+    for (const [u, v] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      const [x, y] = [20 + u * 8 + v * -3, 10 + u * 6 + v * 4];
+      const [ru, rv] = uvAt(x, y);
+      expect(ru).toBeCloseTo(u, 5);
+      expect(rv).toBeCloseTo(v, 5);
+    }
+    // The border measures the member's own edges, 10 and 5 scene units.
+    expect([m[36], m[37]]).toEqual([20, 10]);
   });
 
   it("rebuilds a draw index's bind groups when a resource it names is replaced", async () => {

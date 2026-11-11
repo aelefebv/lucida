@@ -9,7 +9,7 @@ const MISS: u32 = 0xFFFFFFFFu;
 const FAILED: u32 = 0xFFFFFFFEu;
 
 struct Uniforms {
-  transform: mat4x4f,                  // offset 0   (64 bytes) — inverse pan/zoom (screen UV → texture UV)
+  transform: mat4x4f,                  // offset 0   (64 bytes) — screen UV → layer UV, through the camera and the layer's quad
   levelAtlasSlotDims: array<vec4u, 4>, // offset 64  (64 bytes) — xy=slots per axis, one per level pool binding
   coarseAtlasSlotDims: vec4u,          // offset 128 (16 bytes) — xy=slots per axis
   memberScreenSize: vec4f,             // offset 144 (16 bytes) — xy=member pixel size on screen, z=render pixels per CSS pixel
@@ -408,13 +408,21 @@ fn vsAggregate(
   );
   let local = corners[vid];
   let layerUV = quad.rect.xy + local * quad.rect.zw;
-  // `u.transform` maps screen UV → layer UV (texUV = s·uv + t, per
-  // axis); invert it to place the corner on screen.
-  let sx = u.transform[0].x;
-  let sy = u.transform[1].y;
-  let tx = u.transform[3].x;
-  let ty = u.transform[3].y;
-  let screenUV = vec2f((layerUV.x - tx) / sx, (layerUV.y - ty) / sy);
+  // `u.transform` maps screen UV → layer UV (texUV = A·uv + t); invert it
+  // to place the corner on screen. A layer that turns nothing has a
+  // diagonal A, inverted per axis as it always was.
+  let a = u.transform[0].x;
+  let c = u.transform[0].y;
+  let b = u.transform[1].x;
+  let d = u.transform[1].y;
+  let t = u.transform[3].xy;
+  var screenUV: vec2f;
+  if (b == 0.0 && c == 0.0) {
+    screenUV = vec2f((layerUV.x - t.x) / a, (layerUV.y - t.y) / d);
+  } else {
+    let r = layerUV - t;
+    screenUV = vec2f(d * r.x - b * r.y, a * r.y - c * r.x) / (a * d - b * c);
+  }
 
   var out: AggregateVSOut;
   out.pos = vec4f(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0);

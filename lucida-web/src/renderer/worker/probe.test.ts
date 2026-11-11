@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { axisAlignedQuad } from "../sliceQuad.ts";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { decompress } from "fzstd";
@@ -155,7 +156,7 @@ function drewImage(levels: Level[], fullDims: [number, number], chunk: number) {
   const frame: SliceRenderMultiPassMessage = {
     type: "sliceRenderMultiPass",
     epochs: EPOCHS,
-    layers: [{ datasetId: memberId, dataW: width, dataH: height, blendMode: "additive", entityIndex: 0 }],
+    layers: [{ datasetId: memberId, quad: axisAlignedQuad(0, 0, width, height), blendMode: "additive", entityIndex: 0 }],
     zoom: 1,
     cx: width / 2,
     cy: height / 2,
@@ -330,8 +331,7 @@ describe("the worker's pixel probe", () => {
     const frame = [...state.lastFrames.values()][0] as SliceRenderMultiPassMessage;
     frame.layers.push({
       datasetId: "img:label:regions",
-      dataW: 40,
-      dataH: 40,
+      quad: axisAlignedQuad(0, 0, 40, 40),
       blendMode: "alpha",
       entityIndex: 0,
       entityId: "entity",
