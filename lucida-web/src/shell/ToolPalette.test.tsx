@@ -17,12 +17,18 @@ afterEach(() => {
   __resetEscapeLayersForTesting();
 });
 
-function Harness() {
+function Harness({ canMove = false }: { canMove?: boolean }) {
   const [tool, setTool] = useState<Tool>("pan");
   const [visible, setVisible] = useState(true);
   return (
     <>
-      <ToolPalette tool={tool} onToolChange={setTool} annotationsVisible={visible} onAnnotationsVisibleChange={setVisible} />
+      <ToolPalette
+        tool={tool}
+        onToolChange={setTool}
+        annotationsVisible={visible}
+        onAnnotationsVisibleChange={setVisible}
+        canMove={canMove}
+      />
       <output data-testid="state">{`${tool} ${visible ? "shown" : "hidden"}`}</output>
     </>
   );
@@ -72,6 +78,23 @@ describe("ToolPalette", () => {
     ]);
   });
 
+  it("offers the move tool only to a member who may place layers", async () => {
+    render(<Harness />);
+    expect(screen.queryByRole("button", { name: "Move and scale tool" })).toBeNull();
+    await press({ key: "t", code: "KeyT" });
+    expect(state()).toBe("pan shown");
+    cleanup();
+    __resetCommandsForTesting();
+    __resetShortcutsForTesting();
+
+    render(<Harness canMove />);
+    await press({ key: "t", code: "KeyT" });
+    expect(state()).toBe("move shown");
+    expect(screen.getByRole("button", { name: "Move and scale tool" }).getAttribute("aria-pressed")).toBe("true");
+    await press({ key: "Escape", code: "Escape" });
+    expect(state()).toBe("pan shown");
+  });
+
   it("cancels what Escape should first, then returns to the pan tool", async () => {
     render(<Harness />);
     await press({ key: "b", code: "KeyB" });
@@ -102,5 +125,8 @@ describe("pressAnnotationKind", () => {
     expect(pressAnnotationKind("pan", true)).toBe("point");
     expect(pressAnnotationKind("line", false)).toBe("line");
     expect(pressAnnotationKind("box", true)).toBe("box");
+    // The move tool's outline takes its presses; anywhere else navigates.
+    expect(pressAnnotationKind("move", false)).toBeNull();
+    expect(pressAnnotationKind("move", true)).toBeNull();
   });
 });

@@ -1,0 +1,25 @@
+{
+  "type": "command",
+  "command": {
+    "type": "set_user_transform",
+    "dataset_id": "wds-0f3a",
+    "transform": {
+      "translation": [
+        12.5,
+        -4.0,
+        0.0
+      ],
+      "rotation": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "scale": [
+        2.0,
+        2.0,
+        2.0
+      ]
+    }
+  }
+}

@@ -4,6 +4,7 @@ mod browser;
 mod config;
 mod credentials;
 mod dataset;
+mod dataset_transform;
 mod error;
 mod http;
 mod inbox;
@@ -55,6 +56,10 @@ use crate::dataset::{
     format_dataset_browse_human, format_dataset_health_human, format_dataset_info_human,
     format_dataset_list_human, format_dataset_open_human, format_dataset_remove_human,
     format_dataset_retry_human,
+};
+use crate::dataset_transform::{
+    DatasetTransformClient, DatasetTransformOutput, TransformChange,
+    format_dataset_transform_human, parse_scale, parse_triple,
 };
 
 use crate::error::{CliError, ErrorKind};
@@ -575,6 +580,29 @@ enum DatasetCommand {
         /// Workspace-local dataset id or unambiguous dataset name
         dataset: String,
         /// Seconds to wait for command acknowledgement
+        #[arg(long, default_value_t = 60)]
+        timeout_seconds: u64,
+    },
+    /// Show where a dataset was placed by hand, or move and scale it
+    ///
+    /// The placement goes on top of where the dataset's metadata puts it and
+    /// never changes the data. It is shared with everyone in the workspace,
+    /// as the viewer's Move and scale tool is. With no option, prints the
+    /// current placement.
+    Transform {
+        /// Workspace-local dataset id or unambiguous dataset name
+        dataset: String,
+        /// Offset `x,y,z` in the dataset's own declared units
+        #[arg(long, value_parser = parse_triple, allow_hyphen_values = true, value_name = "X,Y,Z")]
+        offset: Option<[f64; 3]>,
+        /// Scale on the declared sample size: one number for every axis, or `x,y,z`
+        #[arg(long, value_parser = parse_scale, value_name = "S|X,Y,Z")]
+        scale: Option<[f64; 3]>,
+        /// Put the dataset back where its metadata places it, before any
+        /// --offset or --scale
+        #[arg(long)]
+        reset: bool,
+        /// Seconds to wait for the workspace snapshot and acknowledgement
         #[arg(long, default_value_t = 60)]
         timeout_seconds: u64,
     },
@@ -2413,6 +2441,51 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 };
                 output.print_either(&output_payload, || {
                     format_dataset_remove_human(&output_payload)
+                })?;
+            }
+            DatasetCommand::Transform {
+                dataset,
+                offset,
+                scale,
+                reset,
+                timeout_seconds,
+            } => {
+                let server = resolve_server(cli.server.as_deref(), &config)?;
+                let token = resolve_token(&server.url, &config);
+                let workspace_client = WorkspaceClient::new(server.url.clone(), token.clone());
+                let workspace = resolve_workspace_record(
+                    &workspace_client,
+                    cli.workspace.as_deref(),
+                    &config,
+                    &server.url,
+                    WorkspaceLookupMode::ActiveOnly,
+                )
+                .await?;
+                let target = target_for(&server.url, &workspace)?;
+                let change = TransformChange {
+                    offset: *offset,
+                    scale: *scale,
+                    reset: *reset,
+                };
+                let result = DatasetTransformClient::new(target.ws_url.clone(), token)
+                    .transform(
+                        dataset,
+                        &change,
+                        &workspace,
+                        Duration::from_secs(*timeout_seconds),
+                    )
+                    .await?;
+                let output_payload = DatasetTransformOutput {
+                    server,
+                    workspace,
+                    target,
+                    dataset: result.dataset,
+                    seq: result.seq,
+                    user_transform: result.user_transform,
+                    units: result.units,
+                };
+                output.print_either(&output_payload, || {
+                    format_dataset_transform_human(&output_payload)
                 })?;
             }
             DatasetCommand::Montage {

@@ -2,14 +2,20 @@
 //
 // Source-url views name datasets by URL and open the missing ones.
 // Workspace-dataset-id views name loaded workspace members and never open
-// source URLs. Everything but a layout change is a recipient-local
-// ViewportCommand. The camera goes last, through `import_presence`, so it
+// source URLs. Everything but a layout change or a placement by hand is a
+// recipient-local ViewportCommand. The camera goes last, through `import_presence`, so it
 // lands through one mutator. The in-progress state lets urlSync suppress URL
 // writes while an apply runs.
 
 import type { WasmScene } from "lucida-core";
 import type { DocumentCommand, ViewportCommand } from "../commands.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
+import {
+  IDENTITY_USER_TRANSFORM,
+  readUserTransform,
+  sameUserTransform,
+  setUserTransformCommand,
+} from "../userTransform.ts";
 import type {
   Camera,
   CameraSpace,
@@ -103,6 +109,7 @@ function workspaceDatasetIdsForView(view: SavedView): string[] {
   for (const id of Object.keys(view.dataset_settings)) add(id);
   for (const id of Object.keys(view.active_layouts)) add(id);
   for (const id of Object.keys(view.auto_contrast ?? {})) add(id);
+  for (const id of Object.keys(view.user_transforms ?? {})) add(id);
 
   return out;
 }
@@ -334,6 +341,8 @@ export class SavedViewApplier {
         }
       }
 
+      this.applyPlacement(sceneAfter, view, requestedSet, loadedAfter);
+
       const filteredOrder = view.dataset_order.filter((id) => loadedAfter.has(id));
       if (filteredOrder.length > 0) {
         this.applyViewport(sceneAfter, {
@@ -390,6 +399,34 @@ export class SavedViewApplier {
       for (const fn of this.applyCompleteListeners) fn(view);
     } finally {
       this.setState({ ...this.state, inProgress: false });
+    }
+  }
+
+  /**
+   * Put each dataset the view names where it sat by hand, the identity where
+   * its record leaves one out. A view that records no placement leaves the
+   * document's.
+   */
+  private applyPlacement(
+    scene: WasmScene,
+    view: SavedView,
+    requested: ReadonlySet<string>,
+    loaded: ReadonlySet<string>,
+  ): void {
+    const recorded = view.user_transforms;
+    if (!recorded) return;
+    for (const id of requested) {
+      if (!loaded.has(id)) continue;
+      const want = recorded[id] ?? IDENTITY_USER_TRANSFORM;
+      const have = readUserTransform(scene, id) ?? IDENTITY_USER_TRANSFORM;
+      if (sameUserTransform(want, have)) continue;
+      if (this.layoutMutation === "refuse") {
+        const warning = `Workspace view places dataset ${id} by hand differently; leaving the shared placement unchanged`;
+        console.warn(`[SavedViewApplier] ${warning}`);
+        this.addWarning(warning);
+        continue;
+      }
+      this.applyDocument(setUserTransformCommand(id, want), this.layoutMutation === "broadcast");
     }
   }
 

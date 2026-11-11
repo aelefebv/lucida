@@ -140,6 +140,11 @@ const pinView: SavedView = {
 const documentCases: {
   [K in DocumentCommand["type"]]: Extract<DocumentCommand, { type: K }>;
 } = {
+  set_user_transform: {
+    type: "set_user_transform",
+    dataset_id: DS,
+    transform: { translation: [12.5, -4, 0], rotation: [0, 0, 0, 1], scale: [2, 2, 2] },
+  },
   remove_dataset: { type: "remove_dataset", id: DS },
   rename_dataset: { type: "rename_dataset", id: DS, name: "renamed.zarr" },
   register_layout: {

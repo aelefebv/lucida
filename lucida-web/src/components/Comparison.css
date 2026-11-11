@@ -71,3 +71,8 @@
   outline: 2px solid var(--lc-focus-ring);
   outline-offset: 2px;
 }
+
+.lc-comparison-by-hand {
+  display: inline-flex;
+  flex-shrink: 0;
+}

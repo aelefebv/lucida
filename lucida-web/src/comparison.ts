@@ -36,6 +36,7 @@ export type ComparisonScene = Pick<
   | "comparison"
   | "comparison_span"
   | "datasets_line_up"
+  | "datasets_line_up_by_hand"
   | "compare"
   | "end_comparison"
   | "set_comparison_mode"
@@ -51,6 +52,20 @@ export function readLineUp(scene: Pick<WasmScene, "datasets_line_up">, a: string
   return JSON.parse(scene.datasets_line_up(a, b)) as LineUp;
 }
 
+/** Of a pair that lines up, the datasets placed by hand, from `Scene::line_up_by_hand`. */
+export function readLineUpByHand(scene: Pick<WasmScene, "datasets_line_up_by_hand">, a: string, b: string): string[] {
+  return JSON.parse(scene.datasets_line_up_by_hand(a, b)) as string[];
+}
+
+/**
+ * Says that a pair lines up where someone placed it by hand rather than where
+ * its metadata puts it, or null when no one did.
+ */
+export function placedByHandNote(byHand: readonly string[], nameOf: (id: string) => string): string | null {
+  if (byHand.length === 0) return null;
+  return `Lines up as placed by hand: ${byHand.map(nameOf).join(" and ")}.`;
+}
+
 /** Why `a` can't be compared with `b`, in a sentence, or null when it can. */
 export function lineUpReason(lineUp: LineUp, nameOf: (id: string) => string): string | null {
   const names = (ids: string[]) => ids.map(nameOf).join(" and ");
@@ -64,7 +79,7 @@ export function lineUpReason(lineUp: LineUp, nameOf: (id: string) => string): st
     case "missing":
       return `${names(lineUp.datasets)} ${lineUp.datasets.length === 1 ? "has" : "have"} no image yet.`;
     case "no_physical_scale":
-      return `${names(lineUp.datasets)} ${lineUp.datasets.length === 1 ? "has" : "have"} no physical scale to line up by.`;
+      return `${names(lineUp.datasets)} ${lineUp.datasets.length === 1 ? "has" : "have"} no physical scale to line up by. Give ${lineUp.datasets.length === 1 ? "it" : "them"} a scale under Position and size to line up by hand.`;
   }
 }
 

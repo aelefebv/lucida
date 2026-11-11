@@ -13,6 +13,7 @@ import type { AnnotationDraft } from "../components/annotationDraft.ts";
 import type { Tool } from "../components/annotationTool.ts";
 import type { ClientPoint, ViewSurface } from "../components/cameraProjection.ts";
 import type { MentionCandidate } from "../components/annotationMentions.ts";
+import { MoveScaleOverlay } from "../components/MoveScaleOverlay.tsx";
 import { PeerCursorLayer } from "../components/PeerCursorLayer.tsx";
 import { PixelReadout, type PixelReadoutHandle } from "../components/PixelReadout.tsx";
 import { SliceViewer } from "../components/SliceViewer.tsx";
@@ -30,6 +31,7 @@ import { ViewPanes } from "./ViewPanes.tsx";
 import { WithheldNotice } from "./WithheldNotice.tsx";
 import type { ViewPane } from "../sceneStore.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
+import type { UserTransformActions } from "../hooks/useUserTransforms.ts";
 
 // Code-split: mounted only when an overlay is on or a radius preview is being
 // dragged.
@@ -63,6 +65,8 @@ interface Props {
   showDebugOverlays: boolean;
   /** What a press in a view calls to make it the active view. */
   viewLayout: ViewLayoutActions;
+  /** What the move tool places the selected layer with. */
+  userTransforms: UserTransformActions;
 }
 
 export function CanvasLayers({
@@ -87,6 +91,7 @@ export function CanvasLayers({
   canvasSize,
   showDebugOverlays,
   viewLayout,
+  userTransforms,
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
@@ -185,6 +190,16 @@ export function CanvasLayers({
         )}
         {overlays && pane.active && (
           <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
+        )}
+        {viewers && overlays && slice && tool === "move" && userTransforms.canEdit &&
+          pane.draws.includes(overlays.datasetId) && (
+          <MoveScaleOverlay
+            datasetId={overlays.datasetId}
+            name={nameOf(overlays.datasetId)}
+            scene={viewers.scene}
+            surface={surface}
+            actions={userTransforms}
+          />
         )}
         {overlays && pins && slice && (
           <AnnotationOverlay

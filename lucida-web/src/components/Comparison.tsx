@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { Slider, SliderThumb, SliderTrack } from "react-aria-components";
 import { ArrowsLeftRightIcon, PauseIcon, PlayIcon, SplitHorizontalIcon, XIcon } from "@phosphor-icons/react";
 import type { ComparisonActions, Comparison, CompareMode } from "../comparison.ts";
-import { Card, IconButton, SegmentedControl, type KeyCombo } from "../ui/index.ts";
+import { Badge, Card, IconButton, SegmentedControl, type KeyCombo } from "../ui/index.ts";
 import { useShortcut } from "../ui/shortcuts.ts";
 import "./Comparison.css";
 
@@ -27,9 +27,11 @@ interface BarProps {
   comparison: Comparison | null;
   actions: ComparisonActions;
   nameOf: (datasetId: string) => string;
+  /** Says when the pair lines up because someone placed it by hand, or null. */
+  byHand?: string | null;
 }
 
-export function ComparisonBar({ comparison, actions, nameOf }: BarProps) {
+export function ComparisonBar({ comparison, actions, nameOf, byHand }: BarProps) {
   // A running blink belongs to the pair it was started on, so a new
   // comparison starts still.
   const pair = comparison ? `${comparison.a}\n${comparison.b}` : null;
@@ -60,6 +62,11 @@ export function ComparisonBar({ comparison, actions, nameOf }: BarProps) {
       <span className="lc-comparison-names" title={`${nameOf(comparison.a)} and ${nameOf(comparison.b)}`}>
         {blinking ? nameOf(shown) : `${nameOf(comparison.a)} | ${nameOf(comparison.b)}`}
       </span>
+      {byHand && (
+        <span className="lc-comparison-by-hand" title={byHand} aria-label={byHand}>
+          <Badge tone="accent">By hand</Badge>
+        </span>
+      )}
       <SegmentedControl<CompareMode>
         label="Compare by"
         size="sm"

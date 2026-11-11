@@ -15,7 +15,7 @@ import { useShortcutScope } from "../ui/shortcuts.ts";
 import { FlyCameraHint } from "./FlyCameraHint.tsx";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
-import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
+import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToScreenPx, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { frameClock } from "../frameClock.ts";
@@ -473,7 +473,7 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
   // One finger orbits, or draws with a tool; two pinch to zoom and drag to
   // pan. Fly mode keeps its own pointer handling, touch included.
   useTouchGestures(element, !isFlyMode, {
-    claimsPress: () => toolRef.current !== "pan",
+    claimsPress: () => drawsOnPress(toolRef.current),
     onGesture: (g) => {
       switch (g.type) {
         case "pressStart":
@@ -564,7 +564,7 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
     // for hover/drag feedback, vs a parent-driven CSS class that would
     // re-render the whole viewport on every transition.
     // eslint-disable-next-line react-hooks/immutability
-    element.style.cursor = isFlyMode || tool !== "pan" ? "crosshair" : (dragging ? "grabbing" : "grab");
+    element.style.cursor = isFlyMode || drawsOnPress(tool) ? "crosshair" : (dragging ? "grabbing" : "grab");
     return () => {
       element.removeEventListener("pointerdown", onPointerDown);
       element.removeEventListener("pointermove", onPointerMove);

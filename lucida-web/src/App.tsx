@@ -59,6 +59,8 @@ import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useComparison } from "./hooks/useComparison.ts";
+import { useEditHistory } from "./hooks/useEditHistory.ts";
+import { useUserTransforms } from "./hooks/useUserTransforms.ts";
 import { viewLayoutActions } from "./viewLayout.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
@@ -565,6 +567,19 @@ function Viewer({
   }, [liveBridge, render.canvasRef, render.clientRef, render.loopRef]);
 
   const comparison = useComparison(engine, layers.layerInfos);
+  const editHistory = useEditHistory({
+    engine,
+    sendCommand: bridge.sendCommand,
+    onDocumentChanged: bumpRemoteDocumentVersion,
+  });
+  const userTransforms = useUserTransforms({
+    engine,
+    canEdit: canEditWorkspace,
+    sendCommand: bridge.sendCommand,
+    history: editHistory,
+    nameOf: comparison.nameOf,
+    onDocumentChanged: bumpRemoteDocumentVersion,
+  });
   const viewLayout = useMemo(() => viewLayoutActions(engine.scene, engine.loop), [engine]);
   const { views: shownViews, layout: viewLayoutName } = useSceneView(engine.store);
   // Several views offer each layer a place among them.
@@ -924,7 +939,10 @@ function Viewer({
       onLabelSetOpacity={layers.handleLabelSetOpacity}
       onAddData={() => setAddDataOpen(true)}
       comparisonBlocker={comparison.blocker}
+      comparisonNote={comparison.byHand}
       onCompare={comparison.compareWith}
+      onSetUserTransform={userTransforms.commit}
+      onResetUserTransform={userTransforms.reset}
       viewPlacement={layerViewPlacement}
       layoutRegistry={layoutRegistry}
       sendCommand={bridge.sendCommand}
@@ -1120,6 +1138,7 @@ function Viewer({
                   annotationsVisible={annotationsVisible}
                   onAnnotationsVisibleChange={setAnnotationsVisible}
                   compact={phone}
+                  canMove={canEditWorkspace}
                 />
               ),
               "top-center": (
@@ -1147,6 +1166,7 @@ function Viewer({
                       comparison={comparison.current}
                       actions={comparison.actions}
                       nameOf={comparison.nameOf}
+                      byHand={comparison.current && comparison.byHand(comparison.current.a, comparison.current.b)}
                     />
                   )}
                   {/* `#a=<id>` didn't resolve. A recipient without access fails
@@ -1224,6 +1244,7 @@ function Viewer({
               canvasSize={canvasSize}
               showDebugOverlays={showDebugOverlays}
               viewLayout={viewLayout}
+              userTransforms={userTransforms}
             />
             <SwipeDivider comparison={comparison.current} actions={comparison.actions} nameOf={comparison.nameOf} />
           </CanvasStage>
