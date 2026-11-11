@@ -23,9 +23,9 @@ function request(overrides: Partial<ChunkRequest>): ChunkRequest {
   };
 }
 
-function viewRequests(demand: TickDemand, key: string): ChunkRequest[] {
-  const out: ChunkRequest[] = [];
-  demand.forEachViewRequest(key, (req) => out.push(req));
+function viewTargets(demand: TickDemand, key: string): [string, ChunkRequest][] {
+  const out: [string, ChunkRequest][] = [];
+  demand.forEachViewTarget(key, (target, req) => out.push([target, req]));
   return out;
 }
 
@@ -59,17 +59,18 @@ describe("TickDemand", () => {
     expect(demand.wants("absent")).toBe(false);
   });
 
-  it("keeps each of the view's requests for a chunk, and none of prefetch's", () => {
+  it("names each place the view wants a chunk delivered once, and none for prefetch", () => {
     const demand = new TickDemand();
-    const slice = request({ lane: "detail", mode: "slice" });
+    const slice = request({ lane: "detail", mode: "slice", cut: { axis: "z", plane: 3 } });
     const volume = request({ lane: "detail", mode: "volume" });
     demand.note("a", slice);
     demand.note("a", request({ lane: "prefetch" }));
     demand.note("a", volume);
+    demand.note("a", request({ lane: "coarse", mode: "slice", cut: { axis: "z", plane: 3 } }));
     demand.note("b", request({ lane: "prefetch" }));
 
-    expect(viewRequests(demand, "a")).toEqual([slice, volume]);
-    expect(viewRequests(demand, "b")).toEqual([]);
+    expect(viewTargets(demand, "a")).toEqual([["slice:z3", slice], ["volume", volume]]);
+    expect(viewTargets(demand, "b")).toEqual([]);
   });
 
   it("forgets everything on clear", () => {

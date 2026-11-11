@@ -1039,24 +1039,25 @@ export class CpuCache {
    * pools; the volume's whole chunk is fetched on its own and replaces it.
    */
   private pushDeliveries(entry: CacheEntry, out: ReadyChunkDelivery[]): void {
-    const targets = this.targetsWanting(chunkSchedulerKey(entry, entry.residencyTier));
-    if (!targets) return;
     let cached: CachedChunk | null = null;
-    for (const [target, { mode, cut }] of targets) {
-      if (mode === "volume" && entry.planes) continue;
-      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey, entry.residencyTier, target)) continue;
+    this.demand.forEachViewTarget(chunkSchedulerKey(entry, entry.residencyTier), (target, { mode, cut }) => {
+      if (mode === "volume" && entry.planes) return;
+      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey, entry.residencyTier, target)) return;
       cached ??= this.chunkEntryToCached(entry);
       out.push(cut ? { ...cached, mode, cut } : { ...cached, mode });
-    }
+    });
   }
 
-  /** Each place this tick's view requests want `key` delivered, by `deliveryTarget`, with a request that names it. */
-  private targetsWanting(key: string): Map<string, ChunkRequest> | undefined {
-    let targets: Map<string, ChunkRequest> | undefined;
-    this.demand.forEachViewRequest(key, (req) => {
-      (targets ??= new Map()).set(deliveryTarget(req.mode, req.cut), req);
+  /** Whether the view wants `entry`'s chunk only in slice pools, and each was sent it. */
+  private sentToEveryViewTarget(key: string, entry: CacheEntry): boolean {
+    let wanted = false;
+    let sent = true;
+    this.demand.forEachViewTarget(key, (target, { mode }) => {
+      wanted = true;
+      sent &&= mode !== "volume" &&
+        this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey, entry.residencyTier, target);
     });
-    return targets;
+    return wanted && sent;
   }
 
   markSent(delivery: ReadyChunkDelivery): void {
@@ -1896,15 +1897,9 @@ export class CpuCache {
     // slice pools already hold from its planes and no volume pool wants,
     // changes nothing on screen. Waking the page for it would hold a settled
     // view open until the prefetch ends.
-    const targets = this.targetsWanting(chunk);
     const unseen =
       cacheEntry.lane === "prefetch" ||
-      (result.planes === undefined &&
-        resident?.planes !== undefined &&
-        targets !== undefined &&
-        [...targets].every(([target, { mode }]) =>
-          mode !== "volume" &&
-          this.deliveryState.wasChunkSent(cacheEntry.imageId, cacheEntry.c, cacheEntry.chunkKey, cacheEntry.residencyTier, target)));
+      (result.planes === undefined && resident?.planes !== undefined && this.sentToEveryViewTarget(chunk, cacheEntry));
     if (!unseen) this.notifyListeners();
 
     this.drainScheduler();

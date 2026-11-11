@@ -1,4 +1,5 @@
 import type { ChunkRequest } from "../planning/index.ts";
+import { deliveryTarget } from "../../renderer/poolKeys.ts";
 
 const DETAIL = 1;
 /** A detail chunk a lane other than prefetch asks for: what settling waits on. */
@@ -81,12 +82,24 @@ export class TickDemand {
     return ((this.byKey.get(key)?.flags ?? 0) & (VIEW_DETAIL | COARSE)) !== 0;
   }
 
-  /** Each of the view's detail and coarse requests for the chunk. */
-  forEachViewRequest(key: string, visit: (req: ChunkRequest) => void): void {
+  /**
+   * Each place the view's detail and coarse requests want the chunk
+   * delivered, by `deliveryTarget`, once, with a request that names it.
+   */
+  forEachViewTarget(key: string, visit: (target: string, req: ChunkRequest) => void): void {
     const view = this.byKey.get(key)?.view;
     if (view === undefined) return;
-    if (Array.isArray(view)) view.forEach(visit);
-    else visit(view);
+    if (!Array.isArray(view)) {
+      visit(deliveryTarget(view.mode, view.cut), view);
+      return;
+    }
+    const seen = new Set<string>();
+    for (const req of view) {
+      const target = deliveryTarget(req.mode, req.cut);
+      if (seen.has(target)) continue;
+      seen.add(target);
+      visit(target, req);
+    }
   }
 
   get detailKeys(): number {
