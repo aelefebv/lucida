@@ -9,7 +9,8 @@ import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import { datasetSampleFormat } from "./renderer/dataTypeUtil.ts";
 import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import { compositeKey } from "./tickCommon.ts";
-import { readPlacement, rectToScene } from "./placement.ts";
+import { readPlaneMap, rectToQuad } from "./placement.ts";
+import { quadBounds } from "./renderer/sliceQuad.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;
@@ -607,7 +608,7 @@ function buildMinimapOverview(
     }
 
     const memberMatrices = readMemberRenderMatrices(scene, dsId);
-    const placement = readPlacement(scene, dsId);
+    const placement = readPlaneMap(scene, dsId);
 
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
@@ -631,7 +632,8 @@ function buildMinimapOverview(
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
       if (level0) {
         const [x, y] = memberPositions[img.owner] ?? memberPositions[memberId] ?? [0, 0];
-        const placed = rectToScene(placement, x, y, level0.shape[Axis.X], level0.shape[Axis.Y]);
+        // A turned member's rect is the one around its corners.
+        const placed = quadBounds(rectToQuad(placement, x, y, level0.shape[Axis.X], level0.shape[Axis.Y]));
         sliceViewportMembers.push({
           datasetId: dsId,
           memberId,

@@ -8,6 +8,7 @@
  * cursor.
  */
 
+import { quadBounds, quadUV } from "../sliceQuad.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import type {
   SliceAggregateParams,
@@ -20,6 +21,7 @@ import type {
   AggregateDrawParams,
   LayerGroupDraw,
   MemberDraw,
+  SliceLayerPlacement,
   SlicePoolBinding,
 } from "../sliceRenderer.ts";
 import { resolveMemberPools, type EntityDescriptorIndex } from "../descriptorBuffer.ts";
@@ -121,9 +123,9 @@ function ensureLabelPalette(
 /**
  * Draw one categorical label overlay from its r32uint slice pool.
  *
- * The quad is sized to the source's voxel extent (`layer.dataW/dataH`) and
- * placed at the source member's offset, so a coarser label still covers the
- * same region. Returns null when the pool has no resident slice yet.
+ * The quad spans the source's level-0 extent and lies where the source
+ * member does, so a coarser label still covers the same region. Returns null
+ * when the pool has no resident slice yet.
  */
 function renderLabelLayer(
   ctx: WorkerCtx,
@@ -142,8 +144,6 @@ function renderLabelLayer(
   const palette = ensureLabelPalette(ctx, pool, layer.labelColors);
 
   const renderer = ctx.getSliceRenderer();
-  const ox = layer.offsetX ?? 0;
-  const oy = layer.offsetY ?? 0;
   renderer.setTierAtlases(
     [{ texture: pool.texture, indirectionBuf: pool.indirectionBuf, slotsX: pool.grid.x, slotsY: pool.grid.y }],
     null,
@@ -151,7 +151,7 @@ function renderLabelLayer(
   // Categorical shading computes color from the id in-shader; the LUT is
   // bound (a valid gray ramp) but unread on this path.
   renderer.setColormapTexture(ctx.getOrCreateLUT("gray"));
-  renderer.setTransform(msg.zoom, msg.cx - ox, msg.cy - oy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);
+  renderer.setTransform(layerPlacement(msg, layer), msg.canvasW, msg.canvasH);
   renderer.setLabelColorBuffer(palette.buffer);
   renderer.setDescriptorBinding(descBuffer, 0, palette.count);
 
@@ -207,8 +207,8 @@ function buildAggregateBatches(
     agg.count,
     Math.floor(agg.quads.byteLength / AGGREGATE_QUAD_STRIDE_BYTES),
   );
-  const aggOx = layer.offsetX ?? 0;
-  const aggOy = layer.offsetY ?? 0;
+  // The view center in the aggregate's UV, from which each member's follows.
+  const [layerU, layerV] = quadUV(layer.quad, msg.cx, msg.cy);
 
   interface PendingBatch {
     levels: Array<SliceAtlasState | null>;
@@ -234,16 +234,13 @@ function buildAggregateBatches(
 
     // Camera-UV recency, as the per-member path keeps it. The member-local
     // UV of the view center follows from the quad rect: rect origin/size are
-    // fractions of the layer extent.
+    // fractions of the layer's quad.
     const rx = srcF32[r * wordsPerRecord + 0];
     const ry = srcF32[r * wordsPerRecord + 1];
     const rw = srcF32[r * wordsPerRecord + 2];
     const rh = srcF32[r * wordsPerRecord + 3];
     if (rw > 0 && rh > 0) {
-      setCameraUVForMember(ctx.state, msg.view, memberId, [
-        (msg.cx - (aggOx + rx * layer.dataW)) / (rw * layer.dataW),
-        (msg.cy - (aggOy + ry * layer.dataH)) / (rh * layer.dataH),
-      ]);
+      setCameraUVForMember(ctx.state, msg.view, memberId, [(layerU - rx) / rw, (layerV - ry) / rh]);
     }
 
     const key = [
@@ -286,10 +283,12 @@ function buildAggregateBatches(
 
 /** The view center in a per-member layer's [0,1] coordinates: the slice eviction reference. */
 export function memberCameraUV(msg: SliceRenderMultiPassMessage, layer: SliceLayerParams): [number, number] {
-  return [
-    (msg.cx - (layer.offsetX ?? 0)) / layer.dataW,
-    (msg.cy - (layer.offsetY ?? 0)) / layer.dataH,
-  ];
+  return quadUV(layer.quad, msg.cx, msg.cy);
+}
+
+/** Where `layer` lies on screen under `msg`'s camera. */
+function layerPlacement(msg: SliceRenderMultiPassMessage, layer: SliceLayerParams): SliceLayerPlacement {
+  return { zoom: msg.zoom, cx: msg.cx, cy: msg.cy, quad: layer.quad };
 }
 
 export async function handleSliceRenderMultiPass(
@@ -412,11 +411,7 @@ function buildAggregateDraw(
     quadData: built.quadData,
     batches: built.batches,
     colormap: ctx.getOrCreateLUT(colormapName),
-    zoom: msg.zoom,
-    cx: msg.cx - (layer.offsetX ?? 0),
-    cy: msg.cy - (layer.offsetY ?? 0),
-    dataW: layer.dataW,
-    dataH: layer.dataH,
+    placement: layerPlacement(msg, layer),
   };
 }
 
@@ -425,12 +420,15 @@ export function memberScissor(
   msg: SliceRenderMultiPassMessage,
   layer: SliceLayerParams,
 ): [number, number, number, number] | null {
-  const left = ((layer.offsetX ?? 0) - msg.cx) * msg.zoom + msg.canvasW / 2;
-  const top = ((layer.offsetY ?? 0) - msg.cy) * msg.zoom + msg.canvasH / 2;
+  // A turned quad covers the rect around its corners; the shader leaves the
+  // pixels past its edges untouched.
+  const bounds = quadBounds(layer.quad);
+  const left = (bounds.x - msg.cx) * msg.zoom + msg.canvasW / 2;
+  const top = (bounds.y - msg.cy) * msg.zoom + msg.canvasH / 2;
   const x0 = Math.max(0, Math.floor(left));
   const y0 = Math.max(0, Math.floor(top));
-  const x1 = Math.min(msg.canvasW, Math.ceil(left + layer.dataW * msg.zoom));
-  const y1 = Math.min(msg.canvasH, Math.ceil(top + layer.dataH * msg.zoom));
+  const x1 = Math.min(msg.canvasW, Math.ceil(left + bounds.w * msg.zoom));
+  const y1 = Math.min(msg.canvasH, Math.ceil(top + bounds.h * msg.zoom));
   if (!(x1 > x0) || !(y1 > y0)) return null;
   return [x0, y0, x1 - x0, y1 - y0];
 }
@@ -471,11 +469,7 @@ function buildMemberDraw(
     colormap: ctx.getOrCreateLUT(colormapName),
     descriptorBuffer: descIndex.buffer,
     entityIndex: layer.entityIndex,
-    zoom: msg.zoom,
-    cx: msg.cx - (layer.offsetX ?? 0),
-    cy: msg.cy - (layer.offsetY ?? 0),
-    dataW: layer.dataW,
-    dataH: layer.dataH,
+    placement: layerPlacement(msg, layer),
     scissor,
   };
 }

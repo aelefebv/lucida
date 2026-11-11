@@ -14,7 +14,7 @@
  * the volume pass.
  */
 import type { WasmScene } from "lucida-core";
-import { frameToScene, readPlacement, sceneToFrame } from "../placement.ts";
+import { frameToScene, readPlaneMap, sceneToFrame } from "../placement.ts";
 import type { ScreenPoint } from "./annotationGeometry.ts";
 
 /** The x/y of a pointer event, so plain objects and React events both qualify. */
@@ -81,7 +81,7 @@ export function eventToFrame(
   e: ClientPoint,
   datasetId: string,
 ): [number, number] {
-  return sceneToFrame(readPlacement(scene, datasetId), eventToWorld(scene, surface, e));
+  return sceneToFrame(readPlaneMap(scene, datasetId), eventToWorld(scene, surface, e));
 }
 
 /**
@@ -94,7 +94,7 @@ export function makeFrameToScreen(
   datasetId: string,
 ): (v: ScreenPoint) => ScreenPoint {
   const project = makeWorldToScreen(scene, surface);
-  const placement = readPlacement(scene, datasetId);
+  const placement = readPlaneMap(scene, datasetId);
   return (v: ScreenPoint): ScreenPoint => project(frameToScene(placement, v));
 }
 

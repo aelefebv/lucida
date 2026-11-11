@@ -24,7 +24,7 @@ function make2DScene(initial: Annotation[]): WasmScene {
     active_view: () => 0,
     zoom: () => 1,
     center: () => new Float64Array([0, 0]),
-    dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
+    dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
     apply_command: () => {},
   } as unknown as WasmScene;
 }

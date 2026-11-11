@@ -34,6 +34,7 @@ interface VisibleRegionJson {
   radius_basis_vox?: number;
   sort_center: [number, number, number] | null;
   frustum_planes: [number, number, number, number][] | null;
+  side_planes?: [number, number, number, number][];
   cut_axis?: SpatialAxis;
 }
 
@@ -183,6 +184,7 @@ export function buildViewSnapshot(args: BuildViewSnapshotArgs): ViewSnapshot | n
         ...(vr.radius_basis_vox !== undefined ? { radiusBasisVox: vr.radius_basis_vox } : {}),
         sortCenterVox: vr.sort_center,
         frustumPlanes: vr.frustum_planes,
+        ...(vr.side_planes !== undefined ? { sidePlanes: vr.side_planes } : {}),
         ...(vr.cut_axis !== undefined ? { cutAxis: vr.cut_axis } : {}),
       }
     : DEFAULT_VISIBLE_REGION;

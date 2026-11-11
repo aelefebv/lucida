@@ -4,7 +4,8 @@ import { labelFootprint } from "./renderer/labelLayout.ts";
 import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
-import { placementInPlane, readPlacement, rectToScene, type Placement } from "./placement.ts";
+import { keepsCut, placementInPlane, readPlacement, rectToQuad, type PlaneMap } from "./placement.ts";
+import { quadEdgeLengths } from "./renderer/sliceQuad.ts";
 import type { FrameScale, TickContext, TickView } from "./renderLoopTypes.ts";
 import { compositeKey } from "./tickCommon.ts";
 import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
@@ -63,8 +64,8 @@ export interface MemberLayerInput {
   /** Every member's footprint, in level-0 samples of its dataset's frame. */
   fullResWidth: number;
   fullResHeight: number;
-  /** Where the dataset's frame sits in the scene frame the camera views. */
-  placement: Placement;
+  /** Where the dataset's frame sits on the plane the camera views. */
+  placement: PlaneMap;
   /** Device pixels per scene-frame unit at the render backing resolution. */
   zoom: number;
 }
@@ -109,6 +110,10 @@ export function pushMemberLayers(
   const dataW = fullResWidth;
   const dataH = fullResHeight;
 
+  // Every member has its dataset's footprint, turned as the dataset is, so
+  // one member's diagonal on screen is every member's.
+  const [placedW, placedH] = quadEdgeLengths(rectToQuad(placement, 0, 0, dataW, dataH));
+  const diagPx = Math.hypot(placedW, placedH) * zoom;
   const candidates: MemberLayerCandidate[] = [];
   for (const m of members) {
     const memberKey = compositeKey(m.imageId, channel);
@@ -120,7 +125,7 @@ export function pushMemberLayers(
       entityIndex,
       dataW,
       dataH,
-      diagPx: Math.hypot(dataW * placement.scale[0], dataH * placement.scale[1]) * zoom,
+      diagPx,
       order: candidates.length,
     });
   }
@@ -182,14 +187,10 @@ export function pushMemberLayers(
       // overlaps an individual one draws under it regardless of roster
       // order. Accepted, since batched members are the smallest on screen.
       // The quads are fractions of the extent, so placing it places them.
-      const extent = rectToScene(placement, minX, minY, extW, extH);
       layers.push({
         datasetId: batched[0].memberKey,
-        dataW: extent.w,
-        dataH: extent.h,
+        quad: rectToQuad(placement, minX, minY, extW, extH),
         blendMode,
-        offsetX: extent.x,
-        offsetY: extent.y,
         // Informational for an aggregate layer; each quad carries its
         // own descriptor index in `quads`.
         entityIndex: batched[0].entityIndex,
@@ -209,14 +210,10 @@ export function pushMemberLayers(
   }
 
   for (const c of individual) {
-    const rect = rectToScene(placement, c.member.position[0], c.member.position[1], c.dataW, c.dataH);
     layers.push({
       datasetId: c.memberKey,
-      dataW: rect.w,
-      dataH: rect.h,
+      quad: rectToQuad(placement, c.member.position[0], c.member.position[1], c.dataW, c.dataH),
       blendMode,
-      offsetX: rect.x,
-      offsetY: rect.y,
       entityId: c.member.entityId,
       entityIndex: c.entityIndex,
       passGroup,
@@ -246,7 +243,7 @@ export function pushLabelLayers(
   layers: SliceLayerParams[],
   manifest: DatasetManifest,
   members: MemberRosterEntry[],
-  placement: Placement,
+  placement: PlaneMap,
   labelSettings?: LabelViewSetting[],
   memberPositions?: Record<string, [number, number]>,
   at?: { t: number; z: number },
@@ -262,14 +259,10 @@ export function pushLabelLayers(
     // off-roster label on the first group.
     const sourceMember = members.find((m) => m.imageId === label.source_image_id);
     const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
-    const rect = rectToScene(placement, position[0], position[1], dataW, dataH);
     layers.push({
       datasetId: label.image.image_id,
-      dataW: rect.w,
-      dataH: rect.h,
+      quad: rectToQuad(placement, position[0], position[1], dataW, dataH),
       blendMode: "alpha",
-      offsetX: rect.x,
-      offsetY: rect.y,
       entityId: source.owner,
       entityIndex: 0, // labels render via a transient descriptor, not the cold-state buffer
       isLabel: true,
@@ -369,7 +362,11 @@ export function renderSliceView(
     const members = memberRosterByDatasetView.get(datasetViewKey(dsId, view.id))
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
     const indexByMember = entityIndexByDatasetView.get(datasetViewKey(dsId, view.id)) ?? new Map<string, number>();
-    const placement = placementInPlane(readPlacement(scene, dsId), cut);
+    // A placement that turns the dataset off the cut leaves no plane of it
+    // across the cut to draw.
+    const placed = readPlacement(scene, dsId);
+    if (!keepsCut(placed, cut)) continue;
+    const placement = placementInPlane(placed, cut);
 
     // The member-pass budget applies per channel. A layer past the scene's t,
     // or a flat one under a Z cut, draws its clamped plane, which the plan

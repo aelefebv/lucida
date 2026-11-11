@@ -9,6 +9,7 @@
  * to how either locates a sample must change this too.
  */
 
+import { quadEdgeLengths, quadUV } from "./sliceQuad.ts";
 import type { SliceRenderMultiPassMessage, VolumeRenderMultiPassMessage } from "./workerProtocol.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
@@ -164,12 +165,15 @@ export function sliceHits(
   const py = pixelCenter(fy, msg.canvasH);
   const hits: SliceHit[] = [];
   for (const layer of msg.layers) {
-    // Layer-local level-0 sample coordinates, as `buildSliceUniformData`'s transform gives them.
-    const u = ((px - msg.canvasW / 2) / msg.zoom + msg.cx - (layer.offsetX ?? 0)) / layer.dataW;
-    const v = ((py - msg.canvasH / 2) / msg.zoom + msg.cy - (layer.offsetY ?? 0)) / layer.dataH;
+    // The layer's UV at the pixel's scene point, as `buildSliceUniformData`'s transform gives it.
+    const [u, v] = quadUV(
+      layer.quad,
+      (px - msg.canvasW / 2) / msg.zoom + msg.cx,
+      (py - msg.canvasH / 2) / msg.zoom + msg.cy,
+    );
     if (layer.isLabel) {
       if (inUnit(u) && inUnit(v)) {
-        const [dataW, dataH] = layer.labelSamples ?? [layer.dataW, layer.dataH];
+        const [dataW, dataH] = layer.labelSamples ?? quadEdgeLengths(layer.quad);
         hits.push({
           memberId: layer.datasetId,
           uv: [u, v],

@@ -16,7 +16,7 @@ import type { MemberRosterEntry, TickCoordinator, TickCoordinatorResult } from "
 import type { TickContext } from "./renderLoopTypes.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { compositeKey } from "./tickCommon.ts";
-import { IDENTITY_PLACEMENT } from "./placement.ts";
+import { IDENTITY_PLANE_MAP } from "./placement.ts";
 import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
 import type { ResolvedLayer } from "./resolvedLayers.ts";
 
@@ -54,7 +54,7 @@ describe("pushMemberLayers", () => {
         blendMode: "additive",
         fullResWidth: 1024,
         fullResHeight: 1024,
-        placement: IDENTITY_PLACEMENT,
+        placement: IDENTITY_PLANE_MAP,
         zoom: 0.5,
       });
     }
@@ -73,7 +73,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 0.0005, // diag ≈ 0.7 device px per member
     });
     expect(layers).toHaveLength(1);
@@ -92,7 +92,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 1, // diag ≈ 1448 px per member
     });
     expect(layers).toHaveLength(9);
@@ -102,12 +102,12 @@ describe("pushMemberLayers", () => {
     // Standard per-member layer shape: ids, offsets, entity indices.
     expect(layers[0].datasetId).toBe("img-0:ch0");
     expect(layers[0].entityIndex).toBe(0);
-    expect(layers[4].offsetX).toBe(1024);
-    expect(layers[4].offsetY).toBe(1024);
+    expect(layers[4].quad.origin[0]).toBe(1024);
+    expect(layers[4].quad.origin[1]).toBe(1024);
   });
 
   it("places each member layer, and an aggregate's extent, as the dataset's placement puts them", () => {
-    const placement = { offset: [100, -50, 0], scale: [0.5, 0.25, 1] } as const;
+    const placement = { offset: [100, -50], linear: [[0.5, 0], [0, 0.25]] } as const;
     const members = rosterGrid(4, 2, 1024);
     const individual: SliceLayerParams[] = [];
     pushMemberLayers(individual, {
@@ -120,8 +120,8 @@ describe("pushMemberLayers", () => {
       placement,
       zoom: 1,
     });
-    expect([individual[3].offsetX, individual[3].offsetY]).toEqual([100 + 512, -50 + 256]);
-    expect([individual[3].dataW, individual[3].dataH]).toEqual([512, 256]);
+    expect([individual[3].quad.origin[0], individual[3].quad.origin[1]]).toEqual([100 + 512, -50 + 256]);
+    expect([individual[3].quad.across[0], individual[3].quad.down[1]]).toEqual([512, 256]);
 
     const aggregated: SliceLayerParams[] = [];
     pushMemberLayers(aggregated, {
@@ -135,8 +135,8 @@ describe("pushMemberLayers", () => {
       zoom: 0.0005,
     });
     expect(aggregated).toHaveLength(1);
-    expect([aggregated[0].offsetX, aggregated[0].offsetY]).toEqual([100, -50]);
-    expect([aggregated[0].dataW, aggregated[0].dataH]).toEqual([1024, 512]);
+    expect([aggregated[0].quad.origin[0], aggregated[0].quad.origin[1]]).toEqual([100, -50]);
+    expect([aggregated[0].quad.across[0], aggregated[0].quad.down[1]]).toEqual([1024, 512]);
   });
 
   it("keeps a LONE tiny member as an individual pass (single small dataset unchanged)", () => {
@@ -149,7 +149,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
@@ -170,7 +170,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom,
     });
     const individual = layers.filter((l) => !l.aggregate);
@@ -194,17 +194,17 @@ describe("pushMemberLayers", () => {
       blendMode: "max",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
     const layer = layers[0];
     expect(layer.blendMode).toBe("max");
     // Union AABB: x ∈ [100, 2148+1024], y ∈ [200, 2248+1024].
-    expect(layer.offsetX).toBe(100);
-    expect(layer.offsetY).toBe(200);
-    expect(layer.dataW).toBe(2148 + 1024 - 100);
-    expect(layer.dataH).toBe(2248 + 1024 - 200);
+    expect(layer.quad.origin[0]).toBe(100);
+    expect(layer.quad.origin[1]).toBe(200);
+    expect(layer.quad.across[0]).toBe(2148 + 1024 - 100);
+    expect(layer.quad.down[1]).toBe(2248 + 1024 - 200);
     const agg = layer.aggregate!;
     expect(agg.count).toBe(3);
     const f32 = new Float32Array(agg.quads);
@@ -212,14 +212,14 @@ describe("pushMemberLayers", () => {
     // First member: origin of the union → rect starts at (0, 0).
     expect(f32[0]).toBeCloseTo(0);
     expect(f32[1]).toBeCloseTo(0);
-    expect(f32[2]).toBeCloseTo(1024 / layer.dataW);
-    expect(f32[3]).toBeCloseTo(1024 / layer.dataH);
+    expect(f32[2]).toBeCloseTo(1024 / layer.quad.across[0]);
+    expect(f32[3]).toBeCloseTo(1024 / layer.quad.down[1]);
     expect(u32[4]).toBe(0);
     // Second member: offset (2148 - 100) in x, entity index 1.
-    expect(f32[8]).toBeCloseTo((2148 - 100) / layer.dataW);
+    expect(f32[8]).toBeCloseTo((2148 - 100) / layer.quad.across[0]);
     expect(u32[12]).toBe(1);
     // Third member: offset (2248 - 200) in y, entity index 2.
-    expect(f32[17]).toBeCloseTo((2248 - 200) / layer.dataH);
+    expect(f32[17]).toBeCloseTo((2248 - 200) / layer.quad.down[1]);
     expect(u32[20]).toBe(2);
   });
 
@@ -235,7 +235,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
@@ -252,7 +252,7 @@ describe("pushMemberLayers", () => {
       blendMode: "additive",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(1);
@@ -275,7 +275,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom,
     });
     const individual = layers.filter((l) => !l.aggregate);
@@ -305,7 +305,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 0,
       fullResHeight: 0,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(0);
@@ -332,7 +332,7 @@ describe("pushMemberLayers", () => {
       blendMode: "alpha",
       fullResWidth: 1024,
       fullResHeight: 1024,
-      placement: IDENTITY_PLACEMENT,
+      placement: IDENTITY_PLANE_MAP,
       zoom: 0.03, // smallest diag ≈ 42 px — everyone above the threshold
     });
     const agg = layers.find((l) => l.aggregate);
@@ -421,7 +421,7 @@ function makeSeamHarness(opts: {
     slice_plane: () => "xy",
     cut_index: () => 0,
     epochs: () => JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),
-    dataset_placement: () => new Float64Array([0, 0, 0, 1, 1, 1]),
+    dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
     comparison_span: () => new Float64Array(),
   };
   const manifest = {

@@ -19,6 +19,11 @@ export interface VisibleRegion {
   /** Six frustum half-planes, or null for 2-D views. */
   frustumPlanes: [number, number, number, number][] | null;
   /**
+   * A 2-D view of a dataset its placement turns in the plane: the screen's
+   * four edges as half-planes in the dataset's frame. Absent otherwise.
+   */
+  sidePlanes?: [number, number, number, number][];
+  /**
    * The axis a 2-D view cuts. Its extent here is the planes the view cuts,
    * in each image's own samples. Absent: Z.
    */
