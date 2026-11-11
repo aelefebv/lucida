@@ -102,6 +102,8 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     plane_positions: () => JSON.stringify(config.memberPositions),
     visible_region: () => JSON.stringify(config.visibleRegion),
     slice_plane: () => "xy",
+    // Every dataset placed where its frame says, turned off no cut.
+    dataset_placement: () => new Float64Array(),
     cut_index: () => 0,
     t: () => config.t,
     z: () => config.z,

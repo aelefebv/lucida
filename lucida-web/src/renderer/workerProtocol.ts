@@ -312,8 +312,19 @@ export interface SliceAggregateParams {
 
 export interface SliceLayerParams {
   datasetId: string;
-  /** Where the layer's quad lies in the scene frame the camera views, turned as its dataset is. */
+  /**
+   * Where the layer's quad lies in the scene frame the camera views, turned
+   * as its dataset is. For a layer cut from bricks, the rect it may cover.
+   */
   quad: SliceQuad;
+  /**
+   * A layer cut from its dataset's bricks: the view's cut, which the
+   * dataset's placement tilts off its planes, sampled from the volume pools.
+   * `planeToWorld` is the column-major map from a point `[across, down]` of
+   * the view's plane, at its cut, to world space. Absent for a layer drawn
+   * from a slice pool.
+   */
+  bricks?: { planeToWorld: number[] };
   blendMode: "alpha" | "additive" | "max";
   /** See {@link VolumeLayerParams.entityId}. */
   entityId?: string;

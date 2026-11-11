@@ -37,7 +37,7 @@ import {
   marchSpan,
   pickIntensitySample,
   pickLabelSample,
-  sliceHits,
+  cutHits, sliceHits,
   texelValue,
   type MarchSpan,
   type MarchStep,
@@ -104,6 +104,9 @@ export function handleProbe(ctx: WorkerCtx, probe: ProbeMessage): void {
       if (hit.label) probeSliceLabel(ctx, frame.view, hit, samples, reads);
       else probeMember(ctx, hit.memberId, hit.uv, samples, reads, frame.view, "slice");
     }
+    // A tilted cut samples its member's bricks, as a volume view's clip face does.
+    const cuts = cutHits(frame, msg.x, msg.y, (memberId) => memberOf(ctx, memberId, frame.view)?.entry.invModelMatrix);
+    for (const cut of cuts) probeMember(ctx, cut.memberId, cut.local, samples, reads, frame.view, "volume");
   } else if (frame?.type === "volumeRenderMultiPass") {
     for (const layer of frame.layers) {
       if (layer.isLabel) {

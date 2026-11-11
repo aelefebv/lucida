@@ -98,7 +98,7 @@ describe.each<[string, (device: GPUDevice) => Compiles, number]>([
   ["slice renderer", (device) => new SliceRenderer(device), 6],
   ["layer compositor", (device) => new LayerCompositor(device, "bgra8unorm"), 4],
   ["cursor renderer", (device) => new CursorRenderer(device, "bgra8unorm"), 2],
-  ["volume renderer", (device) => new VolumeRenderer(device), 1],
+  ["volume renderer", (device) => new VolumeRenderer(device), 4],
 ])("the %s", (_name, construct, pipelineCount) => {
   it("creates every pipeline asynchronously and is compiled once the last one resolves", async () => {
     const { device, pending } = makeDevice();
@@ -228,6 +228,7 @@ describe("drawing before the compile", () => {
 
     const main = pipeline("volume");
     pending[0].resolve(main);
+    for (const cut of pending.slice(1)) cut.resolve(pipeline("cut"));
     await volumes.compiled;
 
     volumes.renderTo(view, encoder);

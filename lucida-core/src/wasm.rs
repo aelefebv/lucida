@@ -1161,6 +1161,27 @@ impl WasmScene {
         self.inner.dataset_model_matrix(dataset_id).to_vec()
     }
 
+    /// The map from the scene frame into world space, where the volume
+    /// cameras look, as a column-major 4x4 ([`Scene::world_space`]).
+    pub fn scene_to_world(&self) -> Vec<f32> {
+        self.inner
+            .world_space()
+            .from_scene()
+            .matrix_f64()
+            .map(|v| v as f32)
+            .to_vec()
+    }
+
+    /// The place along `view`'s slice plane's cut axis it cuts, in the scene
+    /// frame: the middle of its slab ([`Scene::cut_place`]). 0 for an unknown
+    /// view.
+    pub fn view_cut_place(&self, view: u32) -> f64 {
+        let id = ViewId(view);
+        self.inner.view(id).map_or(0.0, |shown| {
+            self.inner.cut_place(id, shown.slice_plane().cut())
+        })
+    }
+
     /// Inverse of [`Self::scene_model_matrix_for`] (world space → the first
     /// member's `[0,1]³` unit space); owned by
     /// [`Scene::dataset_inv_model_matrix`]. Identity for an unknown/empty

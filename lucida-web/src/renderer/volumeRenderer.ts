@@ -1,6 +1,7 @@
 /** WebGPU pipeline for volume ray marching. */
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
+import { LAYER_BLENDS, type BlendMode } from "./layerCompositor.ts";
 import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
 import { serializeTransientDescriptor, type TransientDescriptorParams } from "./descriptor/transient.ts";
 import type { PassTiming } from "./passTiming.ts";
@@ -74,6 +75,13 @@ export interface VolumeMemberDraw {
   entityIndex: number;
   /** Where the draw lands; the whole target when absent. */
   scissor?: PixelRect;
+  /**
+   * For a slice view's cut of a member its placement tilts, drawn by
+   * {@link VolumeRenderer.renderCut}: the column-major map from the target's
+   * NDC to the world point of the cut there, which the draw reads in place
+   * of the camera's inverse view-projection.
+   */
+  cut?: Float32Array;
 }
 
 /** One draw as {@link VolumeRenderer.prepareMembers} left it ready. */
@@ -111,6 +119,8 @@ export class VolumeRenderer {
   private pipeline: GPURenderPipeline | null = null;
   /** Resolves once the pipeline has compiled. See `pipelineCompile.ts`. */
   readonly compiled: Promise<void>;
+  /** One pipeline per blend mode for a slice view's tilted cuts ({@link renderCut}). */
+  private cutPipelines: Record<BlendMode, GPURenderPipeline> | null = null;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -144,7 +154,7 @@ export class VolumeRenderer {
   private nextResourceId = 1;
 
   get isCompiled(): boolean {
-    return this.pipeline !== null;
+    return this.pipeline !== null && this.cutPipelines !== null;
   }
 
   constructor(device: GPUDevice) {
@@ -229,7 +239,7 @@ export class VolumeRenderer {
       bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
     });
 
-    this.compiled = device.createRenderPipelineAsync({
+    const main = device.createRenderPipelineAsync({
       layout: pipelineLayout,
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
@@ -245,6 +255,20 @@ export class VolumeRenderer {
     }).then((pipeline) => {
       this.pipeline = pipeline;
     });
+    // A cut draws into a slice view's layer target, alongside slice draws
+    // of the same layer, so it blends as they do and keeps no depth.
+    const cuts = Promise.all((["alpha", "additive", "max"] as const).map((mode) =>
+      device.createRenderPipelineAsync({
+        layout: pipelineLayout,
+        vertex: { module: shaderModule, entryPoint: "vs" },
+        fragment: { module: shaderModule, entryPoint: "fsCut", targets: [{ format: OFFSCREEN_FORMAT, blend: LAYER_BLENDS[mode] }] },
+        primitive: { topology: "triangle-list" },
+      }),
+    )).then(([alpha, additive, max]) => {
+      this.cutPipelines = { alpha, additive, max };
+    });
+
+    this.compiled = Promise.all([main, cuts]).then(() => undefined);
 
     this.uniformBuffer = device.createBuffer({
       size: VOLUME_UNIFORM_SIZE,
@@ -480,10 +504,11 @@ export class VolumeRenderer {
     renderMode: number,
     levels: ReadonlyArray<VolumePoolBinding | null>,
     coarse: VolumePoolBinding | null,
+    cut?: Float32Array,
   ): void {
     const O = VOLUME_UNIFORM_OFFSETS;
     f32.fill(0, base, base + VOLUME_UNIFORM_SIZE / 4);
-    f32.set(this.invViewProj, base + O.invViewProj / 4);
+    f32.set(cut ?? this.invViewProj, base + O.invViewProj / 4);
     f32.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], base + O.cameraPos / 4);
     // stepInfo = (opacityScale, renderMode, pixelRatio, marchStepScale). The
     // march step comes from the sampled level's dims in the descriptor.
@@ -565,11 +590,13 @@ export class VolumeRenderer {
       const slots = (b: VolumePoolBinding | null | undefined) => (b ? `${b.slotsX},${b.slotsY},${b.slotsZ}` : "-");
       let key = `${renderMode}|${slots(draw.coarse)}`;
       for (let l = 0; l < DESCRIPTOR_MAX_LEVEL_SOURCES; l++) key += `|${slots(draw.levels[l])}`;
+      // A cut reads its own map in place of the camera's, so shares no block.
+      if (draw.cut) key += `|cut${i}`;
       let block = blockByKey.get(key);
       if (block === undefined) {
         block = blockByKey.size;
         blockByKey.set(key, block);
-        this.writeUniformBlock(f32, u32, block * words, renderMode, draw.levels, draw.coarse);
+        this.writeUniformBlock(f32, u32, block * words, renderMode, draw.levels, draw.coarse, draw.cut);
       }
 
       set.refWords[i * (DRAW_REF_STRIDE / 4)] = draw.entityIndex >>> 0;
@@ -665,6 +692,39 @@ export class VolumeRenderer {
       const rect = clipToBand(draw.scissor ?? [0, 0, targetWidth, targetHeight], band);
       if (!rect) continue;
       const [x, y, w, h] = rect;
+      pass.setScissorRect(x, y, w, h);
+      pass.setBindGroup(0, draw.pools, [draw.uniformOffset]);
+      pass.setBindGroup(1, draw.entity, [draw.refOffset]);
+      pass.draw(3); // full-screen triangle
+    }
+    pass.end();
+  }
+
+  /**
+   * Draw the prepared cut draws at `indices` into `target`, a slice view's
+   * layer target, in one pass that clears it first. Each blends with
+   * `blendMode`, as the slice draws of a layer do, clipped to its scissor.
+   */
+  renderCut(
+    setName: string,
+    indices: readonly number[],
+    target: GPUTextureView,
+    targetWidth: number,
+    targetHeight: number,
+    blendMode: BlendMode,
+    encoder: GPUCommandEncoder,
+    timing?: PassTiming,
+  ): void {
+    const set = this.memberDrawSet(setName);
+    const pipeline = requireCompiled(this.cutPipelines, "volume cut")[blendMode];
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+      timestampWrites: timing?.nextPass(),
+    });
+    pass.setPipeline(pipeline);
+    for (const index of indices) {
+      const draw = set.draws[index];
+      const [x, y, w, h] = draw.scissor ?? [0, 0, targetWidth, targetHeight];
       pass.setScissorRect(x, y, w, h);
       pass.setBindGroup(0, draw.pools, [draw.uniformOffset]);
       pass.setBindGroup(1, draw.entity, [draw.refOffset]);

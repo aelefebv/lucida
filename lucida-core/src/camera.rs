@@ -776,6 +776,60 @@ impl Slice {
         }
     }
 
+    /// What this view shows of a dataset `frame_to_scene` turns off the cut,
+    /// in the dataset's own frame: the screen's bounds across `slab`, the
+    /// places along the cut axis the view reads, mapped back through the
+    /// placement. The cut crosses the dataset's samples aslant, so planning
+    /// reads its bricks there as a volume view does, culled by the slab's six
+    /// faces read into the frame.
+    pub fn tilted_region(&self, frame_to_scene: &Affine, slab: (f64, f64)) -> VisibleRegion {
+        let [across, down, cut] = self.plane.axes().map(SpatialAxis::xyz);
+        let [u0, v0, u1, v1] = self.world_bounds();
+        let (mut lo, mut hi) = ([0.0; 3], [0.0; 3]);
+        (lo[across], hi[across], lo[down], hi[down]) = (u0, u1, v0, v1);
+        (lo[cut], hi[cut]) = (slab.0.min(slab.1), slab.0.max(slab.1));
+        let to_frame = frame_to_scene.inverse();
+        let (min, max) = to_frame.apply_box(lo, hi);
+        let face = |axis: usize, sign: f64, bound: f64| {
+            let r = frame_to_scene.linear[axis];
+            [
+                sign * r[0],
+                sign * r[1],
+                sign * r[2],
+                sign * (frame_to_scene.offset[axis] - bound),
+            ]
+        };
+        let faces = [
+            face(across, 1.0, lo[across]),
+            face(across, -1.0, hi[across]),
+            face(down, 1.0, lo[down]),
+            face(down, -1.0, hi[down]),
+            face(cut, 1.0, lo[cut]),
+            face(cut, -1.0, hi[cut]),
+        ];
+        let middle: [f64; 3] = std::array::from_fn(|i| (lo[i] + hi[i]) / 2.0);
+        let plane = |z: f64| z.max(0.0).min(u32::MAX as f64) as u32;
+        let first = plane(min[2].floor());
+        // The densest of the three axes, which the cut may cross, so the
+        // level chosen errs coarse.
+        let reach = (0..3)
+            .map(|c| {
+                let step = frame_to_scene.column(c);
+                (step[0] * step[0] + step[1] * step[1] + step[2] * step[2]).sqrt()
+            })
+            .fold(f64::INFINITY, f64::min);
+        VisibleRegion {
+            xy_bounds: [min[0], min[1], max[0], max[1]],
+            z_range: first..plane(max[2].ceil()).max(first + 1),
+            effective_zoom: self.zoom * reach,
+            radius_basis_vox: visible_radius_basis_from_box(min, max),
+            sort_center: Some(to_frame.apply(middle)),
+            frustum_planes: Some(faces),
+            side_planes: None,
+            cut_axis: SpatialAxis::Z,
+        }
+    }
+
     pub fn pan(&mut self, dx: f64, dy: f64) {
         // The divide is never by zero (every write to `zoom` clamps to
         // `SLICE_ZOOM_MIN..=SLICE_ZOOM_MAX`), and `step_position` bounds the

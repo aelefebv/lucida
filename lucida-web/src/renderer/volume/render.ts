@@ -168,7 +168,7 @@ function renderLabelVolumeLayer(
  * An atlas as the renderer binds it for `view`: the shared texture, read
  * through the view's own indirection, written to the GPU first if it changed.
  */
-function poolBinding(ctx: WorkerCtx, atlas: AtlasState, view: number): VolumePoolBinding {
+export function volumePoolBinding(ctx: WorkerCtx, atlas: AtlasState, view: number): VolumePoolBinding {
   const indirection = atlas.views.get(view)!;
   flushViewIndirection(ctx.device, indirection);
   return {
@@ -294,8 +294,8 @@ export async function handleVolumeRenderMultiPass(
     const renderMode = layer.renderMode === "max_intensity" ? 1 : 0;
     drawn.push({ draw: draws.length });
     draws.push({
-      levels: pools.levels.map((atlas) => (atlas ? poolBinding(ctx, atlas, msg.view) : null)),
-      coarse: pools.coarse ? poolBinding(ctx, pools.coarse, msg.view) : null,
+      levels: pools.levels.map((atlas) => (atlas ? volumePoolBinding(ctx, atlas, msg.view) : null)),
+      coarse: pools.coarse ? volumePoolBinding(ctx, pools.coarse, msg.view) : null,
       colormap: ctx.getOrCreateLUT(descIndex.colormapNameByMember.get(memberId) ?? "gray"),
       renderMode,
       descriptorBuffer: descIndex.buffer,

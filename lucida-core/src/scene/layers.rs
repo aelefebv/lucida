@@ -298,7 +298,10 @@ fn resolve(
         channel_count: extent.c,
         solo: settings.solo.filter(|&solo| solo < extent.c),
         channels,
-        z_clamped: (i64::from(z_range.start)..i64::from(z_range.end)) != z_planes,
+        // A layer turned off Z has no planes across it to clamp to: a cut
+        // along Z reads it wherever it lies, or misses it.
+        z_clamped: turned[2].is_none()
+            && (i64::from(z_range.start)..i64::from(z_range.end)) != z_planes,
         z_range,
         t_clamped: extent.clamp_t(t) != t,
         t: extent.clamp_t(t),

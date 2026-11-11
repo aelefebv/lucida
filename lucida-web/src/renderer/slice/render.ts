@@ -8,6 +8,9 @@
  * cursor.
  */
 
+import type { VolumeMemberDraw } from "../volumeRenderer.ts";
+import { volumePoolBinding } from "../volume/render.ts";
+import { cutNdcToWorld } from "../sliceCut.ts";
 import { quadBounds, quadUV } from "../sliceQuad.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import type {
@@ -300,6 +303,7 @@ export async function handleSliceRenderMultiPass(
   const cr = ctx.getCursorRenderer();
   // The wait holds every message behind this one (`worker/inOrder.ts`).
   await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
+  if (frame.layers.some((layer) => layer.bricks)) await ctx.getVolumeRenderer().compiled;
 
   const target = beginViewFrame(ctx, frame.view, frame.canvasW, frame.canvasH, frame.rect);
   // The view draws in its own pixels, as if its rectangle were the canvas.
@@ -336,6 +340,12 @@ export async function handleSliceRenderMultiPass(
       continue;
     }
 
+    if (first.bricks) {
+      const drawn = renderCutGroup(ctx, msg, group, () => targetFor(renderedLayers.length));
+      if (drawn) renderedLayers.push(drawn);
+      continue;
+    }
+
     const draw = buildLayerGroup(ctx, msg, group);
     if (!draw) continue;
     const target = targetFor(renderedLayers.length);
@@ -363,6 +373,63 @@ export async function handleSliceRenderMultiPass(
   // texture expires with this handler. A view that covers part of the canvas
   // reaches it, and is read, when the views are presented.
   if (target.canvasTexture) captureRenderedFrame(ctx, target.canvasTexture);
+}
+
+/** The member draw set a slice view's cuts from bricks use. */
+const CUT_DRAWS = "sliceCut";
+
+/**
+ * Draw one group of layers cut from their dataset's bricks: each member
+ * with something resident, sampled from its volume pools at the view's cut.
+ * Null when nothing draws.
+ */
+function renderCutGroup(
+  ctx: WorkerCtx,
+  msg: SliceRenderMultiPassMessage,
+  layers: SliceLayerParams[],
+  targetFor: () => GPUTexture,
+): CompositeLayer | null {
+  const draws: VolumeMemberDraw[] = [];
+  for (const layer of layers) {
+    const draw = buildCutDraw(ctx, msg, layer);
+    if (draw) draws.push(draw);
+  }
+  if (draws.length === 0) return null;
+  const volume = ctx.getVolumeRenderer();
+  const target = targetFor();
+  volume.prepareMembers(CUT_DRAWS, draws);
+  const encoder = ctx.device.createCommandEncoder();
+  volume.renderCut(
+    CUT_DRAWS, draws.map((_, i) => i), target.createView(), msg.canvasW, msg.canvasH, layers[0].blendMode, encoder,
+    ctx.passTimer,
+  );
+  ctx.device.queue.submit([encoder.finish()]);
+  return { view: target.createView(), blendMode: layers[0].blendMode, clip: layers[0].clip };
+}
+
+/** One member's cut from its bricks, or null when it has nothing resident or lies off the target. */
+function buildCutDraw(
+  ctx: WorkerCtx,
+  msg: SliceRenderMultiPassMessage,
+  layer: SliceLayerParams,
+): VolumeMemberDraw | null {
+  const memberId = layer.datasetId;
+  const datasetId = ctx.state.memberToDataset.get(memberId);
+  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, msg.view) : null;
+  if (!descIndex || !layer.bricks) return null;
+  const pools = resolveMemberPools(ctx.state.volumeAtlases, descIndex, memberId, msg.view);
+  if (!pools.levels.some((atlas) => atlas !== null) && pools.coarse === null) return null;
+  const scissor = memberScissor(msg, layer);
+  if (!scissor) return null;
+  return {
+    levels: pools.levels.map((atlas) => (atlas ? volumePoolBinding(ctx, atlas, msg.view) : null)),
+    coarse: pools.coarse ? volumePoolBinding(ctx, pools.coarse, msg.view) : null,
+    colormap: ctx.getOrCreateLUT(descIndex.colormapNameByMember.get(memberId) ?? "gray"),
+    descriptorBuffer: descIndex.buffer,
+    entityIndex: layer.entityIndex,
+    scissor,
+    cut: cutNdcToWorld(msg, layer.bricks.planeToWorld),
+  };
 }
 
 /**
