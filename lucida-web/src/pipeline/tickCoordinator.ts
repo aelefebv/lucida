@@ -1582,19 +1582,6 @@ export class TickCoordinator {
   }
 
   /**
-   * Reconstruct what `view` sees of a dataset's `entities` by folding the
-   * scene's `view_query_delta` onto the cursor for the two. Returns `"skip"`
-   * when the view does not show the dataset or the dataset is not
-   * registered, as the full `view_query` path does.
-   * The identity of `deps` is the cursor's basis.
-   *
-   * The result matches a fresh full build on the render-affecting fields
-   * (`visible`, `targetLevel`, `kind`, `coarseLevel`, `parentId`). Continuous
-   * fields (`importance`, `projectedDiagonalPx`, `projectedAreaPx2`,
-   * `centroidWorld`) may be stale on a carried-over record; none of them
-   * feeds the active set.
-   */
-  /**
    * The camera-independent inputs to `view`'s snapshot of a dataset, the same
    * object while they hold, so a view-query fold keeps its basis. Members are
    * placed on the plane the view draws, a volume view placing them as an XY
@@ -1630,6 +1617,19 @@ export class TickCoordinator {
     return inputs;
   }
 
+  /**
+   * Reconstruct what `view` sees of a dataset's `entities` by folding the
+   * scene's `view_query_delta` onto the cursor for the two. Returns `"skip"`
+   * when the view does not show the dataset or the dataset is not
+   * registered, as the full `view_query` path does.
+   * The identity of `deps` is the cursor's basis.
+   *
+   * The result matches a fresh full build on the render-affecting fields
+   * (`visible`, `targetLevel`, `kind`, `coarseLevel`, `parentId`). Continuous
+   * fields (`importance`, `projectedDiagonalPx`, `projectedAreaPx2`,
+   * `centroidWorld`) may be stale on a carried-over record; none of them
+   * feeds the active set.
+   */
   private foldViewDeltaEntities(
     scene: TickContext["scene"],
     view: number,
