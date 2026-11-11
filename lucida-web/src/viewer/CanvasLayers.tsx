@@ -1,8 +1,9 @@
 /**
  * What draws on and over the canvas: the 2D or 3D viewer, the annotation
- * overlays and draft, the pixel readout, the peer cursors, and the debug
- * overlays. The view mode and selectors come from the scene store; the engine
- * supplies the scene, client, canvas, loop, and session.
+ * overlays and draft, the pixel readout and the crosshairs of the point under
+ * the pointer, the peer cursors, and the debug overlays. The view mode and
+ * selectors come from the scene store; the engine supplies the scene, client,
+ * canvas, loop, and session.
  */
 import { lazy, Suspense, useCallback, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { viewSettleSignal } from "../pipeline/viewSettle.ts";
@@ -32,6 +33,7 @@ import { ScaleBar } from "./ScaleBar.tsx";
 import { useScaleBarShown } from "./scaleBar.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
 import { ViewOverlays } from "./ViewOverlays.tsx";
+import { Hover } from "./hover.ts";
 import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
@@ -110,6 +112,7 @@ export function CanvasLayers({
 
   // A finger's long press stands for both a right-click and a hover.
   const readoutRef = useRef<PixelReadoutHandle>(null);
+  const [hover] = useState(() => new Hover());
   const openContextMenu2d = useCallback((at: ClientPoint) => {
     overlay2dRef.current?.openContextMenu(at);
     readoutRef.current?.pressAt(at);
@@ -287,6 +290,7 @@ export function CanvasLayers({
             const index = wasmScene?.plane_line_position(view, axis, fraction) ?? -1;
             if (index >= 0) onAxisChange(axis, Number(index));
           }}
+          hover={hover}
         />
       )}
       {viewers && panesRoot && (
@@ -298,6 +302,8 @@ export function CanvasLayers({
           scene={viewers.scene}
           datasets={datasets}
           layers={layers}
+          hover={hover}
+          trace={engine.loop}
         />
       )}
       {showDebugOverlays && (

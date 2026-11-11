@@ -808,12 +808,12 @@ export class RenderClient implements UploadClient {
    * value and its level. Empty when nothing is drawn there, before the worker
    * is ready, and after destroy.
    */
-  probe(x: number, y: number): Promise<ProbeSample[]> {
+  probe(x: number, y: number, point?: [number, number, number]): Promise<ProbeSample[]> {
     if (this.destroyed || !this.workerReady) return Promise.resolve([]);
     const id = this.probeSeq++;
     return new Promise((resolve) => {
       this.probePending.set(id, resolve);
-      this.worker.postMessage({ type: "probe", id, x, y } satisfies ProbeMessage);
+      this.worker.postMessage({ type: "probe", id, x, y, ...(point && { point }) } satisfies ProbeMessage);
     });
   }
 

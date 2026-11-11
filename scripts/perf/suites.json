@@ -25,6 +25,12 @@
       "scenarios": ["phone-cold-open", "phone-full-ui", "phone-settle-then-orbit"],
       "ratios": [3]
     },
+    "hover": {
+      "description": "the pointer moved across one view: alone, then with a crosshair and a readout following it in a linked view and in four-up's other three",
+      "datasets": ["physical-volume", "volume"],
+      "scenarios": ["hover", "two-views-hover", "four-up-hover"],
+      "ratios": [1, 2]
+    },
     "four-up": {
       "description": "a volume and a deep one four-up, opened and scrubbed, next to the same in one view, so settle and coverage read side by side",
       "datasets": ["volume", "deep-volume"],
