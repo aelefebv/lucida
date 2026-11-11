@@ -607,13 +607,27 @@ impl Page {
     /// wants the canvas asks the page to capture it and keeps this as the
     /// fallback.
     pub async fn screenshot_png(&mut self, wait: Duration) -> Result<Vec<u8>, CliError> {
-        let captured = self
-            .call(
-                "Page.captureScreenshot",
-                json!({ "format": "png", "fromSurface": true }),
-                wait,
-            )
-            .await?;
+        self.capture_png(json!({ "format": "png", "fromSurface": true }), wait)
+            .await
+    }
+
+    /// [`Self::screenshot_png`] of one rectangle of the page, `[x, y, width,
+    /// height]` in CSS pixels, at the page's device pixel ratio.
+    pub async fn screenshot_region_png(
+        &mut self,
+        [x, y, width, height]: [f64; 4],
+        wait: Duration,
+    ) -> Result<Vec<u8>, CliError> {
+        let clip = json!({ "x": x, "y": y, "width": width, "height": height, "scale": 1 });
+        self.capture_png(
+            json!({ "format": "png", "fromSurface": true, "clip": clip }),
+            wait,
+        )
+        .await
+    }
+
+    async fn capture_png(&mut self, params: Value, wait: Duration) -> Result<Vec<u8>, CliError> {
+        let captured = self.call("Page.captureScreenshot", params, wait).await?;
         let data = captured
             .get("data")
             .and_then(|value| value.as_str())

@@ -102,6 +102,18 @@ impl Scene {
     /// dataset with nothing left out, which the active view's camera and
     /// axis positions describe alone.
     pub fn record_views(&self, comparisons: bool) -> Option<ViewsRecord> {
+        let record = self.views_record(comparisons);
+        let alone =
+            |view: &ViewRecord| view.datasets == ViewDatasets::All && view.comparison.is_none();
+        if record.layout == ViewLayout::Single && record.views.iter().all(alone) {
+            return None;
+        }
+        Some(record)
+    }
+
+    /// The views as [`Self::record_views`] records them, one view of every
+    /// dataset included, for a reader that wants the layout spelled out.
+    pub fn views_record(&self, comparisons: bool) -> ViewsRecord {
         let views: Vec<ViewRecord> = self
             .views
             .iter()
@@ -112,19 +124,18 @@ impl Scene {
                 comparison: view.comparison.clone().filter(|_| comparisons),
             })
             .collect();
-        let alone =
-            |view: &ViewRecord| view.datasets == ViewDatasets::All && view.comparison.is_none();
-        if self.layout == ViewLayout::Single && views.iter().all(alone) {
-            return None;
-        }
-        let at = |id: ViewId| self.views.iter().position(|view| view.id() == id);
-        Some(ViewsRecord {
+        ViewsRecord {
             layout: self.layout,
-            active: at(self.active).unwrap_or(0),
-            maximized: self.maximized.and_then(at),
+            active: self.view_index(self.active).unwrap_or(0),
+            maximized: self.maximized.and_then(|id| self.view_index(id)),
             views,
             links: self.links_record(),
-        })
+        }
+    }
+
+    /// Where `view` stands in the layout's order, from 0.
+    pub fn view_index(&self, view: ViewId) -> Option<usize> {
+        self.views.iter().position(|shown| shown.id() == view)
     }
 
     /// Lay the views out as `record` says, their cameras and axis positions
