@@ -7,7 +7,7 @@ import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../ap
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
-import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
+import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToWorld as sceneEventToWorld, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { useCommand } from "../ui/commands.ts";
@@ -329,7 +329,7 @@ function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFo
 
   // One finger pans, or draws with a tool; two pinch and pan in one move.
   useTouchGestures(element, true, {
-    claimsPress: () => toolRef.current !== "pan",
+    claimsPress: () => drawsOnPress(toolRef.current),
     onGesture: (g) => {
       switch (g.type) {
         case "pressStart":
@@ -425,7 +425,7 @@ function SliceViewerBody({ scene, surface, canvas, active, emitPresence, breakFo
     // state to the parent + a CSS class would re-render the whole
     // viewport tree on every drag transition.
     // eslint-disable-next-line react-hooks/immutability
-    element.style.cursor = dragging ? "grabbing" : tool === "pan" ? "grab" : "crosshair";
+    element.style.cursor = dragging ? "grabbing" : drawsOnPress(tool) ? "crosshair" : "grab";
     return () => {
       element.removeEventListener("pointerdown", onPointerDown);
       element.removeEventListener("pointermove", onPointerMove);

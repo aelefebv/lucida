@@ -132,6 +132,9 @@ impl ProfileScene {
                 .collect(),
             auto_contrast: self.auto_contrast.clone(),
             camera_space: scene.camera_space(),
+            // A profile holds how the viewer looks, so a page opening it
+            // draws each dataset where the document puts it now.
+            user_transforms: None,
         }
     }
 

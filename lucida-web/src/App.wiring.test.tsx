@@ -70,6 +70,18 @@ vi.mock("lucida-core", () => {
     dataset_has_physical_scale() {
       return false;
     }
+    dataset_user_transform() {
+      return "null";
+    }
+    user_transforms() {
+      return "{}";
+    }
+    dataset_units() {
+      return "[null,null,null]";
+    }
+    datasets_line_up_by_hand() {
+      return "[]";
+    }
     datasets_line_up() {
       return JSON.stringify({ verdict: "no_physical_scale", datasets: [] });
     }

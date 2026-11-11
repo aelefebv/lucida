@@ -741,7 +741,7 @@ where
     .await
 }
 
-fn dataset_summaries_from_document(document: &DocumentState) -> Vec<DatasetSummary> {
+pub(crate) fn dataset_summaries_from_document(document: &DocumentState) -> Vec<DatasetSummary> {
     document
         .manifests
         .values()
@@ -826,7 +826,7 @@ fn active_layout_id(
         .map(|id| id.0.clone())
 }
 
-fn resolve_dataset_summary(
+pub(crate) fn resolve_dataset_summary(
     selector: &str,
     datasets: &[DatasetSummary],
 ) -> Result<DatasetSummary, CliError> {

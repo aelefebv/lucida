@@ -60,6 +60,8 @@ import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useComparison } from "./hooks/useComparison.ts";
+import { useEditHistory } from "./hooks/useEditHistory.ts";
+import { useUserTransforms } from "./hooks/useUserTransforms.ts";
 import { viewLayoutActions } from "./viewLayout.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
@@ -566,6 +568,19 @@ function Viewer({
   }, [liveBridge, render.canvasRef, render.clientRef, render.loopRef]);
 
   const comparison = useComparison(engine, layers.layerInfos);
+  const editHistory = useEditHistory({
+    engine,
+    sendCommand: bridge.sendCommand,
+    onDocumentChanged: bumpRemoteDocumentVersion,
+  });
+  const userTransforms = useUserTransforms({
+    engine,
+    canEdit: canEditWorkspace,
+    sendCommand: bridge.sendCommand,
+    history: editHistory,
+    nameOf: comparison.nameOf,
+    onDocumentChanged: bumpRemoteDocumentVersion,
+  });
   const viewLayout = useMemo(() => viewLayoutActions(engine.scene, engine.loop), [engine]);
   const { views: shownViews, layout: viewLayoutName } = useSceneView(engine.store);
   // Several views offer each layer a place among them.
@@ -794,12 +809,13 @@ function Viewer({
   const savedViewApplier = savedViewSync.applier;
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
     revealCanvas();
-    await savedViewApplier.apply(view);
+    // Picked by hand, so it may put datasets where it recorded them.
+    userTransforms.restored(await savedViewApplier.apply(view, { restorePlacement: true }));
     notifySavedViewChange();
     // Remember which saved view is now applied so the sidebar can flag the
     // active row. Set it only after a successful apply.
     setCurrentOpenSavedViewId(savedViewId);
-  }, [savedViewApplier, notifySavedViewChange]);
+  }, [savedViewApplier, notifySavedViewChange, userTransforms]);
 
   // The sidebar reports when the open saved view stops existing (deleted,
   // withdrawn, or rejected); drop the highlight. The id guard keeps a stale
@@ -925,7 +941,10 @@ function Viewer({
       onLabelSetOpacity={layers.handleLabelSetOpacity}
       onAddData={() => setAddDataOpen(true)}
       comparisonBlocker={comparison.blocker}
+      comparisonNote={comparison.byHand}
       onCompare={comparison.compareWith}
+      onSetUserTransform={userTransforms.commit}
+      onResetUserTransform={userTransforms.reset}
       viewPlacement={layerViewPlacement}
       layoutRegistry={layoutRegistry}
       sendCommand={bridge.sendCommand}
@@ -1121,6 +1140,7 @@ function Viewer({
                   annotationsVisible={annotationsVisible}
                   onAnnotationsVisibleChange={setAnnotationsVisible}
                   compact={phone}
+                  canMove={canEditWorkspace}
                 />
               ),
               "top-center": (
@@ -1149,6 +1169,7 @@ function Viewer({
                       actions={comparison.actions}
                       nameOf={comparison.nameOf}
                       setAside={setAsideNote(dims.layers)}
+                      byHand={comparison.current && comparison.byHand(comparison.current.a, comparison.current.b)}
                     />
                   )}
                   {/* `#a=<id>` didn't resolve. A recipient without access fails
@@ -1226,6 +1247,7 @@ function Viewer({
               canvasSize={canvasSize}
               showDebugOverlays={showDebugOverlays}
               viewLayout={viewLayout}
+              userTransforms={userTransforms}
             />
             <SwipeDivider comparison={comparison.current} actions={comparison.actions} nameOf={comparison.nameOf} />
           </CanvasStage>

@@ -2,7 +2,8 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmScene } from "lucida-core";
 import { SavedViewApplier, type ApplierBridge, clampViewIndices } from "./applier.ts";
 import { buildCapture } from "./captureBuilder.ts";
-import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
+import { SAVED_VIEW_VERSION, type SavedView, type UserTransform } from "./types.ts";
+import { IDENTITY_USER_TRANSFORM } from "../userTransform.ts";
 import {
   FIXTURES,
   PIXEL_RATIOS,
@@ -350,6 +351,95 @@ describe("SavedViewApplier", () => {
     // were A's, so it lands elsewhere.
     const legacy = await restored({ ...view, camera_space: undefined });
     expect(legacy.some((n, i) => Math.abs(n - shown[i]) > 10)).toBe(true);
+  });
+
+  describe("placement by hand", () => {
+    const moved: UserTransform = { translation: [5, 0, 0], rotation: [0, 0, 0, 1], scale: [2, 2, 2] };
+    const placeB = (scene: WasmScene) =>
+      scene.apply_command(JSON.stringify({ type: "set_user_transform", dataset_id: "wds-b", transform: moved }));
+    const applierFor = (scene: WasmScene, mode: "broadcast" | "local" | "refuse") =>
+      new SavedViewApplier(bridge, () => scene, fakeIdForUrl, 30_000, "workspace-dataset-id", mode);
+    const transformOf = (scene: WasmScene, id: string) => JSON.parse(scene.dataset_user_transform(id));
+    const viewOf = (record: SavedView["user_transforms"]): SavedView => ({
+      ...emptyView(),
+      dataset_order: ["wds-a", "wds-b"],
+      user_transforms: record,
+    });
+
+    const restoring = { restorePlacement: true };
+
+    it("puts each dataset where a chosen view recorded it, sends the change and says what moved", async () => {
+      const { scene } = createScene(["wds-a", "wds-b"]);
+      const placed = await applierFor(scene, "broadcast").apply(viewOf({ "wds-b": moved }), restoring);
+      expect(placed).toEqual([{ datasetId: "wds-b", from: IDENTITY_USER_TRANSFORM, to: moved }]);
+      expect(transformOf(scene, "wds-b")).toEqual(moved);
+      expect(transformOf(scene, "wds-a")).toBeNull();
+      const sent = docCmds.filter((c) => c.includes('"set_user_transform"')).map((c) => JSON.parse(c));
+      expect(sent).toEqual([{ type: "set_user_transform", dataset_id: "wds-b", transform: moved }]);
+    });
+
+    it("puts back a dataset moved since the view, which recorded it where it declares", async () => {
+      const { scene } = createScene(["wds-a", "wds-b"]);
+      placeB(scene);
+      await applierFor(scene, "broadcast").apply(viewOf({}), restoring);
+      expect(transformOf(scene, "wds-b")).toBeNull();
+    });
+
+    it.each(["broadcast", "local", "refuse"] as const)(
+      "leaves placement alone in a restore nobody chose, whatever the view recorded (%s)",
+      async (mode) => {
+        const { scene, calls } = createScene(["wds-a", "wds-b"]);
+        placeB(scene);
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const applier = applierFor(scene, mode);
+        const placed = await applier.apply(viewOf({ "wds-a": moved }));
+        warn.mockRestore();
+        expect(placed).toEqual([]);
+        expect(transformOf(scene, "wds-b")).toEqual(moved);
+        expect(transformOf(scene, "wds-a")).toBeNull();
+        expect(calls.filter((c) => c.includes('"set_user_transform"'))).toHaveLength(1);
+        expect(docCmds.find((c) => c.includes('"set_user_transform"'))).toBeUndefined();
+        expect(applier.getState().warnings.some((w) => w.includes("placement"))).toBe(false);
+      },
+    );
+
+    it("leaves placement alone for a view that records none", async () => {
+      const { scene, calls } = createScene(["wds-a", "wds-b"]);
+      placeB(scene);
+      await applierFor(scene, "broadcast").apply(viewOf(undefined), restoring);
+      expect(transformOf(scene, "wds-b")).toEqual(moved);
+      expect(calls.filter((c) => c.includes('"set_user_transform"'))).toHaveLength(1);
+      expect(docCmds.find((c) => c.includes('"set_user_transform"'))).toBeUndefined();
+    });
+
+    it("places locally on the capture surface and refuses for a viewer, saying so", async () => {
+      const local = createScene(["wds-a", "wds-b"]);
+      await applierFor(local.scene, "local").apply(viewOf({ "wds-b": moved }), restoring);
+      expect(transformOf(local.scene, "wds-b")).toEqual(moved);
+      expect(docCmds).toEqual([]);
+
+      const viewer = createScene(["wds-a", "wds-b"]);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const applier = applierFor(viewer.scene, "refuse");
+      await applier.apply(viewOf({ "wds-b": moved }), restoring);
+      warn.mockRestore();
+      expect(transformOf(viewer.scene, "wds-b")).toBeNull();
+      expect(applier.getState().warnings.some((w) => w.includes("leaving the shared placement unchanged"))).toBe(true);
+    });
+
+    it("round-trips through a capture of the moved scene", async () => {
+      const saved = createScene(["wds-a", "wds-b"]);
+      placeB(saved.scene);
+      const view = buildCapture({
+        scene: saved.scene,
+        urlByDatasetId: new Map(),
+        datasetReferenceMode: "workspace-dataset-id",
+      });
+      expect(view.user_transforms).toEqual({ "wds-b": moved });
+      const { scene } = createScene(["wds-a", "wds-b"]);
+      await applierFor(scene, "broadcast").apply(view, restoring);
+      expect(scene.dataset_placement("wds-b")).toEqual(saved.scene.dataset_placement("wds-b"));
+    });
   });
 
   it.each(["refuse", "broadcast", "local"] as const)(
