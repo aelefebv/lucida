@@ -88,12 +88,9 @@ export function buildColdActiveEntry(
     ];
     return { level: idx, chunkShape, gridShape, levelDims };
   });
-  // The layout places an image along X and Y. Along the cut it is in its
-  // own samples, so only the axes on screen keep their offset.
-  const position = entity?.layoutPositionVox;
-  const layoutPositionVox = position && cutAxis !== "z"
-    ? toPlaneFrame([position[0], position[1], 0], cutAxis).slice(0, 2) as [number, number]
-    : position;
+  // Already on the worker's axes: the planner's place is across and down the
+  // plane the view draws.
+  const layoutPositionVox = entity?.layoutPositionVox;
 
   // Identity fallback is defensive: a missing roster match renders at
   // the unit cube — a clear visual failure, not a silent off-screen one.

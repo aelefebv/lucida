@@ -1,5 +1,5 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import { planeAxes, tczyx, toPlaneFrame, type SlicePlane } from "./renderer/slicePlane.ts";
+import { planeAxes, tczyx, type SlicePlane } from "./renderer/slicePlane.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
 import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
@@ -363,13 +363,9 @@ export function renderSliceView(
     const fullResWidth = dsShapeL[tczyx(across)];
     const fullResHeight = dsShapeL[tczyx(down)];
 
-    const roster = memberRoster.get(dsId)
+    // The planner's places are already across and down this plane.
+    const members = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
-    // A layout places images along X and Y; along Z every image starts at 0.
-    const members = plane === "xy" ? roster : roster.map((m) => ({
-      ...m,
-      position: toPlaneFrame([m.position[0], m.position[1], 0], cut).slice(0, 2) as [number, number],
-    }));
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
     const placement = placementInPlane(readPlacement(scene, dsId), cut);
 

@@ -537,11 +537,13 @@ export class TickCoordinator {
   }>();
   /**
    * Per-dataset cache of the camera-independent inputs to
-   * {@link buildViewSnapshot}: parsed `member_positions` and the
+   * {@link buildViewSnapshot}: parsed `plane_positions` and the
    * `imageSpecById` / `parentByEntityId` manifest maps. A view move leaves
    * all three identical. An entry is valid only while both keys match:
-   *   - `epochKey`, the content|layout fingerprint. A reflow or
-   *     add/remove that moves placement bumps it.
+   *   - `epochKey`, the content|layout fingerprint and the plane the views
+   *     place members on. A reflow or add/remove that moves placement bumps
+   *     it, and so does a side view, which places a collection's tiles in
+   *     cells of their own.
    *   - `manifestRef`, the `ds.manifest` reference. Progressively generated
    *     levels swap in a new manifest object with no epoch bump, so
    *     reference identity is the only signal the manifest maps are stale.
@@ -844,8 +846,12 @@ export class TickCoordinator {
         .sort((a, b) => Number(b.id === holder.id) - Number(a.id === holder.id));
       if (viewsOfDataset.length === 0) continue;
 
-      // See `snapshotInputCacheByDataset` for why both keys are checked.
-      const snapshotInputEpochKey = `${currentEpochs.content}|${currentEpochs.layout}`;
+      // Every view that draws a dataset holds it in one form, so each places
+      // its members as the first does. See `snapshotInputCacheByDataset` for
+      // why both keys are checked.
+      const placingView = viewsOfDataset[0];
+      const placingPlane = viewCutPlane(ctx, placingView) ?? "xy";
+      const snapshotInputEpochKey = `${currentEpochs.content}|${currentEpochs.layout}|${placingPlane}`;
       let snapshotInputs = this.snapshotInputCacheByDataset.get(dsId);
       if (
         !snapshotInputs ||
@@ -853,7 +859,7 @@ export class TickCoordinator {
         snapshotInputs.manifestRef !== ds.manifest
       ) {
         const positions = JSON.parse(
-          ctx.scene.member_positions(dsId),
+          ctx.scene.plane_positions(placingView.id, dsId),
         ) as Record<string, [number, number]>;
         const imageSpecById = new Map<string, ImageSpec>();
         for (const img of ds.manifest.images) {

@@ -99,7 +99,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     active_view: () => 0,
     view_query: () => JSON.stringify(config.viewQuery),
     view_query_delta: () => JSON.stringify({ Full: config.viewQuery }),
-    member_positions: () => JSON.stringify(config.memberPositions),
+    plane_positions: () => JSON.stringify(config.memberPositions),
     visible_region: () => JSON.stringify(config.visibleRegion),
     slice_plane: () => "xy",
     cut_index: () => 0,

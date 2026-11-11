@@ -24,7 +24,7 @@ use crate::camera::{Camera, Framing};
 use crate::chunk::{self, ChunkCoord, ChunkQuery, ChunkView, CullCounts};
 use crate::epoch::SceneEpochs;
 use crate::framing::{FitBounds, PlaneBox, WorldBox};
-use crate::placement::{Affine, CameraSpace, DeclaredFrame};
+use crate::placement::{Affine, CameraSpace, DeclaredFrame, TileCells};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::slice_plane::SlicePlane;
 use crate::target_level::{self, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios};
@@ -32,7 +32,7 @@ use crate::transform::VolumeTransform;
 use crate::view::{AxisPositions, View, ViewDatasets, ViewId, ViewLayout};
 use lucida_content::SpatialAxis;
 pub use placement::member_transform;
-use placement::{Placed, slice_box};
+use placement::{Placed, placing_plane, slice_box};
 
 /// Per-dataset derived state for fast hot-path lookups.
 /// Rebuilt on register/remove. Not serialized.
@@ -52,6 +52,10 @@ pub struct DatasetDerivedState {
     /// samples; zero with no members. Precomputed so
     /// [`Scene::world_space`] folds over datasets, not over every member.
     pub max_member_shape: [f64; 3],
+    /// How a side view lays out the tiles of a collection. `None` for a
+    /// dataset that isn't one, which a side view cuts where the scene frame
+    /// places the cut.
+    pub tile_cells: Option<TileCells>,
 }
 
 impl DatasetDerivedState {
@@ -60,6 +64,21 @@ impl DatasetDerivedState {
     /// first (see `member_index`). `None` for an unknown id.
     pub fn member_by_id(&self, id: &str) -> Option<&MemberState> {
         self.member_index.get(id).map(|&i| &self.members[i])
+    }
+
+    /// Where a view drawing `plane` places `member`, `[across, down]` in
+    /// the dataset's samples: a tile's cell in a side view of a collection,
+    /// and otherwise its layout position on the two axes the plane draws.
+    /// Along Z every image starts at 0. A volume view places members as an
+    /// XY view does.
+    pub fn plane_position(&self, plane: SlicePlane, member: &MemberState) -> [f64; 2] {
+        let [x, y] = member.position;
+        match (plane, &self.tile_cells) {
+            (SlicePlane::Xy, _) => member.position,
+            (_, Some(cells)) => cells.position(plane, member.position),
+            (SlicePlane::Xz, None) => [x, 0.0],
+            (SlicePlane::Yz, None) => [y, 0.0],
+        }
     }
 }
 
@@ -602,10 +621,11 @@ impl Scene {
     /// Bounds of a single dataset's members in the plane `view`'s slice
     /// camera works in: the plane twin of [`Self::dataset_world_bounds`].
     ///
-    /// Each member with a level 0 contributes its layout box, its level-0
-    /// shape from its position, placed in the scene frame on the two axes
-    /// the slice plane draws. The third counts the member's planes along the
-    /// cut, since the axis position steps through planes ([`slice_box`]).
+    /// Each member with a level 0 contributes its box on the plane, its
+    /// level-0 shape from where the plane places it, placed in the scene
+    /// frame on the two axes the slice plane draws. The third counts the
+    /// member's planes along the cut, since the axis position steps through
+    /// planes ([`slice_box`]).
     /// Returns `None` when no member has levels, or for an unknown view.
     pub fn dataset_plane_bounds(&self, view: ViewId, dataset_id: &str) -> Option<PlaneBox> {
         let plane = self.view(view)?.slice_plane();
@@ -616,7 +636,7 @@ impl Scene {
             .members
             .iter()
             .filter_map(|member| {
-                let (min, max) = slice_box(plane, &to_scene, member)?;
+                let (min, max) = slice_box(plane, &to_scene, derived, member)?;
                 Some(PlaneBox::new(min, max))
             })
             .reduce(PlaneBox::union)
@@ -784,8 +804,8 @@ impl Scene {
     /// through a level boundary.
     ///
     /// For multi-member datasets (collections), each member's AABB is checked
-    /// against the visible region, and its chunks are enumerated at its
-    /// layout position.
+    /// against the visible region, and its chunks are enumerated where the
+    /// view places it ([`DatasetDerivedState::plane_position`]).
     pub fn chunk_plan_for(
         &self,
         view: ViewId,
@@ -808,9 +828,10 @@ impl Scene {
             return Some(Vec::new());
         }
 
-        // The region is in the dataset's frame, where member positions are.
+        // The region is in the dataset's frame, where the view places members.
         let region = self.visible_region(id, dataset_id)?;
         let placed = self.placed(dataset_id)?;
+        let plane = placing_plane(view);
         let mut plans = Vec::new();
         for member in &derived.members {
             if member.levels.is_empty() {
@@ -821,12 +842,10 @@ impl Scene {
             let tile_w = level0.shape[4] as f64; // X
             let tile_h = level0.shape[3] as f64; // Y
 
-            // AABB culling (same logic as current but using member.position).
-            // A slice view's cut is in the member's own samples.
-            let cut = (!view.camera.is_volume()).then_some(region.cut_axis);
-            let placed_at = |axis: SpatialAxis, at: f64| if cut == Some(axis) { 0.0 } else { at };
-            let pos_x = placed_at(SpatialAxis::X, member.position[0]);
-            let pos_y = placed_at(SpatialAxis::Y, member.position[1]);
+            // AABB culling on X and Y. A slice view's cut is in the member's
+            // own samples, so the view never places it along that axis.
+            let on_plane = derived.plane_position(plane, member);
+            let [pos_x, pos_y, _] = plane.frame_point(on_plane);
             let member_max_x = pos_x + tile_w;
             let member_max_y = pos_y + tile_h;
 
@@ -852,12 +871,7 @@ impl Scene {
             let level_geo = &member.levels[level as usize];
 
             // The query places the member, as the browser's planner does.
-            let query = ChunkQuery::new(
-                level_geo,
-                level0,
-                member.position,
-                chunk::RENDER_RADIUS_DISABLED,
-            );
+            let query = ChunkQuery::new(level_geo, level0, on_plane, chunk::RENDER_RADIUS_DISABLED);
             let mut cells = Vec::new();
             chunk::enumerate_chunks(
                 &ChunkView::new(&region, 0.0),
@@ -931,7 +945,8 @@ impl Scene {
     /// `view`. `None` for an unknown view.
     ///
     /// For Slice (2D) mode: tests the ray's scene-frame point against each
-    /// member's layout box, placed in the scene frame as its dataset is.
+    /// member's box on the plane ([`slice_box`]), placed in the scene frame
+    /// as its dataset is.
     ///
     /// For 3D modes (Arcball/Fly): uses the rendering transform, placed in
     /// world space, so the ray test matches what the camera actually sees.
@@ -957,7 +972,8 @@ impl Scene {
             let hit_result = if is_2d {
                 // Slice mode: the ray stands at a point of the slice plane,
                 // which the member's placed box holds or doesn't.
-                let Some((min, max)) = slice_box(view.slice_plane(), &placed.to_scene, member)
+                let Some((min, max)) =
+                    slice_box(view.slice_plane(), &placed.to_scene, derived, member)
                 else {
                     continue;
                 };
@@ -1547,7 +1563,7 @@ impl Scene {
 
             let pixels_per_sample = if is_2d {
                 // Corners and centroid in the slice camera's space.
-                let (min, max) = slice_box(view.slice_plane(), &placed.to_scene, member)
+                let (min, max) = slice_box(view.slice_plane(), &placed.to_scene, derived, member)
                     .unwrap_or(([0.0; 3], [1.0; 3]));
                 centroid = [
                     (min[0] + max[0]) / 2.0,
@@ -1907,12 +1923,21 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
         }
     }
 
+    let tile_cells = matches!(manifest.kind, DatasetKind::Collection { .. }).then(|| {
+        TileCells::new(
+            members
+                .iter()
+                .filter_map(|member| Some(member.levels.first()?.shape)),
+        )
+    });
+
     DatasetDerivedState {
         active_layout,
         members,
         member_index,
         frame: DeclaredFrame::of(manifest),
         max_member_shape,
+        tile_cells,
     }
 }
 
@@ -4795,12 +4820,15 @@ mod tests {
         apply_vp(&mut scene, SetMode3D);
         apply_vp(&mut scene, SetMode2D);
         assert_eq!(scene.active_view().slice_plane(), SlicePlane::Xz);
+        // Back to XY moves no axis position, yet draws other planes.
+        let epochs = scene.epochs.clone();
         apply_vp(
             &mut scene,
             SetSlicePlane {
                 plane: SlicePlane::Xy,
             },
         );
+        assert!(scene.epochs.selection > epochs.selection);
         assert_eq!(
             scene
                 .dataset_plane_bounds(scene.active_view().id(), "vol")
