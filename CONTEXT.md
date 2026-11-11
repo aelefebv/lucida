@@ -281,7 +281,10 @@ _Avoid_: viewport (the canvas size a camera is fitted to)
 
 **View layout**:
 How the canvas divides among the views: one view across it, two side by side,
-or two stacked.
+two stacked, four in quarters, or *four-up*. Four-up shows the same datasets
+as an XY, a YZ and an XZ slice and a volume, crossing at one point: the four
+stand at one set of axis positions, so moving one view's position moves them
+all. A phone offers one view or two stacked.
 _Avoid_: layout (unqualified; a collection's arrangement of entities)
 
 **Link**:

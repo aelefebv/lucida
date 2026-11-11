@@ -16,7 +16,9 @@ impl Scene {
     /// Divide the canvas as `layout` does. A view the layout adds starts
     /// showing nothing, at the next id the scene has not used. A layout of
     /// fewer views keeps the active one and drops the others from the end.
+    /// Four-up then gives each view its part, fitted.
     pub(crate) fn set_view_layout(&mut self, layout: ViewLayout) {
+        let entering_four_up = layout == ViewLayout::FourUp && self.layout != layout;
         let rects = layout.rects();
         while self.views.len() > rects.len() {
             let drop = self
@@ -34,10 +36,17 @@ impl Scene {
         }
         self.layout = layout;
         self.maximized = None;
+        if entering_four_up {
+            self.arrange_four_up();
+        }
         let ids: Vec<ViewId> = self.views.iter().map(View::id).collect();
         self.view_query_cursors
             .retain(|(view, _), _| ids.contains(view));
         self.arrange();
+        if entering_four_up {
+            self.reframe_all();
+            self.align_four_up();
+        }
     }
 
     /// Give each view its rectangle: the layout's, or the whole canvas for a

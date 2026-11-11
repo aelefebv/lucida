@@ -12,6 +12,25 @@ import type { InvalidationSink } from "./invalidation.ts";
 import type { WasmScene } from "lucida-core";
 import { readViewLinks, type ViewLinks } from "./viewLinks.ts";
 
+/** Every layout, in the order the layout menu offers them. */
+export const VIEW_LAYOUTS: readonly ViewLayoutName[] = ["single", "columns", "rows", "grid", "four_up"];
+
+/** Each layout as the layout menu names it. */
+export const LAYOUT_LABELS: Readonly<Record<ViewLayoutName, string>> = {
+  single: "1",
+  columns: "1×2",
+  rows: "2×1",
+  grid: "2×2",
+  four_up: "Four-up",
+};
+
+/** The layouts a phone offers: one view, or two stacked. */
+export const PHONE_LAYOUTS: readonly ViewLayoutName[] = ["single", "rows"];
+
+export function isViewLayoutName(value: string): value is ViewLayoutName {
+  return (VIEW_LAYOUTS as readonly string[]).includes(value);
+}
+
 export interface ViewLayoutActions {
   /** How the canvas divides now. */
   layout(): ViewLayoutName;

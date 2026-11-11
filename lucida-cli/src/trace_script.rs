@@ -271,8 +271,8 @@ pub enum ScriptStep {
         )]
         interval_ms: Option<u64>,
     },
-    /// Divide the canvas among views as `layout` does, `single`, `columns`
-    /// or `rows`, then move into each view, in order, the open datasets
+    /// Divide the canvas among views as `layout` does, `single`, `columns`,
+    /// `rows`, `grid` or `four_up`, then move into each view, in order, the open datasets
     /// whose source URLs `show` lists for it, as a layer dropped on a view
     /// moves there; with `keep`, shows them there as well, as "Show in both
     /// views" does. Only a script file can name the datasets.
@@ -299,7 +299,13 @@ pub enum ScriptStep {
 }
 
 /// The view layouts, as a views step spells them, and how many views each holds.
-const VIEW_LAYOUTS: [(&str, usize); 3] = [("single", 1), ("columns", 2), ("rows", 2)];
+const VIEW_LAYOUTS: [(&str, usize); 5] = [
+    ("single", 1),
+    ("columns", 2),
+    ("rows", 2),
+    ("grid", 4),
+    ("four_up", 4),
+];
 
 fn visible_by_default() -> bool {
     true
@@ -486,7 +492,9 @@ impl ScriptStep {
             Self::Blink { with, .. } => validate_with(with.as_deref()),
             Self::Views { layout, show, .. } => {
                 let Some((_, views)) = VIEW_LAYOUTS.iter().find(|(name, _)| name == layout) else {
-                    return Err(format!("a layout is single, columns or rows, not {layout}"));
+                    return Err(format!(
+                        "a layout is single, columns, rows, grid or four_up, not {layout}"
+                    ));
                 };
                 if show.len() > *views {
                     return Err(format!(
@@ -4244,8 +4252,8 @@ mod tests {
 
         let refused = |json: &str| Script::from_json(json).unwrap_err();
         assert_eq!(
-            refused(r#"[{"kind": "views", "layout": "grid"}]"#),
-            "step 1 (views): a layout is single, columns or rows, not grid"
+            refused(r#"[{"kind": "views", "layout": "triple"}]"#),
+            "step 1 (views): a layout is single, columns, rows, grid or four_up, not triple"
         );
         assert_eq!(
             refused(r#"[{"kind": "views", "layout": "single", "show": [["a.zarr"], ["b.zarr"]]}]"#),
