@@ -92,6 +92,7 @@ describe("the comparison controls", () => {
       set_comparison_mode: vi.fn(),
       set_comparison_divider: vi.fn(),
       flip_comparison: vi.fn(),
+      set_blink_rate: vi.fn(),
     } as unknown as ComparisonScene & Record<string, ReturnType<typeof vi.fn>>;
   }
 
@@ -108,5 +109,15 @@ describe("the comparison controls", () => {
     const quiet = { markInteractiveDirty: vi.fn(), markResidencyDirty: vi.fn(), markInput: vi.fn() };
     expect(comparisonActions(() => refused, () => quiet).start("a", "b", "blink")).toEqual({ verdict: "apart" });
     expect(quiet.markInput).not.toHaveBeenCalled();
+  });
+
+  it("run a blink at a rate, or hold it", () => {
+    const scene = fakeScene();
+    const loop = { markInteractiveDirty: vi.fn(), markResidencyDirty: vi.fn(), markInput: vi.fn() };
+    const actions = comparisonActions(() => scene, () => loop);
+    actions.setBlinkRate(2);
+    actions.setBlinkRate(null);
+    expect(scene.set_blink_rate).toHaveBeenNthCalledWith(1, 2);
+    expect(scene.set_blink_rate).toHaveBeenNthCalledWith(2, undefined);
   });
 });

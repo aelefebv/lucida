@@ -47,9 +47,13 @@ interface Props {
   dragPlane?: (view: number, axis: SpatialAxis, fraction: number) => void;
   /** The crosshairs the point under the pointer puts in the other views. */
   hover?: Pick<Hover, "subscribe" | "markOf">;
+  /** Whether a running blink holds still, as a capture asks. */
+  still?: boolean;
 }
 
-export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, planes, dragPlane, hover }: Props) {
+export function ViewOverlays({
+  views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, planes, dragPlane, hover, still,
+}: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
     <div className="lc-view-overlays">
@@ -90,6 +94,7 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
                     setAside={setAsideNote(pane.setAside)}
                     byHand={byHand(comparison.a, comparison.b)}
                     active={pane.active}
+                    still={still}
                   />
                 </div>
               )}

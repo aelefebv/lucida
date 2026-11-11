@@ -34,6 +34,7 @@ function overlays(
     setMode: vi.fn(),
     setDivider: vi.fn(),
     flip: vi.fn(),
+    setBlinkRate: vi.fn(),
   };
   const activate = vi.fn();
   const store = { subscribe: () => () => {}, getComparisons: () => byView };
