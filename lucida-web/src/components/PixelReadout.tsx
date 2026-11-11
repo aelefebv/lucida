@@ -193,7 +193,8 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
   const height = canvas.clientHeight;
   return cards.map(({ point: at, blocks }) => blocks.length > 0 && (
     <div
-      key={`${at.view}${at.crosshair ? "+" : ""}`}
+      // A view reads one point: the pointer's, or a crosshair it isn't under.
+      key={at.view}
       className="lc-pixel-readout"
       role="tooltip"
       data-testid="pixel-readout"
