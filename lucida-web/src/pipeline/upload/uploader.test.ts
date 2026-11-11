@@ -194,6 +194,7 @@ const PLANE_BYTES = 256 * 256 * 2;
 
 function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkDelivery {
   return {
+    mode: "slice",
     entityId: "tile-0",
     imageId: "img-0",
     level: 0,
@@ -332,7 +333,7 @@ describe("Uploader unified delivery", () => {
 
     uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
-      uploader.handleChunkResidency("img-0", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
+      uploader.handleChunkResidency("img-0", "slice", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
       uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     }
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
@@ -345,13 +346,14 @@ describe("Uploader unified delivery", () => {
     expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }))).toBe(false);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
-    uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", displayStateByChannel: {} });
+    uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", viewMode: "slice", displayStateByChannel: {} });
     uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateSelection({
       ctx,
       datasetId: "ds1",
+      viewMode: "slice",
       currentT: 0,
       currentZ: 1,
       requests: [],
@@ -364,11 +366,11 @@ describe("Uploader unified delivery", () => {
   });
 
   it("preserves the one-item soft budget cap", () => {
-    const large = makeChunkDelivery({
+    const large = makeChunkDelivery({ mode: "volume",
       data: new ArrayBuffer(4 * 1024 * 1024),
       priority: 1,
     });
-    const smallerLowerPriority = makeChunkDelivery({
+    const smallerLowerPriority = makeChunkDelivery({ mode: "volume",
       chunkKey: "0/0/0/0/0/1",
       data: new ArrayBuffer(64),
       priority: 100,
@@ -391,7 +393,7 @@ describe("Uploader unified delivery", () => {
   it("sends chunks held back while the view moved at the held budget, until a tick sends all it can", () => {
     const MIB = 1024 * 1024;
     const chunks = (n: number) => Array.from({ length: n }, (_, i) =>
-      makeChunkDelivery({ chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(4 * MIB), priority: i }));
+      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(4 * MIB), priority: i }));
     let deliverable = chunks(12);
     const cpuCache = makeCpuCache();
     vi.mocked(cpuCache.getDeliverable).mockImplementation(function* () {
@@ -416,20 +418,20 @@ describe("Uploader unified delivery", () => {
   });
 
   it("splits upload budget across detail and coarse when both tiers have deliverables", () => {
-    const largeDetail = makeChunkDelivery({
+    const largeDetail = makeChunkDelivery({ mode: "volume",
       data: new ArrayBuffer(700),
       priority: 1,
       residencyTier: "detail",
       lane: "detail",
     });
-    const secondDetail = makeChunkDelivery({
+    const secondDetail = makeChunkDelivery({ mode: "volume",
       chunkKey: "0/0/0/0/0/1",
       data: new ArrayBuffer(100),
       priority: 2,
       residencyTier: "detail",
       lane: "detail",
     });
-    const coarse = makeChunkDelivery({
+    const coarse = makeChunkDelivery({ mode: "volume",
       chunkKey: "0/0/0/0/0/2",
       data: new ArrayBuffer(100),
       priority: 100,
@@ -471,7 +473,7 @@ describe("Uploader unified delivery", () => {
   });
 
   it("flags the tick when the upload budget is exhausted", () => {
-    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
+    const chunk = makeChunkDelivery({ mode: "volume", data: new ArrayBuffer(2048) });
     const cpuCache = makeCpuCache([chunk]);
     const ctx = makeCtx({ cpuCache, mode: "volume" });
 
@@ -526,17 +528,17 @@ describe("Uploader worker feedback", () => {
     const cpuCache = makeCpuCache();
     const uploader = new Uploader();
 
-    expect(uploader.handleChunkResidency("img-0:ch1", "detail", "held", ["0/0/1/0/0/0"], cpuCache)).toBe(false);
-    expect(cpuCache.markChunksHeld).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/0"]);
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "detail", "held", ["0/0/1/0/0/0"], cpuCache)).toBe(false);
+    expect(cpuCache.markChunksHeld).toHaveBeenCalledWith("img-0", 1, "slice", "detail", ["0/0/1/0/0/0"]);
 
-    expect(uploader.handleChunkResidency("img-0:ch1", "coarse", "lost", ["2/0/1/0/0/0"], cpuCache, "evicted")).toBe(true);
-    expect(cpuCache.markChunksLost).toHaveBeenCalledWith("img-0", 1, "coarse", ["2/0/1/0/0/0"], "evicted");
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "coarse", "lost", ["2/0/1/0/0/0"], cpuCache, "evicted")).toBe(true);
+    expect(cpuCache.markChunksLost).toHaveBeenCalledWith("img-0", 1, "slice", "coarse", ["2/0/1/0/0/0"], "evicted");
 
     // A full atlas waits for the next plan; any other refusal may go again now.
-    expect(uploader.handleChunkResidency("img-0:ch1", "detail", "refused", ["0/0/1/0/0/1"], cpuCache, "atlas-policy")).toBe(false);
-    expect(uploader.handleChunkResidency("img-0:ch1", "detail", "refused", ["0/0/1/0/0/2"], cpuCache, "stale")).toBe(true);
-    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/1"], "atlas-policy");
-    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/2"], "stale");
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "detail", "refused", ["0/0/1/0/0/1"], cpuCache, "atlas-policy")).toBe(false);
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "detail", "refused", ["0/0/1/0/0/2"], cpuCache, "stale")).toBe(true);
+    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "slice", "detail", ["0/0/1/0/0/1"], "atlas-policy");
+    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "slice", "detail", ["0/0/1/0/0/2"], "stale");
   });
 
   it("checks a missing chunk against the residency mirror, and asks for a tick only on a disagreement", () => {
@@ -551,11 +553,11 @@ describe("Uploader worker feedback", () => {
     };
     const uploader = new Uploader();
 
-    expect(uploader.handleWantedSetDelta("ds1", [missing], cpuCache)).toBe(false);
-    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "detail");
+    expect(uploader.handleWantedSetDelta("ds1", "slice", [missing], cpuCache)).toBe(false);
+    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "slice", "detail");
 
     vi.mocked(cpuCache.markChunkMissing).mockReturnValue(true);
-    expect(uploader.handleWantedSetDelta("ds1", [missing], cpuCache)).toBe(true);
+    expect(uploader.handleWantedSetDelta("ds1", "slice", [missing], cpuCache)).toBe(true);
   });
 });
 

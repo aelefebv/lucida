@@ -72,8 +72,8 @@ export function sliceEvictionParams(
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
     cameraFor: (memberId) => state.cameraUVPerEntity.get(memberId) ?? [0.5, 0.5],
-    targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
-    isWanted: (memberId, chunkKey) => wantedChunksFor(state, memberId, tier)?.has(chunkKey) ?? false,
+    targetLevelFor: (memberId) => state.targetLevelByMember.slice.get(memberId),
+    isWanted: (memberId, chunkKey) => wantedChunksFor(state, "slice", memberId, tier)?.has(chunkKey) ?? false,
     is3D: false,
     sliceAxis: atlas.axis,
   };

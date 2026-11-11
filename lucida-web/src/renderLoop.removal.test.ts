@@ -65,8 +65,9 @@ function deliver(cpuCache: CpuCache, entityId: string, imageId: string): void {
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     lane: "detail",
     residencyTier: "detail",
+    mode: "slice",
   });
-  cpuCache.markChunksHeld(imageId, 0, "detail", ["0/0/0/0/0/0"]);
+  cpuCache.markChunksHeld(imageId, 0, "slice", "detail", ["0/0/0/0/0/0"]);
 }
 
 describe("removing a dataset", () => {
@@ -92,8 +93,8 @@ describe("removing a dataset", () => {
 
     loop.removeDataset("ds");
 
-    expect(cpuCache.deliveryState.wasChunkSent("ds:image-0", 0, "0/0/0/0/0/0", "detail")).toBe(false);
-    expect(cpuCache.deliveryState.wasChunkSent("ds:label-0", 0, "0/0/0/0/0/0", "detail")).toBe(false);
-    expect(cpuCache.deliveryState.isChunkHeld("other:image-0", 0, "0/0/0/0/0/0", "detail")).toBe(true);
+    expect(cpuCache.deliveryState.wasChunkSent("ds:image-0", 0, "0/0/0/0/0/0", "detail", "slice")).toBe(false);
+    expect(cpuCache.deliveryState.wasChunkSent("ds:label-0", 0, "0/0/0/0/0/0", "detail", "slice")).toBe(false);
+    expect(cpuCache.deliveryState.isChunkHeld("other:image-0", 0, "0/0/0/0/0/0", "detail", "slice")).toBe(true);
   });
 });

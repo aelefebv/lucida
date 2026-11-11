@@ -146,6 +146,7 @@ function makeCold(
     wantedChunks: [],
     activeSet,
     viewMode: "slice",
+    drawnModes: ["slice"],
     sampleFormat: "u16",
   };
 }

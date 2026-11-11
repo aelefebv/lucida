@@ -3,7 +3,7 @@ import type { VolumeRenderer } from "./volumeRenderer.ts";
 import type { LayerCompositor } from "./layerCompositor.ts";
 import type { ViewLander } from "./viewLander.ts";
 import type { CursorRenderer } from "./cursorRenderer.ts";
-import type { WorkerToMainMessage } from "./workerProtocol.ts";
+import type { PoolMode, WorkerToMainMessage } from "./workerProtocol.ts";
 import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
 import type { FrameTiming } from "./passTiming.ts";
 import type { RendererState } from "./worker/state.ts";
@@ -33,11 +33,15 @@ export interface WorkerCtx {
   post(msg: WorkerToMainMessage, transfer?: Transferable[]): void;
   /**
    * Recompute and post the wanted-set delta and level report for one
-   * dataset: the one named, else the dataset whose cold state arrived last.
-   * An upload names the dataset its member belongs to, so a workspace with
+   * dataset's pools of `mode`, or of each mode it holds when `mode` is
+   * absent: the dataset named, else the cold state that arrived last. An
+   * upload names the dataset its member belongs to, so a workspace with
    * several datasets keeps each one's report current.
    */
-  postWantedSet(datasetId?: string): void;
-  /** The dataset's entity descriptor buffer and index maps, or null before its first cold state. */
-  lookupEntityDescriptor(datasetId: string): EntityDescriptorIndex | null;
+  postWantedSet(datasetId?: string, mode?: PoolMode): void;
+  /**
+   * The entity descriptor buffer and index maps of the dataset's pools of
+   * `mode`, or null before that mode's first cold state.
+   */
+  lookupEntityDescriptor(datasetId: string, mode: PoolMode): EntityDescriptorIndex | null;
 }

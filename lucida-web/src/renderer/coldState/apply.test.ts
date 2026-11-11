@@ -153,6 +153,7 @@ function makeCold(
     wantedChunks: [],
     activeSet,
     viewMode: opts?.viewMode ?? "volume",
+    drawnModes: opts?.drawnModes ?? [opts?.viewMode ?? "volume"],
     sampleFormat: "u16",
   };
 }
@@ -166,7 +167,7 @@ function sli(state: RendererState) {
 
 /** Pool routing for one member's (tier, level) section. */
 function poolOf(state: RendererState, memberId: string, tier: "detail" | "coarse", level: number) {
-  return state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level));
+  return state.memberSourcePools.volume.get(memberId)?.get(sourceKey(tier, level)) ?? state.memberSourcePools.slice.get(memberId)?.get(sourceKey(tier, level));
 }
 
 /**
@@ -186,26 +187,28 @@ const HALVING_PYRAMID: ColdStateActiveEntry["levels"] = [
  * check see it.
  */
 /** Add chunks to the wanted set of the member's dataset, as a cold state from the planner would. */
-function wantChunks(ctx: WorkerCtx, memberId: string, tier: ResidencyTier, keys: string[]): void {
-  const datasetId = ctx.state.memberToDataset.get(memberId)!;
-  const index = new Map(ctx.state.wantedByDataset.get(datasetId) ?? []);
+function wantChunks(
+  ctx: WorkerCtx, mode: "slice" | "volume", memberId: string, tier: ResidencyTier, keys: string[],
+): void {
+  const key = `${ctx.state.memberToDataset.get(memberId)!}|${mode}`;
+  const index = new Map(ctx.state.wantedByDatasetMode.get(key) ?? []);
   const entry = wantedEntryKey(tier, memberId);
   index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
-  ctx.state.wantedByDataset.set(datasetId, index);
+  ctx.state.wantedByDatasetMode.set(key, index);
 }
 
 /** Upload chunks the planner wants. These tests are about sections, not admission. */
 function deliverVolume(
   ctx: WorkerCtx, msg: VolumeChunkDataMessage, epochs: SceneEpochs, poolKey: string, memberId: string,
 ): void {
-  wantChunks(ctx, memberId, msg.tier, msg.chunks.map((c) => c.key));
+  wantChunks(ctx, "volume", memberId, msg.tier, msg.chunks.map((c) => c.key));
   handleVolumeChunkData(ctx, msg, epochs, poolKey, memberId);
 }
 
 function deliverSlice(
   ctx: WorkerCtx, msg: SliceChunkDataMessage, epochs: SceneEpochs, poolKey: string, memberId: string,
 ): void {
-  wantChunks(ctx, memberId, msg.tier, msg.chunks.map((c) => c.key));
+  wantChunks(ctx, "slice", memberId, msg.tier, msg.chunks.map((c) => c.key));
   handleSliceChunkData(ctx, msg, epochs, poolKey, memberId);
 }
 
@@ -283,9 +286,9 @@ describe("Suite A — applyColdState", () => {
     // Indirection sized to gridX*gridY*gridZ = 2*4*4 = 32.
     expect(atlas.indirectionData.length).toBe(32);
     // Snapshot captured for the dataset.
-    expect(ctx.state.currentSourcesByDataset.get("ds1")?.get("imgA:ch0")).toHaveLength(1);
+    expect(ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.get("imgA:ch0")).toHaveLength(1);
     // Descriptor buffer was built for the dataset.
-    expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
+    expect(ctx.state.descriptorBuffersByDatasetMode.has("ds1|volume")).toBe(true);
   });
 
   // 2. Multi-channel volume cold state
@@ -398,14 +401,14 @@ describe("Suite A — applyColdState", () => {
       chunkDims: [8, 128, 128],
       offset: 0,
     });
-    const sources = ctx.state.currentSourcesByDataset.get("ds1")?.get("imgA:ch0") ?? [];
+    const sources = ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.get("imgA:ch0") ?? [];
     expect(sources.map((s) => [s.tier, s.meta.level])).toEqual([
       ["detail", 0],
       ["detail", 2],
       ["coarse", 2],
     ]);
     // The draw binds both detail pools (finest first) and the coarse pool.
-    expect(ctx.state.descriptorBuffersByDataset.get("ds1")?.sourceBindingByMember.get("imgA:ch0")).toEqual({
+    expect(ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")?.sourceBindingByMember.get("imgA:ch0")).toEqual({
       levelPoolKeys: ["ds1:ch0:64x64x32:detail", "ds1:ch0:128x128x8:detail"],
       coarsePoolKey: "ds1:ch0:128x128x8:coarse",
     });
@@ -436,7 +439,7 @@ describe("Suite A — applyColdState", () => {
       level: 1,
       offset: 0,
     });
-    const sources = ctx.state.currentSourcesByDataset.get("ds1")?.get("imgA:ch0") ?? [];
+    const sources = ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.get("imgA:ch0") ?? [];
     expect(sources.map((s) => [s.tier, s.meta.level])).toEqual([["detail", 1], ["coarse", 1]]);
   });
 
@@ -464,7 +467,7 @@ describe("Suite A — applyColdState", () => {
     }
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBeUndefined();
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 5)).toBeUndefined();
-    expect(ctx.state.descriptorBuffersByDataset.get("ds1")?.sourceBindingByMember.get("imgA:ch0")).toEqual({
+    expect(ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")?.sourceBindingByMember.get("imgA:ch0")).toEqual({
       levelPoolKeys: ["ds1:ch0:32x32x32:detail"],
       coarsePoolKey: null,
     });
@@ -580,13 +583,13 @@ describe("Suite A — applyColdState", () => {
       makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [2], levels: HALVING_PYRAMID }),
     ]);
     applyColdState(ctx, cold);
-    expect(ctx.state.targetLevelByMember.get("imgA:ch0")).toBe(2);
-    expect(ctx.state.targetLevelByMember.has("grp")).toBe(false);
+    expect(ctx.state.targetLevelByMember.volume.get("imgA:ch0")).toBe(2);
+    expect(ctx.state.targetLevelByMember.volume.has("grp")).toBe(false);
 
     applyColdState(ctx, makeCold([
       makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [0], levels: HALVING_PYRAMID }),
     ]));
-    expect(ctx.state.targetLevelByMember.get("imgA:ch0")).toBe(0);
+    expect(ctx.state.targetLevelByMember.volume.get("imgA:ch0")).toBe(0);
   });
 
   // Pins the four-level bound from the eviction side. The bound itself is
@@ -768,7 +771,7 @@ describe("Suite A — applyColdState", () => {
       }),
     ]);
     applyColdState(ctx, coldA);
-    const descA = ctx.state.descriptorBuffersByDataset.get("ds1")!;
+    const descA = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
     const descABuffer = descA.buffer as unknown as MockBuffer;
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe("ds1:ch0:64x64x32:detail");
 
@@ -784,13 +787,13 @@ describe("Suite A — applyColdState", () => {
     expect(poolOf(ctx.state, "imgB:ch0", "detail", 0)).toBe("ds1:ch0:32x32x16:detail");
     // B's entries are written into A's buffer, which holds them, so every
     // bind group that names it stays valid.
-    const descB = ctx.state.descriptorBuffersByDataset.get("ds1")!;
+    const descB = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
     expect(descB).not.toBe(descA);
     expect(descB.buffer).toBe(descA.buffer);
     expect(descABuffer.destroyed).toBe(false);
     expect([...descB.indexByMember.keys()]).toEqual(["imgB:ch0"]);
     // Stale routing for A is cleared before B is registered.
-    expect(ctx.state.memberSourcePools.has("imgA:ch0")).toBe(false);
+    expect(ctx.state.memberSourcePools.volume.has("imgA:ch0")).toBe(false);
   });
 
   it("replaces a descriptor buffer too small for the next cold state, destroying the old one", () => {
@@ -800,11 +803,11 @@ describe("Suite A — applyColdState", () => {
       levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
     });
     applyColdState(ctx, makeCold([entry("imgA")]));
-    const descA = ctx.state.descriptorBuffersByDataset.get("ds1")!;
+    const descA = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
 
     applyColdState(ctx, makeCold([entry("imgA"), entry("imgB"), entry("imgC")]));
 
-    const descB = ctx.state.descriptorBuffersByDataset.get("ds1")!;
+    const descB = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
     expect(descB.buffer).not.toBe(descA.buffer);
     expect((descA.buffer as unknown as MockBuffer).destroyed).toBe(true);
     expect(descB.entityCount).toBe(3);
@@ -818,14 +821,14 @@ describe("Suite A — applyColdState", () => {
     // No pools.
     expect(vol(ctx.state).size).toBe(0);
     // No routing entries.
-    expect(ctx.state.memberSourcePools.size).toBe(0);
+    expect(ctx.state.memberSourcePools.volume.size).toBe(0);
     // No memberToDataset entries (iterateColdMembers yields nothing).
     expect(ctx.state.memberToDataset.size).toBe(0);
     // Snapshot recorded (empty) for the dataset.
-    expect(ctx.state.currentSourcesByDataset.get("ds1")?.size).toBe(0);
+    expect(ctx.state.currentSourcesByDatasetMode.get("ds1|volume")?.size).toBe(0);
     // Descriptor buffer was still built (empty buffer is fine — the
     // build path always runs).
-    expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
+    expect(ctx.state.descriptorBuffersByDatasetMode.has("ds1|volume")).toBe(true);
   });
 
 });

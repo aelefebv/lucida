@@ -16,6 +16,7 @@ function req(overrides: Partial<ChunkRequest>): ChunkRequest {
     x: 0,
     lane: "detail",
     tier: "detail",
+    mode: "slice",
     priority: 0,
     chunkKey: "0/0/0/0/0/0",
     ...overrides,

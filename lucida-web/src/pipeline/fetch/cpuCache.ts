@@ -27,7 +27,7 @@ import { Scheduler } from "./scheduler.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
-import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
+import type { ChunkFeedbackReason, PoolMode } from "../../renderer/workerProtocol.ts";
 import type { CacheSettleInputs } from "../settle.ts";
 import {
   classifyFetchError,
@@ -48,6 +48,7 @@ import {
   type LaneOutstanding,
   type LevelResidency,
   type PoolResidencyReport,
+  type CachedChunk,
   type ReadyChunkDelivery,
 } from "./types.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
@@ -257,7 +258,8 @@ function compareDeliveries(a: ReadyChunkDelivery, b: ReadyChunkDelivery): number
     a.y - b.y ||
     a.x - b.x ||
     a.c - b.c ||
-    a.chunkKey.localeCompare(b.chunkKey)
+    a.chunkKey.localeCompare(b.chunkKey) ||
+    a.mode.localeCompare(b.mode)
   );
 }
 
@@ -384,6 +386,11 @@ export class CpuCache {
    * and overview demand). Feeds {@link resolveDemandLane}.
    */
   private viewCoarseKeysThisTick = new Set<string>();
+  /**
+   * The pool modes whose views' detail and coarse lanes want each key this
+   * tick, as {@link MODE_BITS}. A chunk goes to the pools of each.
+   */
+  private modesWantingThisTick = new Map<string, number>();
 
   /**
    * Moves whenever the plan side of what {@link getDeliverable} and the
@@ -586,6 +593,9 @@ export class CpuCache {
         for (const fetch of inFlight.get(key) ?? []) {
           if (holdsPlane(fetch.request, req)) unwantedInFlightKeys.delete(fetch.key);
         }
+      }
+      if (req.lane === "detail" || req.lane === "coarse") {
+        this.modesWantingThisTick.set(key, (this.modesWantingThisTick.get(key) ?? 0) | MODE_BITS[req.mode]);
       }
       if (tier === "detail") {
         this.desiredDetailKeysThisTick.add(key);
@@ -997,6 +1007,7 @@ export class CpuCache {
     this.viewDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
+    this.modesWantingThisTick.clear();
     this.rejectionTracker.clear();
     // The submits that follow carry the new wanted set and re-arm for it.
     this.wantedRequests = [];
@@ -1026,31 +1037,15 @@ export class CpuCache {
     for (const entry of this.chunkStore.iterateTier("active-detail")) {
       if (entry.lane !== "detail") continue;
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (this.deliveryState.wasChunkSent(
-        entry.imageId,
-        entry.c,
-        entry.chunkKey,
-        entry.residencyTier,
-      )) {
-        continue;
-      }
       if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) continue;
-      candidates.push(this.chunkEntryToDelivery(entry));
+      this.pushDeliveries(entry, candidates);
     }
 
     for (const entry of this.overviewStore.allEntries()) {
       if (entry.lane !== "coarse") continue;
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (this.deliveryState.wasChunkSent(
-        entry.imageId,
-        entry.c,
-        entry.chunkKey,
-        entry.residencyTier,
-      )) {
-        continue;
-      }
       if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) continue;
-      candidates.push(this.chunkEntryToDelivery(entry));
+      this.pushDeliveries(entry, candidates);
     }
 
     if (candidates.length === 0) {
@@ -1063,6 +1058,24 @@ export class CpuCache {
     at.plan = -1;
     candidates.sort(compareDeliveries);
     yield* candidates;
+  }
+
+  /**
+   * One delivery of `entry` for each pool mode that wants it this tick and
+   * was not sent it. Volume pools hold whole chunks, so an entry of some
+   * planes goes only to slice pools; the volume's whole chunk is fetched on
+   * its own and replaces it.
+   */
+  private pushDeliveries(entry: CacheEntry, out: ReadyChunkDelivery[]): void {
+    const modes = this.modesWantingThisTick.get(chunkSchedulerKey(entry, entry.residencyTier)) ?? 0;
+    let cached: CachedChunk | null = null;
+    for (const mode of POOL_MODES) {
+      if ((modes & MODE_BITS[mode]) === 0) continue;
+      if (mode === "volume" && entry.planes) continue;
+      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey, entry.residencyTier, mode)) continue;
+      cached ??= this.chunkEntryToCached(entry);
+      out.push({ ...cached, mode });
+    }
   }
 
   markSent(delivery: ReadyChunkDelivery): void {
@@ -1081,7 +1094,7 @@ export class CpuCache {
       }
     }
     this.deliveryState.markChunkSent(
-      delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
+      delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier, delivery.mode,
     );
     let images = this.sentImagesByEntity.get(delivery.entityId);
     if (!images) {
@@ -1091,9 +1104,9 @@ export class CpuCache {
     images.add(delivery.imageId);
   }
 
-  /** The render worker wrote these chunks, or already held them. */
-  markChunksHeld(imageId: string, c: number, tier: ResidencyTier, keys: readonly string[]): void {
-    for (const key of keys) this.deliveryState.markChunkHeld(imageId, c, key, tier);
+  /** The render worker's pools of `mode` wrote these chunks, or already held them. */
+  markChunksHeld(imageId: string, c: number, mode: PoolMode, tier: ResidencyTier, keys: readonly string[]): void {
+    for (const key of keys) this.deliveryState.markChunkHeld(imageId, c, key, tier, mode);
   }
 
   /**
@@ -1105,12 +1118,13 @@ export class CpuCache {
   markChunksRefused(
     imageId: string,
     c: number,
+    mode: PoolMode,
     tier: ResidencyTier,
     keys: readonly string[],
     reason: ChunkFeedbackReason,
   ): void {
     for (const key of keys) {
-      this.deliveryState.markChunkRefused(imageId, c, key, tier);
+      this.deliveryState.markChunkRefused(imageId, c, key, tier, mode);
       const entry =
         this.chunkStore.findByImageChunk(imageId, c, key) ??
         this.overviewStore.findByImageChunk(imageId, c, key);
@@ -1130,12 +1144,13 @@ export class CpuCache {
   markChunksLost(
     imageId: string,
     c: number,
+    mode: PoolMode,
     tier: ResidencyTier,
     keys: readonly string[],
     reason: ChunkFeedbackReason,
   ): void {
     for (const key of keys) {
-      this.deliveryState.markChunkLost(imageId, c, key, tier);
+      this.deliveryState.markChunkLost(imageId, c, key, tier, mode);
       if (reason !== "evicted") continue;
       const entry =
         this.chunkStore.findByImageChunk(imageId, c, key) ??
@@ -1155,9 +1170,10 @@ export class CpuCache {
     imageId: string,
     c: number,
     chunkKey: string,
+    mode: PoolMode,
     tier: ResidencyTier,
   ): boolean {
-    return this.deliveryState.markChunkMissing(imageId, c, chunkKey, tier);
+    return this.deliveryState.markChunkMissing(imageId, c, chunkKey, tier, mode);
   }
 
   /**
@@ -1534,9 +1550,9 @@ export class CpuCache {
   }
 
   /** The whole chunk, searching detail then overview. */
-  getCachedChunk(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
+  getCachedChunk(entityId: string, chunkKey: string): CachedChunk | null {
     const entry = this.wholeEntry(entityId, chunkKey);
-    return entry ? this.chunkEntryToDelivery(entry) : null;
+    return entry ? this.chunkEntryToCached(entry) : null;
   }
 
   /**
@@ -1899,15 +1915,16 @@ export class CpuCache {
     traceRecorder.countPhase(CountedPhaseIndex.CacheAdmission);
 
     // A chunk only the prefetch lane wants, or a whole one whose plane the
-    // renderer already holds from its planes, changes nothing on screen.
-    // Waking the page for it would hold a settled view open until the
-    // prefetch ends.
+    // slice pools already hold from its planes and no volume pool wants,
+    // changes nothing on screen. Waking the page for it would hold a settled
+    // view open until the prefetch ends.
     const unseen =
       cacheEntry.lane === "prefetch" ||
       (result.planes === undefined &&
         resident?.planes !== undefined &&
+        ((this.modesWantingThisTick.get(chunk) ?? 0) & MODE_BITS.volume) === 0 &&
         this.deliveryState.wasChunkSent(
-          cacheEntry.imageId, cacheEntry.c, cacheEntry.chunkKey, cacheEntry.residencyTier,
+          cacheEntry.imageId, cacheEntry.c, cacheEntry.chunkKey, cacheEntry.residencyTier, "slice",
         ));
     if (!unseen) this.notifyListeners();
 
@@ -2202,8 +2219,8 @@ export class CpuCache {
     this.config.onChunkFailureRecovered?.();
   }
 
-  private chunkEntryToDelivery(entry: CacheEntry): ReadyChunkDelivery {
-    const delivery: ReadyChunkDelivery = {
+  private chunkEntryToCached(entry: CacheEntry): CachedChunk {
+    const delivery: CachedChunk = {
       entityId: entry.entityId,
       imageId: entry.imageId,
       level: entry.level,
@@ -2406,6 +2423,11 @@ function coveringFetch(fetches: readonly InFlightFetch[] | undefined, req: Chunk
 function chunkSchedulerKey(req: Pick<ChunkRequest, "entityId" | "chunkKey">, tier: ResidencyTier): string {
   return `${req.entityId}/${tier}/${req.chunkKey}`;
 }
+
+const POOL_MODES: readonly PoolMode[] = ["slice", "volume"];
+
+/** Each pool mode's bit in a set of modes. */
+const MODE_BITS: Record<PoolMode, number> = { slice: 1, volume: 2 };
 
 /**
  * Interleave detail and coarse requests so neither tier exhausts the fetch

@@ -37,7 +37,7 @@ export { chunkKey, compareChunkRequests, isCutStep, slicePlaneIn, type PlaneInCh
 
 export { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
 
-export { plan, emitPlanRequests, scrubbedPlanningState } from "./plan.ts";
+export { plan, emitPlanRequests, mergeActiveSets, scrubbedPlanningState } from "./plan.ts";
 
 export {
   DEFAULT_PLANNING_CONFIG,

@@ -1935,6 +1935,91 @@ describe("multi-dataset planning", () => {
 // 2b. Incremental delta fold
 // ===========================================================================
 
+describe("views of one dataset in two modes", () => {
+  const emptyMinimap = new Map<string, never[]>();
+
+  /** A slice view and a volume view of ds1, each holding the pools of its mode. */
+  function makeTwoModes() {
+    const scene = createMockScene() as Record<string, unknown>;
+    const views = [
+      { id: 0, mode: "slice" as const, rect: [0, 0, 400, 600] as const },
+      { id: 1, mode: "volume" as const, rect: [400, 0, 400, 600] as const },
+    ];
+    scene.dataset_holder = (_dsId: string, mode: string) => (mode === "slice" ? 0 : 1);
+    const coldState = vi.fn();
+    const coldStateDelta = vi.fn();
+    const cpuCache = createMockCpuCache();
+    const ctx = {
+      scene,
+      datasets: new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]),
+      client: {
+        coldState,
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta,
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
+      views,
+      renderScale: 1,
+      resolutionScale: 1,
+      cpuCache,
+    } as unknown as TickContext;
+    return { scene, ctx, coldState, coldStateDelta, cpuCache };
+  }
+
+  it("sends each mode's pools a cold state of their own views' requests, both kept", () => {
+    const { ctx, coldState, cpuCache } = makeTwoModes();
+    new TickCoordinator(new Uploader()).planAndFetch(ctx, emptyMinimap);
+
+    const sent = coldState.mock.calls.map(([msg]) => msg as ColdStateMessage);
+    expect(sent.map((msg) => msg.viewMode)).toEqual(["slice", "volume"]);
+    for (const msg of sent) {
+      expect(msg.datasetId).toBe("ds1");
+      expect(msg.drawnModes).toEqual(["slice", "volume"]);
+      expect(msg.activeSet.map((entry) => entry.imageId)).toEqual(["img-0"]);
+      expect(msg.wantedChunks.length).toBeGreaterThan(0);
+    }
+    // The volume pools hold whole chunks, cut along no plane.
+    expect(sent[1].sliceAxis).toBeUndefined();
+
+    // One submit for the dataset, carrying each mode's requests, so each
+    // chunk goes to the pools of both.
+    const submit = vi.mocked(cpuCache.submit);
+    expect(submit).toHaveBeenCalledTimes(1);
+    const requests = (submit.mock.calls[0][0] as RequestPlan).requests.filter((req) => req.lane === "detail");
+    const key = requests[0].chunkKey;
+    expect(requests.filter((req) => req.chunkKey === key).map((req) => req.mode).sort()).toEqual(["slice", "volume"]);
+  });
+
+  it("tells the worker the modes that still draw the dataset once one view leaves it", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { scene, ctx, coldState, coldStateDelta } = makeTwoModes();
+      const orch = new TickCoordinator(new Uploader());
+      orch.planAndFetch(ctx, emptyMinimap);
+      coldState.mockClear();
+
+      // The volume view turns to slices at the slice view's cut, so it draws
+      // the dataset from the slice pools, and no view from the volume pools.
+      vi.advanceTimersByTime(500);
+      const views = [ctx.views[0], { ...ctx.views[1], mode: "slice" as const }];
+      scene.dataset_holder = (_dsId: string, mode: string) => (mode === "slice" ? 0 : undefined);
+      const epochs = JSON.parse((scene.epochs as () => string)());
+      scene.epochs = () => JSON.stringify({ ...epochs, view: epochs.view + 1, selection: epochs.selection + 1 });
+      orch.planAndFetch({ ...ctx, views } as TickContext, emptyMinimap);
+
+      const sent = coldState.mock.calls.map(([msg]) => msg as ColdStateMessage);
+      expect(coldStateDelta).not.toHaveBeenCalled();
+      expect(sent.map((msg) => [msg.viewMode, msg.drawnModes])).toEqual([["slice", ["slice"]]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("incremental delta fold", () => {
   // Under coarseDetail (the shipping default), a settled camera move
   // reconstructs each dataset's `entities` by folding `view_query_delta` onto a

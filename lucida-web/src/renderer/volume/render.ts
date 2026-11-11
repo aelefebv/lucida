@@ -268,7 +268,7 @@ export async function handleVolumeRenderMultiPass(
     // The orchestrator's entity index matches the worker's descriptor build
     // by construction.
     const datasetId = ctx.state.memberToDataset.get(memberId);
-    const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
+    const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, "volume") : null;
     if (!descIndex) continue;
 
     const pools = resolveMemberPools(atlasMap, descIndex, memberId);

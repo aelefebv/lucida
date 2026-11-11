@@ -127,25 +127,31 @@ export function drawnView(ctx: Pick<TickContext, "views">): TickView {
   return ctx.views[0];
 }
 
-const holdersByTick = new WeakMap<readonly TickView[], Map<string, TickView>>();
+const holdersByTick = new WeakMap<readonly TickView[], Map<string, TickView | null>>();
 
 /**
- * The view whose form `datasetId`'s pools hold (`Scene::dataset_holder`).
- * What the worker keeps of the dataset is what this view draws, so its mode
- * picks the pools the dataset's chunks go to. Read once a tick.
+ * The view whose form `datasetId`'s pools of `mode` hold
+ * (`Scene::dataset_holder`), or null when no view draws the dataset in that
+ * mode. What the worker keeps in those pools is what this view draws. Read
+ * once a tick.
  */
-export function holderView(ctx: Pick<TickContext, "views" | "scene">, datasetId: string): TickView {
-  if (ctx.views.length === 1) return ctx.views[0];
+export function holderView(
+  ctx: Pick<TickContext, "views" | "scene">,
+  datasetId: string,
+  mode: TickView["mode"],
+): TickView | null {
+  if (ctx.views.length === 1) return ctx.views[0].mode === mode ? ctx.views[0] : null;
   let holders = holdersByTick.get(ctx.views);
   if (!holders) {
     holders = new Map();
     holdersByTick.set(ctx.views, holders);
   }
-  let holder = holders.get(datasetId);
-  if (!holder) {
-    const id = ctx.scene.dataset_holder(datasetId);
-    holder = ctx.views.find((view) => view.id === id) ?? drawnView(ctx);
-    holders.set(datasetId, holder);
+  const key = `${datasetId}|${mode}`;
+  let holder = holders.get(key);
+  if (holder === undefined) {
+    const id = ctx.scene.dataset_holder(datasetId, mode);
+    holder = ctx.views.find((view) => view.id === id && view.mode === mode) ?? null;
+    holders.set(key, holder);
   }
   return holder;
 }

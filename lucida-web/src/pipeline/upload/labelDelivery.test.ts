@@ -120,6 +120,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       epochs: EPOCHS,
       lane: "detail",
       residencyTier: "detail",
+      mode: "slice",
     };
 
     // 3. Delivery routing: meta is indexed as a label; the mock client
@@ -190,6 +191,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       epochs: EPOCHS,
       lane: "detail",
       residencyTier: "detail",
+      mode: "slice",
     };
     const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
     const result = dispatchLabelChunkDelivery(client, delivery, meta!, { axis: "z", index: 1 }, EPOCHS);
@@ -227,6 +229,7 @@ describe("label chunk flow: planes of a deeper chunk", () => {
       epochs: EPOCHS,
       lane: "detail",
       residencyTier: "detail",
+      mode: "slice",
       planes: [3, 6],
     };
   }
@@ -283,6 +286,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
       epochs: EPOCHS,
       lane: "detail",
       residencyTier: "detail",
+      mode: "slice",
     };
 
     // 3. Delivery routing: the mock client forwards the message into the worker handler.

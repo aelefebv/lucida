@@ -13,6 +13,7 @@ import type {
   ColdStateMessage,
   GpuErrorKind,
   GpuMemoryReport,
+  PoolMode,
   SliceRenderMultiPassMessage,
   VolumeRenderMultiPassMessage,
 } from "../workerProtocol.ts";
@@ -33,22 +34,28 @@ export interface GpuErrorReport {
   message: string;
 }
 
+/**
+ * What the worker keeps of each dataset, it keeps per {@link PoolMode}: a
+ * dataset's slice pools and its volume pools each have their own cold state,
+ * sections, routes and descriptors. Maps keyed by `datasetModeKey`
+ * (`poolKeys.ts`) hold one entry per dataset and mode.
+ */
 export interface RendererState {
   /** memberId → datasetId (canonical: imageId or imageId:chN). */
   memberToDataset: Map<string, string>;
   /**
-   * memberId → (`sourceKey(tier, level)` → pool key): the pool each
-   * indirection section a member holds lives in. Chunk uploads and the
-   * wanted set route by (member, tier, level) through this map, since
+   * Per mode, memberId → (`sourceKey(tier, level)` → pool key): the pool
+   * each indirection section a member holds lives in. Chunk uploads and the
+   * wanted set route by (mode, member, tier, level) through this map, since
    * the detail tier holds several levels per member and levels with
    * different chunk shapes live in different pools.
    */
-  memberSourcePools: Map<string, Map<string, string>>;
-  /** Per-dataset sections snapshot captured during the most recent cold state. */
-  currentSourcesByDataset: Map<string, Map<string, EntitySource[]>>;
+  memberSourcePools: Record<PoolMode, Map<string, Map<string, string>>>;
+  /** Per dataset and mode, the sections its most recent cold state laid out. */
+  currentSourcesByDatasetMode: Map<string, Map<string, EntitySource[]>>;
 
-  /** dataset → entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
-  descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
+  /** Per dataset and mode, its entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
+  descriptorBuffersByDatasetMode: Map<string, EntityDescriptorIndex>;
 
   /**
    * The one GPU budget every holder counts against, fitted to the device at
@@ -78,11 +85,11 @@ export interface RendererState {
   /** memberId → last known viewport center in entity-local [0,1]^2 (slice mode). */
   cameraUVPerEntity: Map<string, [number, number]>;
   /**
-   * memberId → target level from the most recent cold state. Eviction
-   * takes a resident chunk finer than it first. Absent for a
-   * member with no chunk levels.
+   * Per mode, memberId → target level from that mode's most recent cold
+   * state. Eviction takes a resident chunk finer than it first. Absent for
+   * a member with no chunk levels.
    */
-  targetLevelByMember: Map<string, number>;
+  targetLevelByMember: Record<PoolMode, Map<string, number>>;
 
   /** Current scene epochs (replaced on every cold state). */
   currentEpochs: SceneEpochs | null;
@@ -98,14 +105,15 @@ export interface RendererState {
   /** The newest viewport frame the page gave up on; a banded frame up to it stops at its next band. */
   abandonedFrameSeq: number;
   /**
-   * Per-dataset most-recent cold-state message. A display-only update
-   * (`coldStateDisplay`) patches this dataset's entry and rebuilds its
+   * Per dataset and mode, the most recent cold-state message. A display-only
+   * update (`coldStateDisplay`) patches its entry and rebuilds its
    * descriptor buffer from it, so display edits get the full active set
-   * without re-sending it. Cleared on dataset removal.
+   * without re-sending it. Cleared on dataset removal and when the mode's
+   * pools are released.
    */
-  coldStateByDataset: Map<string, ColdStateMessage>;
-  /** Per-dataset index of its latest cold state's wanted chunks. */
-  wantedByDataset: Map<string, WantedChunkIndex>;
+  coldStateByDatasetMode: Map<string, ColdStateMessage>;
+  /** Per dataset and mode, the index of its latest cold state's wanted chunks. */
+  wantedByDatasetMode: Map<string, WantedChunkIndex>;
   /** dataset → imageId → chunk keys the source failed for good, as the page last listed them. */
   failedByDataset: Map<string, Map<string, ReadonlySet<string>>>;
   /**
@@ -166,23 +174,23 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
   return {
     gpuTotalBytes,
     memberToDataset: new Map(),
-    memberSourcePools: new Map(),
-    currentSourcesByDataset: new Map(),
-    descriptorBuffersByDataset: new Map(),
+    memberSourcePools: { slice: new Map(), volume: new Map() },
+    currentSourcesByDatasetMode: new Map(),
+    descriptorBuffersByDatasetMode: new Map(),
     volumeAtlases: new Map(),
     sliceAtlases: new Map(),
     labelSlicePools: new Map(),
     labelVolumePools: new Map(),
     rayHitPerEntity: new Map(),
     cameraUVPerEntity: new Map(),
-    targetLevelByMember: new Map(),
+    targetLevelByMember: { slice: new Map(), volume: new Map() },
     currentEpochs: null,
     currentColdState: null,
     lastFrames: new Map(),
     viewResources: new Map(),
     abandonedFrameSeq: 0,
-    coldStateByDataset: new Map(),
-    wantedByDataset: new Map(),
+    coldStateByDatasetMode: new Map(),
+    wantedByDatasetMode: new Map(),
     failedByDataset: new Map(),
     remappedFor: new WeakMap(),
     frameCaptures: [],

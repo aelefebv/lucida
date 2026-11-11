@@ -4,7 +4,7 @@
  * reads as a range across its visible tiles.
  */
 
-import type { EntityLevelReport, LevelRange } from "../renderer/workerProtocol.ts";
+import type { EntityLevelReport, LevelRange, PoolMode } from "../renderer/workerProtocol.ts";
 
 export interface DatasetLevels {
   /**
@@ -20,6 +20,12 @@ export interface DatasetLevels {
   /** True while some visible entity draws any pixel from a level coarser than its own target. */
   coarserThanTarget: boolean;
 }
+
+/**
+ * A dataset's readouts, one for its pools of each mode a view draws it in.
+ * The two modes' pools hold their own levels, so each has its own readout.
+ */
+export type LevelsByMode = Partial<Record<PoolMode, DatasetLevels>>;
 
 /** `null` when the dataset reports no image-bearing entity. */
 export function summarizeDatasetLevels(

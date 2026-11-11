@@ -24,7 +24,7 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { GpuCapacityReport, GpuMemoryReport, GpuPoolCapacity } from "../workerProtocol.ts";
+import type { GpuCapacityReport, GpuMemoryReport, GpuPoolCapacity, PoolMode } from "../workerProtocol.ts";
 import type { RendererState } from "./state.ts";
 import { halvedGpuTotal } from "../../deviceBudget.ts";
 import { getDeviceLimits } from "../gpuContext.ts";
@@ -48,7 +48,7 @@ import { volumeEvictionParams } from "../volume/eviction.ts";
 import { sliceEvictionParams } from "../slice/eviction.ts";
 import { rankSlotsToKeep } from "../eviction.ts";
 import { postSlotsLost } from "../chunkUploadFeedback.ts";
-import { chunkPoolTier } from "../poolKeys.ts";
+import { chunkPoolTier, datasetModeKey } from "../poolKeys.ts";
 import { parseCompositeKey } from "../chunkKeys.ts";
 import { wantedChunksFor } from "../wantedChunks.ts";
 import { gpuLedgerLine } from "./gpuLedger.ts";
@@ -76,12 +76,13 @@ export function chunkPoolUsage(): GPUTextureUsageFlags {
  */
 export function wantedSlotsOf(
   state: RendererState,
+  mode: PoolMode,
   poolKey: string,
   atlas: AtlasState | SliceAtlasState,
 ): number {
   const tier = chunkPoolTier(poolKey);
   let slots = 0;
-  for (const memberId of atlas.entityMetas.keys()) slots += wantedChunksFor(state, memberId, tier)?.size ?? 0;
+  for (const memberId of atlas.entityMetas.keys()) slots += wantedChunksFor(state, mode, memberId, tier)?.size ?? 0;
   return slots;
 }
 
@@ -274,7 +275,7 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
   }
   spares.sort((a, b) => (b.steps - b.minSteps) * b.stepBytes - (a.steps - a.minSteps) * a.stepBytes);
 
-  const touched = new Set<string>();
+  const touched = new Map<string, { datasetId: string; mode: PoolMode }>();
   for (const spare of spares) {
     if (needed <= 0) break;
     const freeSteps = Math.min(spare.steps - spare.minSteps, Math.ceil(needed / spare.stepBytes));
@@ -289,12 +290,13 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
       const keep = rankSlotsToKeep(sliceEvictionParams(state, atlas, tier)).map((slot) => slot.key);
       dropped = shrinkSliceAtlas(ctx.device, atlas, spare.steps - freeSteps, keep);
     }
-    postSlotsLost(ctx, tier, dropped, "evicted");
+    postSlotsLost(ctx, spare.kind, tier, dropped, "evicted");
     needed -= freeSteps * spare.stepBytes;
-    touched.add(spare.atlas.datasetId);
+    const { datasetId } = spare.atlas;
+    touched.set(datasetModeKey(datasetId, spare.kind), { datasetId, mode: spare.kind });
   }
   // A dropped fallback slot can change the level an entity displays.
-  for (const datasetId of touched) ctx.postWantedSet(datasetId);
+  for (const { datasetId, mode } of touched.values()) ctx.postWantedSet(datasetId, mode);
 }
 
 function spareOf(
@@ -307,7 +309,7 @@ function spareOf(
   let wanted = 0;
   for (const key of atlas.slots.keys()) {
     const parsed = parseCompositeKey(key);
-    if (parsed && wantedChunksFor(state, parsed.memberId, tier)?.has(parsed.chunkKey)) wanted++;
+    if (parsed && wantedChunksFor(state, kind, parsed.memberId, tier)?.has(parsed.chunkKey)) wanted++;
   }
   const volume = kind === "volume" ? (atlas as AtlasState) : null;
   const slice = kind === "slice" ? (atlas as SliceAtlasState) : null;
