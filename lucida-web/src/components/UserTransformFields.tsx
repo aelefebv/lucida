@@ -1,8 +1,10 @@
 /**
- * A layer's placement by hand as numbers: its offset and scale on each axis,
- * and the one action that puts it back where its metadata places it. The
- * Move and scale tool changes the same transform on the canvas.
+ * A layer's placement by hand as numbers: its offset, scale and rotation on
+ * each axis, and the one action that puts it back where its metadata places
+ * it. The Move, scale and rotate tool changes the same transform on the
+ * canvas.
  */
+import { useState } from "react";
 import { ArrowCounterClockwiseIcon } from "@phosphor-icons/react";
 import { Button, NumberField } from "../ui/index.ts";
 import { IDENTITY_USER_TRANSFORM, sameUserTransform, type UserTransform } from "../userTransform.ts";
@@ -10,19 +12,30 @@ import "./UserTransformFields.css";
 
 const AXES = ["X", "Y", "Z"] as const;
 
+type Triple = [number, number, number];
+
 /** The smallest scale a field takes; a layer always keeps a size. */
 const MIN_SCALE = 0.0001;
+
+/** How a person reads the three angles, which lucida-core turns by in this order. */
+const ROTATION_ORDER =
+  "Degrees about X, then Y, then Z, each about the axis the turns before it left. The layer turns about its center.";
 
 export interface UserTransformFieldsProps {
   /** The layer's name, for the fields' labels. */
   name: string;
   /** Its transform, or null where it sits as its metadata places it. */
   transform: UserTransform | null;
+  /** Its rotation as degrees about X, then Y, then Z. */
+  rotation: readonly [number, number, number];
   /** The unit each axis declares, `[x, y, z]`, which the offset is in. */
   units: readonly [string | null, string | null, string | null];
   /** Whether this member may change the shared workspace. */
   canEdit: boolean;
   onChange(from: UserTransform, to: UserTransform): void;
+  /** Turn the layer to `degrees` about its center, from `from`: the
+   *  transform that placed it, or null where nothing changed. */
+  onTurn(from: UserTransform, degrees: Triple): UserTransform | null;
   onReset(): void;
 }
 
@@ -32,17 +45,37 @@ function offsetUnit([x, y, z]: readonly (string | null)[]): string | null {
   return x !== null && x === y && (z === null || z === x) ? x : null;
 }
 
-export function UserTransformFields({ name, transform, units, canEdit, onChange, onReset }: UserTransformFieldsProps) {
+export function UserTransformFields({
+  name,
+  transform,
+  rotation,
+  units,
+  canEdit,
+  onChange,
+  onTurn,
+  onReset,
+}: UserTransformFieldsProps) {
   const current = transform ?? IDENTITY_USER_TRANSFORM;
+  // The angles typed here, with the rotation they made. Read back from the
+  // rotation, a quarter turn about Y folds X and Z together, so the fields
+  // keep showing what was typed until the rotation changes some other way.
+  const [typed, setTyped] = useState<{ degrees: Triple; rotation: UserTransform["rotation"] } | null>(null);
+  const shown = typed && typed.rotation.every((v, i) => v === current.rotation[i]) ? typed.degrees : rotation;
   const set = (part: "translation" | "scale", axis: number, value: number) => {
-    const values = current[part].map((v, i) => (i === axis ? value : v)) as [number, number, number];
+    const values = current[part].map((v, i) => (i === axis ? value : v)) as Triple;
     const next = { ...current, [part]: values };
     if (!sameUserTransform(next, current)) onChange(current, next);
   };
+  const turn = (axis: number, value: number) => {
+    if (!Number.isFinite(value) || value === shown[axis]) return;
+    const degrees = shown.map((v, i) => (i === axis ? value : v)) as Triple;
+    const placed = onTurn(current, degrees);
+    if (placed) setTyped({ degrees, rotation: placed.rotation });
+  };
   const unit = offsetUnit(units);
   return (
-    <div className="lc-user-transform" role="group" aria-label={`${name} position and size`}>
-      <span className="lc-layer-field-label">Position and size</span>
+    <div className="lc-user-transform" role="group" aria-label={`${name} placement`}>
+      <span className="lc-layer-field-label">Placement</span>
       <div className="lc-user-transform-grid">
         <span aria-hidden />
         {AXES.map((axis) => (
@@ -79,6 +112,21 @@ export function UserTransformFields({ name, transform, units, canEdit, onChange,
             onChange={(v) => set("scale", i, v)}
           />
         ))}
+        <span className="lc-user-transform-row" title={ROTATION_ORDER}>
+          Rotation
+        </span>
+        {AXES.map((axis, i) => (
+          <NumberField
+            key={axis}
+            label={`${name} rotation ${axis} in degrees`}
+            labelPosition="hidden"
+            hideSteppers
+            value={shown[i]}
+            formatOptions={{ maximumFractionDigits: 2 }}
+            isDisabled={!canEdit}
+            onChange={(v) => turn(i, v)}
+          />
+        ))}
       </div>
       <Button
         className="lc-user-transform-reset"
@@ -88,7 +136,7 @@ export function UserTransformFields({ name, transform, units, canEdit, onChange,
         isDisabled={!canEdit || transform === null}
         onPress={onReset}
       >
-        Reset position and size
+        Reset placement
       </Button>
     </div>
   );

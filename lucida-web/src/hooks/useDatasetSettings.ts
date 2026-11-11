@@ -16,7 +16,7 @@ import type { LevelsByView } from "../pipeline/datasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import { channelDisplayName, channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
 import { readResolvedLayers } from "../resolvedLayers.ts";
-import { readUnits, readUserTransform } from "../userTransform.ts";
+import { readRotationDegrees, readUnits, readUserTransform } from "../userTransform.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -239,6 +239,7 @@ export function buildLayerInfos(
       downsamplingMethod: ds?.manifest.images[0]?.multiscale.downsampling_method ?? null,
       physicalScale: scene.dataset_has_physical_scale(id),
       userTransform: readUserTransform(scene, id),
+      rotationDegrees: readRotationDegrees(scene, id),
       units: readUnits(scene, id),
     };
   });

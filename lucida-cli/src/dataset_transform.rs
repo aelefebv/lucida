@@ -1,14 +1,15 @@
 //! `lucida dataset transform`: read where a dataset was placed by hand, or
-//! place it, as the viewer's Move and scale tool does. The transform is
-//! shared workspace state, so every viewer of the workspace sees the move.
+//! place it, as the viewer's Move, scale and rotate tool does. The transform
+//! is shared workspace state, so every viewer of the workspace sees the move.
 
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
-use lucida_core::placement::UserTransform;
+use lucida_core::placement::{UserTransform, rotation_from_degrees};
 use lucida_core::protocol::{ClientMessage, ServerMessage};
+use lucida_core::scene::Scene;
 use serde::Serialize;
 
 use crate::config::EffectiveServer;
@@ -29,23 +30,36 @@ pub struct TransformChange {
     pub offset: Option<[f64; 3]>,
     /// `[x, y, z]` multipliers on the dataset's declared sample size.
     pub scale: Option<[f64; 3]>,
+    /// `[x, y, z]` degrees, about X, then Y, then Z, about the dataset's center.
+    pub rotate: Option<[f64; 3]>,
     /// Put the dataset back where its metadata places it, before the rest.
     pub reset: bool,
 }
 
 impl TransformChange {
     pub fn is_empty(&self) -> bool {
-        self.offset.is_none() && self.scale.is_none() && !self.reset
+        self.offset.is_none() && self.scale.is_none() && self.rotate.is_none() && !self.reset
     }
 
-    /// `current` with this change made. Refused when the result is a
-    /// transform no viewer can place a dataset by.
-    pub fn applied_to(&self, current: UserTransform) -> Result<UserTransform, CliError> {
+    /// `current` with this change made: the reset, then the turn, which
+    /// `turned` makes about the dataset's center from a transform and a
+    /// rotation, then the offset and scale, which set what they name
+    /// outright. Refused when the result is a transform no viewer can place
+    /// a dataset by.
+    pub fn applied_to(
+        &self,
+        current: UserTransform,
+        turned: impl FnOnce(&UserTransform, [f64; 4]) -> Option<UserTransform>,
+    ) -> Result<UserTransform, CliError> {
         let mut next = if self.reset {
             UserTransform::IDENTITY
         } else {
             current
         };
+        if let Some(degrees) = self.rotate {
+            next = turned(&next, rotation_from_degrees(degrees))
+                .ok_or_else(|| CliError::config("the dataset has no image to turn"))?;
+        }
         if let Some(offset) = self.offset {
             next.translation = offset;
         }
@@ -99,6 +113,8 @@ pub struct DatasetTransformOutput {
     /// The dataset's transform now, the identity when it sits where its
     /// metadata places it.
     pub user_transform: UserTransform,
+    /// Its rotation as degrees about X, then Y, then Z.
+    pub rotation_degrees: [f64; 3],
     /// The unit each axis declares, `[x, y, z]`, which the offset is in.
     pub units: [Option<String>; 3],
 }
@@ -154,7 +170,11 @@ impl DatasetTransformClient {
                 let [z, y, x] = space.units.clone();
                 [x, y, z]
             });
-        let next = change.applied_to(current)?;
+        let next = change.applied_to(current, |from, rotation| {
+            let mut scene = Scene::new([1, 1]);
+            scene.load_document(snapshot.document.clone());
+            scene.user_transform_turned(&id, from, rotation)
+        })?;
         let seq = if next == current {
             None
         } else {
@@ -206,6 +226,12 @@ pub fn format_dataset_transform_human(output: &DatasetTransformOutput) -> String
         lines.push("Placement: moved by hand".to_string());
         lines.push(format!("Offset: {}{unit}", numbers(&t.translation)));
         lines.push(format!("Scale: {}", numbers(&t.scale)));
+        if t.rotation != UserTransform::IDENTITY.rotation {
+            lines.push(format!(
+                "Rotation: {} degrees, about X, then Y, then Z",
+                numbers(&output.rotation_degrees)
+            ));
+        }
     }
     lines.push(format!(
         "Workspace: {} ({})",
@@ -261,7 +287,7 @@ mod tests {
             scale: Some([4.0, 4.0, 1.0]),
             ..Default::default()
         };
-        let next = scale_only.applied_to(current).unwrap();
+        let next = scale_only.applied_to(current, no_turn).unwrap();
         assert_eq!(next.translation, [1.0, 2.0, 3.0]);
         assert_eq!(next.scale, [4.0, 4.0, 1.0]);
 
@@ -270,7 +296,7 @@ mod tests {
             reset: true,
             ..Default::default()
         };
-        let next = reset_then_move.applied_to(current).unwrap();
+        let next = reset_then_move.applied_to(current, no_turn).unwrap();
         assert_eq!(next.translation, [5.0, 0.0, 0.0]);
         assert_eq!(next.scale, [1.0; 3]);
         assert!(TransformChange::default().is_empty());
@@ -282,7 +308,38 @@ mod tests {
             scale: Some([1.0, 0.0, 1.0]),
             ..Default::default()
         };
-        assert!(flat.applied_to(UserTransform::IDENTITY).is_err());
+        assert!(flat.applied_to(UserTransform::IDENTITY, no_turn).is_err());
+    }
+
+    #[test]
+    fn a_turn_goes_after_a_reset_and_before_an_offset_sets_its_own() {
+        let current = UserTransform {
+            translation: [1.0, 2.0, 3.0],
+            ..UserTransform::IDENTITY
+        };
+        let change = TransformChange {
+            rotate: Some([0.0, 0.0, 30.0]),
+            offset: Some([5.0, 0.0, 0.0]),
+            reset: true,
+            ..Default::default()
+        };
+        let mut seen = None;
+        let next = change
+            .applied_to(current, |from, rotation| {
+                seen = Some(*from);
+                Some(UserTransform { rotation, ..*from })
+            })
+            .unwrap();
+        assert_eq!(seen, Some(UserTransform::IDENTITY));
+        assert_eq!(next.rotation, rotation_from_degrees([0.0, 0.0, 30.0]));
+        assert_eq!(next.translation, [5.0, 0.0, 0.0]);
+        assert!(!change.is_empty());
+        // A dataset the scene can't turn refuses the change.
+        assert!(change.applied_to(current, |_, _| None).is_err());
+    }
+
+    fn no_turn(_: &UserTransform, _: [f64; 4]) -> Option<UserTransform> {
+        unreachable!("the change names no rotation")
     }
 
     #[test]

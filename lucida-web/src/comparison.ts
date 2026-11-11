@@ -83,7 +83,7 @@ export function lineUpReason(lineUp: LineUp, nameOf: (id: string) => string): st
     case "missing":
       return `${names(lineUp.datasets)} ${lineUp.datasets.length === 1 ? "has" : "have"} no image yet.`;
     case "no_physical_scale":
-      return `${names(lineUp.datasets)} ${lineUp.datasets.length === 1 ? "has" : "have"} no physical scale to line up by. Give ${lineUp.datasets.length === 1 ? "it" : "them"} a scale under Position and size to line up by hand.`;
+      return `${names(lineUp.datasets)} ${lineUp.datasets.length === 1 ? "has" : "have"} no physical scale to line up by. Give ${lineUp.datasets.length === 1 ? "it" : "them"} a scale under Placement to line up by hand.`;
   }
 }
 

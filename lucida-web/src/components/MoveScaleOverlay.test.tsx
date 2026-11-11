@@ -31,6 +31,7 @@ function setup() {
     current: (id) => readUserTransform(scene, id) ?? IDENTITY_USER_TRANSFORM,
     preview: vi.fn((_id: string, t: UserTransform) => place(t)),
     commit: vi.fn((_id: string, _from: UserTransform, to: UserTransform) => place(to)),
+    turnTo: vi.fn(),
     reset: vi.fn(),
     restored: vi.fn(),
   };
@@ -94,6 +95,34 @@ describe("MoveScaleOverlay", () => {
     expect(perAxis.scale[0]).toBeGreaterThan(uniform.scale[0]);
     expect(perAxis.scale[1]).toBeCloseTo(uniform.scale[1], 9);
     expect(readUserTransform(scene, "b")).toEqual(perAxis);
+  });
+
+  it("turns the layer about its center by the angle a drag of the round handle sweeps", () => {
+    const { scene, actions, pane } = setup();
+    const view = scene.active_view();
+    const middle = () => {
+      const q = scene.dataset_plane_quad(view, "b");
+      return [q[0] + (q[2] + q[4]) / 2, q[1] + (q[3] + q[5]) / 2];
+    };
+    const before = middle();
+    // The middle on the pane, where the view's center sits at its top left.
+    const center = scene.center(view);
+    const zoom = scene.zoom(view);
+    const [sx, sy] = [(before[0] - center[0]) * zoom, (before[1] - center[1]) * zoom];
+    const handle = grip(pane, "turn");
+    // From straight above the middle round to its right: a quarter turn
+    // from across toward down, which on an XY view is +90 degrees about Z.
+    pointer(handle, "pointerdown", sx, sy - 100);
+    pointer(handle, "pointermove", sx + 100, sy);
+    pointer(handle, "pointerup", sx + 100, sy);
+
+    const turned = vi.mocked(actions.commit).mock.calls[0][2];
+    const half = Math.SQRT1_2;
+    [0, 0, half, half].forEach((v, i) => expect(turned.rotation[i]).toBeCloseTo(v, 9));
+    expect(turned.scale).toEqual([1, 1, 1]);
+    const after = middle();
+    expect(after[0]).toBeCloseTo(before[0], 6);
+    expect(after[1]).toBeCloseTo(before[1], 6);
   });
 
   it("puts the layer back where it began on Escape, and places nothing", () => {

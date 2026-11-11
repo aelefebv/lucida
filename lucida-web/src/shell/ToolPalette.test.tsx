@@ -80,7 +80,7 @@ describe("ToolPalette", () => {
 
   it("offers the move tool only to a member who may place layers", async () => {
     render(<Harness />);
-    expect(screen.queryByRole("button", { name: "Move and scale tool" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Move, scale and rotate tool" })).toBeNull();
     await press({ key: "t", code: "KeyT" });
     expect(state()).toBe("pan shown");
     cleanup();
@@ -90,7 +90,7 @@ describe("ToolPalette", () => {
     render(<Harness canMove />);
     await press({ key: "t", code: "KeyT" });
     expect(state()).toBe("move shown");
-    expect(screen.getByRole("button", { name: "Move and scale tool" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Move, scale and rotate tool" }).getAttribute("aria-pressed")).toBe("true");
     await press({ key: "Escape", code: "Escape" });
     expect(state()).toBe("pan shown");
   });

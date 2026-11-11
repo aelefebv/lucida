@@ -73,6 +73,9 @@ vi.mock("lucida-core", () => {
     dataset_user_transform() {
       return "null";
     }
+    dataset_rotation_degrees() {
+      return new Float64Array([0, 0, 0]);
+    }
     user_transforms() {
       return "{}";
     }
