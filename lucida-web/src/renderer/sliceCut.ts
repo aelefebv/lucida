@@ -25,6 +25,14 @@ export function cutNdcToWorld(camera: CutCamera, planeToWorld: readonly number[]
 }
 
 /**
+ * `planeToWorld` with the plane's two axes swapped, for a view that draws its
+ * plane transposed: the plane's down axis across the target.
+ */
+export function transposePlaneToWorld(planeToWorld: readonly number[]): number[] {
+  return [...planeToWorld.slice(4, 8), ...planeToWorld.slice(0, 4), ...planeToWorld.slice(8)];
+}
+
+/**
  * The member-local point, in its `[0, 1]` cube, of the cut at target point
  * `(px, py)`, through the member's world-to-local `invModel`; null where the
  * cut misses the member.

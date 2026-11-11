@@ -1,19 +1,34 @@
 //! The four-up layout: one set of datasets as an XY, an XZ and a YZ slice
-//! and a volume, crossing at one point. The point is the views' axis
+//! and a volume, crossing at one point. YZ is drawn transposed, Z across and
+//! Y down, so that it shares XY's rows as XZ shares its columns. The point is the views' axis
 //! positions, which every view holds on all three axes, so the four share
 //! them: each slice view cuts where the other two draw their lines, and a
 //! move of one view's position moves them all. Their cameras stay their own.
 
 use lucida_content::SpatialAxis;
+use serde::Serialize;
 
 use super::Scene;
-use crate::camera::{Arcball, Camera, Framing};
+use crate::camera::{Arcball, Camera, Framing, Slice};
 use crate::slice_plane::SlicePlane;
-use crate::view::{AxisPositions, ViewLayout};
+use crate::view::{AxisPositions, ViewId, ViewLayout};
+
+/// Where one of four-up's planes crosses a view, as the view draws it: a
+/// slice view the other two planes as lines, the volume each plane's
+/// outline over the data.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlaneLine {
+    /// The axis the plane stands at a place along, the one its view cuts.
+    pub axis: SpatialAxis,
+    /// The segment's ends, as fractions of the view's width and height from
+    /// its top left.
+    pub from: [f64; 2],
+    pub to: [f64; 2],
+}
 
 /// What each view of a four-up layout shows, in the layout's order: XY at
-/// the top left, YZ at its right, XZ under it so the two share X, and the
-/// volume at the bottom right.
+/// the top left, YZ at its right so the two share Y, XZ under it so the two
+/// share X, and the volume at the bottom right.
 pub const FOUR_UP: [Option<SlicePlane>; 4] = [
     Some(SlicePlane::Xy),
     Some(SlicePlane::Yz),
@@ -60,6 +75,9 @@ impl Scene {
         for (index, (view, role)) in self.views.iter_mut().zip(FOUR_UP).enumerate() {
             view.axes = axes.clone();
             if index == slot {
+                if let Camera::Slice(slice) = &mut view.camera {
+                    slice.transposed = slice.plane == SlicePlane::Yz;
+                }
                 continue;
             }
             let viewport = view.camera.viewport();
@@ -68,6 +86,7 @@ impl Scene {
                     let mut camera = Camera::new_2d(viewport);
                     if let Camera::Slice(slice) = &mut camera {
                         slice.plane = plane;
+                        slice.transposed = plane == SlicePlane::Yz;
                     }
                     camera
                 }
@@ -106,6 +125,118 @@ impl Scene {
             slice.set_center(center[0], center[1]);
             slice.framing = Framing::Placed;
         }
+    }
+
+    /// Draw every slice view the way its plane stands alone again, as a
+    /// layout other than four-up does. A transposed view keeps its region.
+    pub(super) fn leave_four_up(&mut self) {
+        for view in &mut self.views {
+            for camera in view.cameras_mut() {
+                if let Camera::Slice(slice) = camera {
+                    slice.transposed = false;
+                }
+            }
+        }
+    }
+
+    /// Where four-up's planes cross `view`: in a slice view, a line across
+    /// it for each plane whose axis it draws; in the volume, each plane's
+    /// outline over the data the view draws. None in any other layout.
+    pub fn plane_lines(&self, view: ViewId) -> Vec<PlaneLine> {
+        if self.layout != ViewLayout::FourUp {
+            return Vec::new();
+        }
+        let Some(shown) = self.view(view) else {
+            return Vec::new();
+        };
+        match &shown.camera {
+            Camera::Slice(slice) => slice
+                .screen_axes()
+                .into_iter()
+                .enumerate()
+                .map(|(on_screen, axis)| {
+                    let at = slice_screen_at(slice, axis, self.cut_place(view, axis));
+                    let [width, height] = slice.viewport.map(f64::from);
+                    match on_screen {
+                        0 => PlaneLine {
+                            axis,
+                            from: [at / width, 0.0],
+                            to: [at / width, 1.0],
+                        },
+                        _ => PlaneLine {
+                            axis,
+                            from: [0.0, at / height],
+                            to: [1.0, at / height],
+                        },
+                    }
+                })
+                .collect(),
+            camera => self.plane_outlines(view, camera),
+        }
+    }
+
+    /// Each plane's outline over the data `view` draws, projected by its
+    /// volume camera.
+    fn plane_outlines(&self, view: ViewId, camera: &Camera) -> Vec<PlaneLine> {
+        let extents = SpatialAxis::ALL.map(|axis| {
+            self.layer_ids()
+                .filter(|id| self.draws(view, id))
+                .filter_map(|id| self.scene_extent(id, axis))
+                .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
+        });
+        let [Some(x), Some(y), Some(z)] = extents else {
+            return Vec::new();
+        };
+        let span = [x, y, z];
+        let to_world = self.world_space().from_scene();
+        let [width, height] = camera.viewport().map(f64::from);
+        let on_screen = |point: [f64; 3]| {
+            let [sx, sy] = camera.project_to_screen(to_world.apply(point))?;
+            Some([sx / width, sy / height])
+        };
+        let mut lines = Vec::new();
+        for axis in SpatialAxis::ALL {
+            let a = axis.xyz();
+            let [b, c] = [(a + 1) % 3, (a + 2) % 3];
+            let corner = |sb: usize, sc: usize| {
+                let mut point = [0.0; 3];
+                point[a] = self.cut_place(view, axis);
+                point[b] = if sb == 0 { span[b].0 } else { span[b].1 };
+                point[c] = if sc == 0 { span[c].0 } else { span[c].1 };
+                on_screen(point)
+            };
+            let corners = [corner(0, 0), corner(1, 0), corner(1, 1), corner(0, 1)];
+            for i in 0..4 {
+                if let (Some(from), Some(to)) = (corners[i], corners[(i + 1) % 4]) {
+                    lines.push(PlaneLine { axis, from, to });
+                }
+            }
+        }
+        lines
+    }
+
+    /// The position on `view`'s grid along `axis` under `fraction` of the
+    /// way across the view, along the screen axis that draws `axis`, as a
+    /// drag of its plane's line sets it. `None` for a view that doesn't draw
+    /// the axis.
+    pub fn plane_line_position(
+        &self,
+        view: ViewId,
+        axis: SpatialAxis,
+        fraction: f64,
+    ) -> Option<u32> {
+        let Camera::Slice(slice) = &self.view(view)?.camera else {
+            return None;
+        };
+        let on_screen = slice.screen_axes().iter().position(|a| *a == axis)?;
+        let [width, height] = slice.viewport.map(f64::from);
+        let screen = match on_screen {
+            0 => [fraction * width, height / 2.0],
+            _ => [width / 2.0, fraction * height],
+        };
+        let point = slice.from_screen(screen);
+        let along = slice.plane.axes().iter().position(|a| *a == axis)?;
+        Some(self.cut_grid(view, axis).index_of(point[along]))
     }
 
     /// Stand every view of a four-up layout at the active view's axis
@@ -150,6 +281,20 @@ impl Scene {
                 }
             })
             .reduce(f64::min)
+    }
+}
+
+/// Where `place` along `axis`, one the slice camera draws, falls on the
+/// screen along the screen axis that draws it, in device pixels.
+fn slice_screen_at(slice: &Slice, axis: SpatialAxis, place: f64) -> f64 {
+    let mut point = slice.center;
+    if let Some(along) = slice.plane.axes()[..2].iter().position(|a| *a == axis) {
+        point[along] = place;
+    }
+    let screen = slice.to_screen(point);
+    match slice.screen_axes().iter().position(|a| *a == axis) {
+        Some(0) => screen[0],
+        _ => screen[1],
     }
 }
 
@@ -282,6 +427,130 @@ mod tests {
         // XZ shares X, and YZ draws Y across; each stays on the middle of Z.
         assert_eq!(xz.0, [xy.0[0], 16.0]);
         assert_eq!(yz.0, [xy.0[1], 16.0]);
+    }
+
+    #[test]
+    fn yz_is_drawn_transposed_so_it_shares_xys_rows() {
+        let scene = four_up();
+        let slice = |index: usize| match &scene.views()[index].camera {
+            Camera::Slice(slice) => slice.clone(),
+            other => panic!("a slice camera, not {other:?}"),
+        };
+        let (xy, yz, xz) = (slice(0), slice(1), slice(2));
+        assert!(yz.transposed && !xy.transposed && !xz.transposed);
+        assert_eq!(yz.screen_axes(), [SpatialAxis::Z, SpatialAxis::Y]);
+        // Any Y lands on one screen row in both, and any X on one column of
+        // XY and XZ, the views being alike in size.
+        for y in [10.0, 64.0, 101.5] {
+            assert_eq!(xy.to_screen([20.0, y])[1], yz.to_screen([y, 3.0])[1]);
+        }
+        for x in [5.0, 48.0, 90.0] {
+            assert_eq!(xy.to_screen([x, 30.0])[0], xz.to_screen([x, 3.0])[0]);
+        }
+    }
+
+    #[test]
+    fn a_transposed_and_a_standalone_yz_at_one_cut_plan_the_same_chunks() {
+        // Square views, so the two cover the same region of the plane.
+        let mut scene = Scene::new([800, 400]);
+        open(&mut scene, "a", [32, 128, 96]);
+        let layout = ViewLayout::Columns;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        let ids: Vec<ViewId> = scene.views().iter().map(|v| v.id()).collect();
+        let datasets = ViewDatasets::All;
+        let second = ids[1];
+        apply(
+            &mut scene,
+            ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets,
+            },
+        );
+        for id in &ids {
+            apply(&mut scene, ViewportCommand::SetActiveView { view: *id });
+            let plane = SlicePlane::Yz;
+            apply(&mut scene, ViewportCommand::SetSlicePlane { plane });
+            apply(&mut scene, ViewportCommand::SetX { x: 40 });
+        }
+        if let Camera::Slice(slice) = &mut scene.views[1].camera {
+            slice.transposed = true;
+        }
+        let a = DatasetId::from("a");
+        let plan = |view: ViewId| format!("{:?}", scene.chunk_plan_for(view, &a));
+        assert_eq!(plan(ids[0]), plan(ids[1]));
+    }
+
+    #[test]
+    fn another_layout_or_another_plane_draws_a_plane_as_it_stands_alone() {
+        let mut scene = four_up();
+        let yz = scene.views()[1].id();
+        apply(&mut scene, ViewportCommand::SetActiveView { view: yz });
+        let plane = SlicePlane::Xy;
+        apply(&mut scene, ViewportCommand::SetSlicePlane { plane });
+        let transposed = |scene: &Scene, index: usize| match &scene.views()[index].camera {
+            Camera::Slice(slice) => slice.transposed,
+            _ => false,
+        };
+        assert!(!transposed(&scene, 1));
+        let mut scene = four_up();
+        let layout = ViewLayout::Grid;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        assert!((0..4).all(|index| !transposed(&scene, index)));
+    }
+
+    #[test]
+    fn each_slice_view_draws_the_other_two_planes_where_they_cross_it() {
+        let mut scene = four_up();
+        apply(&mut scene, ViewportCommand::SetZ { z: 7 });
+        let xy = scene.views()[0].id();
+        let lines = scene.plane_lines(xy);
+        // XY draws X across and Y down: X's plane is a vertical line, Y's a
+        // horizontal one, through the middle where both stand.
+        assert_eq!(
+            lines.iter().map(|l| l.axis).collect::<Vec<_>>(),
+            vec![SpatialAxis::X, SpatialAxis::Y]
+        );
+        assert_eq!(lines[0].from[0], lines[0].to[0]);
+        assert_eq!((lines[0].from[1], lines[0].to[1]), (0.0, 1.0));
+        assert_eq!(lines[1].from[1], lines[1].to[1]);
+        // YZ, transposed, draws Z across, standing at Z 7 near its left.
+        let yz = scene.views()[1].id();
+        let lines = scene.plane_lines(yz);
+        assert_eq!(
+            lines.iter().map(|l| l.axis).collect::<Vec<_>>(),
+            vec![SpatialAxis::Z, SpatialAxis::Y]
+        );
+        assert!(lines[0].from[0] < 0.5);
+        // The same Y lands on one height of XY and YZ.
+        assert_eq!(scene.plane_lines(xy)[1].from[1], lines[1].from[1]);
+        // The volume outlines all three planes, four edges each.
+        let volume = scene.views()[3].id();
+        let outlines = scene.plane_lines(volume);
+        assert_eq!(outlines.len(), 12);
+        let layout = ViewLayout::Grid;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        assert!(scene.plane_lines(xy).is_empty());
+    }
+
+    #[test]
+    fn dragging_a_line_names_the_position_under_the_pointer() {
+        let mut scene = four_up();
+        let xy = scene.views()[0].id();
+        let line = scene.plane_lines(xy)[0].clone();
+        assert_eq!(
+            scene.plane_line_position(xy, SpatialAxis::X, line.from[0]),
+            Some(48)
+        );
+        let left = scene.plane_line_position(xy, SpatialAxis::X, 0.2).unwrap();
+        let right = scene.plane_line_position(xy, SpatialAxis::X, 0.8).unwrap();
+        assert!(left < 48 && right > 48);
+        // XY draws no Z to drag.
+        assert_eq!(scene.plane_line_position(xy, SpatialAxis::Z, 0.5), None);
+        // Set from a drag, the place moves every view and every line.
+        apply(&mut scene, ViewportCommand::SetX { x: right });
+        let xz = scene.views()[2].id();
+        let moved = scene.plane_lines(xz)[0].from[0];
+        assert!(moved > line.from[0]);
     }
 
     #[test]

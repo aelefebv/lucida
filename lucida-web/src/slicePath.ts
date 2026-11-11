@@ -5,7 +5,8 @@ import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type Resolve
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { keepsCut, placementInPlane, readPlacement, rectToQuad, type PlaneMap } from "./placement.ts";
-import { axisAlignedQuad, quadEdgeLengths, type SliceQuad } from "./renderer/sliceQuad.ts";
+import { transposePlaneToWorld } from "./renderer/sliceCut.ts";
+import { axisAlignedQuad, quadEdgeLengths, transposeQuad, type SliceQuad } from "./renderer/sliceQuad.ts";
 import type { FrameScale, TickContext, TickView } from "./renderLoopTypes.ts";
 import { compositeKey } from "./tickCommon.ts";
 import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
@@ -463,13 +464,26 @@ export function renderSliceView(
     clipSliceLayers(layers, firstLabel, clip);
   }
 
+  // A view that draws its plane transposed sends it with the plane's two
+  // axes swapped, so the worker lays it on the screen as any other.
+  const transposed = scene.transposed(view.id);
+  const drawn = transposed ? layers.map(transposeLayer) : layers;
+  const [screenCx, screenCy] = transposed ? [cy, cx] : [cx, cy];
   const frameSeq = client.sliceRenderMultiPass(
-    layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs, view.id, rect, devicePixelRatio * backingScale,
+    drawn, currentZoom, screenCx, screenCy, canvasW, canvasH, planResult.epochs, view.id, rect,
+    devicePixelRatio * backingScale, transposed,
   );
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
   traceRecorder.noteFrameDispatched(frameSeq);
+}
+
+/** `layer` with the plane's two axes swapped, as a view that draws its plane transposed sends it. */
+function transposeLayer(layer: SliceLayerParams): SliceLayerParams {
+  const transposed = { ...layer, quad: transposeQuad(layer.quad) };
+  if (layer.bricks) transposed.bricks = { planeToWorld: transposePlaneToWorld(layer.bricks.planeToWorld) };
+  return transposed;
 }
 
 export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}

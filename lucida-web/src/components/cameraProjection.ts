@@ -37,7 +37,8 @@ export function eventToScreenPx(element: HTMLElement, e: ClientPoint): [number, 
   return [(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr];
 }
 
-/** A pointer event in 2D world coords: `(screenPhysPx - half) / zoom + center`.
+/** A pointer event in 2D world coords: `(screenPhysPx - half) / zoom + center`,
+ * across and down the plane, which a transposed view turns on the screen.
  * Every cursor-anchored producer uses it so all land in the same world frame. */
 export function eventToWorld(
   scene: WasmScene,
@@ -50,7 +51,11 @@ export function eventToWorld(
   const center = scene.center(view);
   const halfW = (element.clientWidth * dpr) / 2;
   const halfH = (element.clientHeight * dpr) / 2;
-  return [(cursorX - halfW) / zoom + center[0], (cursorY - halfH) / zoom + center[1]];
+  const across = (cursorX - halfW) / zoom;
+  const down = (cursorY - halfH) / zoom;
+  return scene.transposed(view)
+    ? [down + center[0], across + center[1]]
+    : [across + center[0], down + center[1]];
 }
 
 /**
@@ -68,6 +73,12 @@ export function makeWorldToScreen(
   const center = scene.center(view);
   const centerX = center[0];
   const centerY = center[1];
+  if (scene.transposed(view)) {
+    return (v: ScreenPoint): ScreenPoint => [
+      ((v[1] - centerY) * zoom + physW / 2) / dpr,
+      ((v[0] - centerX) * zoom + physH / 2) / dpr,
+    ];
+  }
   return (v: ScreenPoint): ScreenPoint => [
     ((v[0] - centerX) * zoom + physW / 2) / dpr,
     ((v[1] - centerY) * zoom + physH / 2) / dpr,

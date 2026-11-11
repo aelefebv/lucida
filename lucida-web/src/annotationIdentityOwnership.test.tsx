@@ -22,6 +22,7 @@ function stubScene(annotations: Annotation[]): WasmScene {
     active_view: () => 0,
     zoom: () => 1,
     center: () => [0, 0] as [number, number],
+    transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
   } as unknown as WasmScene;
 }

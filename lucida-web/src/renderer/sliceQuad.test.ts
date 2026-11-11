@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { axisAlignedQuad, quadBounds, quadEdgeLengths, quadPoint, quadUV, type SliceQuad } from "./sliceQuad.ts";
+import { axisAlignedQuad, quadBounds, quadEdgeLengths, quadPoint, quadUV, transposeQuad, type SliceQuad } from "./sliceQuad.ts";
 
 /** A `w × h` quad at `origin`, turned by `radians` in the plane. */
 function turned(origin: [number, number], w: number, h: number, radians: number): SliceQuad {
@@ -38,5 +38,16 @@ describe("a slice layer's quad", () => {
     // A corner of the rect around it lies outside the quad's unit square.
     const [u, v] = quadUV(q, bounds.x + 0.5, bounds.y + 0.5);
     expect(u >= 0 && u <= 1 && v >= 0 && v <= 1).toBe(false);
+  });
+});
+
+describe("transposeQuad", () => {
+  it("swaps the plane's axes, so a point lands where the transposed screen draws it", () => {
+    const quad = { origin: [5, 2], across: [20, 0], down: [0, 10] } as const;
+    const turned = transposeQuad(quad);
+    expect(turned).toEqual({ origin: [2, 5], across: [0, 20], down: [10, 0] });
+    const [x, y] = quadPoint(quad, 0.25, 0.5);
+    expect(quadPoint(turned, 0.25, 0.5)).toEqual([y, x]);
+    expect(quadUV(turned, y, x)).toEqual([0.25, 0.5]);
   });
 });

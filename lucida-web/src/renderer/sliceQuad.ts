@@ -16,6 +16,18 @@ export interface SliceQuad {
   down: Vec2;
 }
 
+/**
+ * `q` with the plane's two axes swapped, as a view that draws its plane
+ * transposed lays it on the screen: the plane's down axis across.
+ */
+export function transposeQuad(q: SliceQuad): SliceQuad {
+  return {
+    origin: [q.origin[1], q.origin[0]],
+    across: [q.across[1], q.across[0]],
+    down: [q.down[1], q.down[0]],
+  };
+}
+
 /** The quad of a rect at `x, y` spanning `w × h`, turning nothing. */
 export function axisAlignedQuad(x: number, y: number, w: number, h: number): SliceQuad {
   return { origin: [x, y], across: [w, 0], down: [0, h] };

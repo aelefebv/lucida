@@ -144,6 +144,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     slice_plane: () => "xy",
     // Every dataset placed where its frame says, turned off no cut.
     dataset_placement: () => new Float64Array(),
+    transposed: () => false,
     cut_index: () => 0,
     t: () => config.t,
     z: () => config.z,

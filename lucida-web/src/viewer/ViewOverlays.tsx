@@ -19,6 +19,8 @@ import type { SceneStore, ViewPane } from "../sceneStore.ts";
 import type { ViewLinkNotices } from "../viewLinks.ts";
 import { CoverageNotice, type Coverage } from "./CoverageNotice.tsx";
 import { LinkNotices } from "./LinkNotices.tsx";
+import { PlaneLines } from "./PlaneLines.tsx";
+import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import "./ViewOverlays.css";
 
 interface Props {
@@ -34,9 +36,11 @@ interface Props {
   byHand(a: string, b: string): string | null;
   /** With two linked views, where the links took each past its data. */
   linkNotices?: readonly ViewLinkNotices[];
+  /** Move `axis`'s plane to `fraction` of the way across `view`, as dragging its line does. */
+  dragPlane?: (view: number, axis: SpatialAxis, fraction: number) => void;
 }
 
-export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices }: Props) {
+export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
     <div className="lc-view-overlays">
@@ -56,6 +60,11 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
             onPointerDownCapture={select}
             onFocusCapture={select}
           >
+            {/* Under the column, so its controls and notices cover the lines. */}
+            <PlaneLines
+              lines={pane.lines}
+              onDrag={dragPlane && pane.cameraMode === "slice" ? (axis, fraction) => dragPlane(pane.id, axis, fraction) : undefined}
+            />
             {/* Before the column, so the bar covers the line where they cross. */}
             {comparison && <SwipeDivider comparison={comparison} actions={actions} nameOf={nameOf} />}
             <div className="lc-view-overlay-top">

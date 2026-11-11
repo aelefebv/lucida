@@ -364,7 +364,7 @@ export async function handleSliceRenderMultiPass(
 
   if (cr.hasData()) {
     const cursorEncoder = ctx.device.createCommandEncoder();
-    cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, timing);
+    cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, timing, msg.transposed === true);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
 

@@ -15,8 +15,20 @@ function makeScene2D(zoom: number, center: [number, number]): WasmScene {
     active_view: () => 0,
     zoom: () => zoom,
     center: () => new Float64Array(center),
+    transposed: () => false,
   } as unknown as WasmScene;
 }
+
+describe("a transposed view", () => {
+  it("reads the plane's across axis down the screen, and projects back", () => {
+    const scene = { zoom: () => 2, center: () => new Float64Array([10, 20]), transposed: () => true } as unknown as WasmScene;
+    const element = makeCanvas(0, 0, 400, 200);
+    const surface = { view: 0, element };
+    // 100 px right of the middle is 50 units down the plane, 20 px below it 10 across.
+    expect(eventToWorld(scene, surface, { clientX: 300, clientY: 120 })).toEqual([20, 70]);
+    expect(makeWorldToScreen(scene, surface)([20, 70])).toEqual([300, 120]);
+  });
+});
 
 /** A canvas with a fixed layout box (like the overlay test harnesses), so the
  * math is deterministic regardless of happy-dom's zero-size default. */
@@ -98,6 +110,7 @@ describe("makeWorldToScreen (2D forward camera)", () => {
       active_view: () => 0,
       zoom: () => zoom,
       center: () => new Float64Array([0, 0]),
+      transposed: () => false,
     } as unknown as WasmScene;
     const canvas = makeCanvas();
     const project = makeWorldToScreen(scene, { view: 0, element: canvas });

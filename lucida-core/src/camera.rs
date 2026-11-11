@@ -159,6 +159,12 @@ pub struct Slice {
     /// every view written before the field existed was.
     #[serde(default, skip_serializing_if = "SlicePlane::is_xy")]
     pub plane: SlicePlane,
+    /// Draw the plane's down axis across the screen and its across axis
+    /// down it, as four-up's YZ view does so that it shares XY's rows. Only
+    /// the screen turns: the center stays in the plane's own frame, so
+    /// planning, pools and links read the view alike either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transposed: bool,
 }
 
 /// 3D arcball camera for volume rendering.
@@ -540,11 +546,7 @@ impl Camera {
     /// Returns `None` if the point is behind the camera (3D modes only).
     pub fn project_to_screen(&self, world_point: [f64; 3]) -> Option<[f64; 2]> {
         match self {
-            Camera::Slice(v) => {
-                let sx = (world_point[0] - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
-                let sy = (world_point[1] - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
-                Some([sx, sy])
-            }
+            Camera::Slice(v) => Some(v.to_screen([world_point[0], world_point[1]])),
             Camera::Arcball(v) => project_3d(world_point, &v.view_proj_f64(), v.viewport),
             Camera::Fly(v) => project_3d(world_point, &v.view_proj_f64(), v.viewport),
         }
@@ -554,9 +556,8 @@ impl Camera {
     pub fn unproject_ray(&self, screen_x: f64, screen_y: f64) -> crate::ray::Ray {
         match self {
             Camera::Slice(s) => {
-                let world_x = (screen_x - s.viewport[0] as f64 / 2.0) / s.zoom + s.center[0];
-                let world_y = (screen_y - s.viewport[1] as f64 / 2.0) / s.zoom + s.center[1];
-                crate::ray::Ray::new([world_x, world_y, -1000.0], [0.0, 0.0, 1.0])
+                let [across, down] = s.from_screen([screen_x, screen_y]);
+                crate::ray::Ray::new([across, down, -1000.0], [0.0, 0.0, 1.0])
             }
             Camera::Arcball(a) => {
                 unproject_screen_ray(screen_x, screen_y, a.viewport, &a.view_proj_f64())
@@ -720,7 +721,57 @@ impl Slice {
             viewport,
             framing: Framing::Unframed,
             plane: SlicePlane::Xy,
+            transposed: false,
         }
+    }
+
+    /// The axes of the scene frame drawn across the screen and down it.
+    pub fn screen_axes(&self) -> [SpatialAxis; 2] {
+        let [across, down, _] = self.plane.axes();
+        if self.transposed {
+            [down, across]
+        } else {
+            [across, down]
+        }
+    }
+
+    /// The viewport measured along the plane's own across and down axes:
+    /// its height across the plane, and its width down it, when transposed.
+    fn plane_viewport(&self) -> [u32; 2] {
+        let [width, height] = self.viewport;
+        if self.transposed {
+            [height, width]
+        } else {
+            [width, height]
+        }
+    }
+
+    /// Where `point`, across and down the plane, falls on the screen, in
+    /// device pixels from its top left.
+    pub fn to_screen(&self, point: [f64; 2]) -> [f64; 2] {
+        let [width, height] = self.plane_viewport().map(f64::from);
+        let across = (point[0] - self.center[0]) * self.zoom + width / 2.0;
+        let down = (point[1] - self.center[1]) * self.zoom + height / 2.0;
+        if self.transposed {
+            [down, across]
+        } else {
+            [across, down]
+        }
+    }
+
+    /// The point across and down the plane under `screen`, in device pixels
+    /// from the screen's top left; [`Self::to_screen`] undone.
+    pub fn from_screen(&self, screen: [f64; 2]) -> [f64; 2] {
+        let [x, y] = if self.transposed {
+            [screen[1], screen[0]]
+        } else {
+            screen
+        };
+        let [width, height] = self.plane_viewport().map(f64::from);
+        [
+            (x - width / 2.0) / self.zoom + self.center[0],
+            (y - height / 2.0) / self.zoom + self.center[1],
+        ]
     }
 
     /// What this view shows of a dataset that `frame_to_scene` places, in
@@ -836,8 +887,10 @@ impl Slice {
         // accumulated center — a huge finite delta at the zoom floor saturates
         // at ±CAMERA_POSITION_MAX instead of storing Inf. Center stays finite
         // for every finite input.
-        self.center[0] = step_position(self.center[0], dx / self.zoom);
-        self.center[1] = step_position(self.center[1], dy / self.zoom);
+        // A drag across the screen moves along whichever plane axis it draws.
+        let [du, dv] = if self.transposed { [dy, dx] } else { [dx, dy] };
+        self.center[0] = step_position(self.center[0], du / self.zoom);
+        self.center[1] = step_position(self.center[1], dv / self.zoom);
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
@@ -865,10 +918,12 @@ impl Slice {
         ];
     }
 
-    /// The visible region in world coordinates: (min_x, min_y, max_x, max_y).
+    /// The visible region across and down the plane: (min_across,
+    /// min_down, max_across, max_down).
     pub fn world_bounds(&self) -> [f64; 4] {
-        let half_w = (self.viewport[0] as f64) / (2.0 * self.zoom);
-        let half_h = (self.viewport[1] as f64) / (2.0 * self.zoom);
+        let [width, height] = self.plane_viewport();
+        let half_w = (width as f64) / (2.0 * self.zoom);
+        let half_h = (height as f64) / (2.0 * self.zoom);
         [
             self.center[0] - half_w,
             self.center[1] - half_h,
@@ -890,8 +945,12 @@ impl Slice {
     /// math lives in [`crate::framing::slice_framing`].
     pub fn fit_to_bounds(&mut self, bounds: PlaneBox, margin: f64) {
         let (min, max) = (bounds.min, bounds.max);
-        let (center, zoom) =
-            slice_framing([min[0], min[1]], [max[0], max[1]], self.viewport, margin);
+        let (center, zoom) = slice_framing(
+            [min[0], min[1]],
+            [max[0], max[1]],
+            self.plane_viewport(),
+            margin,
+        );
         // Positional write: same component bound as the pan path.
         self.set_center(center[0], center[1]);
         // `slice_framing` already guarantees a finite positive zoom; the clamp
@@ -2237,6 +2296,33 @@ mod tests {
     }
 
     #[test]
+    fn a_transposed_slice_turns_only_the_screen() {
+        let mut slice = Slice::new([400, 200]);
+        slice.plane = SlicePlane::Yz;
+        slice.center = [50.0, 10.0];
+        slice.zoom = 2.0;
+        let standalone = slice.clone();
+        slice.transposed = true;
+        // The plane's across axis, Y, runs down the screen, whose 200 pixels
+        // cover 100 units of it; its down axis, Z, runs across 400 pixels.
+        assert_eq!(slice.world_bounds(), [0.0, -90.0, 100.0, 110.0]);
+        assert_eq!(standalone.world_bounds(), [-50.0, -40.0, 150.0, 60.0]);
+        let point = [60.0, 15.0];
+        assert_eq!(slice.to_screen(point), [210.0, 120.0]);
+        assert_eq!(slice.from_screen(slice.to_screen(point)), point);
+        // A drag across the screen moves along Z.
+        slice.pan(20.0, 0.0);
+        assert_eq!(slice.center, [50.0, 20.0]);
+        // A fit lays the plane's across extent down the screen.
+        let bounds = PlaneBox {
+            min: [0.0, 0.0, 0.0],
+            max: [100.0, 50.0, 0.0],
+        };
+        slice.fit_to_bounds(bounds, 1.0);
+        assert_eq!(slice.zoom, 2.0);
+    }
+
+    #[test]
     fn world_bounds_at_default_zoom() {
         let v = Slice::new([800, 600]);
         let [min_x, min_y, max_x, max_y] = v.world_bounds();
@@ -2492,6 +2578,7 @@ mod tests {
             viewport,
             framing: Framing::Placed,
             plane: SlicePlane::Xy,
+            transposed: false,
         }
     }
 
@@ -3898,6 +3985,7 @@ mod tests {
             viewport: [64, 64],
             framing: Framing::Placed,
             plane: SlicePlane::Xy,
+            transposed: false,
         });
         cam.sanitize();
         match &cam {

@@ -1090,6 +1090,7 @@ mod tests {
                 viewport: [800, 600],
                 framing: lucida_core::camera::Framing::Placed,
                 plane: lucida_core::slice_plane::SlicePlane::Xy,
+                transposed: false,
             })),
             view: Some(AxisPositions::new()),
             display: Some(DisplayState::default()),

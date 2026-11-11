@@ -14,9 +14,11 @@ afterEach(cleanup);
 
 const LEFT: ViewPane = {
   id: 0, shows: "all", draws: ["a"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, setAside: [],
+  lines: [],
 };
 const RIGHT: ViewPane = {
   id: 3, shows: [], draws: [], rect: [0.5, 0, 0.5, 1], cameraMode: "arcball", active: false, setAside: [],
+  lines: [],
 };
 
 function panes(views: ViewPane[], maximized: number | null = null) {

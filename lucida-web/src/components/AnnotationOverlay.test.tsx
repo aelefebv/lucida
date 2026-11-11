@@ -24,6 +24,7 @@ function makeScene(initial: Annotation[]): {
     active_view: () => 0,
     zoom: () => 1,
     center: () => new Float64Array([0, 0]),
+    transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
@@ -1135,6 +1136,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       active_view: () => 0,
       zoom: () => 1,
       center: () => new Float64Array([0, 0]),
+      transposed: () => false,
       dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
       apply_command: () => {},
     } as unknown as WasmScene;

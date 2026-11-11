@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cutLocalAt, cutNdcToWorld } from "./sliceCut.ts";
+import { cutLocalAt, cutNdcToWorld, transposePlaneToWorld } from "./sliceCut.ts";
 
 /** An XZ view's plane at Y = 5, in a world that halves the scene frame: across is X, down is Z. */
 const PLANE_TO_WORLD = [0.5, 0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 2.5, 0, 1];
@@ -25,5 +25,15 @@ describe("a tilted cut", () => {
     expect(local.map((v) => +v.toFixed(6))).toEqual([0.5, 0.25, 1]);
     // Further down the target, the cut passes below the member.
     expect(cutLocalAt(CAMERA, PLANE_TO_WORLD, invModel, 50, 60)).toBeNull();
+  });
+
+  it("draws the same cut transposed, its down axis across the target", () => {
+    const transposed = cutNdcToWorld(
+      { ...CAMERA, cx: CAMERA.cy, cy: CAMERA.cx },
+      transposePlaneToWorld(PLANE_TO_WORLD),
+    );
+    expect(apply(transposed, [0, 0, 0])).toEqual([5, 2.5, 10, 1]);
+    // NDC x now runs down the plane, along Z: 25 scene units right is Z 45.
+    expect(apply(transposed, [1, 0, 0])).toEqual([5, 2.5, 0.5 * 45, 1]);
   });
 });

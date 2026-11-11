@@ -661,6 +661,7 @@ export class RenderClient implements UploadClient {
     view: number,
     rect: ViewRect,
     pixelRatio?: number,
+    transposed = false,
   ): number {
     // Aggregate quad buffers are rebuilt per render tick on the main
     // thread; transferring them avoids structured-cloning what can be
@@ -674,7 +675,7 @@ export class RenderClient implements UploadClient {
       type: "sliceRenderMultiPass",
       epochs,
       view,
-      layers, zoom, cx, cy,
+      layers, zoom, cx, cy, transposed,
       canvasW, canvasH, rect, pixelRatio,
       frameSeq,
     }, transfer);
