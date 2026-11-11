@@ -1327,6 +1327,20 @@ impl Default for InputScale {
 /// The wheel delta of one notch, the value a mouse wheel raises.
 pub const WHEEL_NOTCH_DELTA: f64 = 100.0;
 
+/// The `Input.dispatchMouseEvent` request whose wheel event reaches the page
+/// at `point` carrying `delta_y`. Chrome's device-metrics emulation divides a
+/// dispatched wheel delta by the emulated device pixel ratio, which a real
+/// display at that ratio does not, so the request carries it multiplied back.
+pub fn wheel_event(point: (f64, f64), delta_y: f64, device_pixel_ratio: f64) -> Value {
+    json!({
+        "type": "mouseWheel",
+        "x": point.0,
+        "y": point.1,
+        "deltaX": 0,
+        "deltaY": delta_y * device_pixel_ratio,
+    })
+}
+
 /// Moves per drag: about one per this many CSS pixels, one frame apart, so a
 /// scripted drag has a duration and a frame-time shape like a person's.
 const PIXELS_PER_MOVE: f64 = 8.0;
@@ -1465,9 +1479,9 @@ pub enum SentInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         span_ms: Option<f64>,
     },
-    /// `notches` wheel events at `at`, each carrying `delta_y`, which amount
-    /// to a zoom by `factor`: the asked-for factor in volume mode, and the
-    /// nearest the slice view's fixed step reaches otherwise.
+    /// `notches` wheel events at `at`, each reaching the page with `delta_y`,
+    /// which amount to a zoom by `factor`: the asked-for factor in volume
+    /// mode, and the nearest the slice view's fixed step reaches otherwise.
     #[serde(rename_all = "camelCase")]
     Wheel {
         at: [f64; 2],
@@ -1807,7 +1821,17 @@ async fn run_step(
         }
         ScriptStep::Zoom { factor, at, .. } => {
             let (rect, mode) = gesture_target(page, *target, mode, wait).await?;
-            let zoom = wheel_zoom(page, rect, *factor, *at, mode.as_deref(), scale, pace, wait);
+            let zoom = wheel_zoom(
+                page,
+                rect,
+                *factor,
+                *at,
+                mode.as_deref(),
+                scale,
+                viewport.device_scale_factor,
+                pace,
+                wait,
+            );
             input = Some(zoom.await?);
         }
         ScriptStep::Scrub {
@@ -2207,6 +2231,7 @@ async fn wheel_zoom(
     at: Option<[f64; 2]>,
     mode: Option<&str>,
     scale: InputScale,
+    device_pixel_ratio: f64,
     pace: Option<Duration>,
     wait: Duration,
 ) -> Result<SentInput, CliError> {
@@ -2232,7 +2257,7 @@ async fn wheel_zoom(
     let start = tokio::time::Instant::now();
     let mut span_ms = None;
     for n in 0..notches {
-        let event = json!({ "type": "mouseWheel", "x": point.0, "y": point.1, "deltaX": 0, "deltaY": delta_y });
+        let event = wheel_event(point, delta_y, device_pixel_ratio);
         match pace {
             Some(span) => {
                 tokio::time::sleep_until(start + paced_offset(n as usize, notches as usize, span))
@@ -3219,6 +3244,26 @@ mod tests {
         let scale = InputScale::default();
         assert!((volume_zoom_step(2.0, 1, scale) - (-500.0)).abs() < 1e-9);
         assert!((volume_zoom_step(0.5, 1, scale) - 1000.0).abs() < 1e-9);
+    }
+
+    /// The page receives a dispatched wheel delta divided by the emulated
+    /// ratio, so a zoom step scales the camera distance by the same factor
+    /// at every ratio.
+    #[test]
+    fn a_volume_zoom_divides_the_distance_alike_at_every_device_pixel_ratio() {
+        let scale = InputScale::default();
+        let delta = volume_zoom_step(2.0, 1, scale);
+        for ratio in [1.0, 2.0, 3.0] {
+            let event = wheel_event((720.0, 450.0), delta, ratio);
+            let received = event["deltaY"].as_f64().unwrap() / ratio;
+            let distance = 1.0 + received * scale.volume_zoom_per_wheel_delta;
+            assert!((distance - 0.5).abs() < 1e-9, "ratio {ratio}: {distance}");
+            assert_eq!(event["type"], "mouseWheel");
+            assert_eq!(
+                (event["x"].as_f64(), event["y"].as_f64()),
+                (Some(720.0), Some(450.0))
+            );
+        }
     }
 
     #[test]
