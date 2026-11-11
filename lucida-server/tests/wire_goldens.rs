@@ -2919,6 +2919,7 @@ fn payload_views_saved_view() -> SavedView {
                     mode: CompareMode::Swipe,
                     divider: 0.25,
                     showing: Side::A,
+                    rate: None,
                 }),
             },
         ],

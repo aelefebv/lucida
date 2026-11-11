@@ -5,7 +5,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { isCaptureSurface } from "./captureSurface.ts";
+import { holdsStill, isCaptureSurface } from "./captureSurface.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./pipeline/planning/config.ts";
 
 describe("isCaptureSurface", () => {
@@ -129,4 +129,12 @@ describe("user state on the capture surface", () => {
     localStorage.getItem("debug");
     expect(touched).toEqual(["getItem"]);
   }, 30_000);
+});
+
+describe("holdsStill", () => {
+  it("holds a running blink still on the capture surface, or where a capture asks", () => {
+    expect(holdsStill("?render=1")).toBe(true);
+    expect(holdsStill("?viewer_profile=agent&still=1")).toBe(true);
+    expect(holdsStill("?viewer_profile=agent")).toBe(false);
+  });
 });

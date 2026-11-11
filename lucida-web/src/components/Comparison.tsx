@@ -32,18 +32,22 @@ interface BarProps {
   byHand?: string | null;
   /** Whether its view is the active one, which the actions steer. */
   active: boolean;
+  /** Whether a running blink holds still, as a capture asks, which then
+   *  shows the side the comparison records. */
+  still?: boolean;
 }
 
-export function ComparisonBar({ comparison, actions, nameOf, byHand, active }: BarProps) {
-  // A running blink belongs to the pair it was started on, so a new
-  // comparison starts still. It runs only while its view is active, since a
-  // flip steers the active view.
-  const pair = comparison ? `${comparison.a}\n${comparison.b}` : null;
-  const [playingPair, setPlayingPair] = useState<string | null>(null);
+export function ComparisonBar({ comparison, actions, nameOf, byHand, active, still = false }: BarProps) {
+  // A blink runs at the rate its comparison records, which a new comparison
+  // starts without. It flips only while its view is active, since a flip
+  // steers the active view.
   const [rate, setRate] = useState<BlinkRate>("2");
   const blinking = comparison?.mode === "blink";
-  const playing = blinking && active && pair !== null && playingPair === pair;
-  useBlinkTimer(playing, Number(rate), actions.flip);
+  const running = blinking ? (comparison?.rate ?? null) : null;
+  useBlinkTimer(running !== null && active && !still, running ?? 0, actions.flip);
+  const stop = () => {
+    if (running !== null) actions.setBlinkRate(null);
+  };
 
   useShortcut({
     id: "compare.flip",
@@ -54,7 +58,7 @@ export function ComparisonBar({ comparison, actions, nameOf, byHand, active }: B
     enabled: blinking && active,
     onTrigger: () => {
       // A key press is the person taking over, so it stops a running blink.
-      setPlayingPair(null);
+      stop();
       actions.flip();
     },
   });
@@ -90,22 +94,25 @@ export function ComparisonBar({ comparison, actions, nameOf, byHand, active }: B
             label={`Show ${nameOf(hidden)}`}
             shortcut={FLIP_KEYS}
             onPress={() => {
-              setPlayingPair(null);
+              stop();
               actions.flip();
             }}
           />
           <IconButton
-            icon={playing ? PauseIcon : PlayIcon}
+            icon={running !== null ? PauseIcon : PlayIcon}
             size="sm"
-            label={playing ? "Stop blinking" : "Blink"}
-            onPress={() => setPlayingPair(playing ? null : pair)}
+            label={running !== null ? "Stop blinking" : "Blink"}
+            onPress={() => actions.setBlinkRate(running !== null ? null : Number(rate))}
           />
           <SegmentedControl<BlinkRate>
             label="Blinks per second"
             size="sm"
             options={BLINK_RATES.map((value) => ({ value, label: `${value}/s` }))}
-            value={rate}
-            onChange={setRate}
+            value={running !== null ? (String(running) as BlinkRate) : rate}
+            onChange={(next) => {
+              setRate(next);
+              if (running !== null) actions.setBlinkRate(Number(next));
+            }}
           />
         </>
       )}

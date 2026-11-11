@@ -48,7 +48,15 @@ pub struct Comparison {
     pub divider: f64,
     /// What a blink shows.
     pub showing: Side,
+    /// How many times a second a blink shows the other dataset by itself,
+    /// one of [`BLINK_RATES`], or `None` while it waits to be flipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<f64>,
 }
+
+/// The rates a blink runs at, in flips a second, as the compare bar offers
+/// them.
+pub const BLINK_RATES: [f64; 3] = [1.0, 2.0, 4.0];
 
 impl Comparison {
     /// Whether `dataset` is one of the pair.
@@ -96,6 +104,7 @@ impl Scene {
             mode,
             divider: 0.5,
             showing: Side::A,
+            rate: None,
         }));
         Ok(())
     }
@@ -118,6 +127,15 @@ impl Scene {
             return;
         }
         self.edit_comparison(|c| c.divider = at.clamp(0.0, 1.0));
+    }
+
+    /// Run a blink at `rate` flips a second, or stop it with `None`. A rate
+    /// the compare bar doesn't offer is ignored.
+    pub fn set_blink_rate(&mut self, rate: Option<f64>) {
+        if rate.is_some_and(|rate| !BLINK_RATES.contains(&rate)) {
+            return;
+        }
+        self.edit_comparison(|c| c.rate = rate);
     }
 
     /// Show the other dataset in a blink.

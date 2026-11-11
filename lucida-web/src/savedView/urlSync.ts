@@ -225,7 +225,7 @@ export class UrlSync {
     }
     if (savedView === null) return;
     this.suppressNextEmptyHashFlush = true;
-    await this.applier.apply(savedView.view);
+    await this.applier.apply(savedView.view, { comparisons: true });
   }
 
   private async applyDefaultSavedView(): Promise<void> {

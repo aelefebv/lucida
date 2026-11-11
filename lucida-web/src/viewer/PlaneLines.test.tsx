@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { PlaneLines } from "./PlaneLines.tsx";
-import type { PlaneLine } from "./planeLines.ts";
+import { planeLinesCaptured, type PlaneLine } from "./planeLines.ts";
 
 afterEach(cleanup);
 
@@ -44,5 +44,14 @@ describe("PlaneLines", () => {
     onDrag.mockClear();
     fireEvent.pointerDown(level, { pointerId: 2, clientX: 400, clientY: 125 });
     expect(onDrag.mock.calls).toEqual([["y", 0.75]]);
+  });
+});
+
+describe("planeLinesCaptured", () => {
+  it("draws the lines on a capture only when its URL asks", () => {
+    expect(planeLinesCaptured("?render=1")).toBe(false);
+    expect(planeLinesCaptured("?render=1&plane_lines=1")).toBe(true);
+    // The viewer page draws them whatever the URL says.
+    expect(planeLinesCaptured("?plane_lines=1")).toBe(false);
   });
 });
