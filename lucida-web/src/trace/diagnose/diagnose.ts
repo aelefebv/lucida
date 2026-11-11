@@ -1389,6 +1389,14 @@ function runIdentity(run: TraceRun): RunIdentity {
         header.outstandingAtSettle.speculativeInFlight,
     },
     startedAtEpochMs: header.startedAtEpochMs,
+    ...(header.views && {
+      views: header.views.map(({ view, settledAtUs, wanted, short }) => ({
+        view,
+        settledMs: settledAtUs === null ? null : usToMs(settledAtUs),
+        wanted,
+        short,
+      })),
+    }),
   };
 }
 

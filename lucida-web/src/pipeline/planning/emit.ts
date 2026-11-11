@@ -168,6 +168,16 @@ export class LaneRequests {
     if (req.priority > this.highestBand) this.highestBand = req.priority;
   }
 
+  /** How many requests have been pushed. */
+  get count(): number {
+    return this.requests.length;
+  }
+
+  /** The requests pushed since there were `count`. */
+  since(count: number): ChunkRequest[] {
+    return this.requests.slice(count);
+  }
+
   /** The highest band emitted so far, or -Infinity. */
   get topBand(): number {
     return this.highestBand;
