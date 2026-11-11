@@ -14,7 +14,8 @@ function fakeScene() {
     withheld: "[]",
     comparisons: {} as Record<number, unknown>,
     setAside: [] as string[],
-    epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0, comparison: 0 },
+    links: null as unknown,
+    epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0, comparison: 0, links: 0 },
   };
   const scene = {
     z: () => state.z,
@@ -34,6 +35,7 @@ function fakeScene() {
     resolved_layers: () => JSON.stringify(state.layers),
     camera_mode: () => state.mode,
     view_comparison: (id: number) => JSON.stringify(state.comparisons[id] ?? null),
+    view_links: () => JSON.stringify(state.links),
     epochs: () => JSON.stringify(state.epochs),
   } as unknown as WasmScene;
   return { scene, state };
@@ -128,6 +130,24 @@ describe("SceneStore", () => {
     state.epochs.selection++;
     noteSceneWrite();
     expect(store.getView().views[0].setAside).toEqual(["c"]);
+  });
+
+  it("reads the links when they change, and keeps them while nothing in them changed", () => {
+    const { scene, state } = fakeScene();
+    const store = new SceneStore(() => scene);
+    store.subscribe(() => {});
+    expect(store.getView().links).toBeNull();
+
+    state.views = [0, 1];
+    state.links = { basis: "physical", properties: [{ property: "pan", mode: "linked" }] };
+    state.epochs.links++;
+    noteSceneWrite();
+    const links = store.getView().links;
+    expect(links).toMatchObject({ basis: "physical", properties: [{ property: "pan", mode: "linked" }] });
+
+    state.epochs.view++;
+    noteSceneWrite();
+    expect(store.getView().links).toBe(links);
   });
 
   it("stays quiet when a write moved no epoch", () => {

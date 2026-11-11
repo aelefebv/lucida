@@ -154,6 +154,7 @@ vi.mock("lucida-core", () => {
     drawn_datasets() { return JSON.stringify(Object.keys(this.doc.manifests ?? {})); }
     view_layout() { return "single"; }
     maximized_view() { return undefined; }
+    view_links() { return "null"; }
     view_rect() { return [0, 0, 1, 1]; }
     view_camera_mode() { return this.mode; }
     view_mode() { return this.mode === "slice" ? "slice" : "volume"; }

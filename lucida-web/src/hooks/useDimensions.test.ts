@@ -64,6 +64,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
     drawn_datasets: () => "[]",
     view_layout: () => "single",
     maximized_view: () => undefined,
+    view_links: () => "null",
     view_rect: () => [0, 0, 1, 1],
     view_camera_mode: () => "slice",
     withheld: () => "[]",

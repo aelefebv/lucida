@@ -214,6 +214,7 @@ const viewportCases: {
   set_view_datasets: { type: "set_view_datasets", view: 1, datasets: { only: [DS] } },
   move_dataset_to_view: { type: "move_dataset_to_view", view: 1, dataset_id: DS },
   maximize_view: { type: "maximize_view", view: null },
+  set_view_link: { type: "set_view_link", property: "zoom", mode: "relative" },
   set_mode_slice: { type: "set_mode_slice" },
   set_mode_arcball: { type: "set_mode_arcball" },
   set_mode_fly: { type: "set_mode_fly" },
