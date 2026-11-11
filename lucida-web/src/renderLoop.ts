@@ -232,10 +232,12 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Start planning and delivery over, as a fresh loop would. A view's 2D/3D
-   * switch changes the form its datasets' pools hold, so nothing planned or
-   * delivered for the other form carries over, and the switch opens a run as
-   * a fresh loop's start did.
+   * Start planning and delivery over, as a fresh loop would. A dataset's
+   * slice pools and volume pools each have a holder, so a view's 2D/3D switch
+   * moves the view onto the other kind: its datasets' pools of the mode it
+   * left go once no view draws from them, and those of the mode it joins fill
+   * from a full cold state. Starting over keeps a lone view's switch what a
+   * fresh loop's start was, and opens a run as one did.
    */
   private restartPipeline(): void {
     this.tickCoordinator.dispose();

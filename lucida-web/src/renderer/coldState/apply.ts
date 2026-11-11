@@ -282,6 +282,10 @@ function releasePools(ctx: WorkerCtx, datasetId: string, mode: PoolMode): void {
     removeSliceAtlasesForDataset(ctx, datasetId, none);
     removeLabelSlicePoolsForDataset(ctx, datasetId, "freed");
   }
+  // The page's level readout for these pools would outlive them otherwise.
+  if (state.coldStateByDatasetMode.has(key)) {
+    ctx.post({ type: "entityLevels", datasetId, viewMode: mode, entities: [] });
+  }
   const desc = state.descriptorBuffersByDatasetMode.get(key);
   if (desc) destroyDescriptorBuffer(desc);
   state.descriptorBuffersByDatasetMode.delete(key);

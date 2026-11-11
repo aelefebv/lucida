@@ -124,7 +124,7 @@ export class RenderClient implements UploadClient {
    * and the level on screen, summarised across its entities. Null when the
    * dataset reports no image-bearing entity.
    */
-  onEntityLevels: ((datasetId: string, levels: DatasetLevels | null) => void) | null = null;
+  onEntityLevels: ((datasetId: string, mode: PoolMode, levels: DatasetLevels | null) => void) | null = null;
 
   private readonly pipelinesCompiledHandlers = new Set<() => void>();
 
@@ -326,7 +326,7 @@ export class RenderClient implements UploadClient {
       const key = `${msg.datasetId}|${msg.viewMode}`;
       if (levels === null) this.levelsByDataset.delete(key);
       else this.levelsByDataset.set(key, levels);
-      this.onEntityLevels?.(msg.datasetId, levels);
+      this.onEntityLevels?.(msg.datasetId, msg.viewMode, levels);
     } else if (msg.type === "gpuPassTime") {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.

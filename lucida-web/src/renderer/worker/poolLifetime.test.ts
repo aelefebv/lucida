@@ -314,6 +314,8 @@ describe("a cold state frees the pools it no longer routes to", () => {
     expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
       { type: "chunkResidency", memberId: "ds1-img:ch0", viewMode: "volume", tier: "detail", change: "lost", keys: ["2/0/0/0/0/0"], reason: "freed" },
     );
+    // So does the level readout of the pools.
+    expect(posts).toContainEqual({ type: "entityLevels", datasetId: "ds1", viewMode: "volume", entities: [] });
   });
 
   it("frees a chunk shape that no resident level uses after a zoom", async () => {
