@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.34.0](https://github.com/aelefebv/lucida/compare/v0.33.0...v0.34.0) (2026-11-11)
+
+
+### Features
+
+* layout presets, with four-up crossing at one point ([#1534](https://github.com/aelefebv/lucida/issues/1534)) ([7914035](https://github.com/aelefebv/lucida/commit/7914035c3b952545200bed73b865ba08824e5be6))
+* **web:** slice views draw a dataset turned in their plane ([#1535](https://github.com/aelefebv/lucida/issues/1535)) ([a0f37c0](https://github.com/aelefebv/lucida/commit/a0f37c0b3742682183dcfebe8d6ff45a9663b3ac))
+
+
+### Bug Fixes
+
+* **web:** zoom by a normalized wheel delta in every view ([#1527](https://github.com/aelefebv/lucida/issues/1527)) ([907f838](https://github.com/aelefebv/lucida/commit/907f838cb1e2b43df7c424cc7eb8ca35e40bb08b))
+
+
+### Performance
+
+* **web:** halve plan submit's cost and steady its perf reading ([#1526](https://github.com/aelefebv/lucida/issues/1526)) ([e2d6d2f](https://github.com/aelefebv/lucida/commit/e2d6d2fa8326e9db8ee1d1346c5bfe8ca40447d0))
+* **web:** judge only the resident chunks that changed on each tick of a load ([#1536](https://github.com/aelefebv/lucida/issues/1536)) ([afa1a73](https://github.com/aelefebv/lucida/commit/afa1a73d277808ca990dccd3c741b399c1e643d6))
+
+
+### Refactors
+
+* **core:** placement is a general affine map, so a dataset can be turned ([#1532](https://github.com/aelefebv/lucida/issues/1532)) ([7672048](https://github.com/aelefebv/lucida/commit/7672048e594178cbb1947eca136e9cfa69cf5efa))
+
 ## [0.33.0](https://github.com/aelefebv/lucida/compare/v0.32.0...v0.33.0) (2026-11-11)
 
 
