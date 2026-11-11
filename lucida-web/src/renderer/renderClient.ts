@@ -32,6 +32,7 @@ import type {
   ProbeSample,
 } from "./workerProtocol.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
+import type { SpatialAxis } from "./slicePlane.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
@@ -519,6 +520,7 @@ export class RenderClient implements UploadClient {
     fullResZ: number,
     epochs: SceneEpochs,
     tier: ResidencyTier,
+    sliceAxis: SpatialAxis = "z",
   ) {
     // Each buffer is a plane the caller cut for the worker, so it moves
     // without a second copy.
@@ -537,6 +539,7 @@ export class RenderClient implements UploadClient {
         levelWidth, levelHeight,
         chunkX, chunkY, chunkZ,
         fullResDepth, levelDepth, fullResZ,
+        ...(sliceAxis !== "z" ? { sliceAxis } : {}),
       },
       transferList,
     );

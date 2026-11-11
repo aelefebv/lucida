@@ -435,7 +435,8 @@ impl From<ViewportCommand> for Command {
 /// settings map, the one snapshot with real cost at scale. Classification is
 /// exhaustive, so an unclassified new variant is a compile error.
 enum ViewportScope {
-    /// Mutates the active view's camera only. A change bumps `epochs.view`.
+    /// Mutates the active view's camera only. A change bumps `epochs.view`,
+    /// and one to the plane a slice camera cuts `epochs.selection` too.
     Camera,
     /// Mutates the active view's axis positions (the slice and timepoint
     /// selectors) only. A change bumps `epochs.selection`.
@@ -834,9 +835,12 @@ impl Scene {
                 let others_before = self.other_cameras();
                 // A plane switch also places the axis position it cuts at.
                 let axes_before = self.active_view().axes.clone();
+                let plane_before = self.active_view().slice_plane();
                 self.mutate_viewport(cmd);
                 let view = self.active_view_mut();
-                let axes_changed = view.axes != axes_before;
+                // Another plane draws other planes of every layer, as a moved
+                // axis position does, even where no position moved.
+                let cut_changed = view.axes != axes_before || view.slice_plane() != plane_before;
                 let moved = view.camera != before;
                 // Steering a fit makes it a choice, which a new canvas
                 // keeps. A stand-in stays one: moving an empty canvas
@@ -844,7 +848,7 @@ impl Scene {
                 if moved && steers && view.camera.framing() == Framing::Framed {
                     view.camera.set_framing(Framing::Placed);
                 }
-                if axes_changed {
+                if cut_changed {
                     self.epochs.selection += 1;
                 }
                 if moved || self.other_cameras() != others_before {

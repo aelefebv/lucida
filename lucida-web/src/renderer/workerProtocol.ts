@@ -87,6 +87,8 @@ export interface SliceChunkDataMessage {
   fullResDepth: number;
   levelDepth: number;
   fullResZ: number;
+  /** The axis the planes were cut along, as the cold state's `sliceAxis`. Absent: Z. */
+  sliceAxis?: SpatialAxis;
 }
 
 /**

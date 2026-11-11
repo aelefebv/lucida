@@ -52,8 +52,11 @@ export interface BaseEntitySnapshot {
   coarseLevel: number | null;
   importance: number;
   /**
-   * Layout grid placement, in voxel coordinates. Not the same as
-   * {@link centroidWorld}, which is the entity's own center in world space.
+   * Where the view places the entity, in level-0 samples of its dataset: its
+   * layout position in a volume view or an XY cut, and in a side view its
+   * place across and down the screen, where a collection's tiles sit in cells
+   * of their own (`plane_positions`). Not the same as {@link centroidWorld},
+   * which is the entity's own center in world space.
    */
   layoutPositionVox: [number, number];
   levels: LevelGeometry[];

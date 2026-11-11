@@ -15,6 +15,7 @@
 use lucida_content::{DatasetManifest, LevelGeometry};
 use serde::{Deserialize, Serialize};
 
+use crate::slice_plane::SlicePlane;
 use crate::transform::VolumeTransform;
 
 /// A per-axis scale and offset, `[x, y, z]`: `offset + point * scale`. Every
@@ -405,6 +406,67 @@ pub fn member_cube_to_frame(position: [f64; 2], shape: [u64; 5]) -> Affine {
     }
 }
 
+/// How a side view lays out the tiles of a collection.
+///
+/// One cut through the scene frame passes through a single row of tiles,
+/// and the nearest hides the rest. So a side view cuts every tile at one
+/// place measured from the tile's own first plane, and draws each tile's cut
+/// in its own cell. A tile keeps its place in the layout, stretched so that
+/// its cell holds the section, as tall as the tile is deep, and the grid
+/// stays a grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileCells {
+    /// How far a layout position stretches down the screen: Z samples per Y
+    /// sample of the tile deepest for its height.
+    down: f64,
+    /// How far it stretches across a YZ view, whose cells are as wide as a
+    /// tile is tall: Y samples per X sample of the tile tallest for its width.
+    across_yz: f64,
+}
+
+impl TileCells {
+    /// The cells for tiles whose level-0 shapes, `[t, c, z, y, x]`, are
+    /// `shapes`. Each ratio is the largest any tile needs, so every cell
+    /// holds its tile's section.
+    pub fn new(shapes: impl IntoIterator<Item = [u64; 5]>) -> Self {
+        let mut cells = TileCells {
+            down: 0.0,
+            across_yz: 0.0,
+        };
+        for shape in shapes {
+            let [z, y, x] = [shape[2], shape[3], shape[4]].map(|n| n.max(1) as f64);
+            cells.down = cells.down.max(z / y);
+            cells.across_yz = cells.across_yz.max(y / x);
+        }
+        if cells.down == 0.0 {
+            cells.down = 1.0;
+            cells.across_yz = 1.0;
+        }
+        cells
+    }
+
+    /// Where `plane` draws the tile at layout `position`, `[across, down]`
+    /// in its dataset's samples. An XY view draws the layout as it is.
+    pub fn position(&self, plane: SlicePlane, position: [f64; 2]) -> [f64; 2] {
+        let [x, y] = position;
+        match plane {
+            SlicePlane::Xy => position,
+            SlicePlane::Xz => [x, y * self.down],
+            SlicePlane::Yz => [x * self.across_yz, y * self.down],
+        }
+    }
+
+    /// The map a side view's axis position reads back through into a tile's
+    /// own planes, for a dataset `to_scene` places: its scale alone, since
+    /// the position is measured from the tile's first plane.
+    pub fn cut_placement(to_scene: &Affine) -> Affine {
+        Affine {
+            scale: to_scene.scale,
+            offset: [0.0; 3],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,6 +690,39 @@ mod tests {
         assert!(boxes_overlap(unit, ([0.5; 3], [2.0; 3])));
         assert!(!boxes_overlap(unit, ([1.0, 0.0, 0.0], [2.0, 1.0, 1.0])));
         assert!(!boxes_overlap(unit, ([0.0, 0.0, 3.0], [1.0, 1.0, 4.0])));
+    }
+
+    #[test]
+    fn a_side_view_stretches_the_layout_so_each_cell_holds_its_tiles_section() {
+        // Tiles 100 wide, 50 tall and 20 deep, laid out with a gap of 10.
+        let cells = TileCells::new([[1, 1, 20, 50, 100]; 4]);
+        let second_row = [0.0, 60.0];
+        let second_column = [110.0, 0.0];
+        assert_eq!(cells.position(SlicePlane::Xy, [110.0, 60.0]), [110.0, 60.0]);
+        // Rows stack 20 deep with a gap of 4, the layout's gap stretched alike.
+        assert_eq!(cells.position(SlicePlane::Xz, second_row), [0.0, 24.0]);
+        assert_eq!(cells.position(SlicePlane::Xz, second_column), [110.0, 0.0]);
+        // Across a YZ view a cell is as wide as its tile is tall.
+        assert_eq!(cells.position(SlicePlane::Yz, second_column), [55.0, 0.0]);
+        assert_eq!(cells.position(SlicePlane::Yz, second_row), [0.0, 24.0]);
+    }
+
+    #[test]
+    fn tile_cells_take_the_room_the_largest_section_needs() {
+        let cells = TileCells::new([[1, 1, 10, 50, 50], [1, 1, 40, 40, 20]]);
+        assert_eq!(cells.position(SlicePlane::Xz, [0.0, 10.0]), [0.0, 10.0]);
+        assert_eq!(cells.position(SlicePlane::Yz, [10.0, 0.0]), [20.0, 0.0]);
+        assert_eq!(TileCells::new([]), TileCells::new([[1, 1, 1, 1, 1]]));
+    }
+
+    #[test]
+    fn a_tile_cut_reads_the_position_from_the_tiles_own_edge() {
+        let to_scene = Affine {
+            scale: [0.5, 2.0, 1.0],
+            offset: [100.0, 200.0, 0.0],
+        };
+        let cut = TileCells::cut_placement(&to_scene).inverse();
+        assert!(close(cut.apply([3.0, 9.0, 0.0]), [6.0, 4.5, 0.0]));
     }
 
     #[test]

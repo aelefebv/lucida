@@ -212,6 +212,7 @@ export function dispatchChunkDelivery(
     index,
     epochs,
     delivery.residencyTier,
+    axis,
   );
   return { memberId, bytes };
 }

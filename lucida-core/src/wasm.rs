@@ -741,6 +741,22 @@ impl WasmScene {
         serde_json::to_string(&map).unwrap()
     }
 
+    /// Where `view` places each member of `dataset_id`, as JSON:
+    /// `{"entity_id": [across, down], ...}` in the dataset's own samples.
+    /// The layout positions in a volume view or an XY cut, and in a side view
+    /// the axes across and down the screen, where a collection's tiles sit
+    /// in cells of their own. Chunk planning and the renderer place members
+    /// by these. See [`Scene::plane_positions`].
+    pub fn plane_positions(&self, view: u32, dataset_id: &str) -> String {
+        let positions: std::collections::HashMap<&str, [f64; 2]> = self
+            .inner
+            .plane_positions(ViewId(view), &DatasetId(dataset_id.to_string()))
+            .into_iter()
+            .map(|(entity, position)| (entity.0.as_str(), position))
+            .collect();
+        serde_json::to_string(&positions).unwrap()
+    }
+
     /// The levels a level pin on `dataset_id` may hold, finest first: every
     /// source level including 0, never a generated coarse level. Empty for
     /// an unknown dataset. See [`Scene::pinnable_levels`].
