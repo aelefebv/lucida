@@ -486,8 +486,14 @@ mod tests {
         apply(&mut scene, ViewportCommand::SetViewLayout { layout });
         let views = view_ids(&scene);
         let (view, dataset_id) = (views[1], id("b"));
-        apply(&mut scene, ViewportCommand::MoveDatasetToView { view, dataset_id });
-        apply(&mut scene, ViewportCommand::SetActiveView { view: views[1] });
+        apply(
+            &mut scene,
+            ViewportCommand::MoveDatasetToView { view, dataset_id },
+        );
+        apply(
+            &mut scene,
+            ViewportCommand::SetActiveView { view: views[1] },
+        );
         let recorded = scene.record_views(true).unwrap();
         assert_eq!(recorded.views[0].axes.z, None);
         let mut restored = page([800, 600], false);
