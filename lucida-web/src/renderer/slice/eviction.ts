@@ -1,7 +1,7 @@
 /**
- * Slice-mode eviction state, over `ctx.state.cameraUVPerEntity`: the
- * per-entity camera UV that `findEvictionSlot2D` uses to keep chunks near
- * the viewport center.
+ * Slice-mode eviction state, over `ctx.state.cameraUVs`: each view's camera
+ * UV per entity, which `findEvictionSlot2D` uses to keep chunks near the
+ * center of a view that draws them.
  */
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
@@ -12,35 +12,42 @@ import {
   type EvictionCandidate,
   type FindEvictionParams,
 } from "../eviction.ts";
-import { wantedChunksFor } from "../wantedChunks.ts";
+import { wantedEntryKey } from "../wantedChunks.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import type { SliceAtlasState } from "./atlas.ts";
 
-/** Update the per-entity camera-UV reference (called from render). */
+/** Update one view's camera-UV reference for an entity (called from render). */
 export function setCameraUVForMember(
   state: RendererState,
+  view: number,
   memberId: string,
   uv: [number, number],
 ): void {
-  state.cameraUVPerEntity.set(memberId, uv);
+  let byMember = state.cameraUVs.get(view);
+  if (!byMember) {
+    byMember = new Map();
+    state.cameraUVs.set(view, byMember);
+  }
+  byMember.set(memberId, uv);
 }
 
-/** Read the per-entity camera-UV reference (with [0.5, 0.5] fallback). */
+/** Read one view's camera-UV reference for an entity (with [0.5, 0.5] fallback). */
 export function cameraUVForMember(
   state: RendererState,
+  view: number,
   memberId: string,
 ): [number, number] {
-  return state.cameraUVPerEntity.get(memberId) ?? [0.5, 0.5];
+  return state.cameraUVs.get(view)?.get(memberId) ?? [0.5, 0.5];
 }
 
-/** Drop camera-UV state for a removed dataset / member. */
+/** Drop camera-UV state for a removed dataset / member, in every view. */
 export function clearCameraUVForMember(state: RendererState, idOrMember: string): void {
-  state.cameraUVPerEntity.delete(idOrMember);
+  for (const byMember of state.cameraUVs.values()) byMember.delete(idOrMember);
 }
 
 /** Drop all camera-UV state (worker destroy). */
 export function clearAllCameraUVs(state: RendererState): void {
-  state.cameraUVPerEntity.clear();
+  state.cameraUVs.clear();
 }
 
 /** Squared distance from a chunk grid coordinate to a reference UV. */
@@ -61,7 +68,7 @@ export function findEvictionSlot2D(
   return findEvictionSlot(sliceEvictionParams(state, atlas, tier));
 }
 
-/** What the shared eviction kernels read of a slice pool of `tier`. */
+/** What the shared eviction kernels read of a slice pool of `tier`, and of each view drawing from it. */
 export function sliceEvictionParams(
   state: RendererState,
   atlas: SliceAtlasState,
@@ -69,11 +76,13 @@ export function sliceEvictionParams(
 ): FindEvictionParams {
   return {
     slots: atlas.slots,
-    slotGridIdx: atlas.slotGridIdx,
-    entityMetas: atlas.entityMetas,
-    cameraFor: (memberId) => state.cameraUVPerEntity.get(memberId) ?? [0.5, 0.5],
-    targetLevelFor: (memberId) => state.targetLevelByMember.slice.get(memberId),
-    isWanted: (memberId, chunkKey) => wantedChunksFor(state, "slice", memberId, tier)?.has(chunkKey) ?? false,
+    views: [...atlas.views.values()].map((view) => ({
+      slotGridIdx: view.slotGridIdx,
+      entityMetas: view.entityMetas,
+      cameraFor: (memberId) => cameraUVForMember(state, view.draw.view, memberId),
+      targetLevelFor: (memberId) => view.draw.targetLevels.get(memberId),
+      isWanted: (memberId, chunkKey) => view.draw.wanted.get(wantedEntryKey(tier, memberId))?.has(chunkKey) ?? false,
+    })),
     is3D: false,
     sliceAxis: atlas.axis,
   };

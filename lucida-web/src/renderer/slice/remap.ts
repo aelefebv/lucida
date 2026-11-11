@@ -6,12 +6,17 @@
 
 import { remapSharedIndirection, type RemapEntryInfo } from "../remap.ts";
 import type { VisibleRegion } from "../../pipeline/viewport.ts";
+import type { ViewIndirection } from "../viewIndirection.ts";
 import type { SliceAtlasState } from "./atlas.ts";
 import { computeTargetChunkZ, computeTargetPlane } from "./zRetarget.ts";
 
-/** Remap the 2D indirection buffer to the chunks matching current T/C and each level's target Z. */
+/**
+ * Remap one view's indirection over a slice pool to the slots holding its T,
+ * the pool's channel, and the plane its Z maps to at each level.
+ */
 export function remapSliceIndirection(
   atlas: SliceAtlasState,
+  view: ViewIndirection,
   currentT: number,
   currentC: number,
   currentZ: number,
@@ -24,9 +29,9 @@ export function remapSliceIndirection(
 ): void {
   remapSharedIndirection({
     slots: atlas.slots,
-    slotGridIdx: atlas.slotGridIdx,
-    indirectionData: atlas.indirectionData,
-    entityMetas: atlas.entityMetas,
+    slotGridIdx: view.slotGridIdx,
+    indirectionData: view.indirectionData,
+    entityMetas: view.entityMetas,
     currentT,
     currentC,
     visibleRegion: options.visibleRegion,
@@ -41,5 +46,5 @@ export function remapSliceIndirection(
       return target === null || plane === target;
     },
   });
-  atlas.indirectionDirty = true;
+  view.dirty = true;
 }

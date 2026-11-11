@@ -2,6 +2,7 @@
 
 import type { SliceAtlasState, SliceEntityZInfo } from "./atlas.ts";
 import { sliceChunkIndex, sliceLevelPlane } from "../slicePlane.ts";
+import { sectionOf, type ViewIndirection } from "../viewIndirection.ts";
 
 /** Compute the target chunk Z of one level's section given the current full-res Z. */
 export function computeTargetChunkZ(zInfo: SliceEntityZInfo | undefined, currentZ: number): number | null {
@@ -16,10 +17,27 @@ export function computeTargetPlane(zInfo: SliceEntityZInfo | undefined, currentZ
 }
 
 /**
- * Whether the pool draws `plane` of a member's level: the plane its current
- * Z maps to, or any plane before a chunk set the level's geometry.
+ * Whether `view` draws plane `plane` of a member's level at timepoint `t`: it
+ * lays out a section for the level, stands at `t`, and its Z maps to the
+ * plane, or to any plane before a chunk set the level's geometry.
  */
-export function drawsPlane(atlas: SliceAtlasState, memberId: string, level: number, plane: number): boolean {
-  const target = computeTargetPlane(atlas.entityZInfo.get(memberId)?.get(level), atlas.z);
+export function viewDrawsPlane(
+  atlas: SliceAtlasState,
+  view: ViewIndirection,
+  memberId: string,
+  level: number,
+  t: number,
+  plane: number,
+): boolean {
+  if (view.draw.cold.currentT !== t || !sectionOf(view, memberId, level)) return false;
+  const target = computeTargetPlane(atlas.entityZInfo.get(memberId)?.get(level), view.draw.cold.currentZ);
   return target === null || target === plane;
+}
+
+/** Whether any view drawing from the pool draws plane `plane` of a member's level at timepoint `t`. */
+export function drawsPlane(atlas: SliceAtlasState, memberId: string, level: number, t: number, plane: number): boolean {
+  for (const view of atlas.views.values()) {
+    if (viewDrawsPlane(atlas, view, memberId, level, t, plane)) return true;
+  }
+  return false;
 }

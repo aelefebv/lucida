@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
-import type { PoolMode } from "../renderer/workerProtocol.ts";
-import { sameDatasetLevels, type DatasetLevels, type LevelsByMode } from "../pipeline/datasetLevels.ts";
+import { sameDatasetLevels, type DatasetLevels, type LevelsByView } from "../pipeline/datasetLevels.ts";
 
 /**
- * The per-dataset level readout the render worker reports, for the dataset's
- * pools of each mode: the target level and the level actually on screen. The
+ * The per-dataset level readout the render worker reports, for each view that
+ * draws the dataset: the target level and the level actually on screen. The
  * client summarises every report as it arrives, so the map only changes
  * identity when a summary changes; React skips the re-render otherwise. The
- * worker reports a mode's pools empty when it frees them. `forget` drops a
+ * worker reports a view's draw empty when it drops it. `forget` drops a
  * removed dataset, which the worker stops reporting rather than reports as
  * empty.
  */
@@ -18,14 +17,14 @@ export function useDatasetLevels({
 }: {
   clientReady: boolean;
   clientRef: React.RefObject<RenderClient | null>;
-}): { levels: Map<string, LevelsByMode>; forget: (datasetId: string) => void } {
-  const [levels, setLevels] = useState<Map<string, LevelsByMode>>(new Map());
+}): { levels: Map<string, LevelsByView>; forget: (datasetId: string) => void } {
+  const [levels, setLevels] = useState<Map<string, LevelsByView>>(new Map());
 
   useEffect(() => {
     const client = clientRef.current;
     if (!clientReady || !client) return;
-    client.onEntityLevels = (datasetId, mode, next) => {
-      setLevels((prev) => withLevels(prev, datasetId, mode, next));
+    client.onEntityLevels = (datasetId, view, next) => {
+      setLevels((prev) => withLevels(prev, datasetId, view, next));
     };
     return () => {
       client.onEntityLevels = null;
@@ -44,20 +43,20 @@ export function useDatasetLevels({
   return { levels, forget };
 }
 
-/** `levels` with `datasetId`'s readout for `mode` replaced, or itself when nothing changed. */
+/** `levels` with `datasetId`'s readout for `view` replaced, or itself when nothing changed. */
 export function withLevels(
-  levels: Map<string, LevelsByMode>,
+  levels: Map<string, LevelsByView>,
   datasetId: string,
-  mode: PoolMode,
+  view: number,
   next: DatasetLevels | null,
-): Map<string, LevelsByMode> {
+): Map<string, LevelsByView> {
   const held = levels.get(datasetId);
-  if (sameDatasetLevels(held?.[mode] ?? null, next)) return levels;
-  const byMode: LevelsByMode = { ...held };
-  if (next === null) delete byMode[mode];
-  else byMode[mode] = next;
+  if (sameDatasetLevels(held?.get(view) ?? null, next)) return levels;
+  const byView = new Map(held);
+  if (next === null) byView.delete(view);
+  else byView.set(view, next);
   const updated = new Map(levels);
-  if (byMode.slice === undefined && byMode.volume === undefined) updated.delete(datasetId);
-  else updated.set(datasetId, byMode);
+  if (byView.size === 0) updated.delete(datasetId);
+  else updated.set(datasetId, byView);
   return updated;
 }

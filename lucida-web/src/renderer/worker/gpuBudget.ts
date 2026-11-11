@@ -1,7 +1,7 @@
 /**
  * The render worker's one GPU budget. Every holder counts against a total
- * fitted to the device: chunk and label pools, the viewport's render targets,
- * and the minimap's textures.
+ * fitted to the device: chunk pools and each view's indirection over them,
+ * label pools, the viewport's render targets, and the minimap's textures.
  *
  * Chunk pools start one row or layer deep and grow while the total has room,
  * so slots the planner no longer wants stay resident as fallback for as long
@@ -50,7 +50,8 @@ import { rankSlotsToKeep } from "../eviction.ts";
 import { postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier, datasetModeKey } from "../poolKeys.ts";
 import { parseCompositeKey } from "../chunkKeys.ts";
-import { wantedChunksFor } from "../wantedChunks.ts";
+import { viewIndirectionBytes } from "../viewIndirection.ts";
+import { anyViewWants, wantedCountIn } from "./draws.ts";
 import { gpuLedgerLine } from "./gpuLedger.ts";
 
 
@@ -67,39 +68,39 @@ export function chunkPoolUsage(): GPUTextureUsageFlags {
 }
 
 /**
- * The slots that hold every chunk the planner wants of the members in
- * `atlas`'s tier. A full pool grows straight to them: each growth allocates a
- * texture of the new size and copies the old one into it, so doubling toward
- * them repeats that cost. A member whose levels differ in chunk shape has
- * chunks in another pool counted too, which the GPU total bounds like any
- * growth. A full pool asks at every upload, so this counts no keys.
+ * The slots that hold every chunk the views drawing from `atlas` want of its
+ * members in its tier. A full pool grows straight to them: each growth
+ * allocates a texture of the new size and copies the old one into it, so
+ * doubling toward them repeats that cost. A member whose levels differ in
+ * chunk shape has chunks in another pool counted too, which the GPU total
+ * bounds like any growth.
  */
-export function wantedSlotsOf(
-  state: RendererState,
-  mode: PoolMode,
-  poolKey: string,
-  atlas: AtlasState | SliceAtlasState,
-): number {
+export function wantedSlotsOf(poolKey: string, atlas: AtlasState | SliceAtlasState): number {
   const tier = chunkPoolTier(poolKey);
+  const members = new Set<string>();
+  for (const view of atlas.views.values()) for (const memberId of view.entityMetas.keys()) members.add(memberId);
   let slots = 0;
-  for (const memberId of atlas.entityMetas.keys()) slots += wantedChunksFor(state, mode, memberId, tier)?.size ?? 0;
+  for (const memberId of members) slots += wantedCountIn(atlas, memberId, tier);
   return slots;
 }
 
 /** What every holder has on the GPU now, against the total. */
 export function measureGpuMemory(state: RendererState): GpuMemoryReport {
   let chunkBytes = 0;
+  let indirectionBytes = 0;
   let atlases = 0;
   let slots = 0;
   let slotsHeld = 0;
   for (const atlas of state.volumeAtlases.values()) {
     chunkBytes += volumeAtlasBytes(atlas);
+    indirectionBytes += viewIndirectionBytes(atlas);
     slots += atlas.totalSlots;
     slotsHeld += atlas.slots.size;
     atlases++;
   }
   for (const atlas of state.sliceAtlases.values()) {
     chunkBytes += sliceAtlasBytes(atlas);
+    indirectionBytes += viewIndirectionBytes(atlas);
     slots += atlas.totalSlots;
     slotsHeld += atlas.slots.size;
     atlases++;
@@ -120,6 +121,7 @@ export function measureGpuMemory(state: RendererState): GpuMemoryReport {
     budgetBytes: state.gpuTotalBytes,
     bytes: chunkBytes + labelBytes + targetBytes + minimapBytes,
     chunkBytes,
+    indirectionBytes,
     labelBytes,
     targetBytes,
     minimapBytes,
@@ -140,7 +142,7 @@ export function postGpuMemoryIfChanged(ctx: WorkerCtx): void {
   const report = measureGpuMemory(ctx.state);
   // Until the first report the page knows of nothing held, which a worker
   // holding nothing has no reason to repeat.
-  const last = ctx.state.gpuMemoryPosted ?? { ...report, bytes: 0, chunkBytes: 0, labelBytes: 0,
+  const last = ctx.state.gpuMemoryPosted ?? { ...report, bytes: 0, chunkBytes: 0, indirectionBytes: 0, labelBytes: 0,
     targetBytes: 0, minimapBytes: 0, atlases: 0, slotsHeld: 0, slots: 0, overviewsRefused: 0 };
   if (!(Object.keys(report) as Array<keyof GpuMemoryReport>).every((key) => last[key] === report[key])) {
     ctx.state.gpuMemoryPosted = report;
@@ -265,12 +267,12 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
   const spares: Spare[] = [];
   for (const [poolKey, atlas] of state.volumeAtlases) {
     if (atlas === except) continue;
-    const spare = spareOf(state, poolKey, atlas, "volume");
+    const spare = spareOf(poolKey, atlas, "volume");
     if (spare) spares.push(spare);
   }
   for (const [poolKey, atlas] of state.sliceAtlases) {
     if (atlas === except) continue;
-    const spare = spareOf(state, poolKey, atlas, "slice");
+    const spare = spareOf(poolKey, atlas, "slice");
     if (spare) spares.push(spare);
   }
   spares.sort((a, b) => (b.steps - b.minSteps) * b.stepBytes - (a.steps - a.minSteps) * a.stepBytes);
@@ -300,7 +302,6 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
 }
 
 function spareOf(
-  state: RendererState,
   poolKey: string,
   atlas: AtlasState | SliceAtlasState,
   kind: "volume" | "slice",
@@ -309,7 +310,7 @@ function spareOf(
   let wanted = 0;
   for (const key of atlas.slots.keys()) {
     const parsed = parseCompositeKey(key);
-    if (parsed && wantedChunksFor(state, kind, parsed.memberId, tier)?.has(parsed.chunkKey)) wanted++;
+    if (parsed && anyViewWants(atlas, parsed.memberId, tier, parsed.chunkKey)) wanted++;
   }
   const volume = kind === "volume" ? (atlas as AtlasState) : null;
   const slice = kind === "slice" ? (atlas as SliceAtlasState) : null;

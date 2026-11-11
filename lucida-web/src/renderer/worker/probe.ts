@@ -9,11 +9,11 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import { coversCanvas } from "./viewFrame.ts";
-import { datasetModeKey } from "../poolKeys.ts";
+import { drawOf } from "./draws.ts";
+import type { ViewDraw } from "./state.ts";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
-  PoolMode,
   ProbeMessage,
   ProbeSample,
   SliceRenderMultiPassMessage,
@@ -46,7 +46,10 @@ import {
   type SliceHit,
 } from "../probe.ts";
 
-type ProbeAtlasState = SliceAtlasState | AtlasState;
+/** A pool as one view samples it: the shared texture, read through the view's indirection. */
+interface ProbeAtlasState extends ReadablePool {
+  format: SampleFormat;
+}
 
 /** A pool as a probe reads it: where samples sit, and the texture that holds them. */
 interface ReadablePool extends ProbeAtlas {
@@ -94,11 +97,11 @@ export function handleProbe(ctx: WorkerCtx, probe: ProbeMessage): void {
   if (frame?.type === "sliceRenderMultiPass") {
     const hits = sliceHits(frame, msg.x, msg.y, (poolMemberId, entityIndex) => {
       const datasetId = ctx.state.memberToDataset.get(poolMemberId);
-      return datasetId ? ctx.lookupEntityDescriptor(datasetId, "slice")?.memberByIndex[entityIndex] : undefined;
+      return datasetId ? ctx.lookupEntityDescriptor(datasetId, frame.view)?.memberByIndex[entityIndex] : undefined;
     });
     for (const hit of hits) {
-      if (hit.label) probeSliceLabel(ctx, hit, samples, reads);
-      else probeMember(ctx, hit.memberId, hit.uv, samples, reads, "slice");
+      if (hit.label) probeSliceLabel(ctx, frame.view, hit, samples, reads);
+      else probeMember(ctx, hit.memberId, hit.uv, samples, reads, frame.view, "slice");
     }
   } else if (frame?.type === "volumeRenderMultiPass") {
     for (const layer of frame.layers) {
@@ -106,16 +109,16 @@ export function handleProbe(ctx: WorkerCtx, probe: ProbeMessage): void {
         probeVolumeLabel(ctx, frame, layer, msg, samples, reads);
         continue;
       }
-      const member = memberOf(ctx, layer.datasetId, "volume");
+      const member = memberOf(ctx, layer.datasetId, frame.view);
       if (!member) continue;
       const invModel = member.entry.invModelMatrix;
       const face = clipPlaneHit(frame, msg.x, msg.y, invModel);
       if (face) {
-        probeMember(ctx, layer.datasetId, face, samples, reads, "volume");
+        probeMember(ctx, layer.datasetId, face, samples, reads, frame.view, "volume");
         continue;
       }
       const span = marchSpan(frame, msg.x, msg.y, invModel);
-      if (span) marchMember(ctx, layer.datasetId, span, layer.renderMode, samples, reads);
+      if (span) marchMember(ctx, layer.datasetId, frame.view, span, layer.renderMode, samples, reads);
     }
   }
   reads.submit(ctx, msg.id, samples);
@@ -193,25 +196,41 @@ class TexelReads {
   }
 }
 
-/** A member's level sources finest first and its coarse source, each with the pool its draw binds. */
+/**
+ * A member's level sources finest first and its coarse source in `member`'s
+ * view, each with the pool its draw binds, read through that view's
+ * indirection.
+ */
 function memberSources(
   ctx: WorkerCtx,
   memberId: string,
   member: ColdMember,
-  mode: "slice" | "volume",
 ): { levels: ProbeSource<ProbeAtlasState>[]; coarse: ProbeSource<ProbeAtlasState> | null } | null {
-  const descIndex = ctx.lookupEntityDescriptor(member.datasetId, mode);
-  const sources = ctx.state.currentSourcesByDatasetMode.get(datasetModeKey(member.datasetId, mode))?.get(memberId);
-  if (!descIndex || !sources) return null;
-  const atlases: Map<string, ProbeAtlasState> = mode === "slice" ? ctx.state.sliceAtlases : ctx.state.volumeAtlases;
-  const pools = resolveMemberPools(atlases, descIndex, memberId);
+  const { draw } = member;
+  const sources = draw.sources.get(memberId);
+  if (!draw.descriptor || !sources) return null;
+  const atlases: Map<string, SliceAtlasState | AtlasState> =
+    draw.mode === "slice" ? ctx.state.sliceAtlases : ctx.state.volumeAtlases;
+  const pools = resolveMemberPools(atlases, draw.descriptor, memberId, draw.view);
+  const asSampled = (atlas: SliceAtlasState | AtlasState | null): ProbeAtlasState | null => {
+    const view = atlas?.views.get(draw.view);
+    if (!atlas || !view) return null;
+    return {
+      texture: atlas.texture,
+      format: atlas.format,
+      indirectionData: view.indirectionData,
+      slotsX: atlas.slotsX,
+      slotsY: atlas.slotsY,
+      slotsZ: "slotsZ" in atlas ? atlas.slotsZ : undefined,
+    };
+  };
   const selection = selectEntitySources(member.entry, sources);
   return {
     levels: selection.levels.map(({ source, poolIndex }) => ({
       meta: source.meta,
-      atlas: pools.levels[poolIndex] ?? null,
+      atlas: asSampled(pools.levels[poolIndex] ?? null),
     })),
-    coarse: selection.coarse ? { meta: selection.coarse.meta, atlas: pools.coarse } : null,
+    coarse: selection.coarse ? { meta: selection.coarse.meta, atlas: asSampled(pools.coarse) } : null,
   };
 }
 
@@ -230,11 +249,12 @@ function probeMember(
   pos: readonly number[],
   samples: ProbeSample[],
   reads: TexelReads,
+  view: number,
   mode: "slice" | "volume",
 ): void {
-  const member = memberOf(ctx, memberId, mode);
+  const member = memberOf(ctx, memberId, view);
   if (!member) return;
-  const sources = memberSources(ctx, memberId, member, mode);
+  const sources = memberSources(ctx, memberId, member);
   const dims = levelZeroDims(member.entry);
   if (!sources || !dims) return;
   const location = locateSample(sources.levels, sources.coarse, pos, mode);
@@ -272,14 +292,15 @@ function probeMember(
 function marchMember(
   ctx: WorkerCtx,
   memberId: string,
+  view: number,
   span: MarchSpan,
   renderMode: VolumeLayerParams["renderMode"],
   samples: ProbeSample[],
   reads: TexelReads,
 ): void {
-  const member = memberOf(ctx, memberId, "volume");
+  const member = memberOf(ctx, memberId, view);
   if (!member) return;
-  const sources = memberSources(ctx, memberId, member, "volume");
+  const sources = memberSources(ctx, memberId, member);
   const dims = levelZeroDims(member.entry);
   const window = member.entry.displayStateByChannel[member.channel];
   if (!sources || !dims || !window) return;
@@ -349,7 +370,7 @@ function settleMarch<A extends ProbeAtlas>(
  * sample, unless the cell failed. A cell never written draws nothing, so it
  * reads as not loaded rather than as background.
  */
-function probeSliceLabel(ctx: WorkerCtx, hit: SliceHit, samples: ProbeSample[], reads: TexelReads): void {
+function probeSliceLabel(ctx: WorkerCtx, view: number, hit: SliceHit, samples: ProbeSample[], reads: TexelReads): void {
   const pool = ctx.state.labelSlicePools.get(hit.memberId);
   if (!pool || !hit.label) return;
   const readable: ReadablePool = {
@@ -372,7 +393,7 @@ function probeSliceLabel(ctx: WorkerCtx, hit: SliceHit, samples: ProbeSample[], 
   const written = location.kind !== "resident"
     || pool.planes.has(labelCellKey(Math.floor(location.texel[0] / pool.chunkX), Math.floor(location.texel[1] / pool.chunkY)));
   const position = levelZeroPosition(hit.uv, [1, hit.label.dataH, hit.label.dataW], "slice");
-  position[2] = ctx.state.coldStateByDatasetMode.get(datasetModeKey(pool.datasetId, "slice"))?.currentZ ?? 0;
+  position[2] = drawOf(ctx.state, pool.datasetId, view)?.cold.currentZ ?? 0;
   const sample: ProbeSample = {
     datasetId: pool.datasetId,
     entityId: hit.label.entityId ?? "",
@@ -427,7 +448,7 @@ function probeVolumeLabel(
   };
   // The overlay's cube spans the label's own extent, so a position is carried
   // into its source entity's cube to count that entity's samples.
-  const entry = ctx.state.coldStateByDatasetMode.get(datasetModeKey(pool.datasetId, "volume"))?.activeSet
+  const entry = drawOf(ctx.state, pool.datasetId, frame.view)?.cold.activeSet
     .find((e) => e.entityId === layer.entityId);
   const dims = entry ? levelZeroDims(entry) : null;
   const position = (pos: readonly number[]) => entry && dims
@@ -453,6 +474,8 @@ function probeVolumeLabel(
 
 interface ColdMember {
   datasetId: string;
+  /** The draw of the member's dataset in the probed view. */
+  draw: ViewDraw;
   cold: ColdStateMessage;
   entry: ColdStateActiveEntry;
   channel: number;
@@ -461,11 +484,12 @@ interface ColdMember {
 /** Each active set's members by id, so a hover over a large collection is no scan. */
 const membersByActiveSet = new WeakMap<ColdStateActiveEntry[], Map<string, { entry: ColdStateActiveEntry; channel: number }>>();
 
-/** A member as the cold state of its dataset's pools of `mode` lays it out. */
-function memberOf(ctx: WorkerCtx, memberId: string, mode: PoolMode): ColdMember | null {
+/** A member as `view`'s cold state for its dataset lays it out. */
+function memberOf(ctx: WorkerCtx, memberId: string, view: number): ColdMember | null {
   const datasetId = ctx.state.memberToDataset.get(memberId);
-  const cold = datasetId ? ctx.state.coldStateByDatasetMode.get(datasetModeKey(datasetId, mode)) : undefined;
-  if (!datasetId || !cold) return null;
+  const draw = datasetId ? drawOf(ctx.state, datasetId, view) : undefined;
+  if (!datasetId || !draw) return null;
+  const cold = draw.cold;
   let members = membersByActiveSet.get(cold.activeSet);
   if (!members) {
     members = new Map();
@@ -475,5 +499,5 @@ function memberOf(ctx: WorkerCtx, memberId: string, mode: PoolMode): ColdMember 
     membersByActiveSet.set(cold.activeSet, members);
   }
   const member = members.get(memberId);
-  return member ? { datasetId, cold, ...member } : null;
+  return member ? { datasetId, draw, cold, ...member } : null;
 }

@@ -17,7 +17,8 @@ import { getOrCreateSlicePool, holdSliceSlot, shrinkSliceAtlas } from "../slice/
 import { handleLabelVolumeChunkData } from "../volume/upload.ts";
 import { handleMinimapUploadOverviewChunks, MINIMAP_OVERVIEW_SHARE, removeMinimapResources } from "../minimapHandlers.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
-import { createInitialState } from "./state.ts";
+import { createInitialState, type ViewDraw } from "./state.ts";
+import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
 import {
   releaseAllViewResources,
   releaseViewsBut,
@@ -64,22 +65,30 @@ function makeCtx(gpuTotalBytes = 1536 * MIB) {
  * A volume pool of `layers` layers whose every slot holds `member`'s chunk at
  * the grid cell of the same index, mapped so the shader samples it.
  */
+/** The draw of "ds1" in view 0, which every test pool is drawn through. */
+function testDraw(ctx: WorkerCtx): ViewDraw {
+  let draw = ctx.state.draws.get("ds1|0");
+  if (!draw) {
+    draw = fakeDraw();
+    ctx.state.draws.set("ds1|0", draw);
+  }
+  return draw;
+}
+
 function heldPool(ctx: WorkerCtx, poolKey: string, member: string, layers: number): { atlas: AtlasState; keys: string[] } {
-  const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
+  const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, "u16");
   while (atlas.slotsZ < layers) {
     atlas.slotsZ++;
     atlas.totalSlots = atlas.slotsX * atlas.slotsY * atlas.slotsZ;
   }
-  atlas.slotGridIdx = new Int32Array(atlas.totalSlots);
   const gridZ = Math.ceil(atlas.totalSlots / 64);
-  atlas.entityMetas.set(member, [{ level: 0, gridDims: [gridZ, 8, 8], chunkDims: [32, 32, 32], levelDims: [gridZ * 32, 256, 256], offset: 0 }]);
-  atlas.indirectionData = new Uint32Array(gridZ * 64).fill(0xFFFFFFFF);
+  const view = attachView(atlas, new Map([[member, [{ level: 0, gridDims: [gridZ, 8, 8], chunkDims: [32, 32, 32], levelDims: [gridZ * 32, 256, 256], offset: 0 }]]]), { draw: testDraw(ctx) });
   const keys: string[] = [];
   for (let slot = 0; slot < atlas.totalSlots; slot++) {
     const key = `0/0/0/${Math.floor(slot / 64)}/${Math.floor(slot / 8) % 8}/${slot % 8}`;
     atlas.slots.set(`${member}|${key}`, slot);
-    atlas.slotGridIdx[slot] = slot;
-    atlas.indirectionData[slot] = slot;
+    view.slotGridIdx[slot] = slot;
+    view.indirectionData[slot] = slot;
     keys.push(key);
   }
   atlas.freeSlots = [];
@@ -88,11 +97,7 @@ function heldPool(ctx: WorkerCtx, poolKey: string, member: string, layers: numbe
 }
 
 function want(ctx: WorkerCtx, member: string, keys: string[]): void {
-  for (const key of ["ds1|slice", "ds1|volume"]) {
-    const index = new Map(ctx.state.wantedByDatasetMode.get(key) ?? []);
-    index.set(wantedEntryKey("detail", member), new Set(keys));
-    ctx.state.wantedByDatasetMode.set(key, index);
-  }
+  (testDraw(ctx).wanted as Map<string, ReadonlySet<string>>).set(wantedEntryKey("detail", member), new Set(keys));
 }
 
 function lost(posts: WorkerToMainMessage[]): ChunkResidencyMessage[] {
@@ -119,7 +124,7 @@ describe("when the GPU total is reached", () => {
     for (const key of wantedB) {
       const slot = b.atlas.slots.get(`imgB|${key}`)!;
       expect(slot).toBeLessThan(192);
-      expect(b.atlas.indirectionData[b.atlas.slotGridIdx[slot]]).toBe(slot);
+      expect(viewOf(b.atlas).indirectionData[viewOf(b.atlas).slotGridIdx[slot]]).toBe(slot);
     }
     // Only chunks kept from the dropped layer are copied one by one.
     const moved = copies.filter((copy) => copy.from);
@@ -268,10 +273,9 @@ describe("holders outside the pools", () => {
 describe("a slice pool that shrinks", () => {
   it("keeps the planes it holds of each chunk in step with its slots", () => {
     const { ctx } = makeCtx();
-    const atlas = getOrCreateSlicePool(ctx, "ds1:ch0:32x32:detail", "ds1", 32, 32, 0, 0, 0, "u16");
+    const atlas = getOrCreateSlicePool(ctx, "ds1:ch0:32x32:detail", "ds1", 32, 32, 0, "u16");
     atlas.slotsY = 2;
     atlas.totalSlots = atlas.slotsX * 2;
-    atlas.slotGridIdx = new Int32Array(atlas.totalSlots).fill(-1);
     atlas.freeSlots = [];
     // Two planes of one chunk, one of them in the row that goes.
     const row = atlas.slotsX;
@@ -289,5 +293,25 @@ describe("a slice pool that shrinks", () => {
       expect(atlas.slots.get(`imgA|0/0/0/0/0/0|${plane}`)).toBe(slot);
     }
     expect(atlas.planesByChunk.has("imgA|0/0/0/0/0/1")).toBe(false);
+  });
+});
+
+describe("each view's indirection over a pool", () => {
+  it("counts against the GPU total, once per view, and goes with the view", () => {
+    const { ctx } = makeCtx();
+    const atlas = getOrCreateVolumePool(ctx, "ds1:ch0:32x32x32:detail", "ds1", 32, 32, 32, 0, "u16");
+    const metas = new Map([["imgA", [{ level: 0, gridDims: [2, 8, 8] as [number, number, number], chunkDims: [32, 32, 32] as [number, number, number], levelDims: [64, 256, 256] as [number, number, number], offset: 0 }]]]);
+    attachView(atlas, metas, { draw: fakeDraw({ view: 0 }) });
+    const one = measureGpuMemory(ctx.state);
+    expect(one.indirectionBytes).toBe(128 * 4);
+
+    attachView(atlas, metas, { draw: fakeDraw({ view: 1 }) });
+    const two = measureGpuMemory(ctx.state);
+    expect(two.indirectionBytes).toBe(2 * 128 * 4);
+    expect(two.chunkBytes - one.chunkBytes).toBe(128 * 4);
+    expect(two.bytes - one.bytes).toBe(128 * 4);
+
+    atlas.views.delete(1);
+    expect(measureGpuMemory(ctx.state)).toEqual(one);
   });
 });

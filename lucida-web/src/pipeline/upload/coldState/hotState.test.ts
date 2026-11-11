@@ -44,8 +44,9 @@ function makeColdMsg(
     },
     wantedChunks: [],
     activeSet,
+    view: 0,
     viewMode: "slice",
-    drawnModes: ["slice"],
+    drawnViews: [0],
     sampleFormat: "u16",
   };
 }

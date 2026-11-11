@@ -61,8 +61,8 @@ export interface UploadClient {
   failedChunks(msg: FailedChunksMessage): void;
 
   /**
-   * Must be sent before subsequent render messages so the worker's
-   * `rayHitPerEntity` is current when chunk-data eviction fires.
+   * Must be sent before subsequent render messages so the view's ray hits
+   * are current when chunk-data eviction fires.
    */
   viewHotState(msg: ViewHotStateMessage): void;
 

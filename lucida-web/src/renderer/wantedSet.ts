@@ -66,8 +66,8 @@ export interface WantedSetResult {
 
 /**
  * Which pool holds a member's section for one (tier, level). Mirrors
- * `RendererState.memberSourcePools`; `undefined` when the worker
- * allocated no section for that level.
+ * `ViewDraw.routes`; `undefined` when the view lays out no section for
+ * that level.
  */
 export type SourcePoolResolver = (
   memberId: string,

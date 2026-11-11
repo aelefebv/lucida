@@ -4,9 +4,14 @@ import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { SpatialAxis } from "./slicePlane.ts";
 import type { PoolMode } from "./workerProtocol.ts";
 
-/** Key of what the worker keeps for one dataset's pools of one mode. */
+/** Key of what the page records for one dataset's pools of one mode. */
 export function datasetModeKey(datasetId: string, mode: PoolMode): string {
   return `${datasetId}|${mode}`;
+}
+
+/** Key of what the worker and the page keep for one view's draw of one dataset. */
+export function datasetViewKey(datasetId: string, view: number): string {
+  return `${datasetId}|${view}`;
 }
 
 /**
@@ -54,7 +59,7 @@ export function chunkPoolTier(poolKey: string): ResidencyTier {
 
 /**
  * Key of one indirection section within a member's routing map
- * (`RendererState.memberSourcePools`): the tier and level it serves.
+ * (`ViewDraw.routes`): the tier and level it serves.
  */
 export function sourceKey(tier: ResidencyTier, level: number): string {
   return `${tier}:${level}`;

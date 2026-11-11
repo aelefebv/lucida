@@ -11,7 +11,6 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
-import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import {
   applyFailedMarks,
   failedCellsAt,
@@ -24,9 +23,17 @@ import { allocateWatched } from "../worker/gpuErrors.ts";
 import { LABEL_TIER, postChunkResidency, postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
 import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
-import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
+import { planCompaction } from "../poolCompaction.ts";
 import type { SpatialAxis } from "../slicePlane.ts";
 import { makeCompositeKey, makeSliceSlotKey, parseCompositeKey } from "../chunkKeys.ts";
+import {
+  compactViewSlots,
+  destroyViewIndirection,
+  emptyViewIndirections,
+  growViewSlots,
+  viewIndirectionBytes,
+  type ViewIndirection,
+} from "../viewIndirection.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding the current
@@ -291,8 +298,6 @@ export interface SliceAtlasState {
   texture: GPUTexture;
   /** How the texture holds samples; the dataset's, fixed for the pool's life. */
   format: SampleFormat;
-  indirectionBuf: GPUBuffer;
-  indirectionData: Uint32Array<ArrayBuffer>;
   /**
    * Slot keys `"memberId|chunkKey|plane"` (`makeSliceSlotKey`) → slot index,
    * insertion order = LRU. The plane is the level plane along {@link axis}
@@ -306,8 +311,8 @@ export interface SliceAtlasState {
    * pool holds, so an upload finds them without walking every slot.
    */
   planesByChunk: Map<string, Map<number, number>>;
-  /** slotIndex → globalGridIdx (for eviction cleanup). */
-  slotGridIdx: Int32Array<ArrayBuffer>;
+  /** view id → the view's indirection over the pool, cutting its own plane at its own T. */
+  views: Map<number, ViewIndirection>;
   freeSlots: number[];
   /** Slots the texture holds now. */
   totalSlots: number;
@@ -316,26 +321,22 @@ export interface SliceAtlasState {
   slotsX: number; slotsY: number;
   /** The rows the pool's cap allows, which it grows toward while the GPU total has room. */
   maxSlotsY: number;
-  /** Per-entity LOD sections (absolute offsets into the shared flat indirection buffer). */
-  entityMetas: Map<string, LodIndirectionMeta[]>;
   /**
    * memberId → level → Z geometry, set from the first chunk that arrives
    * at that level. Per level, not per member: the levels sharing a pool
-   * can differ in depth and chunk Z, so each maps the current plane to
-   * its own chunk-Z target.
+   * can differ in depth and chunk Z, so each maps a view's plane to its own
+   * chunk-Z target.
    */
   entityZInfo: Map<string, Map<number, SliceEntityZInfo>>;
-  /** Current T, C, full-res Z — pool-wide. */
-  z: number; t: number; c: number;
+  /** The channel every slot holds, which the pool key names. */
+  c: number;
   /**
    * The axis this pool's slots are cut along, which its pool key names, so
-   * it never changes. Its "Z" (`z`, `entityZInfo`, a slot's plane) is that
-   * axis, and slot keys read in its frame (`parsePlaneChunkKey`). A slot
-   * whose plane is not the one the current Z maps to is stale: the remap
-   * leaves it unmapped and the wanted set reports it missing.
+   * it never changes. Its "Z" (a view's Z, `entityZInfo`, a slot's plane) is
+   * that axis, and slot keys read in its frame (`parsePlaneChunkKey`). A view
+   * maps only the slots of the plane its Z cuts.
    */
   axis: SpatialAxis;
-  indirectionDirty: boolean;
 }
 
 function createSliceAtlasTexture(
@@ -353,15 +354,15 @@ function createSliceAtlasTexture(
 
 /**
  * Create a shared slice pool one row of slots deep. It grows toward the grid
- * its cap allows only as chunks fill it and the GPU total has room.
- * Indirection is sized later from entityMetas.
+ * its cap allows only as chunks fill it and the GPU total has room. Each view
+ * that draws from it adds its indirection.
  */
 function createSliceAtlas(
   device: GPUDevice,
   datasetId: string,
   capBytes: number,
   chunkX: number, chunkY: number,
-  z: number, t: number, c: number,
+  c: number,
   format: SampleFormat,
 ): SliceAtlasState {
   const limits = getDeviceLimits(device);
@@ -379,37 +380,24 @@ function createSliceAtlas(
 
   const texture = createSliceAtlasTexture(device, chunkX, chunkY, slotsX, slotsY, format);
 
-  const indirectionData = new Uint32Array(1);
-  indirectionData[0] = 0xFFFFFFFF;
-  const indirectionBuf = device.createBuffer({
-    size: 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(indirectionBuf, 0, indirectionData);
-
   const freeSlots: number[] = [];
   for (let i = totalSlots - 1; i >= 0; i--) freeSlots.push(i);
 
-  const slotGridIdx = new Int32Array(totalSlots);
-  slotGridIdx.fill(-1);
-
   return {
     datasetId,
-    texture, format, indirectionBuf, indirectionData,
-    slots: new Map(), planesByChunk: new Map(), slotGridIdx, freeSlots, totalSlots,
+    texture, format,
+    slots: new Map(), planesByChunk: new Map(), views: new Map(), freeSlots, totalSlots,
     chunkX, chunkY,
     slotsX, slotsY, maxSlotsY,
-    entityMetas: new Map(),
     entityZInfo: new Map(),
-    z, t, c,
+    c,
     axis: "z",
-    indirectionDirty: true,
   };
 }
 
-/** The bytes a slice pool's texture and indirection hold now. */
+/** The bytes a slice pool's texture and every view's indirection over it hold now. */
 export function sliceAtlasBytes(atlas: SliceAtlasState): number {
-  return sliceRowBytes(atlas) * atlas.slotsY + atlas.indirectionData.length * 4;
+  return sliceRowBytes(atlas) * atlas.slotsY + viewIndirectionBytes(atlas);
 }
 
 /** The bytes one row of a slice pool's slots holds: the step it grows and shrinks by. */
@@ -490,9 +478,7 @@ export function growSliceAtlas(
   atlas.texture.destroy();
   atlas.texture = texture;
 
-  const slotGridIdx = new Int32Array(totalSlots).fill(-1);
-  slotGridIdx.set(atlas.slotGridIdx);
-  atlas.slotGridIdx = slotGridIdx;
+  growViewSlots(atlas, totalSlots);
   for (let i = totalSlots - 1; i >= atlas.totalSlots; i--) atlas.freeSlots.push(i);
   atlas.slotsY = slotsY;
   atlas.totalSlots = totalSlots;
@@ -525,7 +511,7 @@ export function growSlicePoolWithin(
   atlas: SliceAtlasState,
   reclaim: boolean,
 ): boolean {
-  const wantedRows = Math.ceil(wantedSlotsOf(ctx.state, "slice", poolKey, atlas) / atlas.slotsX);
+  const wantedRows = Math.ceil(wantedSlotsOf(poolKey, atlas) / atlas.slotsX);
   const maxSteps = Math.min(atlas.maxSlotsY, Math.max(atlas.slotsY * 2, wantedRows)) - atlas.slotsY;
   const steps = grantGrowth(ctx, atlas, sliceRowBytes(atlas), maxSteps, reclaim);
   return steps > 0 && growSliceAtlasWatched(ctx, poolKey, atlas, atlas.slotsY + steps);
@@ -571,44 +557,42 @@ export function shrinkSliceAtlas(
   atlas.texture.destroy();
   atlas.texture = texture;
 
-  atlas.slotGridIdx = remapSlotEntries(atlas.slots, atlas.slotGridIdx, atlas.indirectionData, plan, capacity);
+  compactViewSlots(atlas, atlas.slots, plan, capacity);
   atlas.slots = new Map();
   atlas.planesByChunk = new Map();
   for (const [key, slot] of plan.slots) holdSliceSlotKey(atlas, key, slot);
   atlas.freeSlots = plan.freeSlots;
   atlas.slotsY = slotsY;
   atlas.totalSlots = capacity;
-  atlas.indirectionDirty = true;
   return plan.dropped;
 }
 
 export function destroySliceAtlas(atlas: SliceAtlasState): void {
   atlas.texture.destroy();
-  atlas.indirectionBuf.destroy();
+  for (const view of atlas.views.values()) destroyViewIndirection(view);
+  atlas.views.clear();
 }
 
 /**
  * Get or create a shared slice pool with the given chunk dims. The cold state
- * handler sets entityMetas and resizes indirection afterward.
+ * handler adds the view's indirection and lays out its sections afterward.
  */
 export function getOrCreateSlicePool(
   ctx: WorkerCtx,
   poolKey: string,
   datasetId: string,
   chunkX: number, chunkY: number,
-  z: number, t: number, c: number,
+  c: number,
   format: SampleFormat,
 ): SliceAtlasState {
   const atlases = ctx.state.sliceAtlases;
   const existing = atlases.get(poolKey);
   if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.format === format) {
-    existing.z = z;
-    existing.t = t;
     existing.c = c;
     return existing;
   }
   if (existing) destroySliceAtlas(existing);
-  const newAtlas = createWatchedSliceAtlas(ctx, poolKey, datasetId, chunkX, chunkY, z, t, c, format);
+  const newAtlas = createWatchedSliceAtlas(ctx, poolKey, datasetId, chunkX, chunkY, c, format);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
@@ -618,14 +602,14 @@ function createWatchedSliceAtlas(
   poolKey: string,
   datasetId: string,
   chunkX: number, chunkY: number,
-  z: number, t: number, c: number,
+  c: number,
   format: SampleFormat,
 ): SliceAtlasState {
   return allocateWatched(
     ctx,
     () => createSliceAtlas(
       ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
-      chunkX, chunkY, z, t, c, format,
+      chunkX, chunkY, c, format,
     ),
     (lost) => replaceLostSliceAtlas(ctx, poolKey, lost),
   );
@@ -641,32 +625,23 @@ export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: Sli
   const atlases = ctx.state.sliceAtlases;
   if (atlases.get(poolKey) !== lost) return;
   postSlotsLost(ctx, "slice", chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
+  // The views' indirection buffers are their own, so a replacement keeps
+  // them, emptied, rather than freeing them with the lost texture.
+  const views = lost.views;
+  lost.views = new Map();
   destroySliceAtlas(lost);
   atlases.delete(poolKey);
   if (handleGpuOutOfMemory(ctx)) {
-    const atlas = createWatchedSliceAtlas(
-      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.z, lost.t, lost.c, lost.format,
-    );
-    atlas.entityMetas = lost.entityMetas;
+    const atlas = createWatchedSliceAtlas(ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.c, lost.format);
     atlas.entityZInfo = lost.entityZInfo;
     atlas.axis = lost.axis;
-    resizeSliceIndirection(ctx, atlas, lost.indirectionData.length);
-    atlas.indirectionData.fill(0xFFFFFFFF);
-    atlas.indirectionDirty = true;
+    atlas.views = views;
+    emptyViewIndirections(atlas, atlas.totalSlots);
     atlases.set(poolKey, atlas);
+  } else {
+    for (const view of views.values()) destroyViewIndirection(view);
   }
   ctx.postWantedSet(lost.datasetId, "slice");
-}
-
-/** Resize the slice pool's indirection to the new total size. */
-export function resizeSliceIndirection(ctx: WorkerCtx, atlas: SliceAtlasState, totalEntries: number): void {
-  if (totalEntries === atlas.indirectionData.length) return;
-  atlas.indirectionData = new Uint32Array(totalEntries);
-  atlas.indirectionBuf.destroy();
-  atlas.indirectionBuf = ctx.device.createBuffer({
-    size: Math.max(totalEntries * 4, 4),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
 }
 
 /**

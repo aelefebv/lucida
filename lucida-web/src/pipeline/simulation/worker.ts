@@ -27,9 +27,10 @@ import { setCameraUVForMember } from "../../renderer/slice/eviction.ts";
 import { memberCameraUV } from "../../renderer/slice/render.ts";
 import { retireOtherLabelPlanes } from "../../renderer/slice/atlas.ts";
 import { INDIRECTION_FAILED } from "../../renderer/remap.ts";
-import { chunkPoolTier, datasetModeKey } from "../../renderer/poolKeys.ts";
+import { chunkPoolTier } from "../../renderer/poolKeys.ts";
+import { drawOf } from "../../renderer/worker/draws.ts";
+import type { ViewIndirection } from "../../renderer/viewIndirection.ts";
 import { LABEL_TIER } from "../../renderer/chunkUploadFeedback.ts";
-import type { LodIndirectionMeta } from "../../renderer/volume/atlas.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
 /** Messages that only draw, capture or style, so the simulation answers them without a handler. */
@@ -155,7 +156,7 @@ export class SimulatedWorker {
       getOrCreateLUT: () => { throw new Error("the simulated worker does not draw"); },
       post,
       postWantedSet: createWantedSetPoster(state, post),
-      lookupEntityDescriptor: (datasetId, mode) => state.descriptorBuffersByDatasetMode.get(datasetModeKey(datasetId, mode)) ?? null,
+      lookupEntityDescriptor: (datasetId, view) => drawOf(state, datasetId, view)?.descriptor ?? null,
     };
   }
 
@@ -268,8 +269,9 @@ export class SimulatedWorker {
         continue;
       }
       if (layer.aggregate) continue;
-      if (!this.ctx.state.memberSourcePools.slice.has(layer.datasetId)) continue;
-      setCameraUVForMember(this.ctx.state, layer.datasetId, memberCameraUV(msg, layer));
+      const datasetId = this.ctx.state.memberToDataset.get(layer.datasetId);
+      if (!datasetId || !drawOf(this.ctx.state, datasetId, msg.view)?.routes.has(layer.datasetId)) continue;
+      setCameraUVForMember(this.ctx.state, msg.view, layer.datasetId, memberCameraUV(msg, layer));
     }
   }
 
@@ -296,33 +298,35 @@ export class SimulatedWorker {
   }
 
   /**
-   * Each indirection cell of one dataset's pools that the shader would draw
-   * as failed, as `member tier level L cell x,y[,z]`.
+   * Each indirection cell of one dataset's pools that a view's shader would
+   * draw as failed, as `member tier level L cell x,y[,z]`, each once however
+   * many views draw it so.
    */
   failedCells(datasetId: string): string[] {
-    const out: string[] = [];
-    type Pool = { datasetId: string; indirectionData: Uint32Array; entityMetas: Map<string, LodIndirectionMeta[]> };
-    const pools: Array<readonly [string, Pool, boolean]> = [
-      ...[...this.ctx.state.sliceAtlases].map(([key, atlas]) => [key, atlas, false] as const),
-      ...[...this.ctx.state.volumeAtlases].map(([key, atlas]) => [key, atlas, true] as const),
-    ];
-    for (const [poolKey, atlas, volume] of pools) {
-      if (atlas.datasetId !== datasetId) continue;
-      for (const [memberId, metas] of atlas.entityMetas) {
+    const out = new Set<string>();
+    const views: Array<readonly [string, ViewIndirection, boolean]> = [];
+    for (const [key, atlas] of this.ctx.state.sliceAtlases) {
+      if (atlas.datasetId === datasetId) for (const view of atlas.views.values()) views.push([key, view, false]);
+    }
+    for (const [key, atlas] of this.ctx.state.volumeAtlases) {
+      if (atlas.datasetId === datasetId) for (const view of atlas.views.values()) views.push([key, view, true]);
+    }
+    for (const [poolKey, view, volume] of views) {
+      for (const [memberId, metas] of view.entityMetas) {
         for (const meta of metas) {
           const [gridZ, gridY, gridX] = meta.gridDims;
           const cells = gridX * gridY * (volume ? gridZ : 1);
           for (let i = 0; i < cells; i++) {
-            if (atlas.indirectionData[meta.offset + i] !== INDIRECTION_FAILED) continue;
+            if (view.indirectionData[meta.offset + i] !== INDIRECTION_FAILED) continue;
             const x = i % gridX;
             const y = Math.floor(i / gridX) % gridY;
             const cell = volume ? `${x},${y},${Math.floor(i / (gridX * gridY))}` : `${x},${y}`;
-            out.push(`${memberId} ${chunkPoolTier(poolKey)} level ${meta.level} cell ${cell}`);
+            out.add(`${memberId} ${chunkPoolTier(poolKey)} level ${meta.level} cell ${cell}`);
           }
         }
       }
     }
-    return out.sort();
+    return [...out].sort();
   }
 
   /**
@@ -331,9 +335,9 @@ export class SimulatedWorker {
    * that bounced, so its last report can be stale by the time a run settles.
    */
   missingNow(datasetId: string): MissingChunk[] {
-    let missing: MissingChunk[] = [];
+    const missing: MissingChunk[] = [];
     createWantedSetPoster(this.ctx.state, (msg) => {
-      if (msg.type === "wantedSetDelta") missing = msg.missing;
+      if (msg.type === "wantedSetDelta") missing.push(...msg.missing);
     })(datasetId);
     return missing;
   }

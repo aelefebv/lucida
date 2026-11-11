@@ -16,7 +16,8 @@ import {
 import { destroyAllResources } from "./resources.ts";
 import { clearFrameCaptures } from "./captureFrame.ts";
 import { clearGpuErrorReports } from "./gpuErrors.ts";
-import { datasetModeKey } from "../poolKeys.ts";
+import { datasetViewKey } from "../poolKeys.ts";
+import { drawsOf } from "./draws.ts";
 
 /**
  * Free everything the worker holds for a removed dataset, or for one member
@@ -29,16 +30,9 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   removeVolumeResources(ctx, id);
   removeMinimapResources(ctx, id);
 
-  for (const mode of ["slice", "volume"] as const) {
-    const key = datasetModeKey(id, mode);
-    const desc = state.descriptorBuffersByDatasetMode.get(key);
-    if (desc) {
-      destroyDescriptorBuffer(desc);
-      state.descriptorBuffersByDatasetMode.delete(key);
-    }
-    state.currentSourcesByDatasetMode.delete(key);
-    state.coldStateByDatasetMode.delete(key);
-    state.wantedByDatasetMode.delete(key);
+  for (const draw of drawsOf(state, id)) {
+    if (draw.descriptor) destroyDescriptorBuffer(draw.descriptor);
+    state.draws.delete(datasetViewKey(id, draw.view));
   }
   state.failedByDataset.delete(id);
 
@@ -46,12 +40,8 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   for (const [memberId, dsId] of state.memberToDataset) {
     if (dsId === id) {
       state.memberToDataset.delete(memberId);
-      for (const mode of ["slice", "volume"] as const) {
-        state.memberSourcePools[mode].delete(memberId);
-        state.targetLevelByMember[mode].delete(memberId);
-      }
-      state.cameraUVPerEntity.delete(memberId);
-      state.rayHitPerEntity.delete(memberId);
+      for (const byMember of state.cameraUVs.values()) byMember.delete(memberId);
+      for (const byMember of state.rayHits.values()) byMember.delete(memberId);
     }
   }
   if (state.currentColdState?.datasetId === id) {
@@ -75,14 +65,9 @@ export function handleDestroy(ctx: WorkerCtx): void {
   clearFrameCaptures(state);
   clearGpuErrorReports(ctx);
   state.memberToDataset.clear();
-  for (const mode of ["slice", "volume"] as const) {
-    state.memberSourcePools[mode].clear();
-    state.targetLevelByMember[mode].clear();
-  }
-  state.currentSourcesByDatasetMode.clear();
-  state.wantedByDatasetMode.clear();
   state.failedByDataset.clear();
   releaseDeviceResources(ctx);
+  state.draws.clear();
   destroyAllMinimapResources(state.minimap);
   self.close();
 }
@@ -94,10 +79,10 @@ export function handleDestroy(ctx: WorkerCtx): void {
  */
 export function releaseDeviceResources(ctx: WorkerCtx): void {
   const state = ctx.state;
-  for (const desc of state.descriptorBuffersByDatasetMode.values()) {
-    destroyDescriptorBuffer(desc);
+  for (const draw of state.draws.values()) {
+    if (draw.descriptor) destroyDescriptorBuffer(draw.descriptor);
+    draw.descriptor = null;
   }
-  state.descriptorBuffersByDatasetMode.clear();
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
   releaseAllViewResources(ctx);

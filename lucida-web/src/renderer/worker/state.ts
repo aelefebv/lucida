@@ -26,6 +26,7 @@ import type { WantedChunkIndex } from "../wantedChunks.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import { createMinimapRendererState, type MinimapRendererState } from "../minimapHandlers.ts";
 import type { ViewResources } from "./viewResources.ts";
+import type { ViewIndirection } from "../viewIndirection.ts";
 
 /** GPU errors of one kind folded into the next report while the last one's spacing runs. */
 export interface GpuErrorReport {
@@ -35,27 +36,53 @@ export interface GpuErrorReport {
 }
 
 /**
- * What the worker keeps of each dataset, it keeps per {@link PoolMode}: a
- * dataset's slice pools and its volume pools each have their own cold state,
- * sections, routes and descriptors. Maps keyed by `datasetModeKey`
- * (`poolKeys.ts`) hold one entry per dataset and mode.
+ * What the worker keeps of one view's draw of one dataset: the cold state it
+ * was last sent for that view, and what its sections, wanted chunks and
+ * descriptors were built from. A view draws from the dataset's pools of its
+ * mode, which every view of that mode shares, through indirection of its own
+ * (`viewIndirection.ts`).
+ */
+export interface ViewDraw {
+  datasetId: string;
+  view: number;
+  mode: PoolMode;
+  /**
+   * The view's most recent cold state. A display, selection or view-move
+   * update patches it and rebuilds from it, so the active set is never sent
+   * again for those.
+   */
+  cold: ColdStateMessage;
+  /** The index of {@link cold}'s wanted chunks. */
+  wanted: WantedChunkIndex;
+  /**
+   * memberId → (`sourceKey(tier, level)` → pool key): the pool each section
+   * the view lays out for a member lives in. Uploads route by it, since the
+   * detail tier holds several levels per member and levels with different
+   * chunk shapes live in different pools.
+   */
+  routes: Map<string, Map<string, string>>;
+  /**
+   * memberId → the target level of the view's cold state. Eviction takes a
+   * resident chunk finer than every view's target first. Absent for a member
+   * with no chunk levels.
+   */
+  targetLevels: Map<string, number>;
+  /** The sections {@link cold} laid out, by member. */
+  sources: Map<string, EntitySource[]>;
+  /** The view's entity descriptor buffer and index maps, rebuilt on each cold state. */
+  descriptor: EntityDescriptorIndex | null;
+}
+
+/**
+ * Per-session worker state. A dataset's pools of one mode are shared by every
+ * view that draws it in that mode; what each view draws through them is a
+ * {@link ViewDraw}, kept by `datasetViewKey` (`poolKeys.ts`).
  */
 export interface RendererState {
   /** memberId → datasetId (canonical: imageId or imageId:chN). */
   memberToDataset: Map<string, string>;
-  /**
-   * Per mode, memberId → (`sourceKey(tier, level)` → pool key): the pool
-   * each indirection section a member holds lives in. Chunk uploads and the
-   * wanted set route by (mode, member, tier, level) through this map, since
-   * the detail tier holds several levels per member and levels with
-   * different chunk shapes live in different pools.
-   */
-  memberSourcePools: Record<PoolMode, Map<string, Map<string, string>>>;
-  /** Per dataset and mode, the sections its most recent cold state laid out. */
-  currentSourcesByDatasetMode: Map<string, Map<string, EntitySource[]>>;
-
-  /** Per dataset and mode, its entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
-  descriptorBuffersByDatasetMode: Map<string, EntityDescriptorIndex>;
+  /** Per dataset and view, what the view draws of the dataset. */
+  draws: Map<string, ViewDraw>;
 
   /**
    * The one GPU budget every holder counts against, fitted to the device at
@@ -80,16 +107,10 @@ export interface RendererState {
    */
   labelVolumePools: Map<string, LabelVolumePool>;
 
-  /** memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
-  rayHitPerEntity: Map<string, [number, number, number]>;
-  /** memberId → last known viewport center in entity-local [0,1]^2 (slice mode). */
-  cameraUVPerEntity: Map<string, [number, number]>;
-  /**
-   * Per mode, memberId → target level from that mode's most recent cold
-   * state. Eviction takes a resident chunk finer than it first. Absent for
-   * a member with no chunk levels.
-   */
-  targetLevelByMember: Record<PoolMode, Map<string, number>>;
+  /** Per view, memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
+  rayHits: Map<number, Map<string, [number, number, number]>>;
+  /** Per view, memberId → last known viewport center in entity-local [0,1]^2 (slice mode). */
+  cameraUVs: Map<number, Map<string, [number, number]>>;
 
   /** Current scene epochs (replaced on every cold state). */
   currentEpochs: SceneEpochs | null;
@@ -104,23 +125,14 @@ export interface RendererState {
   viewResources: Map<number, ViewResources>;
   /** The newest viewport frame the page gave up on; a banded frame up to it stops at its next band. */
   abandonedFrameSeq: number;
-  /**
-   * Per dataset and mode, the most recent cold-state message. A display-only
-   * update (`coldStateDisplay`) patches its entry and rebuilds its
-   * descriptor buffer from it, so display edits get the full active set
-   * without re-sending it. Cleared on dataset removal and when the mode's
-   * pools are released.
-   */
-  coldStateByDatasetMode: Map<string, ColdStateMessage>;
-  /** Per dataset and mode, the index of its latest cold state's wanted chunks. */
-  wantedByDatasetMode: Map<string, WantedChunkIndex>;
   /** dataset → imageId → chunk keys the source failed for good, as the page last listed them. */
   failedByDataset: Map<string, Map<string, ReadonlySet<string>>>;
   /**
-   * What each chunk pool's indirection was last remapped for, by pool object,
-   * so a pool created or replaced since always remaps. See `applyColdState`.
+   * What each view's indirection over a pool was last remapped for, by
+   * indirection object, so one created or replaced since always remaps. See
+   * `applyColdState`.
    */
-  remappedFor: WeakMap<object, RemapInputs>;
+  remappedFor: WeakMap<ViewIndirection, RemapInputs>;
 
   /**
    * Captures the trace bundle asked for that no frame has answered yet.
@@ -157,7 +169,7 @@ export interface RendererState {
   minimap: MinimapRendererState;
 }
 
-/** What a pool's indirection remap reads besides its slots and sections. */
+/** What a view's indirection remap reads besides the pool's slots and its sections. */
 export interface RemapInputs {
   t: number;
   /** The slice plane; zero for a volume pool, which maps every Z. */
@@ -174,23 +186,18 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
   return {
     gpuTotalBytes,
     memberToDataset: new Map(),
-    memberSourcePools: { slice: new Map(), volume: new Map() },
-    currentSourcesByDatasetMode: new Map(),
-    descriptorBuffersByDatasetMode: new Map(),
+    draws: new Map(),
     volumeAtlases: new Map(),
     sliceAtlases: new Map(),
     labelSlicePools: new Map(),
     labelVolumePools: new Map(),
-    rayHitPerEntity: new Map(),
-    cameraUVPerEntity: new Map(),
-    targetLevelByMember: { slice: new Map(), volume: new Map() },
+    rayHits: new Map(),
+    cameraUVs: new Map(),
     currentEpochs: null,
     currentColdState: null,
     lastFrames: new Map(),
     viewResources: new Map(),
     abandonedFrameSeq: 0,
-    coldStateByDatasetMode: new Map(),
-    wantedByDatasetMode: new Map(),
     failedByDataset: new Map(),
     remappedFor: new WeakMap(),
     frameCaptures: [],

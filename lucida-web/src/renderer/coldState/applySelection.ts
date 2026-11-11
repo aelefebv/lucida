@@ -1,5 +1,5 @@
 /**
- * Selection-scrub cold-state update: re-point the dataset's retained cold
+ * Selection-scrub cold-state update: re-point the view's retained cold
  * state at the new T, Z, and visible region, and re-ingest it through
  * {@link applyColdState}.
  *
@@ -7,19 +7,19 @@
  * byte-identical to a full cold state at the new selection without resending
  * the active set. A quad whose chunk moved to a new slot drops until the
  * fresh chunk arrives; it does not keep the prior plane on screen.
- * No-op when no cold state has landed for the dataset yet.
+ * No-op when no cold state has landed for the view's draw yet.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateSelectionMessage } from "../workerProtocol.ts";
 import { applyColdState } from "./apply.ts";
-import { datasetModeKey } from "../poolKeys.ts";
+import { drawOf } from "../worker/draws.ts";
 
 export function applyColdStateSelection(
   ctx: WorkerCtx,
   msg: ColdStateSelectionMessage,
 ): void {
-  const cold = ctx.state.coldStateByDatasetMode.get(datasetModeKey(msg.datasetId, msg.viewMode));
+  const cold = drawOf(ctx.state, msg.datasetId, msg.view)?.cold;
   if (!cold) return;
 
   cold.currentT = msg.currentT;

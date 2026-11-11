@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerCtx } from "../workerContext.ts";
 import type { FrameCapturedMessage, WorkerToMainMessage } from "../workerProtocol.ts";
 import { FRAME_CAPTURE_WAIT_MS, captureRenderedFrame, paddedBytesPerRow } from "./captureFrame.ts";
+import { attachView, fakeDraw } from "../viewIndirectionFixtures.ts";
 import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
 import { UNTIMED } from "../passTiming.ts";
@@ -200,12 +201,15 @@ describe("worker dispatch upload feedback", () => {
 
   it("does not route coarse chunk uploads through the detail pool fallback", async () => {
     const { ctx, posts } = makeCtx();
-    ctx.state.memberSourcePools.volume.set("img-0", new Map([["detail:2", "detail-pool"]]));
+    const draw = fakeDraw({ datasetId: "ds" });
+    draw.routes.set("img-0", new Map([["detail:2", "detail-pool"]]));
+    ctx.state.draws.set("ds|0", draw);
+    ctx.state.memberToDataset.set("img-0", "ds");
     ctx.state.volumeAtlases.set("detail-pool", {
       chunkX: 1,
       chunkY: 1,
       chunkZ: 1,
-      entityMetas: new Map(),
+      views: new Map(),
     } as never);
 
     await dispatchMessage(ctx, {
@@ -243,33 +247,34 @@ describe("worker dispatch upload feedback", () => {
     // (their chunk shapes differ). A level-2 upload must reach level 2's
     // pool, and a level with no section is requeued as missing-pool.
     const { ctx, posts } = makeCtx();
-    ctx.state.memberSourcePools.volume.set("img-0", new Map([
+    const draw = fakeDraw({
+      datasetId: "ds",
+      wanted: indexWantedChunks([
+        { memberId: "img-0", tier: "detail", chunkKeys: ["1/0/0/0/0/0", "2/0/0/0/0/0"] },
+      ]),
+    });
+    draw.routes.set("img-0", new Map([
       ["detail:0", "fine-pool"],
       ["detail:2", "small-chunk-pool"],
     ]));
-    ctx.state.volumeAtlases.set("fine-pool", {
-      chunkX: 32, chunkY: 32, chunkZ: 32,
-      entityMetas: new Map([["img-0", [{ level: 0, gridDims: [1, 1, 1], chunkDims: [32, 32, 32], levelDims: [32, 32, 32], offset: 0 }]]]),
-    } as never);
+    ctx.state.draws.set("ds|0", draw);
+    const finePool = { chunkX: 32, chunkY: 32, chunkZ: 32, datasetId: "ds", views: new Map(), totalSlots: 1 };
+    attachView(finePool as never, new Map([["img-0", [{ level: 0, gridDims: [1, 1, 1], chunkDims: [32, 32, 32], levelDims: [32, 32, 32], offset: 0 }]]]), { draw });
+    ctx.state.volumeAtlases.set("fine-pool", finePool as never);
     const smallChunkPool = {
+      datasetId: "ds",
       chunkX: 8, chunkY: 8, chunkZ: 8,
       slots: new Map<string, number>(),
-      slotGridIdx: new Int32Array(1).fill(-1),
+      views: new Map(),
       freeSlots: [0],
       totalSlots: 1,
       slotsX: 1, slotsY: 1, slotsZ: 1,
-      indirectionData: new Uint32Array(1).fill(0xffffffff),
-      indirectionBuf: {} as GPUBuffer,
       texture: {} as GPUTexture,
-      entityMetas: new Map([["img-0", [{ level: 2, gridDims: [1, 1, 1], chunkDims: [8, 8, 8], levelDims: [8, 8, 8], offset: 0 }]]]),
-      t: 0, c: 0,
-      indirectionDirty: false,
+      c: 0,
     };
+    attachView(smallChunkPool as never, new Map([["img-0", [{ level: 2, gridDims: [1, 1, 1], chunkDims: [8, 8, 8], levelDims: [8, 8, 8], offset: 0 }]]]), { draw });
     ctx.state.volumeAtlases.set("small-chunk-pool", smallChunkPool as never);
     ctx.state.memberToDataset.set("img-0", "ds");
-    ctx.state.wantedByDatasetMode.set("ds|volume", indexWantedChunks([
-      { memberId: "img-0", tier: "detail", chunkKeys: ["1/0/0/0/0/0", "2/0/0/0/0/0"] },
-    ]));
     (ctx as unknown as { device: unknown }).device = { queue: { writeTexture() {}, writeBuffer() {} } };
 
     const upload = (level: number, chunk: number) => dispatchMessage(ctx, {
@@ -312,7 +317,7 @@ describe("worker dispatch upload feedback", () => {
     await dispatchMessage(ctx, {
       type: "coldStateSelection",
       datasetId: "ds-not-yet-ingested",
-      viewMode: "slice",
+      view: 0,
       currentT: 7,
       currentZ: 2,
       visibleRegion: {
@@ -327,7 +332,7 @@ describe("worker dispatch upload feedback", () => {
     });
 
     expect(posts).toEqual([]);
-    expect(ctx.state.coldStateByDatasetMode.size).toBe(0);
+    expect(ctx.state.draws.size).toBe(0);
     expect(ctx.state.currentColdState).toBeNull();
     expect(harness.wantedSetPosts).toBe(1);
   });
@@ -342,8 +347,8 @@ describe("worker dispatch upload feedback", () => {
     await dispatchMessage(ctx, {
       type: "coldStateDelta",
       datasetId: "ds-not-yet-ingested",
-      viewMode: "volume",
-      drawnModes: ["volume"],
+      view: 0,
+      drawnViews: [0],
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
@@ -361,7 +366,7 @@ describe("worker dispatch upload feedback", () => {
     });
 
     expect(posts).toEqual([]);
-    expect(ctx.state.coldStateByDatasetMode.size).toBe(0);
+    expect(ctx.state.draws.size).toBe(0);
     expect(ctx.state.currentColdState).toBeNull();
     expect(harness.wantedSetPosts).toBe(1);
   });

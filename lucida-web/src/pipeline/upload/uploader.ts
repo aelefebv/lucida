@@ -62,7 +62,6 @@ import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
 import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
 import type { SliceCut } from "../../renderer/slicePlane.ts";
-import { datasetModeKey } from "../../renderer/poolKeys.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
@@ -74,13 +73,23 @@ export class Uploader {
   /** Exposed so `TickCoordinator` can wire cache-hit / rebuild events. */
   readonly coldStateTelemetry = new ColdStateTelemetry();
 
-  private readonly lastViewEpochByDataset = new Map<string, number>();
+  /** Per dataset, the view epoch each view's ray picks were last sent at. */
+  private readonly lastViewEpochByDataset = new Map<string, Map<number, number>>();
 
   /**
-   * The wanted chunks each dataset's last cold state of each mode carried,
-   * which a delta diffs against, keyed by `datasetModeKey`.
+   * Per dataset, the wanted chunks each view's last cold state carried, which
+   * a delta diffs against.
    */
-  private readonly wantedByDatasetMode = new Map<string, WantedChunksByMember>();
+  private readonly wantedByDatasetView = new Map<string, Map<number, WantedChunksByMember>>();
+
+  private rememberWanted(datasetId: string, view: number, wanted: WantedChunksByMember): void {
+    let byView = this.wantedByDatasetView.get(datasetId);
+    if (!byView) {
+      byView = new Map();
+      this.wantedByDatasetView.set(datasetId, byView);
+    }
+    byView.set(view, wanted);
+  }
 
   /** The cache's failure version the worker last heard about. */
   private failedVersionSent = 0;
@@ -119,11 +128,13 @@ export class Uploader {
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     layer: ResolvedLayer | undefined;
-    /** The modes of every view that draws the dataset; the worker frees its other pools. */
-    drawnModes: PoolMode[];
+    /** The view the cold state lays the dataset out for. */
+    view: number;
+    /** Every view that draws the dataset; the worker drops what it kept for any other. */
+    drawnViews: number[];
   }): ColdStateMessage {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.wantedByDatasetMode.set(datasetModeKey(args.datasetId, args.selection.renderMode), wanted);
+    this.rememberWanted(args.datasetId, args.view, wanted);
     const msg = buildColdState({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -136,7 +147,8 @@ export class Uploader {
       matricesByEntity: args.matricesByEntity,
       layer: args.layer,
       sampleFormat: datasetSampleFormat(args.ctx.datasets.get(args.datasetId)?.manifest),
-      drawnModes: args.drawnModes,
+      view: args.view,
+      drawnViews: args.drawnViews,
     });
     args.ctx.client.coldState(msg);
     this.lastEpochs = args.epochs;
@@ -155,13 +167,13 @@ export class Uploader {
   sendColdStateDisplay(args: {
     ctx: TickContext;
     datasetId: string;
-    viewMode: PoolMode;
+    view: number;
     displayStateByChannel: Record<number, ColdStateDisplayState>;
   }): void {
     args.ctx.client.coldStateDisplay({
       type: "coldStateDisplay",
       datasetId: args.datasetId,
-      viewMode: args.viewMode,
+      view: args.view,
       displayStateByChannel: args.displayStateByChannel,
     });
   }
@@ -176,7 +188,7 @@ export class Uploader {
   sendColdStateSelection(args: {
     ctx: TickContext;
     datasetId: string;
-    viewMode: PoolMode;
+    view: number;
     currentT: number;
     currentZ: number;
     /** The re-emitted plan's requests; see {@link sendColdState}. */
@@ -185,11 +197,11 @@ export class Uploader {
     epochs: SceneEpochs;
   }): void {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.wantedByDatasetMode.set(datasetModeKey(args.datasetId, args.viewMode), wanted);
+    this.rememberWanted(args.datasetId, args.view, wanted);
     args.ctx.client.coldStateSelection({
       type: "coldStateSelection",
       datasetId: args.datasetId,
-      viewMode: args.viewMode,
+      view: args.view,
       currentT: args.currentT,
       currentZ: args.currentZ,
       visibleRegion: args.visibleRegion,
@@ -221,12 +233,14 @@ export class Uploader {
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     layer: ResolvedLayer | undefined;
     /** See {@link sendColdState}. */
-    drawnModes: PoolMode[];
+    view: number;
+    /** See {@link sendColdState}. */
+    drawnViews: number[];
   }): ColdStateDeltaMessage {
-    const key = datasetModeKey(args.datasetId, args.selection.renderMode);
     const wanted = wantedChunksFromPlan(args.requests);
-    const wantedChanges = diffWantedChunks(this.wantedByDatasetMode.get(key) ?? new Map(), wanted);
-    this.wantedByDatasetMode.set(key, wanted);
+    const held = this.wantedByDatasetView.get(args.datasetId)?.get(args.view);
+    const wantedChanges = diffWantedChunks(held ?? new Map(), wanted);
+    this.rememberWanted(args.datasetId, args.view, wanted);
     const msg = buildColdStateDelta({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -239,7 +253,8 @@ export class Uploader {
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       layer: args.layer,
-      drawnModes: args.drawnModes,
+      view: args.view,
+      drawnViews: args.drawnViews,
     });
     args.ctx.client.coldStateDelta(msg);
     this.lastEpochs = args.epochs;
@@ -249,8 +264,8 @@ export class Uploader {
 
   /**
    * Build and send a viewEpoch hot-state message, from the ray `view` casts.
-   * Must be posted before subsequent render messages so the worker's
-   * `rayHitPerEntity` is current when chunk-data eviction fires. Returns
+   * Must be posted before subsequent render messages so the view's ray hits
+   * are current when chunk-data eviction fires. Returns
    * `false` (and emits nothing) if the viewEpoch is unchanged for this
    * dataset.
    */
@@ -289,6 +304,7 @@ export class Uploader {
         rayHit,
         epochs: args.epochs,
         datasetId: args.datasetId,
+        view: args.view,
       }),
     );
   }
@@ -301,11 +317,15 @@ export class Uploader {
     epochs: SceneEpochs,
     build: (rayHit: [number, number, number]) => ReturnType<typeof buildViewHotState>,
   ): boolean {
-    const lastView = this.lastViewEpochByDataset.get(datasetId);
-    if (lastView === epochs.view) return false;
+    let byView = this.lastViewEpochByDataset.get(datasetId);
+    if (byView?.get(view) === epochs.view) return false;
     const hit = Array.from(ctx.scene.ray_hit_local_image(view, datasetId)) as [number, number, number];
     ctx.client.viewHotState(build(hit));
-    this.lastViewEpochByDataset.set(datasetId, epochs.view);
+    if (!byView) {
+      byView = new Map();
+      this.lastViewEpochByDataset.set(datasetId, byView);
+    }
+    byView.set(view, epochs.view);
     return true;
   }
 
@@ -557,8 +577,7 @@ export class Uploader {
   clearDataset(datasetId: string): void {
     this.workerResources.clearDataset(datasetId);
     this.lastViewEpochByDataset.delete(datasetId);
-    this.wantedByDatasetMode.delete(datasetModeKey(datasetId, "slice"));
-    this.wantedByDatasetMode.delete(datasetModeKey(datasetId, "volume"));
+    this.wantedByDatasetView.delete(datasetId);
     // The worker dropped its list with the dataset, so a reopen sends it again.
     this.failedSent.delete(datasetId);
   }

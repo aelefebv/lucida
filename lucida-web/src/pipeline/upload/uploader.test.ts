@@ -346,14 +346,14 @@ describe("Uploader unified delivery", () => {
     expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }))).toBe(false);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
-    uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", viewMode: "slice", displayStateByChannel: {} });
+    uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", view: 0, displayStateByChannel: {} });
     uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateSelection({
       ctx,
       datasetId: "ds1",
-      viewMode: "slice",
+      view: 0,
       currentT: 0,
       currentZ: 1,
       requests: [],
