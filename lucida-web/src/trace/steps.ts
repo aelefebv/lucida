@@ -70,9 +70,9 @@ export interface ScriptControls {
   /**
    * Divide the canvas as `layout` does, then move into each view, in order,
    * the open datasets whose source URLs `show` lists for it, as a layer
-   * dropped on a view moves there.
+   * dropped on a view moves there; with `keep`, show them there as well.
    */
-  views(layout: ViewLayoutName, show: readonly (readonly string[])[]): Promise<StepOutcome>;
+  views(layout: ViewLayoutName, show: readonly (readonly string[])[], keep: boolean): Promise<StepOutcome>;
 }
 
 /**

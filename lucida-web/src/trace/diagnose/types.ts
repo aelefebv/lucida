@@ -418,6 +418,13 @@ export interface RunIdentity {
   warmth: string;
   /** What was still outstanding when the run closed. */
   outstanding: { pending: number; inFlight: number; speculative: number };
+  /**
+   * With several views, each one's settle and coverage, in layout order:
+   * when it settled, in ms from run start (null when it had not by the
+   * close), and how many of its own requests admission let in. Absent with
+   * one view, whose settle is the run's.
+   */
+  views?: { view: number; settledMs: number | null; wanted: number; short: number }[];
   startedAtEpochMs: number;
 }
 
