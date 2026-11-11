@@ -208,8 +208,12 @@ jobs:
 
           rm -rf "$dir"
           sudo apt-get clean
+          # Refreshed once, not per attempt: with the archive unreachable a
+          # refresh takes minutes and only warns, and the download then
+          # resolves against the image's own indexes.
+          sudo apt-get update -q || true
           attempt=1
-          until sudo apt-get update -q && sudo apt-get install -y -q --download-only mesa-vulkan-drivers; do
+          until sudo apt-get install -y -q --download-only mesa-vulkan-drivers; do
             if (( attempt == 4 )); then
               echo "::error::Could not download the packages from the Ubuntu archive"
               exit 1
