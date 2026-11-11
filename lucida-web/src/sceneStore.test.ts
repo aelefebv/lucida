@@ -14,6 +14,7 @@ function fakeScene() {
     comparisons: {} as Record<number, unknown>,
     setAside: [] as string[],
     links: null as unknown,
+    place: {} as { length?: string; length_width?: number },
     epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0, comparison: 0, links: 0 },
   };
   const scene = {
@@ -31,6 +32,7 @@ function fakeScene() {
     set_aside: () => JSON.stringify(state.setAside),
     slice_plane: () => "xy",
     cut_index: () => state.z,
+    cut_reading: () => JSON.stringify({ position: state.z, count: 1, place: state.z + 0.5, ...state.place }),
     resolved_layers: () => JSON.stringify(state.layers),
     camera_mode: () => state.mode,
     view_comparison: (id: number) => JSON.stringify(state.comparisons[id] ?? null),
@@ -145,6 +147,24 @@ describe("SceneStore", () => {
     state.epochs.view++;
     noteSceneWrite();
     expect(store.getView().links).toBe(links);
+  });
+
+  it("reads the cut as a physical coordinate when the scene measures one", () => {
+    const { scene, state } = fakeScene();
+    const store = new SceneStore(() => scene);
+    store.subscribe(() => {});
+    expect(store.getView().cutPlace).toBeNull();
+
+    state.z = 3;
+    state.place = { length: "7.0 µm", length_width: 8 };
+    state.epochs.selection++;
+    noteSceneWrite();
+    const place = store.getView().cutPlace;
+    expect(place).toEqual({ label: "7.0 µm", width: 8 });
+
+    state.epochs.view++;
+    noteSceneWrite();
+    expect(store.getView().cutPlace).toBe(place);
   });
 
   it("stays quiet when a write moved no epoch", () => {

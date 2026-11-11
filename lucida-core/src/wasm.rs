@@ -564,6 +564,13 @@ impl WasmScene {
             .index_of(place))
     }
 
+    /// Where `view` stands along its slice plane's cut axis, as a JSON
+    /// [`crate::scene::AxisReading`]: its position, the count, the place and
+    /// the place as a physical coordinate when the scene measures lengths.
+    pub fn cut_reading(&self, view: u32) -> String {
+        serde_json::to_string(&self.inner.cut_reading(ViewId(view))).unwrap_or_default()
+    }
+
     /// How many positions the active view's grid along `axis`, `"z"`, `"y"`
     /// or `"x"`, holds; 1 for an unknown axis.
     pub fn grid_count(&self, axis: &str) -> u32 {

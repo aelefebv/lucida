@@ -217,6 +217,36 @@ const LENGTH_UNITS: [(i32, &str); 6] = [
     (3, "km"),
 ];
 
+/// A physical coordinate of `meters`, as `48.5 \u{b5}m`: in the SI unit that
+/// puts it between 1 and 1000, with as many decimals as tell apart two
+/// coordinates `resolution` meters apart. One with no length reads in the
+/// unit of its resolution.
+pub(crate) fn coordinate_label(meters: f64, resolution: f64) -> String {
+    let magnitude = if meters.abs() > 0.0 {
+        meters.abs()
+    } else {
+        resolution
+    };
+    let exponent = if magnitude.is_finite() && magnitude > 0.0 {
+        magnitude.log10().floor() as i32
+    } else {
+        0
+    };
+    let (power, symbol) = LENGTH_UNITS
+        .iter()
+        .rev()
+        .find(|(power, _)| *power <= exponent)
+        .unwrap_or(&LENGTH_UNITS[0]);
+    let unit = 10f64.powi(*power);
+    let step = resolution / unit;
+    let decimals = if step.is_finite() && step > 0.0 {
+        ((-step.log10()).ceil() + 1.0).clamp(0.0, 6.0) as usize
+    } else {
+        0
+    };
+    format!("{:.*} {symbol}", decimals, meters / unit)
+}
+
 /// Lengths past these powers of ten get no bar, since no unit reads them.
 const EXPONENT_RANGE: std::ops::RangeInclusive<i32> = -30..=30;
 
