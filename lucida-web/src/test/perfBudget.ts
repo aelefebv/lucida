@@ -8,11 +8,11 @@
  * divided by how much slower than nominal the reference sample beside it ran.
  * Whatever slows the host evenly, a slower CPU, a busy machine, a collection,
  * slows both and cancels out of the ratio. A host that slows for a stretch
- * slows both samples of a pair, so each pair's own ratio cancels it too,
- * where the two medians taken apart would each catch it a different number
- * of times. Other test files contending for a few shared cores do not slow
- * everything evenly, so the perf tests also run in a phase of their own
- * (`vite.config.ts`).
+ * slows both samples of a pair, so each pair's own ratio cancels that too,
+ * where the median step sample and the median reference sample, taken
+ * apart, can come from different stretches. Other test files contending for
+ * a few shared cores do not slow everything evenly, so the perf tests also
+ * run in a phase of their own (`vite.config.ts`).
  *
  * What is left is the step's cost on the nominal host, and budgets are stated
  * in those microseconds at about twice the typical figure. A step that gets

@@ -21,7 +21,7 @@ interface KeyDemand {
  *
  * A submit notes every request of a dataset's whole wanted set, tens of
  * thousands of them a few times a second, so a chunk costs one map entry
- * however many of these it answers.
+ * whatever its tier and lanes, and however many views ask for it.
  */
 export class TickDemand {
   private readonly byKey = new Map<string, KeyDemand>();
