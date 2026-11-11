@@ -6,6 +6,26 @@ import type { RgbaColor } from "./workerProtocol.ts";
 
 export type BlendMode = "alpha" | "additive" | "max";
 
+/**
+ * Each mode's blend of premultiplied color: how a layer lands on the canvas,
+ * and how draws sharing a layer's target combine, so they combine as
+ * separate layers of that mode would.
+ */
+export const LAYER_BLENDS: Readonly<Record<BlendMode, GPUBlendState>> = {
+  alpha: {
+    color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+    alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+  },
+  additive: {
+    color: { srcFactor: "one", dstFactor: "one", operation: "add" },
+    alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
+  },
+  max: {
+    color: { srcFactor: "one", dstFactor: "one", operation: "max" },
+    alpha: { srcFactor: "one", dstFactor: "one", operation: "max" },
+  },
+};
+
 export interface CompositeLayer {
   view: GPUTextureView;
   blendMode: BlendMode;
@@ -57,18 +77,7 @@ export class LayerCompositor {
       blend,
     });
 
-    const alphaBlend: GPUBlendState = {
-      color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-      alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-    };
-    const additiveBlend: GPUBlendState = {
-      color: { srcFactor: "one", dstFactor: "one", operation: "add" },
-      alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
-    };
-    const maxBlend: GPUBlendState = {
-      color: { srcFactor: "one", dstFactor: "one", operation: "max" },
-      alpha: { srcFactor: "one", dstFactor: "one", operation: "max" },
-    };
+    const { alpha: alphaBlend, additive: additiveBlend, max: maxBlend } = LAYER_BLENDS;
     // Destination-over: the background shows only where the layers left the
     // canvas uncovered.
     const underBlend: GPUBlendState = {

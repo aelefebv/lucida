@@ -84,10 +84,10 @@ function heldPool(
   draw: ViewDraw = testDraw(ctx),
 ): { atlas: AtlasState; keys: string[] } {
   const atlas = getOrCreateVolumePool(ctx, poolKey, draw.datasetId, 32, 32, 32, 0, "u16");
-  while (atlas.slotsZ < layers) {
-    atlas.slotsZ++;
-    atlas.totalSlots = atlas.slotsX * atlas.slotsY * atlas.slotsZ;
-  }
+  // Whole layers, its first full.
+  atlas.rowsY = atlas.slotsY;
+  atlas.slotsZ = layers;
+  atlas.totalSlots = atlas.slotsX * atlas.slotsY * atlas.slotsZ;
   const gridZ = Math.ceil(atlas.totalSlots / 64);
   const view = attachView(atlas, new Map([[member, [{ level: 0, gridDims: [gridZ, 8, 8], chunkDims: [32, 32, 32], levelDims: [gridZ * 32, 256, 256], offset: 0 }]]]), { draw });
   const keys: string[] = [];

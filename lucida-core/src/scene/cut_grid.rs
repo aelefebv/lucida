@@ -191,6 +191,21 @@ impl Scene {
         placed.unwrap_or_else(|| self.cut_grid(view, axis).center(0))
     }
 
+    /// The places along `axis` `view` reads, `(start, end)`: its Z slab, or
+    /// across another axis the position of its grid it stands at.
+    pub(crate) fn cut_slab(&self, view: ViewId, axis: SpatialAxis) -> (f64, f64) {
+        if axis.is_z() {
+            let z = self.view(view).map_or_else(
+                || self.cut_grid(view, axis).cell(0),
+                |shown| self.z_cut(view, &shown.axes),
+            );
+            return (z.start, z.end);
+        }
+        let place = self.cut_place(view, axis);
+        let half = self.cut_grid(view, axis).step / 2.0;
+        (place - half, place + half)
+    }
+
     /// The places `view` cuts along Z: its slab, or with none yet, the
     /// grid's first position.
     pub(crate) fn z_cut(&self, view: ViewId, axes: &AxisPositions) -> Range<f64> {

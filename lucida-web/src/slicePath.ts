@@ -1,11 +1,12 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import { planeAxes, tczyx, type SlicePlane } from "./renderer/slicePlane.ts";
+import { planeAxes, tczyx, xyz, type SlicePlane } from "./renderer/slicePlane.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
 import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { keepsCut, placementInPlane, readPlacement, rectToQuad, type PlaneMap } from "./placement.ts";
-import { quadEdgeLengths, transposeQuad } from "./renderer/sliceQuad.ts";
+import { transposePlaneToWorld } from "./renderer/sliceCut.ts";
+import { axisAlignedQuad, quadEdgeLengths, transposeQuad, type SliceQuad } from "./renderer/sliceQuad.ts";
 import type { FrameScale, TickContext, TickView } from "./renderLoopTypes.ts";
 import { compositeKey } from "./tickCommon.ts";
 import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
@@ -221,6 +222,56 @@ export function pushMemberLayers(
   }
 }
 
+/**
+ * The column-major map from a point `[across, down]` of `view`'s plane, at
+ * the place it cuts, to world space, where the volume pools' members are
+ * placed.
+ */
+function cutPlaneToWorld(scene: TickContext["scene"], view: number, plane: SlicePlane): number[] {
+  const [across, down, cut] = planeAxes(plane).map(xyz);
+  const toWorld = scene.scene_to_world();
+  const place = scene.view_cut_place(view);
+  const column = (c: number) => [toWorld[4 * c], toWorld[4 * c + 1], toWorld[4 * c + 2], toWorld[4 * c + 3]];
+  const [u, v, w, origin] = [column(across), column(down), column(cut), column(3)];
+  return [
+    ...u,
+    ...v,
+    0, 0, 0, 0,
+    ...origin.map((o, i) => o + place * w[i]),
+  ];
+}
+
+/**
+ * One layer per member of a dataset whose placement tilts the view's cut,
+ * each sampled from the member's bricks at the cut. They share the target
+ * the channel's draws use, as a slice dataset's members do.
+ */
+function pushTiltedLayers(
+  layers: SliceLayerParams[],
+  members: MemberRosterEntry[],
+  indexByMember: Map<string, number>,
+  channel: number,
+  blendMode: "alpha" | "additive" | "max",
+  footprint: SliceQuad,
+  planeToWorld: number[],
+): void {
+  const passGroup = layers.length;
+  for (const m of members) {
+    const memberKey = compositeKey(m.imageId, channel);
+    const entityIndex = indexByMember.get(memberKey);
+    if (entityIndex === undefined) continue;
+    layers.push({
+      datasetId: memberKey,
+      quad: footprint,
+      blendMode,
+      entityId: m.entityId,
+      entityIndex,
+      passGroup,
+      bricks: { planeToWorld },
+    });
+  }
+}
+
 /** The plane of a label that slice mode draws at source `t` and `z`, as its fetch names it. */
 function labelPlaneAt(
   resolved: ResolvedLabel,
@@ -363,9 +414,18 @@ export function renderSliceView(
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
     const indexByMember = entityIndexByDatasetView.get(datasetViewKey(dsId, view.id)) ?? new Map<string, number>();
     // A placement that turns the dataset off the cut leaves no plane of it
-    // across the cut to draw.
+    // across the cut, so the view samples the cut from its bricks.
     const placed = readPlacement(scene, dsId);
-    if (!keepsCut(placed, cut)) continue;
+    if (!keepsCut(placed, cut)) {
+      const planeToWorld = cutPlaneToWorld(scene, view.id, plane);
+      const bounds = scene.dataset_plane_bounds(view.id, dsId);
+      const footprint = axisAlignedQuad(bounds[0], bounds[1], bounds[2] - bounds[0], bounds[3] - bounds[1]);
+      for (const ch of resolved.channels) {
+        pushTiltedLayers(layers, members, indexByMember, ch.channel, ch.blend_mode, footprint, planeToWorld);
+      }
+      clipSliceLayers(layers, firstLayer, clip);
+      continue;
+    }
     const placement = placementInPlane(placed, cut);
 
     // The member-pass budget applies per channel. A layer past the scene's t,
@@ -407,7 +467,7 @@ export function renderSliceView(
   // A view that draws its plane transposed sends it with the plane's two
   // axes swapped, so the worker lays it on the screen as any other.
   const transposed = scene.transposed(view.id);
-  const drawn = transposed ? layers.map((layer) => ({ ...layer, quad: transposeQuad(layer.quad) })) : layers;
+  const drawn = transposed ? layers.map(transposeLayer) : layers;
   const [screenCx, screenCy] = transposed ? [cy, cx] : [cx, cy];
   const frameSeq = client.sliceRenderMultiPass(
     drawn, currentZoom, screenCx, screenCy, canvasW, canvasH, planResult.epochs, view.id, rect,
@@ -417,6 +477,13 @@ export function renderSliceView(
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
   traceRecorder.noteFrameDispatched(frameSeq);
+}
+
+/** `layer` with the plane's two axes swapped, as a view that draws its plane transposed sends it. */
+function transposeLayer(layer: SliceLayerParams): SliceLayerParams {
+  const transposed = { ...layer, quad: transposeQuad(layer.quad) };
+  if (layer.bricks) transposed.bricks = { planeToWorld: transposePlaneToWorld(layer.bricks.planeToWorld) };
+  return transposed;
 }
 
 export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}
