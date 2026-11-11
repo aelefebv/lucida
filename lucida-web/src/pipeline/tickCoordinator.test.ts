@@ -143,6 +143,8 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     plane_positions: (_view: number, _dsId: string) => JSON.stringify(config.memberPositions),
     visible_region: (_view: number, _dsId: string) => JSON.stringify(config.visibleRegion),
     slice_plane: () => "xy",
+    // Every dataset placed where its frame says, turned off no cut.
+    dataset_placement: () => new Float64Array(),
     transposed: () => false,
     cut_index: () => 0,
     t: () => config.t,
@@ -2031,6 +2033,18 @@ describe("views of one dataset in two modes", () => {
     const requests = (submit.mock.calls[0][0] as RequestPlan).requests.filter((req) => req.lane === "detail");
     const key = requests[0].chunkKey;
     expect(requests.filter((req) => req.chunkKey === key).map((req) => req.mode).sort()).toEqual(["slice", "volume"]);
+  });
+
+  it("plans a slice view whose cut the dataset's placement tilts from the volume pools, with no label", () => {
+    const { scene, ctx, coldState } = makeTwoModes();
+    // Turned a sixth about Z, which tilts the cut of view 0's XZ plane.
+    const [s, c] = [Math.sin(Math.PI / 6), Math.cos(Math.PI / 6)];
+    scene.dataset_placement = () => new Float64Array([0, 0, 0, c, -s, 0, s, c, 0, 0, 0, 1]);
+    scene.slice_plane = (view: number) => (view === 0 ? "xz" : "xy");
+    new TickCoordinator(new Uploader()).planAndFetch(ctx, emptyMinimap);
+
+    const sent = coldState.mock.calls.map(([msg]) => msg as ColdStateMessage);
+    expect(sent.map((msg) => [msg.view, msg.viewMode, msg.labels])).toEqual([[0, "volume", []], [1, "volume", []]]);
   });
 
   it("places members on the plane each view draws: a side view's cells, the volume view's layout", () => {

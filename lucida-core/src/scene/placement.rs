@@ -360,10 +360,14 @@ impl Scene {
         view: ViewId,
         dataset_id: &DatasetId,
     ) -> Vec<(&EntityId, [f64; 2])> {
-        let (Some(view), Some(derived)) = (self.view(view), self.derived.get(dataset_id)) else {
+        let (Some(view), Some(derived), Some(to_scene)) = (
+            self.view(view),
+            self.derived.get(dataset_id),
+            self.placement(dataset_id),
+        ) else {
             return Vec::new();
         };
-        let plane = placing_plane(view);
+        let plane = placing_plane(view, &to_scene);
         derived
             .members
             .iter()
@@ -386,6 +390,9 @@ impl Scene {
         // A layer shallower than the view's slab plans its nearest plane.
         let z_range = self.layer_cut(id, dataset_id, SlicePlane::Xy);
         Some(match &view.camera {
+            Camera::Slice(slice) if !placed.to_scene.keeps_axis(slice.plane.cut().xyz()) => {
+                slice.tilted_region(&placed.to_scene, self.cut_slab(id, slice.plane.cut()))
+            }
             Camera::Slice(slice) => slice.visible_region(
                 &placed.to_scene,
                 &self.layer_cut(id, dataset_id, slice.plane),
@@ -406,12 +413,14 @@ impl Scene {
     }
 }
 
-/// The plane `view` places members on: its slice camera's, or XY for a
-/// volume camera, which places them by their layout.
-pub(crate) fn placing_plane(view: &View) -> SlicePlane {
+/// The plane `view` places the members of a dataset `to_scene` places on:
+/// its slice camera's, or XY for a volume camera, which places them by their
+/// layout, and for a slice camera whose cut the placement tilts, which reads
+/// the dataset's bricks as a volume camera does.
+pub(crate) fn placing_plane(view: &View, to_scene: &Affine) -> SlicePlane {
     match &view.camera {
-        Camera::Slice(slice) => slice.plane,
-        Camera::Arcball(_) | Camera::Fly(_) => SlicePlane::Xy,
+        Camera::Slice(slice) if to_scene.keeps_axis(slice.plane.cut().xyz()) => slice.plane,
+        Camera::Slice(_) | Camera::Arcball(_) | Camera::Fly(_) => SlicePlane::Xy,
     }
 }
 
@@ -915,6 +924,60 @@ mod tests {
     }
 
     #[test]
+    fn a_side_view_plans_a_dataset_turned_about_z_from_its_bricks_across_the_slab() {
+        let mut scene = Scene::new([800, 600]);
+        open(
+            &mut scene,
+            "a",
+            [64, 64, 64],
+            [1.0; 3],
+            [0.0; 3],
+            Some("micrometer"),
+        );
+        turn_by_hand(&mut scene, "a", turn(2, std::f64::consts::PI / 6.0));
+        scene.apply(
+            ViewportCommand::SetSlicePlane {
+                plane: crate::slice_plane::SlicePlane::Xz,
+            }
+            .into(),
+        );
+        assert!(scene.frame(&FrameTarget::Visible, [800, 600]));
+        let view = scene.active_view().id();
+        let a = DatasetId::from("a");
+
+        let region = scene.visible_region(view, &a).unwrap();
+        let faces = region
+            .frustum_planes
+            .expect("a tilted cut culls by the slab's faces");
+        assert!(region.side_planes.is_none());
+        assert_eq!(region.cut_axis, lucida_content::SpatialAxis::Z);
+        // The cut's middle under the screen's center lies inside every face,
+        // and a frame point well off the slab, along the scene's Y, does not.
+        let inside = |p: [f64; 3]| {
+            faces
+                .iter()
+                .all(|f| f[0] * p[0] + f[1] * p[1] + f[2] * p[2] + f[3] >= 0.0)
+        };
+        let to_frame = scene.placement(&a).unwrap().inverse();
+        let center = scene
+            .view(view)
+            .unwrap()
+            .camera
+            .unproject_ray(400.0, 300.0)
+            .origin;
+        let y = scene.cut_place(view, lucida_content::SpatialAxis::Y);
+        assert!(inside(to_frame.apply([center[0], y, center[1]])));
+        assert!(!inside(to_frame.apply([center[0], y + 20.0, center[1]])));
+        // It places its members by their layout, as a volume view does.
+        assert!(
+            scene
+                .plane_positions(view, &a)
+                .iter()
+                .all(|(_, at)| *at == [0.0, 0.0])
+        );
+    }
+
+    #[test]
     fn a_cut_meets_a_dataset_turned_off_its_axis_where_the_dataset_lies() {
         let mut scene = Scene::new([800, 600]);
         open(
@@ -936,6 +999,8 @@ mod tests {
         // Its own planes stop at 8, but it lies across Z from 0 to 64.
         assert_eq!(reach_at(&mut scene, 30.0), CutReach::Through);
         assert_eq!(reach_at(&mut scene, 70.0), CutReach::Outside);
+        // Nor does it say it shows a plane clamped into its own eight.
+        assert!(!scene.resolved_layer(view, &flat).unwrap().z_clamped);
     }
 
     #[test]

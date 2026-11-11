@@ -401,6 +401,35 @@ struct FsOut {
   @builtin(frag_depth) depth: f32,
 };
 
+// A slice view's cut of a member its placement tilts off the cut: the one
+// sample under each pixel. For a cut draw `u.invViewProj` maps the target's
+// NDC to the world point of the cut there. The color is a slice layer's:
+// the windowed value through the colormap, premultiplied by the opacity, so
+// it composites with the view's other layers.
+@fragment
+fn fsCut(input: VSOut) -> @location(0) vec4f {
+  activeEntity = entityDescriptors[currentEntity.index.x];
+  let entity = activeEntity;
+  let world = u.invViewProj * vec4f(input.ndc, 0.0, 1.0);
+  let local = (entity.invModelMatrix * vec4f(world.xyz / world.w, 1.0)).xyz;
+  if (any(local < vec3f(0.0)) || any(local > vec3f(1.0))) {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
+  // The direction only bounds a ray's skip past empty cells, which one
+  // sample never takes.
+  let s = sampleWithFallback(local, vec3f(0.0, 0.0, 1.0));
+  if (s.value == FAILED) {
+    return failedHatch(input.pos.xy, u.stepInfo.z) * entity.opacity;
+  }
+  if (s.value == MISS || texelIsNaN(s.value, entity.sampleFormat)) {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
+  let range = entity.contrastMax - entity.contrastMin;
+  let normalized = pow(clamp((texelValue(s.value, entity.sampleFormat) - entity.contrastMin) / range, 0.0, 1.0), entity.gamma);
+  let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
+  return vec4f(color * entity.opacity, entity.opacity);
+}
+
 @fragment
 fn fs(input: VSOut) -> FsOut {
   activeEntity = entityDescriptors[currentEntity.index.x];

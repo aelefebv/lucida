@@ -39,7 +39,7 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     freeSlots: [],
     totalSlots,
     chunkX: 32, chunkY: 32, chunkZ: 32,
-    slotsX: 4, slotsY: 4, slotsZ: 2,
+    slotsX: 4, slotsY: 4, slotsZ: 2, rowsY: 4,
     maxSlotsZ: 2,
     c: 0,
     ...overrides,

@@ -10,6 +10,7 @@
  */
 
 import { quadEdgeLengths, quadUV } from "./sliceQuad.ts";
+import { cutLocalAt } from "./sliceCut.ts";
 import type { SliceRenderMultiPassMessage, VolumeRenderMultiPassMessage } from "./workerProtocol.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
@@ -165,6 +166,8 @@ export function sliceHits(
   const py = pixelCenter(fy, msg.canvasH);
   const hits: SliceHit[] = [];
   for (const layer of msg.layers) {
+    // A cut from bricks has no plane of its own to read; see `cutHits`.
+    if (layer.bricks) continue;
     // The layer's UV at the pixel's scene point, as `buildSliceUniformData`'s transform gives it.
     const [u, v] = quadUV(
       layer.quad,
@@ -470,6 +473,30 @@ export function betweenCubes(pos: readonly number[], model: ArrayLike<number>, i
 }
 
 /** The center of the render pixel a fraction of the canvas falls in. */
+/**
+ * The layers cut from bricks a slice frame drew under the canvas point
+ * `(fx, fy)`, each with the member-local point of the cut its fragment
+ * sampled, given each member's world-to-local map. Pixel centers as in
+ * {@link sliceHits}.
+ */
+export function cutHits(
+  msg: SliceRenderMultiPassMessage,
+  fx: number,
+  fy: number,
+  invModelOf: (memberId: string) => ArrayLike<number> | undefined,
+): Array<{ memberId: string; local: [number, number, number] }> {
+  const px = pixelCenter(fx, msg.canvasW);
+  const py = pixelCenter(fy, msg.canvasH);
+  const hits: Array<{ memberId: string; local: [number, number, number] }> = [];
+  for (const layer of msg.layers) {
+    if (!layer.bricks) continue;
+    const invModel = invModelOf(layer.datasetId);
+    const local = invModel && cutLocalAt(msg, layer.bricks.planeToWorld, invModel, px, py);
+    if (local) hits.push({ memberId: layer.datasetId, local });
+  }
+  return hits;
+}
+
 function pixelCenter(fraction: number, size: number): number {
   return Math.min(Math.max(Math.floor(fraction * size), 0), Math.max(size - 1, 0)) + 0.5;
 }

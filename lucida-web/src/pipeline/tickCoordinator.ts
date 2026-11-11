@@ -5,6 +5,7 @@
  * emission and chunk delivery.
  */
 
+import { keepsCut, readPlacement } from "../placement.ts";
 import { drawnView, type TickContext, type TickView } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
@@ -31,7 +32,7 @@ import {
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
 import { buildViewSnapshot, sliceCut } from "./planning/snapshot.ts";
-import type { SlicePlane, SpatialAxis } from "../renderer/slicePlane.ts";
+import { cutAxis, type SlicePlane, type SpatialAxis } from "../renderer/slicePlane.ts";
 import {
   applyViewQueryDelta,
   makeEntitySnapshot,
@@ -131,6 +132,12 @@ function leadLayers(ctx: TickContext, layersByView: ReadonlyMap<number, Resolved
 /** One view of a planned dataset. */
 interface PlannedView {
   view: TickView;
+  /**
+   * The pools the view draws the dataset from: those of its own mode, or
+   * the volume pools for a slice view whose cut the dataset's placement
+   * tilts, which it reads from the dataset's bricks ({@link drawMode}).
+   */
+  mode: PoolMode;
   snapshot: ViewSnapshot;
   /** The dataset's layer as the view resolves it. */
   layer: ResolvedLayer | undefined;
@@ -291,6 +298,27 @@ function withCutRange(region: VisibleRegion, range: [number, number]): VisibleRe
   const xyBoundsVox: [number, number, number, number] =
     axis === "x" ? [range[0], minY, range[1], maxY] : [minX, range[0], maxX, range[1]];
   return { ...region, xyBoundsVox };
+}
+
+/**
+ * The pools `view` draws `datasetId` from: those of its own mode, unless it
+ * is a slice view whose cut the dataset's placement tilts. Its planes then
+ * don't lie across the cut, so the view samples the cut from the dataset's
+ * bricks, as a volume view holds them.
+ */
+function drawMode(ctx: TickContext, view: TickView, datasetId: string): PoolMode {
+  if (view.mode === "volume") return "volume";
+  const plane = ctx.scene.slice_plane(view.id) as SlicePlane;
+  return keepsCut(readPlacement(ctx.scene, datasetId), cutAxis(plane)) ? "slice" : "volume";
+}
+
+/**
+ * Whether a view draws a dataset's label overlays: one that draws from its
+ * own mode's pools. A tilted cut samples the bricks, and no label overlay
+ * draws from them.
+ */
+function drawsLabels(planned: PlannedView): boolean {
+  return planned.mode === planned.view.mode;
 }
 
 /** The plane `view` cuts: its slice plane, or null in the volume view, which cuts none. */
@@ -847,8 +875,11 @@ export class TickCoordinator {
     const planningConfig = configStore.get();
 
     const structural = isStructural(causes);
-    // The fast paths prove their case against the drawn view alone.
-    const fastPathsHold = views.length === 1;
+    // The fast paths prove their case against the drawn view alone, and
+    // against slice cuts alone: a tilted cut's slab moves with the view's
+    // place, which only a full plan follows.
+    const fastPathsHold = views.length === 1
+      && [...ctx.datasets.keys()].every((dsId) => drawMode(ctx, views[0], dsId) === views[0].mode);
     // A camera or a cut moving is a gesture, made in the active view. While
     // one runs, that view's requests lead each lane of a dataset it shares.
     const leadingView = views.length > 1 && (causes.includes("view") || causes.includes("selection"))
@@ -950,20 +981,21 @@ export class TickCoordinator {
         // The builder skips `view_query` when given `entitiesOverride` but
         // still computes `visible_region` and `selection` fresh.
         const layer = layersByView.get(view.id)!.get(dsId);
+        const mode = drawMode(ctx, view, dsId);
         const snapshot = buildViewSnapshot({
           scene: ctx.scene,
           view: view.id,
           datasetId: dsId,
           dataset: ds,
           layer,
-          mode: view.mode,
+          mode,
           precomputed: deps,
           entitiesOverride,
         });
         if (!snapshot) continue;
         const previousCut = planningStateForDataset.views.get(view.id)?.previousCut ?? null;
         const cutStep = isCutStep(previousCut, snapshot.selection, planningConfig.sliceBandPlanes);
-        plannedViewsOfDataset.push({ view, snapshot, layer, cutStep });
+        plannedViewsOfDataset.push({ view, mode, snapshot, layer, cutStep });
       }
       const drawnOfDataset = plannedViewsOfDataset[0];
       if (drawnOfDataset === undefined) continue;
@@ -1061,7 +1093,7 @@ export class TickCoordinator {
       // it asked for, and its own cut, timepoint and region. The worker lays
       // out the view's indirection over the pools the dataset's views share.
       for (const plannedView of planned.views) {
-        const { view, snapshot, layer: viewLayer } = plannedView;
+        const { view, mode, snapshot, layer: viewLayer } = plannedView;
         const { entities } = snapshot;
         const key = datasetViewKey(dsId, view.id);
         const share = viewShare(planned, plannedView, result.requests);
@@ -1080,15 +1112,15 @@ export class TickCoordinator {
           datasetId: dsId,
           activeSet: share.activeSet,
           requests: share.requests,
-          labels: labelFormsFor({
+          labels: drawsLabels(plannedView) ? labelFormsFor({
             datasetId: dsId,
             manifest: ctx.datasets.get(dsId)!.manifest,
             t: snapshot.selection.t,
             z: snapshot.selection.z,
             labelSettings: dsSettings?.label_settings,
-            mode: view.mode,
+            mode,
             cutAxis: snapshot.selection.cut.axis,
-          }),
+          }) : [],
           entities,
           selection: snapshot.selection,
           visibleRegion: snapshot.visibleRegion,
@@ -1107,7 +1139,7 @@ export class TickCoordinator {
         // exactly the active set last sent for this view, so ship only the
         // active-set delta instead of the whole descriptor array.
         const heldForView = held.get(view.id);
-        const previousActiveSet = heldForView?.mode === view.mode ? heldForView.activeSet : undefined;
+        const previousActiveSet = heldForView?.mode === mode ? heldForView.activeSet : undefined;
         if (viewOnly && previousActiveSet !== undefined && previousActiveSet.length > 0) {
           this.uploader.sendColdStateDelta({ ...coldArgs, previousActiveSet });
           // The worker rebuilds its descriptor buffer from the reordered active
@@ -1141,7 +1173,7 @@ export class TickCoordinator {
           });
         }
         // A later pure view move can take the delta path against this.
-        held.set(view.id, { mode: view.mode, activeSet: share.activeSet });
+        held.set(view.id, { mode, activeSet: share.activeSet });
       }
 
       // Categorical label overlays are invisible to the WASM planner
@@ -1152,7 +1184,7 @@ export class TickCoordinator {
       // mode the whole label volume (every z-chunk) is fetched for the 3D
       // first-hit surface. Scoped under each label's own image id, so they
       // never perturb intensity-chunk eviction. Each view asks for its own.
-      const labelRequests = planned.views.flatMap((view) => computeLabelChunkRequests({
+      const labelRequests = planned.views.filter(drawsLabels).flatMap((view) => computeLabelChunkRequests({
         datasetId: dsId,
         manifest: ctx.datasets.get(dsId)!.manifest,
         t: view.snapshot.selection.t,

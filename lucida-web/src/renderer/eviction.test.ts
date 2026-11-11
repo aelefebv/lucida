@@ -32,6 +32,7 @@ import {
   getOrCreateVolumePool,
   growVolumeAtlas,
   handleVolumeChunkData,
+  volumeRows,
   remapIndirection,
   type AtlasState,
   type LodIndirectionMeta,
@@ -44,6 +45,7 @@ import {
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
 import { measureGpuMemory } from "./worker/gpuBudget.ts";
+import { growViewSlots } from "./viewIndirection.ts";
 import type {
   Chunk,
   ChunkResidencyChange,
@@ -276,14 +278,14 @@ describe("volume pool growth", () => {
     }
   }
 
-  it("allocates one layer of its cap's slot grid, not the whole cap", () => {
+  it("allocates one row of its cap's slot grid, not the whole cap", () => {
     const { ctx } = makeGrowthCtx();
     // 32³ r16uint chunks under the device's 256 MiB largest buffer: 4096
     // slots, in layers of 8×8 as deep as the texture allows.
     const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
     expect([atlas.slotsX, atlas.slotsY, atlas.slotsZ, atlas.maxSlotsZ]).toEqual([8, 8, 1, 64]);
-    expect(atlas.totalSlots).toBe(64);
-    expect(textureSizes(ctx)).toEqual([[256, 256, 32]]);
+    expect([atlas.rowsY, atlas.totalSlots]).toEqual([1, 8]);
+    expect(textureSizes(ctx)).toEqual([[256, 32, 32]]);
   });
 
   it("holds float samples as r32uint bits", () => {
@@ -311,7 +313,7 @@ describe("volume pool growth", () => {
     expect(layout.bytesPerRow).toBe(32 * 4);
   });
 
-  it("doubles its layers once full, copying the resident chunks in place", () => {
+  it("grows through its first layer a row past what the planner wants, copying the resident chunks in place", () => {
     const { ctx, posts, copies } = makeGrowthCtx();
     const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
     viewOf(atlas).entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
@@ -322,16 +324,33 @@ describe("volume pool growth", () => {
 
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), "ds1", "imgA");
 
-    expect(atlas.slotsZ).toBe(2);
-    expect(atlas.totalSlots).toBe(128);
-    expect(copies).toEqual([[256, 256, 32]]);
-    expect(textureSizes(ctx).at(-1)).toEqual([256, 256, 64]);
+    // The planner wants one chunk, which a row holds, and a row more for a step.
+    expect([atlas.rowsY, atlas.slotsZ]).toEqual([2, 1]);
+    expect(atlas.totalSlots).toBe(16);
+    expect(copies).toEqual([[256, 32, 32]]);
+    expect(textureSizes(ctx).at(-1)).toEqual([256, 64, 32]);
     expect(firstTexture.destroyed).toBe(true);
     // The chunk took a new slot and nothing was evicted for it.
     const slot = atlas.slots.get("imgA|0/0/0/0/0/0");
-    expect(slot).toBeGreaterThanOrEqual(64);
+    expect(slot).toBeGreaterThanOrEqual(8);
     expect(viewOf(atlas).indirectionData[0]).toBe(slot);
     expect(reports(posts, "lost")).toEqual([]);
+  });
+
+  it("grows from its first row straight to the layers the planner wants, in one copy", () => {
+    const { ctx, copies } = makeGrowthCtx();
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    viewOf(atlas).entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
+    viewOf(atlas).indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+    fill(atlas);
+    // More than a layer of 8×8 wants two layers, which the first row grows to at once.
+    want(ctx, "imgA", Array.from({ length: 70 }, (_, i) => chunkKey(0, 0, 0, i, 0, 0)));
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), "ds1", "imgA");
+
+    expect([atlas.rowsY, atlas.slotsZ]).toEqual([8, 2]);
+    expect(atlas.totalSlots).toBe(128);
+    expect(copies).toEqual([[256, 32, 32]]);
   });
 
   it("grows to its cap's grid and no further", () => {
@@ -339,16 +358,21 @@ describe("volume pool growth", () => {
     const { ctx, copies } = makeGrowthCtx(64 * 1024 * 1024);
     const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
     expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([4, 4, 64]);
-    const grown: number[] = [];
-    while (growVolumeAtlas(ctx.device, atlas)) grown.push(atlas.slotsZ);
-    expect(grown).toEqual([2, 4, 8, 16, 32, 64]);
+    // Doubling its rows: through its first layer's four, then whole layers.
+    const grown: Array<[number, number]> = [];
+    while (growVolumeAtlas(ctx.device, atlas, volumeRows(atlas) * 2)) grown.push([atlas.rowsY, atlas.slotsZ]);
+    expect(grown).toEqual([[2, 1], [4, 1], [4, 2], [4, 4], [4, 8], [4, 16], [4, 32], [4, 64]]);
     expect(atlas.totalSlots).toBe(1024);
-    expect(copies).toHaveLength(6);
-    expect(growVolumeAtlas(ctx.device, atlas)).toBe(false);
+    expect(copies).toHaveLength(8);
+    expect(growVolumeAtlas(ctx.device, atlas, volumeRows(atlas) * 2)).toBe(false);
   });
 
-  /** Hold the chunk at each grid cell of `imgA`'s 5×4×4 section in slot order, mapped. */
+  /** Hold the chunk at each grid cell of `imgA`'s 5×4×4 section in slot order, mapped, through a full first layer. */
   function holdLayer(atlas: AtlasState): string[] {
+    // A layer's worth of rows, as a pool grown through its first layer holds.
+    atlas.rowsY = atlas.slotsY;
+    atlas.totalSlots = atlas.slotsX * atlas.slotsY;
+    growViewSlots(atlas, atlas.totalSlots);
     viewOf(atlas).entityMetas.set("imgA", [makeVolumeMeta(5, 4, 4)]);
     viewOf(atlas).indirectionData = new Uint32Array(5 * 4 * 4).fill(0xFFFFFFFF);
     const keys: string[] = [];

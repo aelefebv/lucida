@@ -72,8 +72,21 @@ export interface AtlasState {
   totalSlots: number;
   /** Shared slot pool dimensions (same chunk dims for all entities in this pool). */
   chunkX: number; chunkY: number; chunkZ: number;
-  /** The texture's slot grid now. Only `slotsZ` changes, as the pool grows or shrinks. */
+  /**
+   * The texture's slot grid: `slotsX` by `slotsY` slots a layer, `slotsZ`
+   * layers. Slot `i` lies at column `i % slotsX` and row
+   * `floor(i / slotsX) % slotsY` of layer `floor(i / (slotsX * slotsY))`.
+   * Neither `slotsX` nor `slotsY` changes, so a slot keeps its place as the
+   * pool grows or shrinks.
+   */
   slotsX: number; slotsY: number; slotsZ: number;
+  /**
+   * The rows of slots the first layer holds now: all `slotsY` of them once
+   * the pool is more than one layer deep. A pool starts one row deep, so a
+   * view that wants a few chunks, such as a slice view's tilted cut, holds
+   * rows for those alone.
+   */
+  rowsY: number;
   /** The layers the pool's cap allows, which it grows toward while the GPU total has room. */
   maxSlotsZ: number;
   /** The channel every slot holds, which the pool key names. */
@@ -613,11 +626,11 @@ export function destroyAllLabelVolumePools(ctx: WorkerCtx): void {
 function createAtlasTexture(
   device: GPUDevice,
   chunkX: number, chunkY: number, chunkZ: number,
-  slotsX: number, slotsY: number, slotsZ: number,
+  slotsX: number, rowsY: number, slotsZ: number,
   format: SampleFormat,
 ): GPUTexture {
   return device.createTexture({
-    size: [slotsX * chunkX, slotsY * chunkY, slotsZ * chunkZ],
+    size: [slotsX * chunkX, rowsY * chunkY, slotsZ * chunkZ],
     format: atlasTextureFormat(format),
     dimension: "3d",
     usage: chunkPoolUsage(),
@@ -625,10 +638,11 @@ function createAtlasTexture(
 }
 
 /**
- * Create a shared atlas pool one layer of slots deep. It grows toward the
- * grid its cap allows only as chunks fill it and the GPU total has room, so a
- * small volume never holds more than it needs. Each view that draws from it
- * adds its indirection.
+ * Create a shared atlas pool one row of slots deep. It grows toward the grid
+ * its cap allows only as chunks fill it and the GPU total has room, so a
+ * small volume, or a view that wants a few of a large one's chunks, never
+ * holds more than it needs. Each view that draws from it adds its
+ * indirection.
  */
 function createVolumeAtlas(
   device: GPUDevice,
@@ -648,10 +662,11 @@ function createVolumeAtlas(
   );
   const { slotsX, slotsY } = geom;
   const maxSlotsZ = geom.slotsZ!;
-  const slotsZ = Math.min(1, maxSlotsZ);
-  const totalSlots = slotsX * slotsY * slotsZ;
+  const slotsZ = 1;
+  const rowsY = 1;
+  const totalSlots = slotsX * rowsY * slotsZ;
 
-  const texture = createAtlasTexture(device, chunkX, chunkY, chunkZ, slotsX, slotsY, slotsZ, format);
+  const texture = createAtlasTexture(device, chunkX, chunkY, chunkZ, slotsX, rowsY, slotsZ, format);
 
   const freeSlots: number[] = [];
   for (let i = totalSlots - 1; i >= 0; i--) freeSlots.push(i);
@@ -661,49 +676,66 @@ function createVolumeAtlas(
     texture, format,
     slots: new Map(), views: new Map(), freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
-    slotsX, slotsY, slotsZ,
+    slotsX, slotsY, slotsZ, rowsY,
     maxSlotsZ,
     c,
   };
 }
 
-/** The bytes a volume pool's texture and every view's indirection over it hold now. */
-export function volumeAtlasBytes(atlas: AtlasState): number {
-  return volumeLayerBytes(atlas) * atlas.slotsZ + viewIndirectionBytes(atlas);
-}
-
-/** The bytes one layer of a volume pool's slots holds: the step it grows and shrinks by. */
-export function volumeLayerBytes(atlas: AtlasState): number {
-  return atlas.slotsX * atlas.chunkX * atlas.slotsY * atlas.chunkY * atlas.chunkZ * bytesPerTexel(atlas.format);
+/** The rows of slots a pool holds now, every layer past the first counting `slotsY`. */
+export function volumeRows(atlas: AtlasState): number {
+  return atlas.rowsY + (atlas.slotsZ - 1) * atlas.slotsY;
 }
 
 /**
- * Grow a full pool to `slotsZ` layers, by default double its layers, up to
- * its cap's. False when it is already there, so the caller evicts instead.
- * The caller has checked the GPU total.
+ * The extent a pool takes to hold `rows` rows: within the first layer, those
+ * rows of it; past it, whole layers, since every layer of a texture is as
+ * tall as the first.
+ */
+export function volumeExtentFor(atlas: AtlasState, rows: number): { rowsY: number; slotsZ: number } {
+  const wanted = Math.max(1, Math.ceil(rows));
+  if (wanted <= atlas.slotsY) return { rowsY: wanted, slotsZ: 1 };
+  return { rowsY: atlas.slotsY, slotsZ: Math.min(atlas.maxSlotsZ, Math.ceil(wanted / atlas.slotsY)) };
+}
+
+/** The bytes a volume pool's texture and every view's indirection over it hold now. */
+export function volumeAtlasBytes(atlas: AtlasState): number {
+  return volumeRowBytes(atlas) * volumeRows(atlas) + viewIndirectionBytes(atlas);
+}
+
+/** The bytes one row of a volume pool's slots holds: the step it grows and shrinks by in its first layer. */
+export function volumeRowBytes(atlas: AtlasState): number {
+  return atlas.slotsX * atlas.chunkX * atlas.chunkY * atlas.chunkZ * bytesPerTexel(atlas.format);
+}
+
+/** The bytes one layer of a volume pool's slots holds: the step it grows and shrinks by past its first layer. */
+export function volumeLayerBytes(atlas: AtlasState): number {
+  return volumeRowBytes(atlas) * atlas.slotsY;
+}
+
+/**
+ * Grow a full pool to hold `toRows` rows, up to its cap's layers. False when
+ * it already holds them, so the caller evicts instead. The caller has
+ * checked the GPU total.
  *
  * A slot's position depends on `slotsX` and `slotsY` alone, which never
  * change, so every resident slot keeps its texels and its index. Growing is
- * one copy of the old texture into the new one's front layers, and the
- * indirection, which holds slot indices, stays valid.
+ * one copy of the old texture into the new one's front, and the indirection,
+ * which holds slot indices, stays valid.
  */
-export function growVolumeAtlas(
-  device: GPUDevice,
-  atlas: AtlasState,
-  toSlotsZ: number = atlas.slotsZ * 2,
-): boolean {
-  const slotsZ = Math.min(atlas.maxSlotsZ, toSlotsZ);
-  if (slotsZ <= atlas.slotsZ) return false;
-  const totalSlots = atlas.slotsX * atlas.slotsY * slotsZ;
+export function growVolumeAtlas(device: GPUDevice, atlas: AtlasState, toRows: number): boolean {
+  const { rowsY, slotsZ } = volumeExtentFor(atlas, toRows);
+  if (rowsY + (slotsZ - 1) * atlas.slotsY <= volumeRows(atlas)) return false;
+  const totalSlots = atlas.slotsX * rowsY * slotsZ;
 
   const texture = createAtlasTexture(
-    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, atlas.slotsY, slotsZ, atlas.format,
+    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, rowsY, slotsZ, atlas.format,
   );
   const encoder = device.createCommandEncoder();
   encoder.copyTextureToTexture(
     { texture: atlas.texture },
     { texture },
-    [atlas.slotsX * atlas.chunkX, atlas.slotsY * atlas.chunkY, atlas.slotsZ * atlas.chunkZ],
+    [atlas.slotsX * atlas.chunkX, atlas.rowsY * atlas.chunkY, atlas.slotsZ * atlas.chunkZ],
   );
   device.queue.submit([encoder.finish()]);
   // Destruction waits for the copy just submitted.
@@ -712,35 +744,38 @@ export function growVolumeAtlas(
 
   growViewSlots(atlas, totalSlots);
   for (let i = totalSlots - 1; i >= atlas.totalSlots; i--) atlas.freeSlots.push(i);
+  atlas.rowsY = rowsY;
   atlas.slotsZ = slotsZ;
   atlas.totalSlots = totalSlots;
   return true;
 }
 
 /**
- * Shrink a pool to `slotsZ` layers, giving their bytes back to the GPU total.
- * It keeps the first chunks of `keep` that fit, moving any that lay in a
- * dropped layer into a slot that stays, and returns the composite keys it no
- * longer holds, for the caller to report lost.
+ * Shrink a pool to hold `toRows` rows, giving their bytes back to the GPU
+ * total. It keeps the first chunks of `keep` that fit, moving any that lay
+ * in a dropped row or layer into a slot that stays, and returns the
+ * composite keys it no longer holds, for the caller to report lost.
  */
 export function shrinkVolumeAtlas(
   device: GPUDevice,
   atlas: AtlasState,
-  slotsZ: number,
+  toRows: number,
   keep: Iterable<string>,
 ): string[] {
-  if (slotsZ >= atlas.slotsZ || slotsZ < 1) return [];
+  const { rowsY, slotsZ } = volumeExtentFor(atlas, toRows);
+  if (rowsY + (slotsZ - 1) * atlas.slotsY >= volumeRows(atlas)) return [];
   const layer = atlas.slotsX * atlas.slotsY;
-  const plan = planCompaction(atlas.slots, layer * slotsZ, keep);
+  const totalSlots = atlas.slotsX * rowsY * slotsZ;
+  const plan = planCompaction(atlas.slots, totalSlots, keep);
 
   const texture = createAtlasTexture(
-    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, atlas.slotsY, slotsZ, atlas.format,
+    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, rowsY, slotsZ, atlas.format,
   );
   const encoder = device.createCommandEncoder();
   encoder.copyTextureToTexture(
     { texture: atlas.texture },
     { texture },
-    [atlas.slotsX * atlas.chunkX, atlas.slotsY * atlas.chunkY, slotsZ * atlas.chunkZ],
+    [atlas.slotsX * atlas.chunkX, Math.min(atlas.rowsY, rowsY) * atlas.chunkY, slotsZ * atlas.chunkZ],
   );
   const origin = (slot: number) => ({
     x: (slot % atlas.slotsX) * atlas.chunkX,
@@ -759,11 +794,12 @@ export function shrinkVolumeAtlas(
   atlas.texture.destroy();
   atlas.texture = texture;
 
-  compactViewSlots(atlas, atlas.slots, plan, layer * slotsZ);
+  compactViewSlots(atlas, atlas.slots, plan, totalSlots);
   atlas.slots = plan.slots;
   atlas.freeSlots = plan.freeSlots;
+  atlas.rowsY = rowsY;
   atlas.slotsZ = slotsZ;
-  atlas.totalSlots = layer * slotsZ;
+  atlas.totalSlots = totalSlots;
   return plan.dropped;
 }
 
@@ -824,20 +860,24 @@ export function growVolumeAtlasWatched(
   ctx: WorkerCtx,
   poolKey: string,
   atlas: AtlasState,
-  toSlotsZ?: number,
+  toRows: number,
 ): boolean {
   return allocateWatched(
     ctx,
-    () => growVolumeAtlas(ctx.device, atlas, toSlotsZ),
+    () => growVolumeAtlas(ctx.device, atlas, toRows),
     () => replaceLostVolumeAtlas(ctx, poolKey, atlas),
   );
 }
 
 /**
- * Grow a full pool as far as the GPU total has room for, toward the layers
- * that hold every chunk the planner wants, or double its layers if that is
- * more. With `reclaim`, grow by one layer even when the total has none, if
- * other pools can give it back from chunks the planner doesn't want.
+ * Grow a full pool as far as the GPU total has room for, toward what holds
+ * every chunk the planner wants, in one copy. While those chunks and a row
+ * more fit its first layer, it grows to them: the extra row is room for a
+ * step of a slice view's tilted cut without trading its bricks away. Past
+ * that it grows whole layers, the wanted ones or double its own if that is
+ * more, so a volume view that keeps asking for more grows in few copies.
+ * With `reclaim`, grow by one step even when the total has none, if other
+ * pools can give it back from chunks the planner doesn't want.
  */
 export function growVolumePoolWithin(
   ctx: WorkerCtx,
@@ -845,16 +885,25 @@ export function growVolumePoolWithin(
   atlas: AtlasState,
   reclaim: boolean,
 ): boolean {
-  const wantedLayers = Math.ceil(wantedSlotsOf(poolKey, atlas) / (atlas.slotsX * atlas.slotsY));
-  const maxSteps = Math.min(atlas.maxSlotsZ, Math.max(atlas.slotsZ * 2, wantedLayers)) - atlas.slotsZ;
-  const steps = grantGrowth(ctx, atlas, volumeLayerBytes(atlas), maxSteps, reclaim);
-  return steps > 0 && growVolumeAtlasWatched(ctx, poolKey, atlas, atlas.slotsZ + steps);
+  const wantedRows = Math.ceil(wantedSlotsOf(poolKey, atlas) / atlas.slotsX);
+  const rows = volumeRows(atlas);
+  const inFirstLayer = rows < atlas.slotsY;
+  const targetRows = inFirstLayer && wantedRows < atlas.slotsY
+    ? Math.max(rows + 1, wantedRows + 1)
+    : atlas.slotsY * Math.min(atlas.maxSlotsZ, Math.max(atlas.slotsZ * 2, Math.ceil(wantedRows / atlas.slotsY)));
+  // A first layer's grant comes in rows, and past that layer the texture
+  // takes whole layers, so rows granted past it round down to them.
+  const stepRows = inFirstLayer ? 1 : atlas.slotsY;
+  const maxSteps = Math.max(0, Math.floor((targetRows - rows) / stepRows));
+  const granted = rows + grantGrowth(ctx, atlas, volumeRowBytes(atlas) * stepRows, maxSteps, reclaim) * stepRows;
+  const toRows = granted <= atlas.slotsY ? granted : atlas.slotsY * Math.floor(granted / atlas.slotsY);
+  return toRows > rows && growVolumeAtlasWatched(ctx, poolKey, atlas, toRows);
 }
 
 /**
  * A pool whose texture the device could not allocate holds nothing and can't
  * be bound. Its chunks go back to the page, the GPU total halves, and a pool
- * with the same sections takes its place one layer deep. At the floor total
+ * with the same sections takes its place one row deep. At the floor total
  * the pool is dropped, and the next cold state tries again.
  */
 export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: AtlasState): void {
