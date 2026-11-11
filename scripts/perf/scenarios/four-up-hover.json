@@ -1,0 +1,10 @@
+{
+  "description": "four-up, then move the pointer across the XY view for 3 s at a person's pace, so a crosshair and a readout follow it in the YZ and XZ views and the volume; to set against hover in one view",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "views", "layout": "four_up" },
+    { "kind": "target", "view": 0 },
+    { "kind": "hover", "dx": -300, "dy": -150, "durationMs": 3000 }
+  ]
+}

@@ -370,6 +370,20 @@ describe("TraceRecorder gesture rule", () => {
     }
   });
 
+  it("keeps hovers to runs of their own: a gesture ends one, and a gesture's run takes none", () => {
+    const { recorder } = makeRecorder();
+    recorder.noteInput("hover");
+    recorder.noteInput("hover");
+    recorder.noteInput("pan");
+    recorder.noteInput("hover");
+    recorder.closeRun("explicit");
+
+    const runs = recorder.exportDocument().runs;
+    expect(runs.map((run) => run.header.cause?.source)).toEqual(["hover", "pan"]);
+    expect(runs.map((run) => run.header.endReason)).toEqual(["run-opened", "explicit"]);
+    expect(runs.map((run) => run.lag?.inputs.map((input) => input.kind))).toEqual([["hover", "hover"], ["pan"]]);
+  });
+
   it("extends an open dataset-open run rather than opening a second one", () => {
     vi.useFakeTimers();
     try {

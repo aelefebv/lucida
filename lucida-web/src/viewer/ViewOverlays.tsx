@@ -1,8 +1,10 @@
 /**
- * What lies over each view's rectangle beside its pane: a comparison's swipe
- * divider across it, and one column at its top holding the compare bar and,
- * below it, the notices that the view covers less than it asks for and of
- * where a link took it past its data. The column keeps them from covering
+ * What lies over each view's rectangle beside its pane: four-up's plane
+ * lines, the crosshair of the point under the pointer in another view, a
+ * comparison's swipe divider across it, and one column at its top holding
+ * the compare bar and, below it, the notices that the view covers less than
+ * it asks for, of where a link took it past its data, and that the point
+ * under the pointer is outside its data. The column keeps them from covering
  * each other, and the bar comes first so a notice coming or going never moves
  * it under the pointer.
  *
@@ -18,6 +20,8 @@ import { ComparisonBar, SwipeDivider } from "../components/Comparison.tsx";
 import type { SceneStore, ViewPane } from "../sceneStore.ts";
 import type { ViewLinkNotices } from "../viewLinks.ts";
 import { CoverageNotice, type Coverage } from "./CoverageNotice.tsx";
+import { Crosshair, CrosshairOutside } from "./Crosshair.tsx";
+import type { Hover } from "./hover.ts";
 import { LinkNotices } from "./LinkNotices.tsx";
 import { PlaneLines } from "./PlaneLines.tsx";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
@@ -38,9 +42,11 @@ interface Props {
   linkNotices?: readonly ViewLinkNotices[];
   /** Move `axis`'s plane to `fraction` of the way across `view`, as dragging its line does. */
   dragPlane?: (view: number, axis: SpatialAxis, fraction: number) => void;
+  /** The crosshairs the point under the pointer puts in the other views. */
+  hover?: Pick<Hover, "subscribe" | "markOf">;
 }
 
-export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane }: Props) {
+export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane, hover }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
     <div className="lc-view-overlays">
@@ -65,6 +71,7 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
               lines={pane.lines}
               onDrag={dragPlane && pane.cameraMode === "slice" ? (axis, fraction) => dragPlane(pane.id, axis, fraction) : undefined}
             />
+            {hover && <Crosshair hover={hover} view={pane.id} />}
             {/* Before the column, so the bar covers the line where they cross. */}
             {comparison && <SwipeDivider comparison={comparison} actions={actions} nameOf={nameOf} />}
             <div className="lc-view-overlay-top">
@@ -82,6 +89,7 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
               )}
               <CoverageNotice coverage={coverageOf(pane.id)} />
               <LinkNotices notices={linkNotices?.find((shown) => shown.view === pane.id)?.notices ?? []} />
+              {hover && <CrosshairOutside hover={hover} view={pane.id} />}
             </div>
           </div>
         );
