@@ -31,6 +31,7 @@ import { drawOf } from "../../renderer/worker/draws.ts";
 import type { ViewIndirection } from "../../renderer/viewIndirection.ts";
 import { LABEL_TIER } from "../../renderer/chunkUploadFeedback.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
+import { toPlaneFrame } from "../../renderer/slicePlane.ts";
 
 /** Messages that only draw, capture or style, so the simulation answers them without a handler. */
 const DRAW_ONLY = new Set<MainToWorkerMessage["type"]>([
@@ -282,11 +283,13 @@ export class SimulatedWorker {
     for (const pool of this.ctx.state.labelSlicePools.values()) {
       const memberId = pool.memberId;
       const drawn = this.drawnLabelChunks.get(memberId);
-      if (!drawn || pool.t !== drawn.t || pool.plane !== drawn.plane) continue;
+      if (!drawn || pool.t !== drawn.t || pool.plane !== drawn.plane || pool.axis !== (drawn.axis ?? "z")) continue;
       for (const [cell, plane] of pool.planes) {
         const key = pool.keys.get(cell);
-        const [level, t, , z] = (key ?? "").split("/").map(Number);
-        if (plane === drawn.plane && level === drawn.level && t === drawn.t && z === drawn.z) continue;
+        const [level, t, , z, y, x] = (key ?? "").split("/").map(Number);
+        // The chunk along the pool's cut, as the frame names it.
+        const along = toPlaneFrame([x, y, z], pool.axis)[2];
+        if (plane === drawn.plane && level === drawn.level && t === drawn.t && along === drawn.z) continue;
         const at = `${cell % 0x10000},${Math.floor(cell / 0x10000)}`;
         const holds = key === undefined ? "a chunk it handed back" : `chunk ${key}`;
         out.push(`${memberId} cell ${at}: plane ${plane} of ${holds}, where the frame draws plane ${drawn.plane}`);

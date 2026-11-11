@@ -564,6 +564,40 @@ describe("label pools live as long as a view draws their form", () => {
   });
 });
 
+describe("label pools of side views", () => {
+  /** Plane `plane` of the label along Y, as an XZ view cuts it. */
+  function labelSide(plane: number): LabelSliceChunkDataMessage {
+    return { ...labelPlane(plane), levelWidth: 64, levelHeight: 32, chunkX: 32, chunkY: 32, sliceAxis: "y" };
+  }
+
+  it("keeps a pool for each axis views cut a label along, and re-cuts each only along its own", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    const side = (plane: number) => cold("ds1", {
+      viewMode: "slice", view: 1, drawnViews: [0, 1], sliceAxis: "y", labels: [{ memberId: "label", t: 0, plane, axis: "y" }],
+    });
+    await dispatchMessage(ctx, sliceWithLabel(0, 1, [0, 1]));
+    await dispatchMessage(ctx, side(5));
+    await dispatchMessage(ctx, labelPlane(1));
+    await dispatchMessage(ctx, labelSide(5));
+    const xy = ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 1))!;
+    const xz = ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 5, "y"))!;
+    expect([xy.axis, xz.axis]).toEqual(["z", "y"]);
+    posts.length = 0;
+
+    // The side view moves along Y, and the XY view to a plane no pool holds.
+    await dispatchMessage(ctx, side(6));
+    await dispatchMessage(ctx, sliceWithLabel(0, 2, [0, 1]));
+
+    expect(ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 6, "y"))).toBe(xz);
+    expect(ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 2))).toBe(xy);
+    expect(residency(posts)).toEqual([
+      expect.objectContaining({ change: "lost", reason: "replaced", cut: { axis: "y", plane: 5 } }),
+      expect.objectContaining({ change: "lost", reason: "replaced", cut: { axis: "z", plane: 1 } }),
+    ]);
+  });
+});
+
 describe("the GPU memory report", () => {
   it("counts every holder's bytes from its own geometry, and the chunk slots held", () => {
     const state = createInitialState(256 * 1024 * 1024);

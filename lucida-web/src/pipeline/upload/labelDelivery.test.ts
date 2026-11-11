@@ -102,7 +102,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
   it("extracts only the current Z-plane and lands it in the pool with ids intact", () => {
     // 1. Fetch plan the tickCoordinator merges (source Z=1 in view). Masks are
     //    opt-in, so the single label is turned on explicitly.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 1, labelSettings: [{ visible: true, opacity: 0.5 }] });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 1 }, labelSettings: [{ visible: true, opacity: 0.5 }] });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
     expect(req.imageId).toBe("img-0:label:region-b");
@@ -237,17 +237,47 @@ describe("label chunk flow: planes of a deeper chunk", () => {
 
   it("asks for the plane drawn and a band around it", () => {
     const [req] = computeLabelChunkRequests({
-      datasetId: "ds-0", manifest: deepManifest, t: 0, z: 4, labelSettings: [{ visible: true, opacity: 0.5 }],
+      datasetId: "ds-0", manifest: deepManifest, t: 0, cut: { axis: "z", index: 4 }, labelSettings: [{ visible: true, opacity: 0.5 }],
     });
     expect(req).toMatchObject({ z: 0, plane: 4, planes: [2, 7], cut: { axis: "z", plane: 4 } });
   });
 
-  it("names the form a view draws the label in: its plane and chunk-T on an XY cut, its chunk-T in 3D", () => {
-    const args = { datasetId: "ds-0", manifest: deepManifest, t: 0, z: 4, labelSettings: [{ visible: true, opacity: 0.5 }] };
+  it("names the form a view draws the label in: its plane, axis and chunk-T in a slice view, its chunk-T in 3D", () => {
+    const args = {
+      datasetId: "ds-0", manifest: deepManifest, t: 0, cut: { axis: "z" as const, index: 4 },
+      labelSettings: [{ visible: true, opacity: 0.5 }],
+    };
     expect(labelFormsFor(args)).toEqual([{ memberId: "img-0:label:deep", t: 0, plane: 4 }]);
     expect(labelFormsFor({ ...args, mode: "volume" })).toEqual([{ memberId: "img-0:label:deep", t: 0 }]);
-    // A side view draws no label.
-    expect(labelFormsFor({ ...args, cutAxis: "y" })).toEqual([]);
+    expect(labelFormsFor({ ...args, cut: { axis: "y", index: 1 } })).toEqual([
+      { memberId: "img-0:label:deep", t: 0, plane: 1, axis: "y" },
+    ]);
+  });
+
+  it("asks a side view's chunks for the plane it cuts along its axis", () => {
+    const [req] = computeLabelChunkRequests({
+      datasetId: "ds-0", manifest: deepManifest, t: 0, cut: { axis: "x", index: 1 },
+      labelSettings: [{ visible: true, opacity: 0.5 }],
+    });
+    // Two samples along X, so the band would be the whole chunk: it comes whole.
+    expect(req).toMatchObject({ z: 0, y: 0, x: 0, cut: { axis: "x", plane: 1 } });
+    expect(req.planes).toBeUndefined();
+  });
+
+  it("cuts a side view's plane out of a whole chunk, across and down the plane drawn", () => {
+    const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
+    // Each id its own index in the chunk: z * 4 + y * 2 + x.
+    const whole: ReadyChunkDelivery = { ...band(), data: new Uint32Array(32).map((_, i) => i).buffer, planes: undefined };
+    expect(dispatchLabelChunkDelivery(client, whole, meta, { axis: "y", plane: 1 }, EPOCHS)).toEqual({
+      memberId: "img-0:label:deep",
+      bytes: 64,
+    });
+    const [, , chunks, , , , levelW, levelH, chunkW, chunkH, plane, , axis] = vi.mocked(client.labelSliceChunkData).mock.calls[0];
+    // X across, Z down, at Y 1.
+    expect([levelW, levelH, chunkW, chunkH, plane, axis]).toEqual([2, 8, 2, 8, 1, "y"]);
+    expect(Array.from(new Uint32Array(chunks[0].data))).toEqual(
+      Array.from({ length: 16 }, (_, i) => Math.floor(i / 2) * 4 + 2 + (i % 2)),
+    );
   });
 
   it("cuts the plane drawn out of a delivery of some planes, at its offset among them", () => {
@@ -277,7 +307,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
   it("forwards the WHOLE 3D chunk (no plane extraction) and lands it with ids intact", () => {
     // 1. Volume-mode fetch plan: the 2x2x2 label is a single chunk. Masks are
     //    opt-in, so the single label is turned on explicitly.
-    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, z: 0, mode: "volume", labelSettings: [{ visible: true, opacity: 0.5 }] });
+    const reqs = computeLabelChunkRequests({ datasetId: "ds-0", manifest, t: 0, cut: { axis: "z", index: 0 }, mode: "volume", labelSettings: [{ visible: true, opacity: 0.5 }] });
     expect(reqs).toHaveLength(1);
     const req = reqs[0];
     expect(req.imageId).toBe("img-0:label:region-b");
