@@ -96,10 +96,12 @@ function makeMockCtx(): { ctx: WorkerCtx; posts: WorkerToMainMessage[] } {
 /** Add chunks to the wanted set of the member's dataset, as a cold state from the planner would. */
 function want(ctx: WorkerCtx, memberId: string, keys: string[], tier: ResidencyTier = "detail"): void {
   ctx.state.memberToDataset.set(memberId, "ds1");
-  const index = new Map(ctx.state.wantedByDataset.get("ds1") ?? []);
-  const entry = wantedEntryKey(tier, memberId);
-  index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
-  ctx.state.wantedByDataset.set("ds1", index);
+  for (const key of ["ds1|slice", "ds1|volume"]) {
+    const index = new Map(ctx.state.wantedByDatasetMode.get(key) ?? []);
+    const entry = wantedEntryKey(tier, memberId);
+    index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
+    ctx.state.wantedByDatasetMode.set(key, index);
+  }
 }
 
 /** The residency reports posted, optionally of one kind. */
@@ -391,7 +393,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
 
     expect(atlas.slots.has(`imgA|${chunk.key}`)).toBe(true);
     expect(reports(posts)).toEqual([
-      { type: "chunkResidency", memberId: "imgA", tier: "detail", change: "held", keys: [chunk.key], reason: undefined },
+      { type: "chunkResidency", memberId: "imgA", viewMode: "volume", tier: "detail", change: "held", keys: [chunk.key], reason: undefined },
     ]);
   });
 
@@ -514,7 +516,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [nearOld, farWanted]), epochs(), "ds1", "imgA");
 
     // A new plan wants the far chunk and the incoming one, not the near one.
-    ctx.state.wantedByDataset.delete("ds1");
+    ctx.state.wantedByDatasetMode.clear();
     want(ctx, "imgA", [farWanted.key, incoming.key]);
     posts.length = 0;
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming]), epochs(), "ds1", "imgA");
@@ -597,7 +599,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
     atlas.entityMetas.set("imgA", [level0, level1]);
     atlas.indirectionData = new Uint32Array(2 * 4 * 4 + 2 * 2).fill(0xFFFFFFFF);
     atlas.freeSlots = [2, 1, 0];
-    ctx.state.targetLevelByMember.set("imgA", 0);
+    ctx.state.targetLevelByMember.volume.set("imgA", 0);
     applyViewHotState(ctx, { type: "viewHotState", epochs: epochs(), datasetId: "ds1", rayHitsByEntity: [["imgA", [0, 0, 0]]] });
     const level1Msg = (chunks: Chunk[], t = 0) =>
       makeVolumeMsg("imgA", chunks, { level: 1, t, levelWidth: 64, levelHeight: 64, levelDepth: 32 });
@@ -619,7 +621,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
     atlas.entityMetas.set("imgA", [{ ...level1, offset: 0 }]);
     atlas.indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
     remapIndirection(atlas, 0, 0);
-    ctx.state.targetLevelByMember.set("imgA", 1);
+    ctx.state.targetLevelByMember.volume.set("imgA", 1);
     expect(atlas.slotGridIdx[atlas.slots.get(`imgA|${finer.key}`)!]).toBe(-1);
 
     posts.length = 0;
@@ -772,7 +774,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     atlas.entityMetas.set("imgA", [level0, level1]);
     atlas.indirectionData = new Uint32Array(4 * 4 + 2 * 2).fill(0xFFFFFFFF);
     atlas.freeSlots = [2, 1, 0];
-    ctx.state.targetLevelByMember.set("imgA", 0);
+    ctx.state.targetLevelByMember.slice.set("imgA", 0);
     ctx.state.cameraUVPerEntity.set("imgA", [0.0, 0.0]);
     const level1Msg = (chunks: Chunk[], t = 0) =>
       makeSliceMsg("imgA", chunks, { level: 1, t, levelWidth: 64, levelHeight: 64 });
@@ -790,7 +792,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     atlas.entityMetas.set("imgA", [{ ...level1, offset: 0 }]);
     atlas.indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
     remapSliceIndirection(atlas, 0, 0, 0);
-    ctx.state.targetLevelByMember.set("imgA", 1);
+    ctx.state.targetLevelByMember.slice.set("imgA", 1);
     expect(atlas.slotGridIdx[atlas.slots.get(`imgA|${finer.key}`)!]).toBe(-1);
 
     posts.length = 0;

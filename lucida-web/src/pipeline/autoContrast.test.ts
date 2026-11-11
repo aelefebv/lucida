@@ -188,6 +188,7 @@ function request(lane: ChunkRequest["lane"], lvl: number, c: number, y: number, 
     x,
     lane,
     tier: lane === "coarse" || lane === "minimap" ? "coarse" : "detail",
+    mode: "slice",
     priority: 0,
     chunkKey: `${lvl}/0/${c}/0/${y}/${x}`,
   };

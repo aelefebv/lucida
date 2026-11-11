@@ -28,9 +28,9 @@ describe("WorkerFeedback residency reconciliation", () => {
     const feedback = new WorkerFeedback();
     const cpuCache = makeCpuCache();
 
-    expect(feedback.handleWantedSetDelta("ds-0", [missingChunk], cpuCache)).toBe(false);
+    expect(feedback.handleWantedSetDelta("ds-0", "slice", [missingChunk], cpuCache)).toBe(false);
 
-    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "detail");
+    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "slice", "detail");
   });
 
   it("names a missing chunk the mirror held to the guard, with no reason the worker gave", () => {
@@ -38,8 +38,8 @@ describe("WorkerFeedback residency reconciliation", () => {
     const noteMissing = vi.spyOn(guard, "noteMissing");
     const feedback = new WorkerFeedback(guard);
 
-    expect(feedback.handleWantedSetDelta("ds-0", [missingChunk], makeCpuCache(true))).toBe(true);
-    expect(noteMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0");
+    expect(feedback.handleWantedSetDelta("ds-0", "slice", [missingChunk], makeCpuCache(true))).toBe(true);
+    expect(noteMissing).toHaveBeenCalledWith("img-0", 2, "slice", "0/0/2/0/0/0");
   });
 
   it("tells the guard why each refused or lost chunk came back", () => {
@@ -48,13 +48,13 @@ describe("WorkerFeedback residency reconciliation", () => {
     const feedback = new WorkerFeedback(guard);
     const cpuCache = makeCpuCache();
 
-    feedback.handleChunkResidency("img-0", "detail", "refused", ["a"], cpuCache, "unwanted");
-    feedback.handleChunkResidency("img-0", "detail", "lost", ["b"], cpuCache, "evicted");
-    feedback.handleChunkResidency("img-0", "detail", "held", ["c"], cpuCache);
+    feedback.handleChunkResidency("img-0", "slice", "detail", "refused", ["a"], cpuCache, "unwanted");
+    feedback.handleChunkResidency("img-0", "slice", "detail", "lost", ["b"], cpuCache, "evicted");
+    feedback.handleChunkResidency("img-0", "slice", "detail", "held", ["c"], cpuCache);
 
     expect(noteReturned.mock.calls).toEqual([
-      ["img-0", 0, "a", "unwanted"],
-      ["img-0", 0, "b", "evicted"],
+      ["img-0", 0, "slice", "a", "unwanted"],
+      ["img-0", 0, "slice", "b", "evicted"],
     ]);
   });
 });

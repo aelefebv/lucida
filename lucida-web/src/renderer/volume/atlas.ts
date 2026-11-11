@@ -560,7 +560,7 @@ export function destroyLabelVolumePool(pool: LabelVolumePool): void {
 export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string, reason: ChunkFeedbackReason): void {
   const pool = ctx.state.labelVolumePools.get(memberId);
   if (pool) {
-    postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
+    postChunkResidency(ctx, memberId, "volume", LABEL_TIER, "lost", [...pool.keys.values()], reason);
     destroyLabelVolumePool(pool);
     ctx.state.labelVolumePools.delete(memberId);
   }
@@ -580,7 +580,7 @@ export function removeLabelVolumePoolsForDataset(
 ): void {
   for (const [memberId, pool] of ctx.state.labelVolumePools) {
     if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
-      if (reason) postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
+      if (reason) postChunkResidency(ctx, memberId, "volume", LABEL_TIER, "lost", [...pool.keys.values()], reason);
       destroyLabelVolumePool(pool);
       ctx.state.labelVolumePools.delete(memberId);
     }
@@ -846,7 +846,7 @@ export function growVolumePoolWithin(
   atlas: AtlasState,
   reclaim: boolean,
 ): boolean {
-  const wantedLayers = Math.ceil(wantedSlotsOf(ctx.state, poolKey, atlas) / (atlas.slotsX * atlas.slotsY));
+  const wantedLayers = Math.ceil(wantedSlotsOf(ctx.state, "volume", poolKey, atlas) / (atlas.slotsX * atlas.slotsY));
   const maxSteps = Math.min(atlas.maxSlotsZ, Math.max(atlas.slotsZ * 2, wantedLayers)) - atlas.slotsZ;
   const steps = grantGrowth(ctx, atlas, volumeLayerBytes(atlas), maxSteps, reclaim);
   return steps > 0 && growVolumeAtlasWatched(ctx, poolKey, atlas, atlas.slotsZ + steps);
@@ -861,7 +861,7 @@ export function growVolumePoolWithin(
 export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: AtlasState): void {
   const atlases = ctx.state.volumeAtlases;
   if (atlases.get(poolKey) !== lost) return;
-  postSlotsLost(ctx, chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
+  postSlotsLost(ctx, "volume", chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
   destroyAtlas(lost);
   atlases.delete(poolKey);
   if (handleGpuOutOfMemory(ctx)) {
@@ -874,7 +874,7 @@ export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: At
     atlas.indirectionDirty = true;
     atlases.set(poolKey, atlas);
   }
-  ctx.postWantedSet(lost.datasetId);
+  ctx.postWantedSet(lost.datasetId, "volume");
 }
 
 /** Resize the indirection buffer to the sum of all entity LOD sections. */

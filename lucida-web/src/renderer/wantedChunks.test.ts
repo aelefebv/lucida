@@ -4,18 +4,23 @@ import { createInitialState } from "./worker/state.ts";
 import { indexWantedChunks, patchWantedChunks, wantedChunksFor } from "./wantedChunks.ts";
 
 describe("the wanted-chunk index", () => {
-  it("looks a member's chunks up per tier, through the member's dataset", () => {
+  it("looks a member's chunks up per tier, through the cold state of its dataset's pools of one mode", () => {
     const state = createInitialState();
     state.memberToDataset.set("img", "ds");
-    state.wantedByDataset.set("ds", indexWantedChunks([
+    state.wantedByDatasetMode.set("ds|volume", indexWantedChunks([
       { memberId: "img", tier: "detail", chunkKeys: ["0/0/0/0/0/0"] },
       { memberId: "img", tier: "coarse", chunkKeys: ["2/0/0/0/0/0"] },
     ]));
+    state.wantedByDatasetMode.set("ds|slice", indexWantedChunks([
+      { memberId: "img", tier: "detail", chunkKeys: ["1/0/0/4/0/0"] },
+    ]));
 
-    expect(wantedChunksFor(state, "img", "detail")?.has("0/0/0/0/0/0")).toBe(true);
-    expect(wantedChunksFor(state, "img", "detail")?.has("2/0/0/0/0/0")).toBe(false);
-    expect(wantedChunksFor(state, "img", "coarse")?.has("2/0/0/0/0/0")).toBe(true);
-    expect(wantedChunksFor(state, "other", "detail")).toBeUndefined();
+    expect(wantedChunksFor(state, "volume", "img", "detail")?.has("0/0/0/0/0/0")).toBe(true);
+    expect(wantedChunksFor(state, "volume", "img", "detail")?.has("2/0/0/0/0/0")).toBe(false);
+    expect(wantedChunksFor(state, "volume", "img", "coarse")?.has("2/0/0/0/0/0")).toBe(true);
+    expect(wantedChunksFor(state, "slice", "img", "detail")?.has("1/0/0/4/0/0")).toBe(true);
+    expect(wantedChunksFor(state, "slice", "img", "detail")?.has("0/0/0/0/0/0")).toBe(false);
+    expect(wantedChunksFor(state, "volume", "other", "detail")).toBeUndefined();
   });
 
   it("patches a retained list: a replacement takes its entry's place, and an empty one drops it", () => {

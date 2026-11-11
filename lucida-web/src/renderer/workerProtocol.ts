@@ -611,6 +611,13 @@ export interface ColdStateDisplayState {
   labelOpacity?: number;
 }
 
+/**
+ * Which of a dataset's pools a message concerns: the slice pools its 2D views
+ * draw from, or the volume pools its 3D views draw from. A dataset holds both
+ * at once, each with a cold state of its own.
+ */
+export type PoolMode = "slice" | "volume";
+
 export interface ColdStateMessage {
   type: "coldState";
   epochs: SceneEpochs;
@@ -640,7 +647,13 @@ export interface ColdStateMessage {
    */
   wantedChunks: WantedMemberChunks[];
   activeSet: ColdStateActiveEntry[];
-  viewMode: "slice" | "volume";
+  /** The pools this cold state lays out, and the views that draw from them. */
+  viewMode: PoolMode;
+  /**
+   * The modes of every view that draws the dataset. The worker keeps the
+   * dataset's pools of these modes and frees the rest.
+   */
+  drawnModes: PoolMode[];
   /** How this dataset's atlases hold samples, and so how its descriptors read them. */
   sampleFormat: SampleFormat;
 }
@@ -678,6 +691,7 @@ export interface ViewHotStateMessage {
 export interface ColdStateDisplayMessage {
   type: "coldStateDisplay";
   datasetId: string;
+  viewMode: PoolMode;
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
 
@@ -691,6 +705,7 @@ export interface ColdStateDisplayMessage {
 export interface ColdStateSelectionMessage {
   type: "coldStateSelection";
   datasetId: string;
+  viewMode: PoolMode;
   currentT: number;
   currentZ: number;
   visibleRegion: VisibleRegion;
@@ -713,6 +728,9 @@ export interface ColdStateSelectionMessage {
 export interface ColdStateDeltaMessage {
   type: "coldStateDelta";
   datasetId: string;
+  viewMode: PoolMode;
+  /** See {@link ColdStateMessage.drawnModes}. */
+  drawnModes: PoolMode[];
   epochs: SceneEpochs;
   currentT: number;
   currentZ: number;
@@ -898,6 +916,8 @@ export interface ChunkResidencyMessage {
   type: "chunkResidency";
   /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
+  /** The pools the chunks went to: a chunk is held in each mode on its own. */
+  viewMode: PoolMode;
   tier: ResidencyTier;
   change: ChunkResidencyChange;
   keys: string[];
@@ -928,6 +948,8 @@ export type MissingChunk = {
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   datasetId: string;
+  /** The pools whose cold state named the wanted chunks. */
+  viewMode: PoolMode;
   epochs: SceneEpochs;
   missing: MissingChunk[];
 }
@@ -966,6 +988,7 @@ export interface EntityLevelReport {
 export interface EntityLevelsMessage {
   type: "entityLevels";
   datasetId: string;
+  viewMode: PoolMode;
   entities: EntityLevelReport[];
 }
 

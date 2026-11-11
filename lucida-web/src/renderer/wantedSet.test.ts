@@ -93,6 +93,7 @@ function makeColdState(
     wantedChunks: [],
     activeSet: [makeActiveEntry()],
     viewMode: "volume",
+    drawnModes: [overrides?.viewMode ?? "volume"],
     sampleFormat: "u16",
     ...overrides,
   };

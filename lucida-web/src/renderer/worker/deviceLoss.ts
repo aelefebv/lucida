@@ -91,8 +91,8 @@ export async function recoverDevice(
 
   // Told before the wanted sets, so the page forgets what it sent first.
   ctx.post({ type: "gpuDeviceRestored" });
-  for (const cold of state.coldStateByDataset.values()) applyColdState(ctx, cold);
-  for (const datasetId of state.coldStateByDataset.keys()) ctx.postWantedSet(datasetId);
+  for (const cold of state.coldStateByDatasetMode.values()) applyColdState(ctx, cold);
+  for (const cold of state.coldStateByDatasetMode.values()) ctx.postWantedSet(cold.datasetId, cold.viewMode);
   postGpuMemoryIfChanged(ctx);
 }
 

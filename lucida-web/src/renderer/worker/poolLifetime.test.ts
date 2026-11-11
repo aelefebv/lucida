@@ -150,6 +150,7 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
     })),
     activeSet: [tile(`${datasetId}-img`, 2)],
     viewMode: "volume",
+    drawnModes: [opts.viewMode ?? "volume"],
     sampleFormat: "u16",
     ...opts,
   };
@@ -258,7 +259,7 @@ describe("a cold state frees the pools it no longer routes to", () => {
     expect(ch0.slots.size).toBe(1);
     // The page hears what went with the freed pool, so it sends it again when the channel returns.
     expect(posts.filter((m) => m.type === "chunkResidency")).toEqual([
-      { type: "chunkResidency", memberId: "ds1-img:ch1", tier: "detail", change: "lost", keys: ["2/0/0/0/0/0"], reason: "freed" },
+      { type: "chunkResidency", memberId: "ds1-img:ch1", viewMode: "volume", tier: "detail", change: "lost", keys: ["2/0/0/0/0/0"], reason: "freed" },
     ]);
   });
 
@@ -278,6 +279,43 @@ describe("a cold state frees the pools it no longer routes to", () => {
     await dispatchMessage(ctx, cold("ds1"));
     expect(ctx.state.sliceAtlases.size).toBe(0);
     expect(sliceTextures.every((texture) => texture.destroyed)).toBe(true);
+  });
+
+  it("keeps a dataset's slice and volume pools while views of both modes draw it, and frees a mode's once none does", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    const both = ["slice", "volume"] as const;
+    await dispatchMessage(ctx, cold("ds1", { drawnModes: [...both] }));
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    await dispatchMessage(ctx, cold("ds1", { viewMode: "slice", drawnModes: [...both] }));
+    const volumePools = [...ctx.state.volumeAtlases.values()];
+    expect(volumePools.length).toBeGreaterThan(0);
+    expect(ctx.state.sliceAtlases.size).toBeGreaterThan(0);
+    expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!.slots.size).toBe(1);
+    // Each mode routes its own uploads and keeps its own cold state.
+    expect(ctx.state.memberSourcePools.volume.get("ds1-img:ch0")?.get("detail:2")).toBe("ds1:ch0:32x32x32:detail");
+    expect(ctx.state.memberSourcePools.slice.get("ds1-img:ch0")?.get("detail:2")).toBe("ds1:ch0:32x32:detail");
+    expect([...ctx.state.coldStateByDatasetMode.keys()].sort()).toEqual(["ds1|slice", "ds1|volume"]);
+
+    // Another volume cold state leaves the slice pools be.
+    const slicePools = [...ctx.state.sliceAtlases.values()];
+    await dispatchMessage(ctx, cold("ds1", { drawnModes: [...both] }));
+    expect([...ctx.state.sliceAtlases.values()]).toEqual(slicePools);
+    posts.length = 0;
+
+    // The volume view goes: its pools and what laid them out go too, and the
+    // page hears their chunks went.
+    await dispatchMessage(ctx, cold("ds1", { viewMode: "slice", drawnModes: ["slice"] }));
+    expect(ctx.state.volumeAtlases.size).toBe(0);
+    expect(volumePools.every((pool) => (pool.texture as unknown as MockTexture).destroyed)).toBe(true);
+    expect([...ctx.state.sliceAtlases.values()]).toEqual(slicePools);
+    expect([...ctx.state.coldStateByDatasetMode.keys()]).toEqual(["ds1|slice"]);
+    expect(ctx.state.memberSourcePools.volume.size).toBe(0);
+    expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
+      { type: "chunkResidency", memberId: "ds1-img:ch0", viewMode: "volume", tier: "detail", change: "lost", keys: ["2/0/0/0/0/0"], reason: "freed" },
+    );
+    // So does the level readout of the pools.
+    expect(posts).toContainEqual({ type: "entityLevels", datasetId: "ds1", viewMode: "volume", entities: [] });
   });
 
   it("frees a chunk shape that no resident level uses after a zoom", async () => {
@@ -320,7 +358,7 @@ describe("label pools live as long as the view mode that draws them", () => {
     });
     const labelTexture = ctx.state.labelSlicePools.get("label")!.texture as unknown as MockTexture;
     expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
-      { type: "chunkResidency", memberId: "label", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "label", viewMode: "slice", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
     );
     posts.length = 0;
 
@@ -329,7 +367,7 @@ describe("label pools live as long as the view mode that draws them", () => {
     expect(ctx.state.labelSlicePools.size).toBe(0);
     expect(labelTexture.destroyed).toBe(true);
     expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
-      { type: "chunkResidency", memberId: "label", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "freed" },
+      { type: "chunkResidency", memberId: "label", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "freed" },
     );
   });
 });

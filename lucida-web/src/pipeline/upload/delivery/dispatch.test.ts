@@ -93,6 +93,7 @@ function makeChunkDelivery(
     epochs: EPOCHS,
     lane: "detail",
     residencyTier: "detail",
+    mode: "slice",
     ...overrides,
   };
 }

@@ -24,6 +24,7 @@ export function resolvedLayer(
   return {
     dataset_id: datasetId,
     visible: true,
+    set_aside: false,
     opacity: 1,
     render_mode: "translucent",
     channel_count: Math.max(1, ...shown.map((c) => c.channel + 1)),

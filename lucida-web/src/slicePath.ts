@@ -9,6 +9,7 @@ import type { FrameScale, TickContext, TickView } from "./renderLoopTypes.ts";
 import { compositeKey } from "./tickCommon.ts";
 import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { MemberRosterEntry, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
+import { datasetModeKey } from "./renderer/poolKeys.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { comparisonClip } from "./comparison.ts";
 import type { PixelRect } from "./renderer/layerBatches.ts";
@@ -328,7 +329,7 @@ export function renderSliceView(
   frame: FrameScale,
 ): void {
   const { scene, client, datasets } = ctx;
-  const { memberRoster, settings, entityIndexByDataset } = planResult;
+  const { memberRosterByDatasetMode, settings, entityIndexByDatasetMode } = planResult;
   const { canvasW, canvasH, scale: backingScale } = frame;
   const rect = scaleRect(view.rect, backingScale);
   const [, , viewW, viewH] = rect;
@@ -363,10 +364,11 @@ export function renderSliceView(
     const fullResWidth = dsShapeL[tczyx(across)];
     const fullResHeight = dsShapeL[tczyx(down)];
 
-    // The planner's places are already across and down this plane.
-    const members = memberRoster.get(dsId)
+    // The members and descriptors of the dataset's slice pools, placed
+    // across and down this plane by the planner.
+    const members = memberRosterByDatasetMode.get(datasetModeKey(dsId, "slice"))
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
-    const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
+    const indexByMember = entityIndexByDatasetMode.get(datasetModeKey(dsId, "slice")) ?? new Map<string, number>();
     const placement = placementInPlane(readPlacement(scene, dsId), cut);
 
     // The member-pass budget applies per channel. A layer past the scene's t,

@@ -8,6 +8,7 @@ import type {
   ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
+  PoolMode,
   WantedMemberChunks,
 } from "../../../renderer/workerProtocol.ts";
 import type { ResolvedLayer } from "../../../resolvedLayers.ts";
@@ -129,6 +130,8 @@ export function buildColdState(args: {
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   layer: ResolvedLayer | undefined;
   sampleFormat: SampleFormat;
+  /** See {@link ColdStateMessage.drawnModes}. */
+  drawnModes: PoolMode[];
 }): ColdStateMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
@@ -151,6 +154,7 @@ export function buildColdState(args: {
     wantedChunks: args.wantedChunks,
     activeSet: coldActiveSet,
     viewMode: args.selection.renderMode,
+    drawnModes: args.drawnModes,
     sampleFormat: args.sampleFormat,
   };
 }
@@ -228,6 +232,8 @@ export function buildColdStateDelta(args: {
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   layer: ResolvedLayer | undefined;
+  /** See {@link ColdStateMessage.drawnModes}. */
+  drawnModes: PoolMode[];
 }): ColdStateDeltaMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
@@ -262,6 +268,8 @@ export function buildColdStateDelta(args: {
     type: "coldStateDelta",
     epochs: args.epochs,
     datasetId: args.datasetId,
+    viewMode: args.selection.renderMode,
+    drawnModes: args.drawnModes,
     currentT: args.selection.t,
     currentZ: workerCutIndex(args.selection),
     visibleRegion: regionInWorkerFrame(args.visibleRegion, cutAxis),

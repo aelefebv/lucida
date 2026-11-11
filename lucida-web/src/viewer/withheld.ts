@@ -1,7 +1,7 @@
 /**
- * Why a view leaves a dataset out: another view holds its GPU pools in
- * another form, and a dataset's pools hold one cut or one volume at a time
- * for now.
+ * Why a view leaves a dataset out: another view of the same 2D or 3D mode
+ * holds the dataset's pools of that mode in another form, and each mode's
+ * pools hold one cut or one timepoint at a time for now.
  */
 import type { PoolForm, ViewPane, WithheldDataset } from "../sceneStore.ts";
 
@@ -9,11 +9,9 @@ import type { PoolForm, ViewPane, WithheldDataset } from "../sceneStore.ts";
 export function withheldMessage(entry: WithheldDataset, views: readonly ViewPane[], name: string): string {
   const position = views.findIndex((view) => view.id === entry.holder);
   const holder = position >= 0 ? `view ${position + 1}` : "another view";
-  const later = entry.held.kind !== entry.wanted.kind
-    ? "one dataset in 2D and 3D at once comes later"
-    : entry.held.t !== entry.wanted.t
-      ? "one dataset at two timepoints comes later"
-      : "one dataset at two cuts comes later";
+  const later = entry.held.t !== entry.wanted.t
+    ? "one dataset at two timepoints comes later"
+    : "one dataset at two cuts comes later";
   return `${name} is shown in ${holder} ${describe(entry.held)}; ${later}.`;
 }
 

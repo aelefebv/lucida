@@ -11,6 +11,7 @@ import { traceRecorder } from "./trace/recorder.ts";
 import { comparisonClip, intersectRects } from "./comparison.ts";
 import type { PixelRect } from "./renderer/layerBatches.ts";
 import type { TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
+import { datasetModeKey } from "./renderer/poolKeys.ts";
 import { scaleRect } from "./slicePath.ts";
 
 /**
@@ -141,7 +142,7 @@ export function renderVolumeView(
   frame: FrameScale,
 ): void {
   const { scene, client, datasets } = ctx;
-  const { memberRoster, settings, entityIndexByDataset } = plan;
+  const { memberRosterByDatasetMode, settings, entityIndexByDatasetMode } = plan;
   const { canvasW: fullCanvasW, canvasH: fullCanvasH } = frame;
   const { layerOrder, allSettings } = settings;
   // Cursors keep their size whatever the render scale, so they read the
@@ -172,9 +173,10 @@ export function renderVolumeView(
     if (clip === "hidden") continue;
     const firstLayer = layers.length;
 
-    const members = memberRoster.get(dsId)
+    // The members and descriptors of the dataset's volume pools.
+    const members = memberRosterByDatasetMode.get(datasetModeKey(dsId, "volume"))
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
-    const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
+    const indexByMember = entityIndexByDatasetMode.get(datasetModeKey(dsId, "volume")) ?? new Map<string, number>();
 
     // The descriptor holds the model matrix, but the CPU needs it too for
     // the scissor projection, which every channel of a member shares.

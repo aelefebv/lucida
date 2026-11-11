@@ -12,7 +12,7 @@ import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { invalidateDisplaySettings, invalidateSelection } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
-import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
+import type { LevelsByMode } from "../pipeline/datasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import { channelDisplayName, channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
 import { readResolvedLayers } from "../resolvedLayers.ts";
@@ -170,8 +170,8 @@ export function buildLayerInfos(
     autoContrast: Map<string, boolean>;
     /** Each channel's latest auto-contrast fit, keyed by {@link channelRangeKey}. */
     contrastFit: Map<string, ChannelFit>;
-    /** The worker's per-dataset level readout; a dataset it has not reported yet is absent. */
-    levels: Map<string, DatasetLevels>;
+    /** The worker's per-dataset level readouts by mode; a dataset it has not reported yet is absent. */
+    levels: Map<string, LevelsByMode>;
   },
   viewMode: ViewMode = "2d",
 ): LayerInfo[] {
@@ -192,7 +192,10 @@ export function buildLayerInfos(
 
     const rawLabelSettings = settings?.label_settings;
     const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
-    const levels = maps.levels.get(id) ?? null;
+    // The readout is the active view's, as the label rows are: the levels of
+    // the dataset's pools in its mode. A view of the other mode draws from
+    // pools at levels of their own, which a bare number here would misstate.
+    const levels = maps.levels.get(id)?.[viewMode === "3d" ? "volume" : "slice"] ?? null;
 
     // The data's channel count is authoritative; the settings may still be
     // growing to match it while the dataset registers.
@@ -261,8 +264,8 @@ interface Params {
   remoteDocumentVersion: number;
   /** Picks the label rows' eligibility caps (slice or volume). */
   viewMode: ViewMode;
-  /** The worker's per-dataset target and displayed levels (see `useDatasetLevels`). */
-  datasetLevels: Map<string, DatasetLevels>;
+  /** The worker's per-dataset target and displayed levels, by mode (see `useDatasetLevels`). */
+  datasetLevels: Map<string, LevelsByMode>;
 }
 
 export function useDatasetSettings({

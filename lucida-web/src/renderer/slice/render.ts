@@ -401,7 +401,7 @@ function buildAggregateDraw(
   agg: SliceAggregateParams,
 ): AggregateDrawParams | null {
   const datasetId = ctx.state.memberToDataset.get(agg.poolMemberId);
-  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
+  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, "slice") : null;
   if (!descIndex) return null;
 
   const built = buildAggregateBatches(ctx, msg, layer, agg, descIndex);
@@ -453,7 +453,7 @@ function buildMemberDraw(
   // The orchestrator's entity index matches the worker's descriptor build
   // because both use canonical iteration order.
   const datasetId = ctx.state.memberToDataset.get(memberId);
-  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
+  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, "slice") : null;
   if (!descIndex) return null;
 
   const pools = resolveMemberPools(ctx.state.sliceAtlases, descIndex, memberId);

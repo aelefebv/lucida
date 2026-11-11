@@ -44,7 +44,7 @@ export function handleLabelSliceChunkData(
 ): void {
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
   const refuseAll = (reason: ChunkFeedbackReason): void =>
-    postChunkResidency(ctx, memberId, LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason);
+    postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason);
 
   // A previous timepoint's plane racing in must not overwrite the pool.
   if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) {
@@ -90,9 +90,9 @@ export function handleLabelSliceChunkData(
       "r32uint",
     );
   }
-  batch.post(ctx, memberId, LABEL_TIER);
+  batch.post(ctx, memberId, "slice", LABEL_TIER);
   // After held, so a chunk this batch wrote and then overwrote ends lost.
-  postChunkResidency(ctx, memberId, LABEL_TIER, "lost", replaced, "replaced");
+  postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", replaced, "replaced");
 }
 
 export function handleSliceChunkData(
@@ -106,7 +106,7 @@ export function handleSliceChunkData(
 
   const { tier } = msg;
   const refuseAll = (reason: ChunkFeedbackReason): void =>
-    postChunkResidency(ctx, memberId, tier, "refused", msg.chunks.map(c => c.key), reason);
+    postChunkResidency(ctx, memberId, "slice", tier, "refused", msg.chunks.map(c => c.key), reason);
 
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     refuseAll("stale");
@@ -154,7 +154,7 @@ export function handleSliceChunkData(
 
   const levelZ = sliceLevelPlane(fullResZ, fullResDepth, levelDepth);
   const targetChunkZ = Math.floor(levelZ / chunkZ);
-  const wanted = wantedChunksFor(ctx.state, memberId, tier);
+  const wanted = wantedChunksFor(ctx.state, "slice", memberId, tier);
 
   const batch = new ResidencyBatch();
   let failure: unknown = null;
@@ -247,8 +247,8 @@ export function handleSliceChunkData(
     }
   }
 
-  batch.post(ctx, memberId, tier);
-  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
+  batch.post(ctx, memberId, "slice", tier);
+  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId), "slice");
 
   if (failure !== null) throw failure;
 }

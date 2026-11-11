@@ -10,6 +10,7 @@ import type {
   ChunkFeedbackReason,
   ChunkResidencyChange,
   MissingChunk,
+  PoolMode,
 } from "../../../renderer/workerProtocol.ts";
 import { debugLog } from "../../../debug/logging.ts";
 import type { ResendGuard } from "./resendGuard.ts";
@@ -33,6 +34,7 @@ export class WorkerFeedback {
    */
   handleChunkResidency(
     memberId: string,
+    mode: PoolMode,
     tier: ResidencyTier,
     change: ChunkResidencyChange,
     keys: string[],
@@ -50,21 +52,22 @@ export class WorkerFeedback {
     }
 
     if (change === "held") {
-      for (const [c, group] of byChannel) cpuCache.markChunksHeld(parsed.imageId, c, tier, group);
+      for (const [c, group] of byChannel) cpuCache.markChunksHeld(parsed.imageId, c, mode, tier, group);
       return false;
     }
 
     const why = reason ?? (change === "lost" ? "evicted" : "atlas-policy");
     for (const [c, group] of byChannel) {
-      if (change === "lost") cpuCache.markChunksLost(parsed.imageId, c, tier, group, why);
-      else cpuCache.markChunksRefused(parsed.imageId, c, tier, group, why);
+      if (change === "lost") cpuCache.markChunksLost(parsed.imageId, c, mode, tier, group, why);
+      else cpuCache.markChunksRefused(parsed.imageId, c, mode, tier, group, why);
       if (this.guard) {
-        for (const key of group) this.guard.noteReturned(parsed.imageId, c, key, why);
+        for (const key of group) this.guard.noteReturned(parsed.imageId, c, mode, key, why);
       }
     }
     debugLog("orch", "upload.worker_chunk_feedback", {
       memberId,
       imageId: parsed.imageId,
+      mode,
       tier,
       change,
       reason: why,
@@ -82,6 +85,7 @@ export class WorkerFeedback {
    */
   handleWantedSetDelta(
     datasetId: string,
+    mode: PoolMode,
     missing: MissingChunk[],
     cpuCache: CpuCache,
   ): boolean {
@@ -89,13 +93,13 @@ export class WorkerFeedback {
     for (const entry of missing) {
       const parsed = parseWorkerMemberId(entry.memberId);
       const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
-      if (cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier)) {
-        this.guard?.noteMissing(parsed.imageId, c, entry.chunkKey);
+      if (cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, mode, entry.tier)) {
+        this.guard?.noteMissing(parsed.imageId, c, mode, entry.chunkKey);
         disagreements.push(`${entry.memberId}/${entry.chunkKey} [${entry.tier}]`);
       }
     }
     if (disagreements.length > 0) {
-      debugLog("orch", "upload.residency_disagreement", { datasetId, chunks: disagreements });
+      debugLog("orch", "upload.residency_disagreement", { datasetId, mode, chunks: disagreements });
     }
     return disagreements.length > 0;
   }
