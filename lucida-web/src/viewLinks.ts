@@ -11,7 +11,20 @@ import type { LinkMode, LinkProperty } from "./commands.ts";
 export type LinkBasis = "physical" | "voxel";
 
 /** Why a property can't link between the views as they stand. */
-export type Unlinkable = "empty" | "cameras";
+export type Unlinkable = "empty" | "cameras" | "shared";
+
+/**
+ * A channel of the first view's dataset and the one of the second's that its
+ * contrast and colormap links reach: paired by name, or, where neither found
+ * its name across, by place.
+ */
+export interface ChannelPair {
+  readonly first: number;
+  readonly second: number;
+  readonly first_name: string;
+  readonly second_name: string;
+  readonly by: "name" | "index";
+}
 
 /** Why a pair compared in its own samples links by default. */
 export type Alike = "same_dataset" | "same_placement";
@@ -37,6 +50,8 @@ export interface ViewLinks {
   readonly properties: readonly PropertyLink[];
   /** Where the links take each view past what it shows. */
   readonly notices: readonly ViewLinkNotices[];
+  /** Which channels the contrast and colormap links pair; absent when both views show one dataset. */
+  readonly channels?: readonly ChannelPair[];
 }
 
 /** The views' links, or null with one view. */
@@ -50,7 +65,14 @@ export const LINK_LABELS: Readonly<Record<LinkProperty, string>> = {
   orientation: "3D orientation",
   z: "Z",
   t: "Time",
+  contrast: "Contrast",
+  colormap: "Colormap",
 };
+
+/** The modes each property offers: a colormap links or stays off, with no offset to keep. */
+export function linkModes(property: LinkProperty): readonly LinkMode[] {
+  return property === "colormap" ? ["linked", "off"] : ["linked", "relative", "off"];
+}
 
 export const LINK_MODE_LABELS: Readonly<Record<LinkMode, string>> = {
   linked: "Linked",
@@ -71,6 +93,8 @@ export function unlinkableReason(property: LinkProperty, unlinkable: Unlinkable)
   switch (unlinkable) {
     case "empty":
       return "Each view needs a layer to link.";
+    case "shared":
+      return "Both views show one dataset, so its channels share one setting.";
     case "cameras":
       if (property === "orientation") return "Links between two 3D views.";
       if (property === "z") return "Links between two 2D views of one plane.";
@@ -84,6 +108,12 @@ export function basisNote(basis: LinkBasis, alike?: Alike): string {
   if (alike === "same_dataset") return "In samples; both views show the same dataset.";
   if (alike === "same_placement") return "In samples; both datasets have the same shape and placement.";
   return "In samples, since the datasets don't both declare physical units.";
+}
+
+/** A channel pair as the link popover lists it, saying when it pairs by place. */
+export function channelPairText(pair: ChannelPair): string {
+  const joined = `${pair.first_name} ↔ ${pair.second_name}`;
+  return pair.by === "index" ? `${joined} (by place)` : joined;
 }
 
 /** Where a link took a view past what it shows, as a sentence. */

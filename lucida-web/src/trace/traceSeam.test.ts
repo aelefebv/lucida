@@ -749,7 +749,7 @@ describe("the trace seam", () => {
       });
       await expect(seam.link("hue", "linked")).resolves.toEqual({
         applied: false,
-        reason: "a link is of pan, zoom, orientation, z or t, not hue",
+        reason: "a link is of pan, zoom, orientation, z, t, contrast or colormap, not hue",
       });
       await expect(seam.link("pan", "on")).resolves.toEqual({
         applied: false,

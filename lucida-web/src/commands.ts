@@ -275,7 +275,7 @@ export interface MaximizeViewCommand {
 }
 
 /** A part of what a view shows that can follow the other view. */
-export type LinkProperty = "pan" | "zoom" | "orientation" | "z" | "t";
+export type LinkProperty = "pan" | "zoom" | "orientation" | "z" | "t" | "contrast" | "colormap";
 
 /** To the same value, keeping the offset it had when linked, or not at all. */
 export type LinkMode = "linked" | "relative" | "off";

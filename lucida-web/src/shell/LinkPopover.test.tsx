@@ -77,6 +77,37 @@ describe("LinkPopover", () => {
     expect(screen.getByText("In samples; both datasets have the same shape and placement.")).toBeTruthy();
   });
 
+  it("offers a colormap linked or off, and lists the channels the channel links pair", async () => {
+    const shown: ViewLinks = {
+      ...links,
+      properties: [...links.properties, { property: "contrast", mode: "off" }, { property: "colormap", mode: "off" }],
+      channels: [
+        { first: 0, second: 1, first_name: "DAPI", second_name: "DAPI", by: "name" },
+        { first: 2, second: 2, first_name: "RFP", second_name: "Cy5", by: "index" },
+      ],
+    };
+    await open(vi.fn(), shown);
+    const options = within(row("colormap")).getAllByRole("radio").map((radio) => radio.textContent);
+    expect(options).toEqual(["Linked", "Off"]);
+    expect(within(row("contrast")).getAllByRole("radio")).toHaveLength(3);
+    expect(screen.getByText("DAPI ↔ DAPI")).toBeTruthy();
+    expect(screen.getByText("RFP ↔ Cy5 (by place)")).toBeTruthy();
+  });
+
+  it("can't link the channels of one dataset shown in both views, and says why", async () => {
+    const onChange = vi.fn();
+    const shown: ViewLinks = {
+      ...links,
+      properties: [{ property: "contrast", mode: "off", unlinkable: "shared" }],
+    };
+    await open(onChange, shown);
+    expect(within(row("contrast")).getByText("Both views show one dataset, so its channels share one setting.")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(within(row("contrast")).getByRole("radio", { name: "Linked" }));
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("leaves the basis out while a view shows nothing", async () => {
     const empty: ViewLinks = {
       basis: null,

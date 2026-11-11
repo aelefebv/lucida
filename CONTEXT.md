@@ -299,7 +299,9 @@ units compare in the scene frame, the *physical basis*; any others compare in
 their own samples, the *voxel basis*. Two views over one region, or showing
 the same samples, link everything by default, and two at one scale but apart
 link zoom and orientation and keep their own centers and depths. A view a
-link takes past its data says so.
+link takes past its data says so. Contrast and colormap link between the two
+datasets' channels, paired by name and then by place, and stay off until
+someone links them.
 _Avoid_: sync (unqualified)
 
 **Framing**:
