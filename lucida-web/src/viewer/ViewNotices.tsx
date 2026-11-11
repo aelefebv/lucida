@@ -86,7 +86,7 @@ export function ViewNotices({ notices }: { notices: readonly ViewNotice[] }) {
           </Button>
         </Tooltip>
       </div>
-      <ul className="lc-view-notices-list" id={listId} aria-label="View notices" hidden={!open}>
+      <ul className="lc-view-notices-list" id={listId} aria-label="View notices" hidden={!open} data-keep-clear="">
         {notices.map((notice) => (
           <li key={notice.key} data-severity={notice.severity}>
             {notice.message}
