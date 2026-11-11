@@ -1,6 +1,7 @@
 mod comparison;
 mod cut_grid;
 mod layers;
+mod link_notices;
 mod links;
 mod placement;
 mod scale_bar;
@@ -11,8 +12,9 @@ pub use comparison::{CompareMode, Comparison, Side};
 pub use cut_grid::{AxisReading, CutGrid};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
+pub use link_notices::{LinkNotice, ViewLinkNotices};
 use links::ViewLinks;
-pub use links::{LinkBasis, LinkMode, LinkProperty, LinksState, PropertyLink, Unlinkable};
+pub use links::{Alike, LinkBasis, LinkMode, LinkProperty, LinksState, PropertyLink, Unlinkable};
 pub use scale_bar::{Arm, Measure, ScaleBar};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
@@ -2081,6 +2083,16 @@ pub(crate) fn resolve_entity_position(
 pub(crate) mod test_helpers {
     use lucida_content::*;
     use lucida_protocol::*;
+
+    /// Turn every link between two views off, so each moves alone. Two
+    /// views showing alike datasets link everything by default.
+    pub fn unlink(scene: &mut super::Scene) {
+        for property in super::LinkProperty::ALL {
+            let mode = super::LinkMode::Off;
+            let cmd = crate::command::ViewportCommand::SetViewLink { property, mode };
+            scene.apply(crate::command::Command::Viewport(cmd));
+        }
+    }
 
     /// A scene whose slice camera is placed at the origin at one sample per
     /// device pixel, so opening a dataset leaves it there.
@@ -5971,7 +5983,26 @@ mod tests {
 
     #[test]
     fn opening_a_dataset_fits_every_framed_view() {
-        let (scene, second) = two_view_scene();
+        // Two halves of one size, so the link that pairs them moves neither.
+        let mut scene = Scene::new([800, 600]);
+        let layout = crate::view::ViewLayout::Columns;
+        apply_vp(
+            &mut scene,
+            crate::command::ViewportCommand::SetViewLayout { layout },
+        );
+        let second = scene.views()[1].id();
+        let datasets = ViewDatasets::All;
+        apply_vp(
+            &mut scene,
+            crate::command::ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets,
+            },
+        );
+        for id in ["a", "b"] {
+            let opened = test_helpers::make_dataset_opened(id, id, 1);
+            scene.apply(DocumentCommand::DatasetOpened(opened).into());
+        }
         for view in scene.views() {
             assert_eq!(view.camera.framing(), Framing::Framed);
         }
@@ -5990,6 +6021,7 @@ mod tests {
     #[test]
     fn commands_steer_the_active_view_alone() {
         let (mut scene, second) = two_view_scene();
+        test_helpers::unlink(&mut scene);
         let other = scene.view(second).unwrap().clone();
         let before = scene.active_view().camera.clone();
         apply_vp(

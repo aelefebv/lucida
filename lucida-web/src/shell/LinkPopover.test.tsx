@@ -19,9 +19,10 @@ const links: ViewLinks = {
     { property: "pan", mode: "relative" },
     { property: "zoom", mode: "linked" },
     { property: "orientation", mode: "linked", unlinkable: "cameras" },
-    { property: "z", mode: "off", unlinkable: "not_yet" },
+    { property: "z", mode: "linked", unlinkable: "cameras" },
     { property: "t", mode: "off" },
   ],
+  notices: [],
 };
 
 async function open(onChange = vi.fn(), shown: ViewLinks = links) {
@@ -37,7 +38,7 @@ const row = (property: string) => document.querySelector(`[data-link-property="$
 describe("LinkPopover", () => {
   it("shows each property's mode and the basis the links compare in", async () => {
     await open();
-    expect(screen.getByText("In voxels, since the datasets don't both declare physical units.")).toBeTruthy();
+    expect(screen.getByText("In samples, since the datasets don't both declare physical units.")).toBeTruthy();
     const checked = (property: string) =>
       within(row(property)).getAllByRole("radio").find((radio) => radio.getAttribute("aria-checked") === "true")
         ?.textContent;
@@ -63,22 +64,27 @@ describe("LinkPopover", () => {
     expect(onChange).toHaveBeenCalledWith("orientation", "off");
   });
 
-  it("can't set Z yet, and says when it can", async () => {
-    const onChange = await open();
-    expect(within(row("z")).getByText("Z links once depth is a physical place.")).toBeTruthy();
-    await act(async () => {
-      fireEvent.click(within(row("z")).getByRole("radio", { name: "Linked" }));
-    });
-    expect(onChange).not.toHaveBeenCalled();
+  it("says Z links between two 2D views of one plane", async () => {
+    await open();
+    expect(within(row("z")).getByText("Links between two 2D views of one plane.")).toBeTruthy();
+  });
+
+  it("says why a pair without units links in samples", async () => {
+    await open(vi.fn(), { ...links, alike: "same_dataset" });
+    expect(screen.getByText("In samples; both views show the same dataset.")).toBeTruthy();
+    cleanup();
+    await open(vi.fn(), { ...links, alike: "same_placement" });
+    expect(screen.getByText("In samples; both datasets have the same shape and placement.")).toBeTruthy();
   });
 
   it("leaves the basis out while a view shows nothing", async () => {
     const empty: ViewLinks = {
       basis: null,
       properties: links.properties.map(({ property }) => ({ property, mode: "off", unlinkable: "empty" })),
+      notices: [],
     };
     await open(vi.fn(), empty);
-    expect(screen.queryByText(/^In (voxels|physical units)/)).toBeNull();
+    expect(screen.queryByText(/^In (samples|physical units)/)).toBeNull();
     expect(screen.getAllByText("Each view needs a layer to link.")).toHaveLength(5);
   });
 });

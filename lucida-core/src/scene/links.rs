@@ -1,7 +1,8 @@
 //! How the two views of a layout follow each other. Pan, zoom, 3D
-//! orientation and the Z and T axis positions link one by one. A linked
-//! property follows the steered view to the same value, a relative one keeps
-//! the offset it had when it was linked, and one that is off stays put.
+//! orientation, the depth a slice view cuts and the timepoint link one by
+//! one. A linked property follows the steered view to the same value, a
+//! relative one keeps the offset it had when it was linked, and one that is
+//! off stays put.
 //!
 //! Each view links by its top visible dataset. Two that each declare
 //! physical units compare as the scene frame places them, so they meet at
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use lucida_content::{DatasetId, SpatialAxis};
 
 use super::Scene;
+use super::link_notices::ViewLinkNotices;
 use crate::camera::{Camera, Framing};
 use crate::command::{Command, ViewportCommand};
 use crate::placement::{Affine, LineUp};
@@ -95,12 +97,20 @@ pub enum Unlinkable {
     /// A view shows nothing to compare.
     Empty,
     /// The two cameras don't share it. Pan and zoom need two slice views of
-    /// one plane or two orbit cameras, and orientation two orbit cameras.
+    /// one plane or two orbit cameras, orientation two orbit cameras, and
+    /// depth two slice views of one plane.
     Cameras,
-    /// An XY view's Z is each layer's own plane number, which means a
-    /// different depth in datasets placed or spaced differently. Z links once
-    /// it is a place in the scene frame.
-    NotYet,
+}
+
+/// Why two datasets compared in their own samples link by default: the
+/// views show the same samples in the same place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Alike {
+    /// Both views show one dataset.
+    SameDataset,
+    /// Two datasets of one extent, placed alike.
+    SamePlacement,
 }
 
 /// One property's link as the views stand.
@@ -118,7 +128,12 @@ pub struct PropertyLink {
 pub struct LinksState {
     /// What the views compare in, once each shows a dataset.
     pub basis: Option<LinkBasis>,
+    /// Why a pair in the voxel basis links by default, when it does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alike: Option<Alike>,
     pub properties: Vec<PropertyLink>,
+    /// Where the links take each view past what it shows.
+    pub notices: Vec<ViewLinkNotices>,
 }
 
 /// The views' links: each property's mode, and what a relative one keeps.
@@ -162,6 +177,13 @@ enum LinkValue {
     OrbitDistance(f64),
     /// An orbit camera's angles, `[theta, phi]`.
     OrbitAngles([f64; 2]),
+    /// A slice view's place along the axis its plane cuts, and along Z the
+    /// slab's ends when it spans more than one position.
+    Cut {
+        plane: SlicePlane,
+        at: f64,
+        slab: Option<[f64; 2]>,
+    },
     Timepoint(i64),
 }
 
@@ -172,7 +194,8 @@ impl LinkValue {
         use LinkValue::*;
         match (self, other) {
             (SliceCenter { plane: a, .. }, SliceCenter { plane: b, .. })
-            | (SliceZoom { plane: a, .. }, SliceZoom { plane: b, .. }) => a == b,
+            | (SliceZoom { plane: a, .. }, SliceZoom { plane: b, .. })
+            | (Cut { plane: a, .. }, Cut { plane: b, .. }) => a == b,
             (OrbitTarget(_), OrbitTarget(_))
             | (OrbitDistance(_), OrbitDistance(_))
             | (OrbitAngles(_), OrbitAngles(_))
@@ -191,6 +214,7 @@ impl LinkValue {
             }
             (OrbitTarget(a), OrbitTarget(b)) => Delta::Shift(std::array::from_fn(|i| b[i] - a[i])),
             (OrbitAngles(a), OrbitAngles(b)) => Delta::Shift([b[0] - a[0], b[1] - a[1], 0.0]),
+            (Cut { at: a, .. }, Cut { at: b, .. }) => Delta::Shift([b - a, 0.0, 0.0]),
             (SliceZoom { zoom: a, .. }, SliceZoom { zoom: b, .. })
             | (OrbitDistance(a), OrbitDistance(b)) => Delta::Ratio(b / a),
             (Timepoint(a), Timepoint(b)) => Delta::Steps(b - a),
@@ -214,6 +238,11 @@ impl LinkValue {
             (OrbitAngles(at), Delta::Shift(by)) => {
                 OrbitAngles([shift(at[0], by[0]), shift(at[1], by[1])])
             }
+            (Cut { plane, at, slab }, Delta::Shift(by)) => Cut {
+                plane,
+                at: shift(at, by[0]),
+                slab: slab.map(|ends| ends.map(|end| shift(end, by[0]))),
+            },
             (SliceZoom { plane, zoom }, Delta::Ratio(by)) => SliceZoom {
                 plane,
                 zoom: scale(zoom, by),
@@ -279,6 +308,22 @@ impl LinkMaps {
                 plane,
                 zoom: zoom / self.scene.length_scale(),
             },
+            Cut { plane, at, slab } => {
+                let a = plane.cut().xyz();
+                let along = |place: f64| {
+                    let mut point = [0.0; 3];
+                    point[a] = place;
+                    self.scene.apply(point)[a]
+                };
+                Cut {
+                    plane,
+                    at: along(at),
+                    slab: slab.map(|[start, end]| {
+                        let (start, end) = (along(start), along(end));
+                        [start.min(end), start.max(end)]
+                    }),
+                }
+            }
             OrbitTarget(at) => OrbitTarget(self.world.apply(at)),
             OrbitDistance(d) => OrbitDistance(d * self.world.length_scale()),
             OrbitAngles(_) | Timepoint(_) => value,
@@ -287,7 +332,8 @@ impl LinkMaps {
 }
 
 /// A property's value in a view with `camera` standing at `axes`, or `None`
-/// where the camera has no such value.
+/// where the camera has no such value. A depth needs the view's grid, see
+/// [`Scene::property_value`].
 fn link_value(camera: &Camera, axes: &AxisPositions, property: LinkProperty) -> Option<LinkValue> {
     match (property, camera) {
         (LinkProperty::Pan, Camera::Slice(s)) => Some(LinkValue::SliceCenter {
@@ -320,6 +366,11 @@ fn set_link_value(view: &mut View, value: LinkValue) {
         (OrbitTarget(at), Camera::Arcball(a)) => a.set_target(at),
         (OrbitDistance(d), Camera::Arcball(a)) => a.set_distance(d),
         (OrbitAngles([theta, phi]), Camera::Arcball(a)) => a.set_angles(theta, phi),
+        (Cut { plane, at, slab }, Camera::Slice(s)) if s.plane == plane => match plane.cut() {
+            SpatialAxis::Z => view.axes.z = slab.map(|[start, end]| start..end),
+            SpatialAxis::Y => view.axes.y = Some(at),
+            SpatialAxis::X => view.axes.x = Some(at),
+        },
         // A timepoint before the first stays at the first; past the last,
         // each layer shows its last, as it does for any timepoint.
         (Timepoint(t), _) => view.axes.t = t.clamp(0, i64::from(u32::MAX)) as u32,
@@ -346,6 +397,7 @@ impl Scene {
     pub fn links(&self) -> Option<LinksState> {
         let views = self.linked_views()?;
         let pair = self.links.pair();
+        let basis = pair.as_ref().map(|pair| self.link_basis(pair));
         let properties = LinkProperty::ALL
             .into_iter()
             .map(|property| PropertyLink {
@@ -355,23 +407,29 @@ impl Scene {
             })
             .collect();
         Some(LinksState {
-            basis: pair.map(|pair| self.link_basis(&pair)),
+            basis,
+            alike: pair
+                .filter(|_| basis == Some(LinkBasis::Voxel))
+                .and_then(|pair| self.alike(&pair)),
             properties,
+            notices: views
+                .into_iter()
+                .map(|view| ViewLinkNotices {
+                    view,
+                    notices: self.link_notices(view),
+                })
+                .collect(),
         })
     }
 
     /// Link `property` in `mode`. A linked property brings the other view to
     /// the active view's value at once, and a relative one keeps the offset
-    /// the views have now. A property that can't link yet, or a view with
-    /// nothing to link, changes nothing.
+    /// the views have now. A view with nothing to link changes nothing.
     pub(crate) fn set_link(&mut self, property: LinkProperty, mode: LinkMode) {
         let Some(views) = self.linked_views() else {
             return;
         };
-        if matches!(
-            self.unlinkable(property, views),
-            Some(Unlinkable::Empty | Unlinkable::NotYet)
-        ) {
+        if self.unlinkable(property, views) == Some(Unlinkable::Empty) {
             return;
         }
         self.links.modes[property.index()] = mode;
@@ -380,11 +438,12 @@ impl Scene {
     }
 
     /// Take the defaults when the views link by a new pair of datasets: a
-    /// pair in one place links pan, zoom, orientation and T; a pair at one
-    /// scale but apart links zoom and orientation, and keeps each view's own
-    /// center by linking pan relative; any other pair links nothing. Called
-    /// after every command, since anything that changes what a view shows
-    /// can change the pair. Returns what that moved in the views.
+    /// pair over one region, or showing the same samples, links everything;
+    /// a pair at one scale but apart links zoom and orientation, and keeps
+    /// each view's own center and depth by linking pan and depth relative;
+    /// any other pair links nothing. Called after every command, since
+    /// anything that changes what a view shows can change the pair. Returns
+    /// what that moved in the views.
     ///
     /// The view that shows what it showed leads, and then one that showed
     /// something: a view given its first dataset, or another one, takes the
@@ -469,8 +528,8 @@ impl Scene {
         let (camera, axes) = (view.camera.clone(), view.axes.clone());
         let mut followed = Followed::default();
         for property in LinkProperty::ALL {
-            let was = link_value(before, axes_before, property);
-            if was == link_value(&camera, &axes, property) {
+            let was = self.property_value(leader, before, axes_before, property);
+            if was == self.property_value(leader, &camera, &axes, property) {
                 continue;
             }
             let paired = was.zip(self.view_value(other, property));
@@ -527,17 +586,28 @@ impl Scene {
     fn default_link_modes(&self, pair: &[DatasetId; 2]) -> [LinkMode; 5] {
         use LinkMode::*;
         let [first, second] = pair;
-        // One dataset in both views is at one scale and in one place when it
-        // declares physical units, and like any other pair without them.
-        let physical = self.link_basis(pair) == LinkBasis::Physical;
         // Pan, zoom, orientation, Z, T, as `LinkProperty::ALL` orders them.
-        // Z stays off until it can link.
         match self.line_up(first, second) {
-            LineUp::Yes => [Linked, Linked, Linked, Off, Linked],
-            LineUp::Same if physical => [Linked, Linked, Linked, Off, Linked],
-            LineUp::Apart => [Relative, Linked, Linked, Off, Off],
-            LineUp::Same | LineUp::Missing { .. } | LineUp::NoPhysicalScale { .. } => [Off; 5],
+            LineUp::Yes | LineUp::Same => [Linked; 5],
+            // Where datasets without units sit says nothing physical, but
+            // one dataset twice, or two of one extent placed alike, still
+            // show the same samples in the same place.
+            LineUp::NoPhysicalScale { .. } if self.alike(pair).is_some() => [Linked; 5],
+            LineUp::Apart => [Relative, Linked, Linked, Relative, Off],
+            LineUp::Missing { .. } | LineUp::NoPhysicalScale { .. } => [Off; 5],
         }
+    }
+
+    /// Whether `pair` shows the same samples in the same place: one dataset
+    /// twice, or two of one extent placed alike. Every dataset without
+    /// units sits at its declared numbers, so the placement alone would
+    /// match unrelated ones.
+    fn alike(&self, [first, second]: &[DatasetId; 2]) -> Option<Alike> {
+        if first == second {
+            return Some(Alike::SameDataset);
+        }
+        let placed = |id| Some((self.placement(id)?, self.placed_extent(id)?));
+        (placed(first)? == placed(second)?).then_some(Alike::SamePlacement)
     }
 
     /// The maps from the first view's numbers into the second's. Both views
@@ -567,9 +637,6 @@ impl Scene {
     ) -> Option<Unlinkable> {
         if self.links.pair().is_none() {
             return Some(Unlinkable::Empty);
-        }
-        if property == LinkProperty::Z {
-            return Some(Unlinkable::NotYet);
         }
         match (
             self.view_value(first, property),
@@ -652,6 +719,7 @@ impl Scene {
             (false, None) => maps.inverse().carry(lead),
             (false, Some(delta)) => maps.inverse().carry(lead.moved(delta, true)),
         };
+        let target = self.one_position_cut(follower, target);
         let Some(view) = self.view_mut(follower) else {
             return Followed::default();
         };
@@ -668,9 +736,76 @@ impl Scene {
         followed
     }
 
+    /// Whether `property` links the views as they stand: its mode isn't
+    /// off and nothing keeps it from applying.
+    pub(super) fn link_applies(&self, property: LinkProperty) -> bool {
+        self.links.modes[property.index()] != LinkMode::Off
+            && self
+                .linked_views()
+                .is_some_and(|views| self.unlinkable(property, views).is_none())
+    }
+
     fn view_value(&self, view: ViewId, property: LinkProperty) -> Option<LinkValue> {
-        let view = self.view(view)?;
-        link_value(&view.camera, &view.axes, property)
+        let shown = self.view(view)?;
+        self.property_value(view, &shown.camera, &shown.axes, property)
+    }
+
+    /// `property`'s value in `view` with `camera` standing at `axes`. A
+    /// depth with no place yet stands at the first position of the view's
+    /// grid, and one position's cell is a single cut, not a slab.
+    fn property_value(
+        &self,
+        view: ViewId,
+        camera: &Camera,
+        axes: &AxisPositions,
+        property: LinkProperty,
+    ) -> Option<LinkValue> {
+        let (LinkProperty::Z, Camera::Slice(slice)) = (property, camera) else {
+            return link_value(camera, axes, property);
+        };
+        let axis = slice.plane.cut();
+        let (at, slab) = match axis {
+            SpatialAxis::Z => {
+                let z = self.z_cut(view, axes);
+                let step = self.cut_grid(view, axis).step;
+                let slab = (z.end - z.start > 1.5 * step).then_some([z.start, z.end]);
+                ((z.start + z.end) / 2.0, slab)
+            }
+            _ => {
+                let place = axes.place(axis);
+                (
+                    place.unwrap_or_else(|| self.cut_grid(view, axis).center(0)),
+                    None,
+                )
+            }
+        };
+        Some(LinkValue::Cut {
+            plane: slice.plane,
+            at,
+            slab,
+        })
+    }
+
+    /// A single cut along Z as `view` stands on it: the cell of its own grid
+    /// that holds the place, past the grid if the place is. The leader's
+    /// cell would cover two planes of a dataset spaced finer than the
+    /// leader's, a slab no one asked for.
+    fn one_position_cut(&self, view: ViewId, value: LinkValue) -> LinkValue {
+        match value {
+            LinkValue::Cut {
+                plane,
+                at,
+                slab: None,
+            } if plane.cut() == SpatialAxis::Z => {
+                let cell = self.cut_grid(view, SpatialAxis::Z).cell_at(at);
+                LinkValue::Cut {
+                    plane,
+                    at,
+                    slab: Some([cell.start, cell.end]),
+                }
+            }
+            value => value,
+        }
     }
 }
 
@@ -678,10 +813,12 @@ impl Scene {
 mod tests {
     use lucida_content::PhysicalSpace;
 
+    use std::ops::Range;
+
     use super::super::test_helpers::make_dataset_opened_with_shape;
     use super::*;
     use crate::command::{Command, DocumentCommand, ViewportCommand};
-    use crate::view::ViewLayout;
+    use crate::view::{ViewDatasets, ViewLayout};
 
     /// An image of `shape` `[t, z, y, x]` samples, each `spacing` long, in
     /// micrometers when `physical` and in no unit otherwise, with its origin
@@ -795,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn datasets_over_one_region_link_pan_zoom_orientation_and_t() {
+    fn datasets_over_one_region_link_everything() {
         use LinkMode::*;
         use LinkProperty::*;
         let scene = one_place();
@@ -806,7 +943,7 @@ mod tests {
                 (Pan, Linked, None),
                 (Zoom, Linked, None),
                 (Orientation, Linked, Some(Unlinkable::Cameras)),
-                (Z, Off, Some(Unlinkable::NotYet)),
+                (Z, Linked, None),
                 (T, Linked, None),
             ]
         );
@@ -1027,7 +1164,7 @@ mod tests {
         side_by_side(&mut scene, "far");
         let [first, second] = views(&scene);
         let shown: Vec<LinkMode> = modes(&scene).into_iter().map(|(_, m, _)| m).collect();
-        assert_eq!(shown, vec![Relative, Linked, Linked, Off, Off]);
+        assert_eq!(shown, vec![Relative, Linked, Linked, Relative, Off]);
         let (center, _) = slice(&scene, second);
         assert!(
             center[0] > 500.0,
@@ -1064,7 +1201,7 @@ mod tests {
                 Some(Unlinkable::Cameras),
                 Some(Unlinkable::Cameras),
                 Some(Unlinkable::Cameras),
-                Some(Unlinkable::NotYet),
+                Some(Unlinkable::Cameras),
                 None
             ]
         );
@@ -1086,14 +1223,115 @@ mod tests {
         assert_eq!(modes(&scene)[0].2, Some(Unlinkable::Cameras));
     }
 
+    /// The position `view` stands at along `axis`, and the planes its one
+    /// layer reads there.
+    fn depth(scene: &Scene, view: ViewId, axis: SpatialAxis) -> (u32, Range<u32>) {
+        let layer = scene.resolved_layers(view).remove(0);
+        let planes = match axis {
+            SpatialAxis::Z => layer.z_range,
+            SpatialAxis::Y => layer.y..layer.y + 1,
+            SpatialAxis::X => layer.x..layer.x + 1,
+        };
+        (scene.axis_index(view, axis), planes)
+    }
+
     #[test]
-    fn z_cannot_link_yet() {
+    fn linked_depth_cuts_one_physical_place_in_both_views() {
         let mut scene = one_place();
+        let [first, second] = views(&scene);
+        // A's plane 10 is 10 to 11 micrometers; B's samples are half as
+        // long, and its plane holding 10.5 is 21, one plane, not a slab.
+        steer(&mut scene, first, ViewportCommand::SetZ { z: 10 });
+        assert_eq!(depth(&scene, second, SpatialAxis::Z), (21, 21..22));
+        steer(&mut scene, second, ViewportCommand::SetZ { z: 7 });
+        assert_eq!(depth(&scene, first, SpatialAxis::Z), (3, 3..4));
+        // A slab carries its physical range.
+        let (start, end) = (4, 6);
+        steer(&mut scene, first, ViewportCommand::SetZRange { start, end });
+        assert_eq!(depth(&scene, second, SpatialAxis::Z).1, 8..12);
+    }
+
+    #[test]
+    fn linked_side_views_cut_one_physical_place() {
+        let mut scene = one_place();
+        let [first, second] = views(&scene);
+        let plane = SlicePlane::Xz;
+        steer(&mut scene, first, ViewportCommand::SetSlicePlane { plane });
+        steer(&mut scene, second, ViewportCommand::SetSlicePlane { plane });
+        steer(&mut scene, first, ViewportCommand::SetY { y: 20 });
+        assert_eq!(depth(&scene, second, SpatialAxis::Y), (41, 41..42));
+        // Two planes are two cameras.
+        let plane = SlicePlane::Yz;
+        steer(&mut scene, second, ViewportCommand::SetSlicePlane { plane });
+        assert_eq!(modes(&scene)[3].2, Some(Unlinkable::Cameras));
+    }
+
+    #[test]
+    fn a_relative_depth_keeps_its_offset() {
+        let mut scene = one_place();
+        let [first, second] = views(&scene);
+        link(&mut scene, LinkProperty::Z, LinkMode::Off);
+        steer(&mut scene, first, ViewportCommand::SetZ { z: 2 });
+        steer(&mut scene, second, ViewportCommand::SetZ { z: 20 });
+        link(&mut scene, LinkProperty::Z, LinkMode::Relative);
+        // Eight micrometers apart, and still so after a step of five.
+        steer(&mut scene, first, ViewportCommand::SetZ { z: 7 });
+        assert_eq!(depth(&scene, second, SpatialAxis::Z).0, 30);
+    }
+
+    #[test]
+    fn unrelated_datasets_link_depth_by_hand_in_samples() {
+        let mut scene = Scene::new([800, 600]);
+        open(&mut scene, "a", [1, 32, 64, 64], 1.0, true, [0.0; 3]);
+        open(&mut scene, "c", [1, 16, 32, 32], 2.0, false, [0.0; 3]);
+        side_by_side(&mut scene, "c");
+        let [first, second] = views(&scene);
+        assert_eq!(modes(&scene)[3].1, LinkMode::Off);
         link(&mut scene, LinkProperty::Z, LinkMode::Linked);
-        assert_eq!(
-            modes(&scene)[3],
-            (LinkProperty::Z, LinkMode::Off, Some(Unlinkable::NotYet))
+        // Sample 10 of the first meets sample 10 of the second.
+        steer(&mut scene, first, ViewportCommand::SetZ { z: 10 });
+        assert_eq!(depth(&scene, second, SpatialAxis::Z), (10, 10..11));
+    }
+
+    #[test]
+    fn one_dataset_without_units_links_by_default_in_samples() {
+        use LinkMode::*;
+        let mut scene = Scene::new([800, 600]);
+        open(&mut scene, "u", [2, 8, 32, 32], 2.0, false, [0.0; 3]);
+        let layout = ViewLayout::Columns;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        let [_, second] = views(&scene);
+        let datasets = ViewDatasets::All;
+        apply(
+            &mut scene,
+            ViewportCommand::SetViewDatasets {
+                view: second,
+                datasets,
+            },
         );
+        let links = scene.links().unwrap();
+        assert_eq!(links.basis, Some(LinkBasis::Voxel));
+        assert_eq!(links.alike, Some(Alike::SameDataset));
+        let shown: Vec<LinkMode> = modes(&scene).into_iter().map(|(_, m, _)| m).collect();
+        assert_eq!(shown, vec![Linked; 5]);
+    }
+
+    #[test]
+    fn datasets_without_units_link_only_when_placed_alike() {
+        let mut scene = Scene::new([800, 600]);
+        open(&mut scene, "u", [1, 8, 32, 32], 2.0, false, [0.0; 3]);
+        open(&mut scene, "v", [1, 8, 32, 32], 2.0, false, [0.0; 3]);
+        side_by_side(&mut scene, "v");
+        let links = scene.links().unwrap();
+        assert_eq!(links.alike, Some(Alike::SamePlacement));
+        assert_eq!(modes(&scene)[3].1, LinkMode::Linked);
+        let mut scene = Scene::new([800, 600]);
+        open(&mut scene, "u", [1, 8, 32, 32], 2.0, false, [0.0; 3]);
+        open(&mut scene, "w", [1, 8, 16, 16], 2.0, false, [0.0; 3]);
+        side_by_side(&mut scene, "w");
+        let links = scene.links().unwrap();
+        assert_eq!(links.alike, None);
+        assert!(links.properties.iter().all(|p| p.mode == LinkMode::Off));
     }
 
     #[test]

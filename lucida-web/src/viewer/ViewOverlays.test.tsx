@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import type { Comparison, ComparisonActions } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
+import type { ViewLinkNotices } from "../viewLinks.ts";
 import { ViewOverlays } from "./ViewOverlays.tsx";
 import type { Coverage } from "./CoverageNotice.tsx";
 
@@ -21,7 +22,11 @@ const RIGHT: ViewPane = {
 };
 const SWIPE: Comparison = { a: "a", b: "b", mode: "swipe", divider: 0.5, showing: "a" };
 
-function overlays(byView: Map<number, Comparison>, coverage: Record<number, Coverage> = {}) {
+function overlays(
+  byView: Map<number, Comparison>,
+  coverage: Record<number, Coverage> = {},
+  linkNotices: readonly ViewLinkNotices[] = [],
+) {
   const actions: ComparisonActions = {
     current: () => null,
     start: vi.fn(() => ({ verdict: "yes" as const })),
@@ -41,6 +46,7 @@ function overlays(byView: Map<number, Comparison>, coverage: Record<number, Cove
       activate={activate}
       coverageOf={(view) => coverage[view]}
       byHand={() => null}
+      linkNotices={linkNotices}
     />,
   );
   const of = (view: number) => rendered.container.querySelector(`[data-view="${view}"]`) as HTMLElement;
@@ -62,11 +68,25 @@ describe("a view's overlays", () => {
     const { of } = overlays(new Map([[3, SWIPE]]), { 3: { wanted: 100, short: 40 } });
     const column = of(3).querySelector(".lc-view-overlay-top")!;
     const children = [...column.children];
-    expect(children.map((child) => child.className)).toEqual(["lc-view-comparison-bar", "lc-coverage-notice"]);
+    expect(children.map((child) => child.className)).toEqual(["lc-view-comparison-bar", "lc-view-notice"]);
     // A view without a comparison still says what it leaves out.
     cleanup();
     const plain = overlays(new Map(), { 0: { wanted: 100, short: 40 } });
-    expect(plain.of(0).querySelector(".lc-view-overlay-top .lc-coverage-notice")).not.toBeNull();
+    expect(plain.of(0).querySelector(".lc-view-overlay-top .lc-view-notice")).not.toBeNull();
+  });
+
+  it("say in the view a link took past its data where it went, and in no other", () => {
+    const notices: ViewLinkNotices[] = [
+      { view: 0, notices: [] },
+      { view: 3, notices: [{ kind: "depth" }, { kind: "time", last: 1 }] },
+    ];
+    const { of } = overlays(new Map(), {}, notices);
+    expect(of(0).querySelector("[data-link-notices]")).toBeNull();
+    const shown = of(3).querySelector("[data-link-notices]")!;
+    expect([...shown.children].map((line) => line.textContent)).toEqual([
+      "The linked depth is outside this view's data, so nothing is drawn.",
+      "The linked time is past this view's data, so it shows its last timepoint, 2.",
+    ]);
   });
 
   it("make their view the active one on a press or focus, before they act", () => {

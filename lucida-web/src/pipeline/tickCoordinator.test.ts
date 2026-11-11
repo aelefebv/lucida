@@ -930,6 +930,7 @@ describe("display-only fast path", () => {
         coldStateDisplay: over?.coldStateDisplay ?? vi.fn(),
         coldStateSelection: over?.coldStateSelection ?? vi.fn(),
         coldStateDelta: over?.coldStateDelta ?? vi.fn(),
+        datasetUnplanned: vi.fn(),
         viewHotState: vi.fn(),
         datasetLevels: vi.fn(() => null),
       } as unknown as TickContext["client"],
@@ -1928,6 +1929,43 @@ describe("multi-dataset planning", () => {
     expect(tick2Ds2State.previousActiveSet).toEqual(tick1Ds2Result.activeSet);
     expect(tick2Ds1State).toBe(tick1Ds1Result.nextState);
     expect(tick2Ds2State).toBe(tick1Ds2Result.nextState);
+  });
+
+  it("tells the worker once when no view plans a dataset, and sends it whole when one plans it again", () => {
+    const settings = (ds2Visible: boolean) => {
+      const layer = {
+        opacity: 1, contrast_min: 0, contrast_max: 1, gamma: 1, blend_mode: "alpha",
+        channel_settings: [], channel_blend_mode: "additive",
+      };
+      return { ds1: { ...layer, visible: true }, ds2: { ...layer, visible: ds2Visible } };
+    };
+    const sceneAt = (content: number, ds2Visible: boolean) => createMockScene({
+      datasetOrder: ["ds1", "ds2"],
+      epochs: { content, layout: 1, view: 1, selection: 1 },
+      allSettings: settings(ds2Visible),
+    });
+    const base = makeCtx(sceneAt(1, true), makeTwoDatasetEntries());
+    const datasetUnplanned = vi.fn();
+    const ctx = { ...base, client: { ...base.client, datasetUnplanned } as unknown as TickContext["client"] };
+    const coldState = vi.mocked(ctx.client.coldState);
+    const orch = makeOrch();
+    const sentTo = () => coldState.mock.calls.map(([msg]) => msg.datasetId);
+
+    orch.planAndFetch(ctx, emptyMinimap);
+    expect(sentTo()).toEqual(["ds1", "ds2"]);
+
+    // ds2 hidden: the worker hears it once, and keeps what it holds.
+    coldState.mockClear();
+    orch.planAndFetch({ ...ctx, scene: sceneAt(2, false) } as TickContext, emptyMinimap);
+    orch.planAndFetch({ ...ctx, scene: sceneAt(3, false) } as TickContext, emptyMinimap);
+    expect(datasetUnplanned.mock.calls).toEqual([[{ type: "datasetUnplanned", datasetId: "ds2" }]]);
+    expect(sentTo()).toEqual(["ds1", "ds1"]);
+
+    // Shown again, it gets a full cold state, which wants its chunks again.
+    coldState.mockClear();
+    orch.planAndFetch({ ...ctx, scene: sceneAt(4, true) } as TickContext, emptyMinimap);
+    expect(sentTo()).toEqual(["ds1", "ds2"]);
+    expect(datasetUnplanned).toHaveBeenCalledTimes(1);
   });
 });
 
