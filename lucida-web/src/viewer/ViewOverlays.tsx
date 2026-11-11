@@ -1,9 +1,10 @@
 /**
  * What lies over each view's rectangle beside its pane: a comparison's swipe
  * divider across it, and one column at its top holding the compare bar and,
- * below it, the notice that the view covers less than it asks for. The column
- * keeps the two from covering each other, and the bar comes first so a notice
- * coming or going never moves it under the pointer.
+ * below it, the notices that the view covers less than it asks for and of
+ * where a link took it past its data. The column keeps them from covering
+ * each other, and the bar comes first so a notice coming or going never moves
+ * it under the pointer.
  *
  * They lie beside the pane, not in it: the viewers listen on the pane itself,
  * and a press on a control would also pan the view. A press or focus in them
@@ -15,7 +16,9 @@ import { useSyncExternalStore } from "react";
 import { setAsideNote, type ComparisonActions } from "../comparison.ts";
 import { ComparisonBar, SwipeDivider } from "../components/Comparison.tsx";
 import type { SceneStore, ViewPane } from "../sceneStore.ts";
+import type { ViewLinkNotices } from "../viewLinks.ts";
 import { CoverageNotice, type Coverage } from "./CoverageNotice.tsx";
+import { LinkNotices } from "./LinkNotices.tsx";
 import "./ViewOverlays.css";
 
 interface Props {
@@ -29,9 +32,11 @@ interface Props {
   coverageOf(view: number): Coverage | undefined;
   /** Says when a pair lines up because someone placed it by hand, or null. */
   byHand(a: string, b: string): string | null;
+  /** With two linked views, where the links took each past its data. */
+  linkNotices?: readonly ViewLinkNotices[];
 }
 
-export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand }: Props) {
+export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
     <div className="lc-view-overlays">
@@ -67,6 +72,7 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
                 </div>
               )}
               <CoverageNotice coverage={coverageOf(pane.id)} />
+              <LinkNotices notices={linkNotices?.find((shown) => shown.view === pane.id)?.notices ?? []} />
             </div>
           </div>
         );

@@ -172,7 +172,7 @@ impl Scene {
 mod tests {
     use lucida_content::DatasetId;
 
-    use super::super::test_helpers::make_dataset_opened_with_shape;
+    use super::super::test_helpers::{make_dataset_opened_with_shape, unlink};
     use super::*;
     use crate::command::{Command, DocumentCommand, ViewportCommand};
     use crate::view::ViewRect;
@@ -289,6 +289,7 @@ mod tests {
         let mut scene = split();
         let [first, second] = both(&scene);
         show(&mut scene, second, &["b"]);
+        unlink(&mut scene);
         let before = scene.view(first).unwrap().camera.clone();
         apply(&mut scene, ViewportCommand::SetActiveView { view: second });
         let moved = scene.view(second).unwrap().camera.clone();
@@ -325,6 +326,7 @@ mod tests {
         let mut scene = split();
         let [first, second] = both(&scene);
         show(&mut scene, second, &["a"]);
+        unlink(&mut scene);
         // Another Z in the second view, then another timepoint in 3D.
         apply(&mut scene, ViewportCommand::SetActiveView { view: second });
         apply(&mut scene, ViewportCommand::SetZ { z: 5 });

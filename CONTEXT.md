@@ -286,13 +286,15 @@ _Avoid_: layout (unqualified; a collection's arrangement of entities)
 
 **Link**:
 How one of two views follows the other, one property at a time: pan, zoom,
-3D orientation, and the Z and T axis positions. A *linked* property takes the
-steered view's value, a *relative* one keeps the offset it had when linked,
-and one that is off stays put. Each view links by its top visible dataset.
-Two that declare physical units compare in the scene frame, the *physical
-basis*; any others compare in their own samples, the *voxel basis*. Two views
-over one region link pan, zoom, orientation and T by default, and two at one
-scale but apart link zoom and orientation and keep their own centers.
+3D orientation, the depth a slice view cuts (its Z, or the Y or X a side view
+cuts), and T. A *linked* property takes the steered view's value, a
+*relative* one keeps the offset it had when linked, and one that is off stays
+put. Each view links by its top visible dataset. Two that declare physical
+units compare in the scene frame, the *physical basis*; any others compare in
+their own samples, the *voxel basis*. Two views over one region, or showing
+the same samples, link everything by default, and two at one scale but apart
+link zoom and orientation and keep their own centers and depths. A view a
+link takes past its data says so.
 _Avoid_: sync (unqualified)
 
 **Framing**:
