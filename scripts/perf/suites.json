@@ -24,6 +24,12 @@
       "datasets": ["large-image", "volume"],
       "scenarios": ["phone-cold-open", "phone-full-ui", "phone-settle-then-orbit"],
       "ratios": [3]
+    },
+    "four-up": {
+      "description": "a volume and a deep one four-up, opened and scrubbed, next to the same in one view, so settle and coverage read side by side",
+      "datasets": ["volume", "deep-volume"],
+      "scenarios": ["cold-open", "four-up", "xz-scrub", "four-up-scrub"],
+      "ratios": [1, 2]
     }
   }
 }
