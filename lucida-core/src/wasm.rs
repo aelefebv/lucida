@@ -290,7 +290,8 @@ impl WasmScene {
 
     /// What of `view`'s width `dataset_id` shows under its comparison, as
     /// `[from, to]` fractions from its left edge ([`Comparison::span`]).
-    /// Empty for a dataset it leaves alone, which shows everywhere.
+    /// Empty without a comparison, which leaves the dataset everywhere, and
+    /// for a dataset outside the pair, which the comparison sets aside.
     ///
     /// [`Comparison::span`]: crate::scene::Comparison::span
     pub fn comparison_span(&self, view: u32, dataset_id: &str) -> Vec<f64> {

@@ -14,7 +14,8 @@ pub struct SceneEpochs {
     /// Camera moved (Pan, Zoom, Rotate, Fly, SetCenter, SetViewport, mode switch)
     pub view: u64,
     /// Selection-like state changed (SetT, SetZ, channel solo,
-    /// channel visibility/settings, render mode, contrast, gamma)
+    /// channel visibility/settings, render mode, contrast, gamma, and the
+    /// layers a comparison sets aside)
     pub selection: u64,
     /// Collaborative annotations changed (a pin added, removed, or moved; a
     /// comment added, removed, or edited).
@@ -23,7 +24,9 @@ pub struct SceneEpochs {
     #[serde(default)]
     pub annotation: u64,
     /// The comparison the view shows changed. Planning reads it nowhere,
-    /// since a comparison changes only where each dataset is drawn.
+    /// since a divider, a mode or a blink changes only where each of the
+    /// pair is drawn. Setting other layers aside, or bringing them back,
+    /// moves `selection` as well.
     #[serde(default)]
     pub comparison: u64,
 }

@@ -4,13 +4,17 @@
 //! point of the screen shows the same place.
 //!
 //! Both datasets stay in the wanted set however the comparison shows them,
-//! so the one that comes back into view never waits on a fetch. A
-//! comparison only decides where on the screen each one is drawn.
+//! so the one that comes back into view never waits on a fetch. Every other
+//! layer the view shows is set aside while the comparison lasts: drawn
+//! nowhere and planned for nothing, so each side shows exactly one of the
+//! pair. Its own visibility is left alone, so ending the comparison brings
+//! it back as it was.
 
 use lucida_content::DatasetId;
 use serde::{Deserialize, Serialize};
 
 use crate::placement::LineUp;
+use crate::view::ViewId;
 
 use super::Scene;
 
@@ -47,9 +51,14 @@ pub struct Comparison {
 }
 
 impl Comparison {
+    /// Whether `dataset` is one of the pair.
+    pub fn compares(&self, dataset: &DatasetId) -> bool {
+        *dataset == self.a || *dataset == self.b
+    }
+
     /// What of the view's width `dataset` shows, as `[from, to]` fractions
     /// from its left edge; equal ends show none of it. `None` for a dataset
-    /// the comparison leaves alone, which shows across the whole view.
+    /// outside the pair, which the comparison sets aside.
     pub fn span(&self, dataset: &DatasetId) -> Option<[f64; 2]> {
         let side = if *dataset == self.a {
             Side::A
@@ -91,7 +100,8 @@ impl Scene {
         Ok(())
     }
 
-    /// Stop comparing; both datasets show across the view again.
+    /// Stop comparing; both datasets show across the view again, and so do
+    /// the layers it set aside.
     pub fn end_comparison(&mut self) {
         self.set_comparison(None);
     }
@@ -128,14 +138,34 @@ impl Scene {
         self.set_comparison(Some(next));
     }
 
+    /// The layers `view`'s comparison sets aside, in layer order: each it
+    /// shows, visible by its own setting, outside the pair. Empty without a
+    /// comparison or for an unknown view.
+    pub fn set_aside(&self, view: ViewId) -> Vec<DatasetId> {
+        let Some(view) = self.view(view) else {
+            return Vec::new();
+        };
+        self.layer_ids()
+            .filter(|id| view.shows(id) && view.sets_aside(id))
+            .filter(|id| self.dataset_settings.get(*id).is_none_or(|s| s.visible))
+            .cloned()
+            .collect()
+    }
+
     /// The one write to the active view's comparison, so `epochs.comparison`
-    /// moves exactly when it does. Planning reads no epoch it bumps: what is
-    /// wanted is the same however the pair is shown.
+    /// moves exactly when it does. Setting layers aside or bringing them back
+    /// changes what is drawn and planned, as a visibility toggle does, so it
+    /// moves `epochs.selection` too.
     fn set_comparison(&mut self, next: Option<Comparison>) {
-        let comparison = &mut self.active_view_mut().comparison;
-        if *comparison != next {
-            *comparison = next;
-            self.epochs.comparison += 1;
+        let view = self.active_view().id();
+        if self.active_view().comparison == next {
+            return;
+        }
+        let aside = self.set_aside(view);
+        self.active_view_mut().comparison = next;
+        self.epochs.comparison += 1;
+        if self.set_aside(view) != aside {
+            self.epochs.selection += 1;
         }
     }
 
@@ -150,11 +180,17 @@ impl Scene {
                     .is_some_and(|c| self.line_up(&c.a, &c.b) != LineUp::Yes)
             })
             .collect();
+        let set_aside = apart
+            .iter()
+            .any(|&i| !self.set_aside(self.views[i].id()).is_empty());
         for i in &apart {
             self.views[*i].comparison = None;
         }
         if !apart.is_empty() {
             self.epochs.comparison += 1;
+        }
+        if set_aside {
+            self.epochs.selection += 1;
         }
     }
 }
@@ -165,7 +201,7 @@ mod tests {
 
     use super::super::test_helpers::make_dataset_opened_with_shape;
     use super::*;
-    use crate::command::DocumentCommand;
+    use crate::command::{DocumentCommand, ViewportCommand};
 
     /// A single image of `shape` `[z, y, x]` samples, `spacing` long in
     /// micrometers each when `physical`, else in no unit.
@@ -257,21 +293,72 @@ mod tests {
     }
 
     #[test]
-    fn the_epoch_moves_with_the_comparison_and_nothing_else_does() {
+    fn the_epoch_moves_with_the_comparison_and_selection_with_what_it_sets_aside() {
         let mut scene = lined_up();
         let [a, b] = ids();
         let before = scene.epochs.clone();
-        scene.compare(a, b, CompareMode::Swipe).unwrap();
+        scene
+            .compare(a.clone(), b.clone(), CompareMode::Swipe)
+            .unwrap();
         scene.set_comparison_divider(0.5);
-        assert_eq!(scene.epochs.comparison, before.comparison + 1);
         scene.flip_comparison();
         scene.set_comparison_divider(0.7);
+        scene.set_comparison_mode(CompareMode::Blink);
         scene.end_comparison();
         scene.end_comparison();
-        assert_eq!(scene.epochs.comparison, before.comparison + 4);
+        // With nothing else to set aside, only where the pair draws changed.
         let mut after = scene.epochs.clone();
+        assert_eq!(after.comparison, before.comparison + 5);
         after.comparison = before.comparison;
         assert_eq!(after, before);
+
+        open(&mut scene, "c", [1, 64, 64], 1.0, true);
+        let before = scene.epochs.clone();
+        scene.compare(a, b, CompareMode::Swipe).unwrap();
+        assert_eq!(
+            scene.set_aside(scene.active_view().id()),
+            [DatasetId::from("c")]
+        );
+        assert_eq!(scene.epochs.selection, before.selection + 1);
+        scene.set_comparison_divider(0.2);
+        scene.set_comparison_mode(CompareMode::Blink);
+        assert_eq!(scene.epochs.selection, before.selection + 1);
+        scene.end_comparison();
+        assert_eq!(scene.epochs.selection, before.selection + 2);
+    }
+
+    #[test]
+    fn only_the_pair_draws_and_ending_the_comparison_brings_the_others_back() {
+        let mut scene = lined_up();
+        open(&mut scene, "c", [1, 64, 64], 1.0, true);
+        open(&mut scene, "hidden", [1, 64, 64], 1.0, true);
+        scene.apply(
+            ViewportCommand::SetDatasetVisible {
+                dataset_id: "hidden".into(),
+                visible: false,
+            }
+            .into(),
+        );
+        let view = scene.active_view().id();
+        let layers = scene.resolved_layers(view);
+        let settings = scene.dataset_settings.clone();
+        let drawn = |scene: &Scene, id: &str| {
+            let layer = scene.resolved_layer(view, &DatasetId::from(id)).unwrap();
+            (layer.visible, layer.set_aside)
+        };
+
+        let [a, b] = ids();
+        scene.compare(a, b, CompareMode::Blink).unwrap();
+        // The one a blink hides stays drawn, so it never waits on a fetch.
+        assert_eq!(drawn(&scene, "a"), (true, false));
+        assert_eq!(drawn(&scene, "b"), (true, false));
+        assert_eq!(drawn(&scene, "c"), (false, true));
+        // A layer hidden by its own setting was never the comparison's to hide.
+        assert_eq!(drawn(&scene, "hidden"), (false, false));
+        assert_eq!(scene.dataset_settings, settings);
+
+        scene.end_comparison();
+        assert_eq!(scene.resolved_layers(view), layers);
     }
 
     #[test]
@@ -282,9 +369,14 @@ mod tests {
         let epoch = scene.epochs.comparison;
         open(&mut scene, "c", [1, 64, 64], 1.0, true);
         assert!(scene.comparison().is_some());
+        let selection = scene.epochs.selection;
         scene.apply(DocumentCommand::RemoveDataset { id: b }.into());
         assert_eq!(scene.comparison(), None);
         assert!(scene.epochs.comparison > epoch);
+        // The layer it set aside draws again.
+        assert!(scene.epochs.selection > selection);
+        let c = scene.resolved_layer(scene.active_view().id(), &DatasetId::from("c"));
+        assert_eq!(c.map(|c| (c.visible, c.set_aside)), Some((true, false)));
     }
 
     #[test]

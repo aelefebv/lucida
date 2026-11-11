@@ -1,8 +1,9 @@
 //! What each layer shows at the scene's selectors: which channels, through
-//! which colormap and window, at which z and t, and whether a slice view's
-//! cut passes through it. Decided here once, so the renderer, the planner,
-//! the minimap, explore thumbnails, the pin-context check, the layer panel
-//! and the CLI cannot disagree about it.
+//! which colormap and window, at which z and t, whether a slice view's cut
+//! passes through it, and whether the view's comparison sets it aside.
+//! Decided here once, so the renderer, the planner, the minimap, explore
+//! thumbnails, the pin-context check, the layer panel and the CLI cannot
+//! disagree about it.
 
 use std::ops::Range;
 
@@ -50,8 +51,14 @@ pub enum CutReach {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedLayer {
     pub dataset_id: DatasetId,
-    /// A hidden layer still lists the channels it would show.
+    /// Whether the view draws the layer: its own visibility, unless the
+    /// view's comparison sets it aside. A hidden layer still lists the
+    /// channels it would show.
     pub visible: bool,
+    /// Visible by its own setting, but outside the pair the view compares,
+    /// so it draws nothing until the comparison ends. The setting is left
+    /// as it was.
+    pub set_aside: bool,
     pub opacity: f32,
     pub render_mode: RenderMode,
     pub channel_count: u32,
@@ -228,13 +235,15 @@ fn reach_across(position: Option<u32>, extent: Option<(f64, f64)>) -> CutReach {
     }
 }
 
-/// What one layer shows with `settings` at the selectors in `view`.
+/// What one layer shows with `settings` at the selectors in `view`, set
+/// aside or not by the view's comparison.
 fn resolve(
     dataset_id: &DatasetId,
     manifest: &DatasetManifest,
     settings: &DatasetDisplaySettings,
     view: &AxisPositions,
     place: &LayerPlace,
+    outside_comparison: bool,
 ) -> ResolvedLayer {
     let extent = LayerExtent::of(manifest);
     let shown = settings.shown_channels(extent.c);
@@ -261,9 +270,11 @@ fn resolve(
         .collect();
     let z_range = extent.clamp_z(&view.z_range);
     let t = extent.clamp_t(view.t);
+    let set_aside = settings.visible && outside_comparison;
     ResolvedLayer {
         dataset_id: dataset_id.clone(),
-        visible: settings.visible,
+        visible: settings.visible && !set_aside,
+        set_aside,
         opacity: settings.opacity,
         render_mode: settings.render_mode,
         channel_count: extent.c,
@@ -294,7 +305,7 @@ impl Scene {
     /// What `dataset_id` shows in `view`, or `None` for a dataset the
     /// document lacks or an unknown view.
     pub fn resolved_layer(&self, view: ViewId, dataset_id: &DatasetId) -> Option<ResolvedLayer> {
-        let axes = &self.view(view)?.axes;
+        let shown = self.view(view)?;
         let manifest = self.document.manifests.get(dataset_id)?;
         let seeded;
         let settings = match self.dataset_settings.get(dataset_id) {
@@ -308,8 +319,9 @@ impl Scene {
             dataset_id,
             manifest,
             settings,
-            axes,
+            &shown.axes,
             &self.layer_place(view, dataset_id),
+            shown.sets_aside(dataset_id),
         ))
     }
 
@@ -358,18 +370,20 @@ impl Scene {
                         ..styled.clone()
                     };
                 }
+                // A saved view records no comparison, so it sets nothing aside.
                 Some(resolve(
                     id,
                     manifest,
                     &settings,
                     &view.view,
                     &self.layer_place(self.active_view().id(), id),
+                    false,
                 ))
             })
             .collect()
     }
 
-    fn layer_ids(&self) -> impl Iterator<Item = &DatasetId> {
+    pub(super) fn layer_ids(&self) -> impl Iterator<Item = &DatasetId> {
         let unlisted = self
             .document
             .manifests
