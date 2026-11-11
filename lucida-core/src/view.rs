@@ -43,7 +43,7 @@ impl ViewRect {
 }
 
 /// How the canvas divides among the views: one view across it, two side by
-/// side, or two stacked, the form a narrow screen takes.
+/// side, two stacked, the form a narrow screen takes, or four in quarters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewLayout {
@@ -51,6 +51,11 @@ pub enum ViewLayout {
     Single,
     Columns,
     Rows,
+    /// Four views, each free.
+    Grid,
+    /// Four views of the same datasets, three slices and a volume, crossing
+    /// at one point. See [`crate::scene::FOUR_UP`].
+    FourUp,
 }
 
 impl ViewLayout {
@@ -67,6 +72,12 @@ impl ViewLayout {
             ViewLayout::Single => vec![ViewRect::WHOLE],
             ViewLayout::Columns => vec![half(0.0, 0.0, 0.5, 1.0), half(0.5, 0.0, 0.5, 1.0)],
             ViewLayout::Rows => vec![half(0.0, 0.0, 1.0, 0.5), half(0.0, 0.5, 1.0, 0.5)],
+            ViewLayout::Grid | ViewLayout::FourUp => vec![
+                half(0.0, 0.0, 0.5, 0.5),
+                half(0.5, 0.0, 0.5, 0.5),
+                half(0.0, 0.5, 0.5, 0.5),
+                half(0.5, 0.5, 0.5, 0.5),
+            ],
         }
     }
 }

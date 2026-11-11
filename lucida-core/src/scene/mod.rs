@@ -1,5 +1,6 @@
 mod comparison;
 mod cut_grid;
+mod four_up;
 mod layers;
 mod link_notices;
 mod links;
@@ -10,6 +11,7 @@ mod views;
 
 pub use comparison::{CompareMode, Comparison, Side};
 pub use cut_grid::{AxisReading, CutGrid};
+pub use four_up::FOUR_UP;
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
 pub use link_notices::{LinkNotice, ViewLinkNotices};
@@ -493,11 +495,15 @@ impl Scene {
         let Some(bounds) = self.visible_bounds(id) else {
             return false;
         };
+        let zoom = self.four_up_fit_zoom();
         let Some(view) = self.view_mut(id) else {
             return false;
         };
         let before = view.camera.clone();
         view.camera.fit(&bounds);
+        if let (Some(zoom), Camera::Slice(slice)) = (zoom, &mut view.camera) {
+            slice.set_zoom(zoom);
+        }
         view.camera.set_framing(Framing::Framed);
         view.camera != before
     }
@@ -1258,12 +1264,14 @@ impl Scene {
             view.axes = axes;
         }
         // A followed peer or a restored view steers the active view, and the
-        // other view follows it through the links as it follows a gesture.
+        // other view follows it through the links as it follows a gesture,
+        // or every view of a four-up layout through the crossing.
         let followed = self.follow_links(id, &before, &axes_before);
+        let crossed = self.share_crossing(&axes_before);
         if moved || followed.camera {
             self.epochs.view += 1;
         }
-        if axes_changed || followed.axes || self.display != display {
+        if axes_changed || followed.axes || crossed || self.display != display {
             self.display = display;
             self.epochs.selection += 1;
         }

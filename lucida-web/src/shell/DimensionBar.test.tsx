@@ -1,12 +1,14 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { __resetKeyboardSeenForTesting } from "../input/fineInput.ts";
 import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
 import { DimensionBar, PLAYBACK_INTERVAL_MS } from "./DimensionBar.tsx";
 import type { SlicePlane } from "../renderer/slicePlane.ts";
+import type { ViewLayoutName } from "../commands.ts";
+import { PHONE_LAYOUTS, VIEW_LAYOUTS } from "../viewLayout.ts";
 
 // The segmented control's selection indicator animates through the Web
 // Animations API, which happy-dom lacks.
@@ -28,27 +30,29 @@ interface Shape {
   dimY?: number;
   z?: number;
   t?: number;
+  /** The layouts the screen offers. */
+  layouts?: readonly ViewLayoutName[];
 }
 
 /** The bar wired to its own state, the way App wires it to `useDimensions`. */
-function Harness({ mode = "2d", dimZ = 1, dimT = 1, dimY = 1, z: z0 = 0, t: t0 = 0 }: Shape) {
+function Harness({ mode = "2d", dimZ = 1, dimT = 1, dimY = 1, z: z0 = 0, t: t0 = 0, layouts = VIEW_LAYOUTS }: Shape) {
   const [viewMode, setViewMode] = useState(mode);
   const [z, setZ] = useState(z0);
   const [t, setT] = useState(t0);
   const [y, setY] = useState(0);
   const [plane, setPlane] = useState<SlicePlane>("xy");
   const [cameraMode, setCameraMode] = useState<"arcball" | "fly">("arcball");
-  const [split, setSplit] = useState(false);
+  const [layout, setLayout] = useState<ViewLayoutName>("single");
   const side = plane !== "xy";
   return (
     <>
-      <output data-testid="state">{`${viewMode} z=${z} t=${t} ${plane} y=${y} ${cameraMode}${split ? " split" : ""}`}</output>
+      <output data-testid="state">{`${viewMode} ${layout} z=${z} t=${t} ${plane} y=${y} ${cameraMode}`}</output>
       <DimensionBar
         viewMode={viewMode}
         onViewModeToggle={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
-        split={split}
-        stacked={false}
-        onSplitToggle={() => setSplit((on) => !on)}
+        layout={layout}
+        layouts={layouts}
+        onLayoutChange={setLayout}
         slicePlane={plane}
         onSlicePlaneChange={setPlane}
         dimZ={dimZ}
@@ -106,23 +110,40 @@ describe("DimensionBar", () => {
     expect(screen.getByRole("slider", { name: "Focal depth" })).toBeTruthy();
   });
 
-  it("splits the canvas into two views and shows one again", () => {
+  it("divides the canvas by the layout chosen from its menu", async () => {
     render(<Harness />);
-    fireEvent.click(screen.getByRole("button", { name: "Split view" }));
-    expect(screen.getByTestId("state").textContent).toContain("split");
-    fireEvent.click(screen.getByRole("button", { name: "Show one view" }));
-    expect(screen.getByTestId("state").textContent).not.toContain("split");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "View layout" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Four-up" }));
+    });
+    expect(screen.getByTestId("state").textContent).toContain(" four_up ");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "1" }));
+    });
+    expect(screen.getByTestId("state").textContent).toContain(" single ");
+  });
+
+  it("offers a phone one view or two stacked", async () => {
+    render(<Harness layouts={PHONE_LAYOUTS} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "View layout" }));
+    });
+    const menu = screen.getByRole("radiogroup", { name: "View layout" });
+    const offered = within(menu).getAllByRole("radio").map((radio) => radio.textContent);
+    expect(offered).toEqual(["1", "2×1"]);
   });
 
   it("offers the view links only while two views divide the canvas", () => {
     const links = { links: { basis: "physical" as const, properties: [], notices: [] }, onChange: vi.fn() };
-    const bar = (split: boolean) => (
+    const bar = (layout: ViewLayoutName) => (
       <DimensionBar
         viewMode="2d"
         onViewModeToggle={() => {}}
-        split={split}
-        stacked={false}
-        onSplitToggle={() => {}}
+        layout={layout}
+        layouts={VIEW_LAYOUTS}
+        onLayoutChange={() => {}}
         links={links}
         slicePlane="xy"
         onSlicePlaneChange={() => {}}
@@ -137,9 +158,11 @@ describe("DimensionBar", () => {
         onCameraModeToggle={() => {}}
       />
     );
-    const { rerender } = render(bar(true));
+    const { rerender } = render(bar("columns"));
     expect(screen.getByRole("button", { name: "Link views" })).toBeTruthy();
-    rerender(bar(false));
+    rerender(bar("single"));
+    expect(screen.queryByRole("button", { name: "Link views" })).toBeNull();
+    rerender(bar("four_up"));
     expect(screen.queryByRole("button", { name: "Link views" })).toBeNull();
   });
 
@@ -149,9 +172,9 @@ describe("DimensionBar", () => {
       <DimensionBar
         viewMode="3d"
         onViewModeToggle={() => {}}
-        split={false}
-        stacked={false}
-        onSplitToggle={() => {}}
+        layout="single"
+        layouts={VIEW_LAYOUTS}
+        onLayoutChange={() => {}}
         slicePlane="xy"
         onSlicePlaneChange={() => {}}
         dimZ={8}
@@ -201,9 +224,9 @@ describe("DimensionBar", () => {
       <DimensionBar
         viewMode="2d"
         onViewModeToggle={() => {}}
-        split={false}
-        stacked={false}
-        onSplitToggle={() => {}}
+        layout="single"
+        layouts={VIEW_LAYOUTS}
+        onLayoutChange={() => {}}
         slicePlane="xy"
         onSlicePlaneChange={() => {}}
         dimZ={96}

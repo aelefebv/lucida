@@ -60,7 +60,7 @@ import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useComparison } from "./hooks/useComparison.ts";
 import { useEditHistory } from "./hooks/useEditHistory.ts";
 import { useUserTransforms } from "./hooks/useUserTransforms.ts";
-import { viewLayoutActions } from "./viewLayout.ts";
+import { PHONE_LAYOUTS, VIEW_LAYOUTS, viewLayoutActions } from "./viewLayout.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import {
@@ -590,10 +590,6 @@ function Viewer({
       showEverywhere: viewLayout.showEverywhere,
     };
   }, [shownViews, viewLayout]);
-  const toggleSplit = useCallback(() => {
-    // A phone stacks its two views; a wider screen sets them side by side.
-    viewLayout.setLayout(viewLayoutName !== "single" ? "single" : phone ? "rows" : "columns");
-  }, [viewLayout, viewLayoutName, phone]);
 
   const requestDatasetHealth = useCallback(
     () => liveBridge
@@ -963,9 +959,9 @@ function Viewer({
     <DimensionBar
       viewMode={dims.viewMode}
       onViewModeToggle={dims.handleViewModeToggle}
-      split={viewLayoutName !== "single"}
-      stacked={phone}
-      onSplitToggle={toggleSplit}
+      layout={viewLayoutName}
+      layouts={phone ? PHONE_LAYOUTS : VIEW_LAYOUTS}
+      onLayoutChange={viewLayout.setLayout}
       links={viewLinks ? { links: viewLinks, onChange: viewLayout.link } : undefined}
       slicePlane={dims.slicePlane}
       onSlicePlaneChange={dims.handleSlicePlaneChange}
