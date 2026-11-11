@@ -4,11 +4,16 @@
 //! positions, which every view holds on all three axes, so the four share
 //! them: each slice view cuts where the other two draw their lines, and a
 //! move of one view's position moves them all. Their cameras stay their own.
+//!
+//! A collection is cut at one place from every tile's own edge, so the lines
+//! stand on one tile, the one the client names, and a drag there moves the
+//! cut of every tile.
 
-use lucida_content::SpatialAxis;
-use serde::Serialize;
+use lucida_content::{DatasetId, EntityId, SpatialAxis};
+use serde::{Deserialize, Serialize};
 
-use super::Scene;
+use super::placement::{frame_box, placing_plane};
+use super::{MemberState, Scene};
 use crate::camera::{Arcball, Camera, Framing, Slice};
 use crate::slice_plane::SlicePlane;
 use crate::view::{AxisPositions, ViewId, ViewLayout};
@@ -24,6 +29,24 @@ pub struct PlaneLine {
     /// its top left.
     pub from: [f64; 2],
     pub to: [f64; 2],
+}
+
+/// A tile of a collection, by its dataset and its entity there: the one
+/// four-up draws its planes on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaneTile {
+    pub dataset: DatasetId,
+    pub entity: EntityId,
+}
+
+/// The tile a view draws four-up's planes on, as the view places it.
+struct OnTile {
+    /// From where the view draws its collection's first planes to where it
+    /// draws the tile's, in the scene frame: how far the tile's planes stand
+    /// from the place the view cuts.
+    shift: [f64; 3],
+    /// The tile's box in the scene frame, as a volume view draws it.
+    extent: ([f64; 3], [f64; 3]),
 }
 
 /// What each view of a four-up layout shows, in the layout's order: XY at
@@ -139,23 +162,89 @@ impl Scene {
         }
     }
 
+    /// The tile of a collection `view` shows under `at`, fractions of its
+    /// width and height from its top left; in a volume view, the nearest
+    /// one the ray meets. `None` over no tile.
+    pub fn tile_at(&self, view: ViewId, at: [f64; 2]) -> Option<PlaneTile> {
+        let [width, height] = self.view(view)?.camera.viewport().map(f64::from);
+        let [x, y] = [at[0] * width, at[1] * height];
+        self.shown_collections(view)
+            .filter_map(|id| Some((id, self.ray_pick(view, id, x, y)?)))
+            .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
+            .map(|(id, hit)| PlaneTile {
+                dataset: id.clone(),
+                entity: hit.entity_id,
+            })
+    }
+
+    /// The visible collections `view` shows, in layer order.
+    fn shown_collections(&self, view: ViewId) -> impl Iterator<Item = &DatasetId> {
+        self.layer_ids().filter(move |id| {
+            self.derived
+                .get(*id)
+                .is_some_and(|d| d.tile_cells.is_some())
+                && self.shown_dataset_ids(view).any(|shown| shown == *id)
+        })
+    }
+
+    /// The tile `view` draws four-up's planes on: `tile` where the view
+    /// shows its collection, or else the first tile of the first collection
+    /// it shows. `None` where it shows none, so the planes stand where the
+    /// scene frame places the cut.
+    fn on_tile(&self, view: ViewId, tile: Option<&PlaneTile>) -> Option<OnTile> {
+        let named = tile.and_then(|tile| {
+            let id = self
+                .shown_collections(view)
+                .find(|id| **id == tile.dataset)?;
+            Some((id, self.derived.get(id)?.member_by_id(&tile.entity.0)?))
+        });
+        let (id, member) = named.or_else(|| {
+            let id = self.shown_collections(view).next()?;
+            Some((id, self.derived.get(id)?.members.first()?))
+        })?;
+        self.tile_placed(view, id, member)
+    }
+
+    /// Where `view` draws `member` of the collection `dataset_id`.
+    fn tile_placed(
+        &self,
+        view: ViewId,
+        dataset_id: &DatasetId,
+        member: &MemberState,
+    ) -> Option<OnTile> {
+        let derived = self.derived.get(dataset_id)?;
+        let to_scene = self.placement(dataset_id)?;
+        let plane = placing_plane(self.view(view)?, &to_scene);
+        let on_plane = plane.frame_point(derived.plane_position(plane, member));
+        let (lo, hi) = frame_box(member)?;
+        Some(OnTile {
+            shift: to_scene.apply_vector(on_plane),
+            extent: to_scene.apply_box(lo, hi),
+        })
+    }
+
     /// Where four-up's planes cross `view`: in a slice view, a line across
     /// it for each plane whose axis it draws; in the volume, each plane's
-    /// outline over the data the view draws. None in any other layout.
-    pub fn plane_lines(&self, view: ViewId) -> Vec<PlaneLine> {
+    /// outline over the data the view draws. In a collection they stand on
+    /// `tile` ([`Self::tile_at`] names one), or on the first tile without
+    /// one. None in any other layout.
+    pub fn plane_lines(&self, view: ViewId, tile: Option<&PlaneTile>) -> Vec<PlaneLine> {
         if self.layout != ViewLayout::FourUp {
             return Vec::new();
         }
         let Some(shown) = self.view(view) else {
             return Vec::new();
         };
+        let on_tile = self.on_tile(view, tile);
+        let shift = on_tile.as_ref().map_or([0.0; 3], |on| on.shift);
         match &shown.camera {
             Camera::Slice(slice) => slice
                 .screen_axes()
                 .into_iter()
                 .enumerate()
                 .map(|(on_screen, axis)| {
-                    let at = slice_screen_at(slice, axis, self.cut_place(view, axis));
+                    let place = self.cut_place(view, axis) + shift[axis.xyz()];
+                    let at = slice_screen_at(slice, axis, place);
                     let [width, height] = slice.viewport.map(f64::from);
                     match on_screen {
                         0 => PlaneLine {
@@ -171,23 +260,36 @@ impl Scene {
                     }
                 })
                 .collect(),
-            camera => self.plane_outlines(view, camera),
+            camera => self.plane_outlines(view, camera, on_tile),
         }
     }
 
-    /// Each plane's outline over the data `view` draws, projected by its
-    /// volume camera.
-    fn plane_outlines(&self, view: ViewId, camera: &Camera) -> Vec<PlaneLine> {
-        let extents = SpatialAxis::ALL.map(|axis| {
-            self.layer_ids()
-                .filter(|id| self.draws(view, id))
-                .filter_map(|id| self.scene_extent(id, axis))
-                .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
-        });
-        let [Some(x), Some(y), Some(z)] = extents else {
-            return Vec::new();
+    /// Each plane's outline over the data `view` draws, or over `on_tile`
+    /// alone, projected by its volume camera.
+    fn plane_outlines(
+        &self,
+        view: ViewId,
+        camera: &Camera,
+        on_tile: Option<OnTile>,
+    ) -> Vec<PlaneLine> {
+        let (span, shift) = match on_tile {
+            Some(OnTile {
+                shift,
+                extent: (min, max),
+            }) => (std::array::from_fn(|a| (min[a], max[a])), shift),
+            None => {
+                let extents = SpatialAxis::ALL.map(|axis| {
+                    self.layer_ids()
+                        .filter(|id| self.draws(view, id))
+                        .filter_map(|id| self.scene_extent(id, axis))
+                        .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
+                });
+                let [Some(x), Some(y), Some(z)] = extents else {
+                    return Vec::new();
+                };
+                ([x, y, z], [0.0; 3])
+            }
         };
-        let span = [x, y, z];
         let to_world = self.world_space().from_scene();
         let [width, height] = camera.viewport().map(f64::from);
         let on_screen = |point: [f64; 3]| {
@@ -200,7 +302,7 @@ impl Scene {
             let [b, c] = [(a + 1) % 3, (a + 2) % 3];
             let corner = |sb: usize, sc: usize| {
                 let mut point = [0.0; 3];
-                point[a] = self.cut_place(view, axis);
+                point[a] = self.cut_place(view, axis) + shift[a];
                 point[b] = if sb == 0 { span[b].0 } else { span[b].1 };
                 point[c] = if sc == 0 { span[c].0 } else { span[c].1 };
                 on_screen(point)
@@ -217,13 +319,14 @@ impl Scene {
 
     /// The position on `view`'s grid along `axis` under `fraction` of the
     /// way across the view, along the screen axis that draws `axis`, as a
-    /// drag of its plane's line sets it. `None` for a view that doesn't draw
-    /// the axis.
+    /// drag of its plane's line on `tile` sets it ([`Self::plane_lines`]).
+    /// `None` for a view that doesn't draw the axis.
     pub fn plane_line_position(
         &self,
         view: ViewId,
         axis: SpatialAxis,
         fraction: f64,
+        tile: Option<&PlaneTile>,
     ) -> Option<u32> {
         let Camera::Slice(slice) = &self.view(view)?.camera else {
             return None;
@@ -236,7 +339,10 @@ impl Scene {
         };
         let point = slice.from_screen(screen);
         let along = slice.plane.axes().iter().position(|a| *a == axis)?;
-        Some(self.cut_grid(view, axis).index_of(point[along]))
+        let shift = self
+            .on_tile(view, tile)
+            .map_or(0.0, |on| on.shift[axis.xyz()]);
+        Some(self.cut_grid(view, axis).index_of(point[along] - shift))
     }
 
     /// Stand every view of a four-up layout at the active view's axis
@@ -503,7 +609,7 @@ mod tests {
         let mut scene = four_up();
         apply(&mut scene, ViewportCommand::SetZ { z: 7 });
         let xy = scene.views()[0].id();
-        let lines = scene.plane_lines(xy);
+        let lines = scene.plane_lines(xy, None);
         // XY draws X across and Y down: X's plane is a vertical line, Y's a
         // horizontal one, through the middle where both stand.
         assert_eq!(
@@ -515,41 +621,48 @@ mod tests {
         assert_eq!(lines[1].from[1], lines[1].to[1]);
         // YZ, transposed, draws Z across, standing at Z 7 near its left.
         let yz = scene.views()[1].id();
-        let lines = scene.plane_lines(yz);
+        let lines = scene.plane_lines(yz, None);
         assert_eq!(
             lines.iter().map(|l| l.axis).collect::<Vec<_>>(),
             vec![SpatialAxis::Z, SpatialAxis::Y]
         );
         assert!(lines[0].from[0] < 0.5);
         // The same Y lands on one height of XY and YZ.
-        assert_eq!(scene.plane_lines(xy)[1].from[1], lines[1].from[1]);
+        assert_eq!(scene.plane_lines(xy, None)[1].from[1], lines[1].from[1]);
         // The volume outlines all three planes, four edges each.
         let volume = scene.views()[3].id();
-        let outlines = scene.plane_lines(volume);
+        let outlines = scene.plane_lines(volume, None);
         assert_eq!(outlines.len(), 12);
         let layout = ViewLayout::Grid;
         apply(&mut scene, ViewportCommand::SetViewLayout { layout });
-        assert!(scene.plane_lines(xy).is_empty());
+        assert!(scene.plane_lines(xy, None).is_empty());
     }
 
     #[test]
     fn dragging_a_line_names_the_position_under_the_pointer() {
         let mut scene = four_up();
         let xy = scene.views()[0].id();
-        let line = scene.plane_lines(xy)[0].clone();
+        let line = scene.plane_lines(xy, None)[0].clone();
         assert_eq!(
-            scene.plane_line_position(xy, SpatialAxis::X, line.from[0]),
+            scene.plane_line_position(xy, SpatialAxis::X, line.from[0], None),
             Some(48)
         );
-        let left = scene.plane_line_position(xy, SpatialAxis::X, 0.2).unwrap();
-        let right = scene.plane_line_position(xy, SpatialAxis::X, 0.8).unwrap();
+        let left = scene
+            .plane_line_position(xy, SpatialAxis::X, 0.2, None)
+            .unwrap();
+        let right = scene
+            .plane_line_position(xy, SpatialAxis::X, 0.8, None)
+            .unwrap();
         assert!(left < 48 && right > 48);
         // XY draws no Z to drag.
-        assert_eq!(scene.plane_line_position(xy, SpatialAxis::Z, 0.5), None);
+        assert_eq!(
+            scene.plane_line_position(xy, SpatialAxis::Z, 0.5, None),
+            None
+        );
         // Set from a drag, the place moves every view and every line.
         apply(&mut scene, ViewportCommand::SetX { x: right });
         let xz = scene.views()[2].id();
-        let moved = scene.plane_lines(xz)[0].from[0];
+        let moved = scene.plane_lines(xz, None)[0].from[0];
         assert!(moved > line.from[0]);
     }
 
@@ -565,5 +678,160 @@ mod tests {
         let layout = ViewLayout::Single;
         apply(&mut scene, ViewportCommand::SetViewLayout { layout });
         assert_eq!(scene.views().len(), 1);
+    }
+
+    /// Six tiles of a collection 64 wide, 32 tall and 16 deep, three across
+    /// and two down with a gap of 8, four-up.
+    fn four_up_tiles() -> Scene {
+        use super::super::test_helpers::make_collection_dataset_opened;
+        let ids = ["t0", "t1", "t2", "t3", "t4", "t5"];
+        let members = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, [(i % 3) as f64 * 72.0, (i / 3) as f64 * 40.0]))
+            .collect();
+        let mut scene = Scene::new([800, 600]);
+        let opened = make_collection_dataset_opened(
+            "tiles",
+            "tiles",
+            members,
+            [1, 1, 16, 32, 64],
+            [1, 1, 8, 8, 32],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(opened).into());
+        let layout = ViewLayout::FourUp;
+        apply(&mut scene, ViewportCommand::SetViewLayout { layout });
+        scene
+    }
+
+    fn tile(index: usize) -> PlaneTile {
+        PlaneTile {
+            dataset: DatasetId::from("tiles"),
+            entity: lucida_content::EntityId(format!("t{index}")),
+        }
+    }
+
+    /// Where a slice view's two lines cross, as fractions of the view.
+    fn crossing(lines: &[PlaneLine]) -> [f64; 2] {
+        [lines[0].from[0], lines[1].from[1]]
+    }
+
+    /// The middle of the outline of the plane across Z, as fractions of the
+    /// view.
+    fn z_outline_middle(lines: &[PlaneLine]) -> [f64; 2] {
+        let z: Vec<&PlaneLine> = lines.iter().filter(|l| l.axis == SpatialAxis::Z).collect();
+        let n = z.len() as f64;
+        [0, 1].map(|i| z.iter().map(|l| l.from[i]).sum::<f64>() / n)
+    }
+
+    fn slice_of(scene: &Scene, index: usize) -> Slice {
+        match &scene.views()[index].camera {
+            Camera::Slice(slice) => slice.clone(),
+            other => panic!("a slice camera, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_lines_stand_on_the_named_tile_and_on_the_first_without_one() {
+        let scene = four_up_tiles();
+        for (index, view) in scene.views().iter().enumerate() {
+            let id = view.id();
+            assert_eq!(
+                scene.plane_lines(id, None),
+                scene.plane_lines(id, Some(&tile(0))),
+                "view {index}"
+            );
+            for k in 0..6 {
+                let lines = scene.plane_lines(id, Some(&tile(k)));
+                // Where they cross, or the middle of the volume's outline,
+                // is over the tile they stand on.
+                let at = match index {
+                    3 => z_outline_middle(&lines),
+                    _ => crossing(&lines),
+                };
+                assert_eq!(
+                    scene.tile_at(id, at),
+                    Some(tile(k)),
+                    "view {index}, tile {k}"
+                );
+            }
+        }
+        // A tile no view shows leaves the lines on the first.
+        let elsewhere = PlaneTile {
+            dataset: DatasetId::from("gone"),
+            entity: lucida_content::EntityId("t4".into()),
+        };
+        let xy = scene.views()[0].id();
+        assert_eq!(
+            scene.plane_lines(xy, Some(&elsewhere)),
+            scene.plane_lines(xy, None)
+        );
+    }
+
+    #[test]
+    fn every_tile_draws_its_lines_at_one_place_from_its_own_edge() {
+        let scene = four_up_tiles();
+        let [width, height] = [400.0, 300.0];
+        // XY places the tiles by their layout: the middle tile of the second
+        // row is one column and one row from the first.
+        let xy = slice_of(&scene, 0);
+        let on_xy = |k| crossing(&scene.plane_lines(scene.views()[0].id(), Some(&tile(k))));
+        let step = |slice: &Slice, by: [f64; 2]| {
+            let [a, b] = [slice.to_screen([0.0, 0.0]), slice.to_screen(by)];
+            [(b[0] - a[0]) / width, (b[1] - a[1]) / height]
+        };
+        let [first, middle] = [on_xy(0), on_xy(4)];
+        let moved = step(&xy, [72.0, 40.0]);
+        for i in 0..2 {
+            assert!((middle[i] - first[i] - moved[i]).abs() < 1e-9, "{middle:?}");
+        }
+        // XZ stacks rows as deep as a tile, so a row down is 20 along Z.
+        let xz = slice_of(&scene, 2);
+        let on_xz = |k| crossing(&scene.plane_lines(scene.views()[2].id(), Some(&tile(k))));
+        let [first, middle] = [on_xz(0), on_xz(4)];
+        let moved = step(&xz, [72.0, 20.0]);
+        for i in 0..2 {
+            assert!((middle[i] - first[i] - moved[i]).abs() < 1e-9, "{middle:?}");
+        }
+    }
+
+    #[test]
+    fn a_drag_on_any_tile_moves_the_cut_of_every_tile() {
+        let mut scene = four_up_tiles();
+        let xy = scene.views()[0].id();
+        let before = scene.axis_index(xy, SpatialAxis::X);
+        let [first, middle] = [0, 4].map(|k| scene.plane_lines(xy, Some(&tile(k)))[0].from[0]);
+        let drag = |scene: &Scene, k: usize, fraction: f64| {
+            scene.plane_line_position(xy, SpatialAxis::X, fraction, Some(&tile(k)))
+        };
+        // Taking a line where it stands keeps the cut where it is.
+        assert_eq!(drag(&scene, 4, middle), Some(before));
+        // The same move on either tile sets the same position.
+        let to = drag(&scene, 4, middle + 0.02).unwrap();
+        assert!(to > before);
+        assert_eq!(drag(&scene, 0, first + 0.02), Some(to));
+        apply(&mut scene, ViewportCommand::SetX { x: to });
+        let [first_now, middle_now] =
+            [0, 4].map(|k| scene.plane_lines(xy, Some(&tile(k)))[0].from[0]);
+        assert!(first_now > first);
+        assert!((middle_now - middle - (first_now - first)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_tile_lies_between_tiles_or_in_a_single_image() {
+        let scene = four_up_tiles();
+        let xy = scene.views()[0].id();
+        // The gap between the first two tiles, on the first row.
+        let xy_slice = slice_of(&scene, 0);
+        let [gx, gy] = xy_slice.to_screen([68.0, 16.0]);
+        assert_eq!(scene.tile_at(xy, [gx / 400.0, gy / 300.0]), None);
+        let single = four_up();
+        for view in single.views() {
+            assert_eq!(single.tile_at(view.id(), [0.5, 0.5]), None);
+            assert_eq!(
+                single.plane_lines(view.id(), Some(&tile(4))),
+                single.plane_lines(view.id(), None)
+            );
+        }
     }
 }

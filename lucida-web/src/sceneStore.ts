@@ -20,7 +20,6 @@ import type { ViewMode } from "./types.ts";
 import type { SlicePlane } from "./renderer/slicePlane.ts";
 import type { ViewLayoutName } from "./commands.ts";
 import { readViewLinks, type ViewLinks } from "./viewLinks.ts";
-import { readPlaneLines, type PlaneLine } from "./viewer/planeLines.ts";
 
 export type CameraMode = "slice" | "arcball" | "fly";
 
@@ -38,8 +37,6 @@ export interface ViewPane {
   readonly active: boolean;
   /** The layers its comparison sets aside, in layer order. */
   readonly setAside: readonly string[];
-  /** Where four-up's planes cross it; none in any other layout. */
-  readonly lines: readonly PlaneLine[];
 }
 
 export interface SceneView {
@@ -100,7 +97,7 @@ const NO_SCENE_VIEW: SceneView = {
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
-  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, setAside: [], lines: [] }],
+  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, setAside: [] }],
   layout: "single",
   maximized: null,
   links: null,
@@ -252,7 +249,6 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
       cameraMode: (scene.view_camera_mode(id) || "slice") as CameraMode,
       active: id === active,
       setAside: JSON.parse(scene.set_aside(id)) as string[],
-      lines: readPlaneLines(scene, id),
     };
   });
   return JSON.stringify(views) === JSON.stringify(previous) ? previous : views;

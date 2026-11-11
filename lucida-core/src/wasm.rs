@@ -10,8 +10,8 @@ use crate::placement::{
 };
 use crate::saved_view::SavedView;
 use crate::scene::{
-    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene,
-    ViewsRecord, member_transform,
+    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, PlaneTile,
+    Scene, ViewsRecord, member_transform,
 };
 use crate::view::{AxisPositions, View, ViewId, ViewLayout};
 
@@ -739,25 +739,42 @@ impl WasmScene {
             .count
     }
 
+    /// The tile of a collection `view` shows under `x`, `y`, fractions of
+    /// its width and height from its top left, as JSON
+    /// [`crate::scene::PlaneTile`]; `"null"` over no tile.
+    pub fn tile_at(&self, view: u32, x: f64, y: f64) -> String {
+        serde_json::to_string(&self.inner.tile_at(ViewId(view), [x, y])).unwrap_or_default()
+    }
+
     /// Where four-up's planes cross `view`, as a JSON list of
-    /// [`crate::scene::PlaneLine`]: empty in any other layout.
-    pub fn plane_lines(&self, view: u32) -> String {
-        serde_json::to_string(&self.inner.plane_lines(ViewId(view))).unwrap_or_default()
+    /// [`crate::scene::PlaneLine`], on `tile`, a [`Self::tile_at`] answer,
+    /// in a collection: empty in any other layout.
+    pub fn plane_lines(&self, view: u32, tile: Option<String>) -> String {
+        let tile = parse_tile(tile.as_deref());
+        serde_json::to_string(&self.inner.plane_lines(ViewId(view), tile.as_ref()))
+            .unwrap_or_default()
     }
 
     /// The position on `view`'s grid along `axis`, `"x"`, `"y"` or `"z"`,
     /// under `fraction` of the way across the view along the screen axis
-    /// that draws it, as dragging that plane's line sets it; -1 for an axis
-    /// the view doesn't draw.
-    pub fn plane_line_position(&self, view: u32, axis: &str, fraction: f64) -> i64 {
+    /// that draws it, as dragging that plane's line on `tile` sets it; -1
+    /// for an axis the view doesn't draw.
+    pub fn plane_line_position(
+        &self,
+        view: u32,
+        axis: &str,
+        fraction: f64,
+        tile: Option<String>,
+    ) -> i64 {
         let axis = match axis {
             "x" => lucida_content::SpatialAxis::X,
             "y" => lucida_content::SpatialAxis::Y,
             "z" => lucida_content::SpatialAxis::Z,
             _ => return -1,
         };
+        let tile = parse_tile(tile.as_deref());
         self.inner
-            .plane_line_position(ViewId(view), axis, fraction)
+            .plane_line_position(ViewId(view), axis, fraction, tile.as_ref())
             .map_or(-1, i64::from)
     }
 
@@ -1546,4 +1563,10 @@ fn compare_mode(mode: &str) -> Result<CompareMode, JsError> {
 
 fn parse_user_transform(json: &str) -> Result<UserTransform, JsError> {
     serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// A tile as [`WasmScene::tile_at`] named it. One the page didn't get from
+/// there reads as none, so the planes stand on the first tile.
+fn parse_tile(json: Option<&str>) -> Option<PlaneTile> {
+    serde_json::from_str(json?).ok()
 }
