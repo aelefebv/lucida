@@ -287,7 +287,7 @@ describe("CpuCache", () => {
   });
 
   describe("getDeliverable", () => {
-    it("walks the cache again only once something could have made a chunk deliverable", async () => {
+    it("walks no store on frames with nothing new, and hands over what a plan makes deliverable", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
       cache.onPlanRebuildStart();
@@ -298,7 +298,7 @@ describe("CpuCache", () => {
       const [delivery] = consumeDeliverables(cache);
       cache.markChunksHeld(delivery.imageId, delivery.c, "slice", "detail", [delivery.chunkKey]);
 
-      // Frames with nothing new, as an orbit draws: one walk finds nothing,
+      // Frames with nothing new, as an orbit draws: no walk of the store,
       // and the demand counts settling reads are not counted again either.
       const walks = vi.spyOn(ChunkStore.prototype, "iterateTier");
       const counts = vi.spyOn(ChunkStore.prototype, "allEntries");
@@ -307,7 +307,7 @@ describe("CpuCache", () => {
           expect(Array.from(cache.getDeliverable())).toEqual([]);
           cache.settleInputs(createSettleState());
         }
-        expect(walks).toHaveBeenCalledTimes(1);
+        expect(walks).not.toHaveBeenCalled();
         expect(counts.mock.calls.length).toBeLessThanOrEqual(3);
 
         // The view reaches the prefetched chunk: the next walk hands it over.

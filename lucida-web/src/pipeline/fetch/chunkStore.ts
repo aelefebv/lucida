@@ -51,7 +51,6 @@ const EVICTION_BURST_THRESHOLD = 16;
 export class ChunkStore {
   private store = new Map<string, Map<string, CacheEntry>>();
   private bytesCounter = 0;
-  private versionCounter = 0;
   private budgetBytesCounter: number;
   private readonly policy: EvictionPolicy<CacheEntry>;
   private readonly evictionTier: (entry: CacheEntry) => EvictionRecordTier;
@@ -84,15 +83,6 @@ export class ChunkStore {
     return this.budgetBytesCounter;
   }
 
-  /**
-   * Moves whenever an entry arrives, leaves or is demoted, so a reading
-   * derived from the whole store can be kept until it does. Edits the cache
-   * makes to an entry it holds are its own to count.
-   */
-  get version(): number {
-    return this.versionCounter;
-  }
-
   setBudgetBytes(budgetBytes: number): void {
     this.budgetBytesCounter = Math.max(0, budgetBytes);
     this.evictIfNeeded(0);
@@ -119,7 +109,6 @@ export class ChunkStore {
     }
     entityMap.set(entry.chunkKey, entry);
     this.bytesCounter += growth;
-    this.versionCounter++;
     if (replaced) this.countLevel(replaced.level, -1);
     this.countLevel(entry.level, 1);
     return true;
@@ -174,7 +163,6 @@ export class ChunkStore {
     entityMap.delete(chunkKey);
     if (entityMap.size === 0) this.store.delete(entityId);
     this.bytesCounter -= entry.sizeBytes;
-    this.versionCounter++;
     this.countLevel(entry.level, -1);
     this.recordEviction(this.evictionTier(entry), entry);
     return true;
@@ -187,7 +175,6 @@ export class ChunkStore {
     entityMap.delete(entry.chunkKey);
     if (entityMap.size === 0) this.store.delete(entry.entityId);
     this.bytesCounter -= entry.sizeBytes;
-    this.versionCounter++;
     this.countLevel(entry.level, -1);
     this.recordEviction(this.evictionTier(entry), entry);
   }
@@ -259,14 +246,12 @@ export class ChunkStore {
         this.countLevel(entry.level, -1);
       }
       this.store.delete(entityId);
-      this.versionCounter++;
     }
   }
 
   reset(): void {
     this.store.clear();
     this.bytesCounter = 0;
-    this.versionCounter++;
     this.levelCounts.length = 0;
   }
 
@@ -325,6 +310,5 @@ export class ChunkStore {
         entry.tier = "demoted-detail";
       }
     }
-    this.versionCounter++;
   }
 }
