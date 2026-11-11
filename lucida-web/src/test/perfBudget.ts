@@ -4,12 +4,15 @@
  * A wall-clock budget measures the host as much as the code: the same tick
  * times many times apart on an idle workstation and on a CI runner sharing
  * its cores with the rest of the suite. So every step is timed interleaved
- * with a fixed reference workload, sample by sample, and its median is
- * divided by how much slower than nominal the reference ran alongside it.
+ * with a fixed reference workload, sample by sample, and each step sample is
+ * divided by how much slower than nominal the reference sample beside it ran.
  * Whatever slows the host evenly, a slower CPU, a busy machine, a collection,
- * slows both and cancels out of the ratio. Other test files contending for a
- * few shared cores do not slow everything evenly, so the perf tests also run
- * in a phase of their own (`vite.config.ts`).
+ * slows both and cancels out of the ratio. A host that slows for a stretch
+ * slows both samples of a pair, so each pair's own ratio cancels that too,
+ * where the median step sample and the median reference sample, taken
+ * apart, can come from different stretches. Other test files contending for
+ * a few shared cores do not slow everything evenly, so the perf tests also
+ * run in a phase of their own (`vite.config.ts`).
  *
  * What is left is the step's cost on the nominal host, and budgets are stated
  * in those microseconds at about twice the typical figure. A step that gets
@@ -65,9 +68,13 @@ export interface StepTiming {
   p50Us: number;
   p95Us: number;
   maxUs: number;
-  /** How much slower than nominal the reference ran beside the step. */
+  /** How much slower than nominal the reference ran beside the step, its median sample. */
   runnerFactor: number;
-  /** The step's median on the nominal host: `p50Us / runnerFactor`. */
+  /**
+   * The step's median on the nominal host: the median over samples of each
+   * step sample divided by the runner factor of the reference sample beside
+   * it. Close to `p50Us / runnerFactor` on a steady host.
+   */
   nominalUs: number;
 }
 
@@ -118,6 +125,7 @@ export function timeStep(step: () => void, options: TimeStepOptions): StepTiming
 
   const stepTimes: number[] = [];
   const unitTimes: number[] = [];
+  const nominalTimes: number[] = [];
   for (let i = 0; i < samples; i++) {
     before?.();
     // Alternate the order, so neither always runs on the other's cache.
@@ -138,17 +146,17 @@ export function timeStep(step: () => void, options: TimeStepOptions): StepTiming
       stepTimes.push(t1 - t0);
       unitTimes.push((t2 - t1) / units);
     }
+    nominalTimes.push((stepTimes[i] * NOMINAL_UNIT_US) / (unitTimes[i] * 1_000));
   }
   stepTimes.sort((a, b) => a - b);
   unitTimes.sort((a, b) => a - b);
-  const p50Us = quantile(stepTimes, 0.5) * 1_000;
-  const runnerFactor = (quantile(unitTimes, 0.5) * 1_000) / NOMINAL_UNIT_US;
+  nominalTimes.sort((a, b) => a - b);
   return {
-    p50Us,
+    p50Us: quantile(stepTimes, 0.5) * 1_000,
     p95Us: quantile(stepTimes, 0.95) * 1_000,
     maxUs: stepTimes[stepTimes.length - 1] * 1_000,
-    runnerFactor,
-    nominalUs: p50Us / runnerFactor,
+    runnerFactor: (quantile(unitTimes, 0.5) * 1_000) / NOMINAL_UNIT_US,
+    nominalUs: quantile(nominalTimes, 0.5) * 1_000,
   };
 }
 

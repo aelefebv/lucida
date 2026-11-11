@@ -1095,7 +1095,7 @@ describe("CpuCache", () => {
       expect(source.fetchCount).toBe(fetchesBefore + 1);
     });
 
-    it("removes activeEntityIds entries", async () => {
+    it("forgets which entities its plans held", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
 
@@ -1106,8 +1106,8 @@ describe("CpuCache", () => {
 
       cache.cancelDataset("ds-1", ["entity-1"]);
 
-      // Now submit a plan with NO entity-1 in activeSet. If activeEntityIds
-      // still contained "entity-1", demoteEntity would be called — but the
+      // Now submit a plan with NO entity-1 in activeSet. If the cache still
+      // held "entity-1" as planned, demoteEntity would be called — but the
       // detail map is already empty, so this is a sanity check that no entry
       // remains. We assert via the mainCache being empty (already covered)
       // and that re-adding entity-1 then dropping it from the active set
