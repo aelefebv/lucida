@@ -11,6 +11,7 @@ import type {
   ChunkResidencyMessage,
   ViewHotStateMessage,
   MissingChunk,
+  PoolMode,
 } from "../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
@@ -20,6 +21,7 @@ export type ChunkResidencyHandler = (msg: ChunkResidencyMessage) => void;
 
 export type WantedSetHandler = (
   datasetId: string,
+  mode: PoolMode,
   epochs: SceneEpochs,
   missing: MissingChunk[],
 ) => void;

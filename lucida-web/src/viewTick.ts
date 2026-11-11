@@ -1,7 +1,7 @@
 /**
  * One tick of every view: the datasets they draw are planned together, their
- * chunks go to the worker in the form each dataset's holder draws, and each
- * view is drawn in its own mode.
+ * chunks go to the worker for the pools of each mode that wants them, and
+ * each view is drawn in its own mode.
  *
  * A lone view across the canvas draws straight onto it. Views that divide
  * the canvas each draw into a frame of their own, which the worker keeps, and
@@ -55,8 +55,8 @@ function deliver(ctx: TickContext, coordinator: TickCoordinator, uploader: Uploa
     return uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
   }
   return uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, (datasetId) => {
-    const holder = holderView(ctx, datasetId);
-    return holder.mode === "slice" ? sliceCut(ctx.scene, holder.id, plan.layers.get(datasetId)) : null;
+    const holder = holderView(ctx, datasetId, "slice");
+    return holder ? sliceCut(ctx.scene, holder.id, plan.sliceLayers.get(datasetId)) : null;
   });
 }
 

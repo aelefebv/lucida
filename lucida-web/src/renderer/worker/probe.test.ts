@@ -110,7 +110,7 @@ function drewImage(levels: Level[], fullDims: [number, number], chunk: number) {
     pool.entityMetas.set(memberId, [metas[i]]);
     state.sliceAtlases.set(`pool${i}`, pool);
   });
-  state.currentSourcesByDataset.set("ds", new Map([[
+  state.currentSourcesByDatasetMode.set("ds|slice", new Map([[
     memberId,
     metas.map((meta, i) => ({ tier: "detail" as const, poolKey: `pool${i}`, meta })),
   ]]));
@@ -137,7 +137,7 @@ function drewImage(levels: Level[], fullDims: [number, number], chunk: number) {
     visibleChannels: [0],
     activeSet: [entry],
   } as unknown as ColdStateMessage;
-  state.coldStateByDataset.set("ds", cold);
+  state.coldStateByDatasetMode.set("ds|slice", cold);
   const [height, width] = fullDims;
   const frame: SliceRenderMultiPassMessage = {
     type: "sliceRenderMultiPass",
@@ -369,7 +369,7 @@ function drewVolume(renderMode: "translucent" | "max_intensity", window: { contr
     entityMetas: new Map([[memberId, [meta]]]),
   } as unknown as AtlasState;
   state.volumeAtlases.set("pool", pool);
-  state.currentSourcesByDataset.set("ds", new Map([[memberId, [{ tier: "detail" as const, poolKey: "pool", meta }]]]));
+  state.currentSourcesByDatasetMode.set("ds|volume", new Map([[memberId, [{ tier: "detail" as const, poolKey: "pool", meta }]]]));
   const entry: ColdStateActiveEntry = {
     entityId: "entity",
     imageId: "vol",
@@ -381,7 +381,7 @@ function drewVolume(renderMode: "translucent" | "max_intensity", window: { contr
     invModelMatrix: new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0.5, 0.5, 1]),
     displayStateByChannel: { 0: { ...window, gamma: 1, opacity: 1, colormapName: "gray", channelMask: 1 } },
   };
-  state.coldStateByDataset.set("ds", {
+  state.coldStateByDatasetMode.set("ds|volume", {
     type: "coldState",
     datasetId: "ds",
     currentT: 0,
@@ -457,7 +457,7 @@ describe("the worker's pixel probe of a 3D label overlay", () => {
     } as unknown as LabelVolumePool;
     ctx.state.labelVolumePools.set("vol:label:regions", label);
     const frame = [...ctx.state.lastFrames.values()][0] as VolumeRenderMultiPassMessage;
-    const entry = ctx.state.coldStateByDataset.get("ds")!.activeSet[0];
+    const entry = ctx.state.coldStateByDatasetMode.get("ds|volume")!.activeSet[0];
     frame.layers.push({
       datasetId: "vol:label:regions",
       blendMode: "alpha",

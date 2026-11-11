@@ -18,6 +18,7 @@ function chunk(x: number, tier: "detail" | "coarse" = "detail"): ReadyChunkDeliv
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     lane: "detail",
     residencyTier: tier,
+    mode: "slice",
   };
 }
 
@@ -33,9 +34,9 @@ describe("ResendGuard", () => {
     const a = chunk(1);
     const b = chunk(2);
     expect(tick(guard, a, b)).toEqual([]);
-    guard.noteReturned("img-0", 0, a.chunkKey, "evicted");
-    guard.noteMissing("img-0", 0, a.chunkKey);
-    guard.noteReturned("img-0", 0, b.chunkKey, "evicted");
+    guard.noteReturned("img-0", 0, "slice", a.chunkKey, "evicted");
+    guard.noteMissing("img-0", 0, "slice", a.chunkKey);
+    guard.noteReturned("img-0", 0, "slice", b.chunkKey, "evicted");
 
     for (let i = 1; i < RESEND_GUARD_TICKS; i++) {
       expect(tick(guard, i % 2 === 0 ? a : b)).toEqual([]);
@@ -54,7 +55,7 @@ describe("ResendGuard", () => {
     const guard = new ResendGuard();
     const a = chunk(1);
     tick(guard, a);
-    guard.noteMissing("img-0", 0, a.chunkKey);
+    guard.noteMissing("img-0", 0, "slice", a.chunkKey);
     let held: ReturnType<ResendGuard["endTick"]> = [];
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) held = tick(guard, a);
     expect(held.map((h) => h.reason)).toEqual(["not-resident"]);

@@ -12,7 +12,7 @@ pub use types::{
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
     RenderMode, declared_channels,
 };
-pub use views::{PoolForm, Withheld};
+pub use views::{PoolForm, PoolKind, Withheld};
 
 use std::collections::HashMap;
 
@@ -111,10 +111,10 @@ pub struct Scene {
     /// of. Client-local.
     #[serde(skip)]
     canvas: [u32; 2],
-    /// Per dataset, the view whose form its pools hold. See
+    /// Per dataset and kind of pools, the view whose form they hold. See
     /// [`Scene::dataset_holder`]. Client-local.
     #[serde(skip)]
-    holders: HashMap<DatasetId, ViewId>,
+    holders: HashMap<(DatasetId, PoolKind), ViewId>,
     /// Shared document state (dataset manifests).
     #[serde(flatten)]
     pub document: DocumentState,

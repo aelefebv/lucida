@@ -90,6 +90,7 @@ function request(overrides: Partial<ChunkRequest>): ChunkRequest {
     x: 0,
     lane: "detail",
     tier: "detail",
+    mode: "slice",
     priority: 0,
     chunkKey: "0/0/0/0/0/0",
     ...overrides,
@@ -155,6 +156,31 @@ describe("a chunk held as some of its planes", () => {
   });
 });
 
+describe("a chunk a slice view and a volume view both want", () => {
+  it("goes to the pools of each, to the volume's only once it is whole, and again only to the pools that lose it", async () => {
+    const { source, cache, submit } = setup();
+    submit(drawing(1, [0, 3]), request({ mode: "volume" }));
+    source.land(`${CHUNK}#0:3`);
+    await landed();
+
+    const planes = [...cache.getDeliverable()];
+    expect(planes.map((d) => [d.mode, d.planes])).toEqual([["slice", [0, 3]]]);
+    for (const delivery of planes) cache.markSent(delivery);
+    cache.markChunksHeld("img", 0, "slice", "detail", ["0/0/0/0/0/0"]);
+
+    source.land(CHUNK);
+    await landed();
+    const whole = [...cache.getDeliverable()];
+    expect(whole.map((d) => [d.mode, d.planes])).toEqual([["volume", undefined]]);
+    for (const delivery of whole) cache.markSent(delivery);
+    cache.markChunksHeld("img", 0, "volume", "detail", ["0/0/0/0/0/0"]);
+    expect([...cache.getDeliverable()]).toEqual([]);
+
+    cache.markChunksLost("img", 0, "volume", "detail", ["0/0/0/0/0/0"], "evicted");
+    expect([...cache.getDeliverable()].map((d) => d.mode)).toEqual(["volume"]);
+  });
+});
+
 describe("the whole chunk", () => {
   it("takes the place of its planes, in the view, without waking the page for a plane it already drew", async () => {
     const { source, cache, submit } = setup();
@@ -165,7 +191,7 @@ describe("the whole chunk", () => {
     await landed();
     expect(wakes).toHaveBeenCalledTimes(1);
     for (const delivery of cache.getDeliverable()) cache.markSent(delivery);
-    cache.markChunksHeld("img", 0, "detail", ["0/0/0/0/0/0"]);
+    cache.markChunksHeld("img", 0, "slice", "detail", ["0/0/0/0/0/0"]);
 
     submit(drawing(2, [0, 4]), rest());
     expect(source.asked.map((r) => r.planes)).toEqual([[0, 3], undefined]);

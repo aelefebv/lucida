@@ -325,6 +325,7 @@ function emitQuery(
         x,
         lane,
         tier,
+        mode: snapshot.selection.renderMode,
         priority: band,
         chunkKey: chunkKey(level, t, c, z, y, x),
       };
@@ -362,6 +363,7 @@ export function emitMinimapLane(
   config: PlanningConfig,
   bulkBandFloor: number,
   out: LaneRequests,
+  mode: ChunkRequest["mode"] = "slice",
 ): void {
   if (minimapPending.size === 0) return;
   // The fast/bulk decision reads the whole pending map, not this call's
@@ -396,6 +398,8 @@ export function emitMinimapLane(
           x: coord.x,
           lane: "minimap",
           tier: "coarse",
+          // Minimap chunks go to no pools; the view's mode only fills the field.
+          mode,
           priority: band,
           chunkKey: coord.key,
         },

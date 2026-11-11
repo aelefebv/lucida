@@ -180,6 +180,7 @@ function cold(datasetId: string): ColdStateMessage {
       displayStateByChannel: { 0: display },
     }],
     viewMode: "volume",
+    drawnModes: ["volume"],
     sampleFormat: "u16",
   };
 }
@@ -361,6 +362,7 @@ describe("GPU errors", () => {
     expect(residency(posts)).toContainEqual({
       type: "chunkResidency",
       memberId: "ds1-img:ch0",
+      viewMode: "volume",
       tier: "detail",
       change: "lost",
       keys: ["1/0/0/0/0/0", "1/0/0/0/0/1"],
@@ -400,8 +402,8 @@ describe("a chunk that throws mid-batch", () => {
     expect([...pool.slots.keys()].sort()).toEqual(["ds1-img:ch0|1/0/0/0/0/0", "ds1-img:ch0|1/0/0/0/1/0"]);
     expect(pool.freeSlots.length).toBe(free - 2);
     expect(residency(posts)).toEqual([
-      { type: "chunkResidency", memberId: "ds1-img:ch0", tier: "detail", change: "held", keys: ["1/0/0/0/0/0", "1/0/0/0/1/0"], reason: undefined },
-      { type: "chunkResidency", memberId: "ds1-img:ch0", tier: "detail", change: "refused", keys: ["1/0/0/0/0/1"], reason: "upload-failed" },
+      { type: "chunkResidency", memberId: "ds1-img:ch0", viewMode: "volume", tier: "detail", change: "held", keys: ["1/0/0/0/0/0", "1/0/0/0/1/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "ds1-img:ch0", viewMode: "volume", tier: "detail", change: "refused", keys: ["1/0/0/0/0/1"], reason: "upload-failed" },
     ]);
     gpu.settleScopes();
   });

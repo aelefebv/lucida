@@ -73,6 +73,7 @@ function makeCold(
     wantedChunks: [],
     activeSet,
     viewMode: "slice",
+    drawnModes: ["slice"],
     sampleFormat: "u16",
   };
 }
@@ -142,24 +143,24 @@ describe("Suite D — removeLayerResources cleanup", () => {
     state.memberToDataset.set("imgA", "ds1");
     state.memberToDataset.set("imgB", "ds1");
     state.memberToDataset.set("imgC", "ds2");
-    state.memberSourcePools.set("imgA", new Map([["detail:0", "ds1:64x64x32:detail"]]));
-    state.memberSourcePools.set("imgB", new Map([["detail:0", "ds1:64x64x32:detail"]]));
-    state.memberSourcePools.set("imgC", new Map([["detail:0", "ds2:64x64x32:detail"]]));
-    state.currentSourcesByDataset.set("ds1", new Map());
-    state.currentSourcesByDataset.set("ds2", new Map());
+    state.memberSourcePools.volume.set("imgA", new Map([["detail:0", "ds1:64x64x32:detail"]]));
+    state.memberSourcePools.volume.set("imgB", new Map([["detail:0", "ds1:64x64x32:detail"]]));
+    state.memberSourcePools.volume.set("imgC", new Map([["detail:0", "ds2:64x64x32:detail"]]));
+    state.currentSourcesByDatasetMode.set("ds1|volume", new Map());
+    state.currentSourcesByDatasetMode.set("ds2|volume", new Map());
 
     removeMemberRoutingForDataset(state, "ds1");
 
     // ds1's entries are gone.
     expect(state.memberToDataset.has("imgA")).toBe(false);
     expect(state.memberToDataset.has("imgB")).toBe(false);
-    expect(state.memberSourcePools.has("imgA")).toBe(false);
-    expect(state.memberSourcePools.has("imgB")).toBe(false);
-    expect(state.currentSourcesByDataset.has("ds1")).toBe(false);
+    expect(state.memberSourcePools.volume.has("imgA")).toBe(false);
+    expect(state.memberSourcePools.volume.has("imgB")).toBe(false);
+    expect(state.currentSourcesByDatasetMode.has("ds1|volume")).toBe(false);
     // ds2's entries are untouched.
     expect(state.memberToDataset.get("imgC")).toBe("ds2");
-    expect(state.memberSourcePools.get("imgC")?.get("detail:0")).toBe("ds2:64x64x32:detail");
-    expect(state.currentSourcesByDataset.has("ds2")).toBe(true);
+    expect(state.memberSourcePools.volume.get("imgC")?.get("detail:0")).toBe("ds2:64x64x32:detail");
+    expect(state.currentSourcesByDatasetMode.has("ds2|volume")).toBe(true);
   });
 
   it("clears currentColdState when the dropped dataset is the active one", () => {

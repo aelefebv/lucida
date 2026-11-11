@@ -87,9 +87,11 @@ function heldPool(ctx: WorkerCtx, poolKey: string, member: string, layers: numbe
 }
 
 function want(ctx: WorkerCtx, member: string, keys: string[]): void {
-  const index = new Map(ctx.state.wantedByDataset.get("ds1") ?? []);
-  index.set(wantedEntryKey("detail", member), new Set(keys));
-  ctx.state.wantedByDataset.set("ds1", index);
+  for (const key of ["ds1|slice", "ds1|volume"]) {
+    const index = new Map(ctx.state.wantedByDatasetMode.get(key) ?? []);
+    index.set(wantedEntryKey("detail", member), new Set(keys));
+    ctx.state.wantedByDatasetMode.set(key, index);
+  }
 }
 
 function lost(posts: WorkerToMainMessage[]): ChunkResidencyMessage[] {
@@ -156,7 +158,7 @@ describe("when the GPU total is reached", () => {
 
     expect(ctx.state.labelVolumePools.size).toBe(0);
     expect(posts).toContainEqual({
-      type: "chunkResidency", memberId: "label", tier: "detail", change: "refused", keys: ["0/0/0/0/0/0"], reason: "atlas-policy",
+      type: "chunkResidency", memberId: "label", viewMode: "volume", tier: "detail", change: "refused", keys: ["0/0/0/0/0/0"], reason: "atlas-policy",
     });
   });
 });

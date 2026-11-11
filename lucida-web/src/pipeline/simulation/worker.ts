@@ -27,7 +27,7 @@ import { setCameraUVForMember } from "../../renderer/slice/eviction.ts";
 import { memberCameraUV } from "../../renderer/slice/render.ts";
 import { retireOtherLabelPlanes } from "../../renderer/slice/atlas.ts";
 import { INDIRECTION_FAILED } from "../../renderer/remap.ts";
-import { chunkPoolTier } from "../../renderer/poolKeys.ts";
+import { chunkPoolTier, datasetModeKey } from "../../renderer/poolKeys.ts";
 import { LABEL_TIER } from "../../renderer/chunkUploadFeedback.ts";
 import type { LodIndirectionMeta } from "../../renderer/volume/atlas.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
@@ -155,7 +155,7 @@ export class SimulatedWorker {
       getOrCreateLUT: () => { throw new Error("the simulated worker does not draw"); },
       post,
       postWantedSet: createWantedSetPoster(state, post),
-      lookupEntityDescriptor: (datasetId) => state.descriptorBuffersByDataset.get(datasetId) ?? null,
+      lookupEntityDescriptor: (datasetId, mode) => state.descriptorBuffersByDatasetMode.get(datasetModeKey(datasetId, mode)) ?? null,
     };
   }
 
@@ -268,7 +268,7 @@ export class SimulatedWorker {
         continue;
       }
       if (layer.aggregate) continue;
-      if (!this.ctx.state.memberSourcePools.has(layer.datasetId)) continue;
+      if (!this.ctx.state.memberSourcePools.slice.has(layer.datasetId)) continue;
       setCameraUVForMember(this.ctx.state, layer.datasetId, memberCameraUV(msg, layer));
     }
   }

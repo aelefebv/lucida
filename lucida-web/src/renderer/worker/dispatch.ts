@@ -14,6 +14,7 @@ import {
   applyColdStateDisplay,
   applyColdStateSelection,
   applyColdStateDelta,
+  releaseUndrawnPools,
 } from "../coldState/index.ts";
 import {
   handleLabelSliceChunkData,
@@ -39,7 +40,7 @@ import { handleCaptureFrame } from "./captureFrame.ts";
 import { handleProbe } from "./probe.ts";
 import { handlePresentViews } from "./viewFrame.ts";
 import { postChunkResidency } from "../chunkUploadFeedback.ts";
-import { sourceKey } from "../poolKeys.ts";
+import { datasetModeKey, sourceKey } from "../poolKeys.ts";
 
 /**
  * Dispatch one main-thread message. The caller is responsible for
@@ -70,11 +71,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "sliceChunkData": {
       const memberId = msg.memberId;
-      const poolKey = ctx.state.memberSourcePools
+      const poolKey = ctx.state.memberSourcePools.slice
         .get(memberId)
         ?.get(sourceKey(msg.tier, msg.level));
       if (!poolKey) {
-        postChunkResidency(ctx, memberId, msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
+        postChunkResidency(ctx, memberId, "slice", msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
         return;
       }
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
@@ -95,13 +96,13 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "volumeChunkData": {
       const memberId = msg.memberId;
-      const poolKey = ctx.state.memberSourcePools
+      const poolKey = ctx.state.memberSourcePools.volume
         .get(memberId)
         ?.get(sourceKey(msg.tier, msg.level));
       if (!poolKey) {
         // No section for this (tier, level): cold state hasn't arrived for
         // this member, or the level is no longer a resident level.
-        postChunkResidency(ctx, memberId, msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
+        postChunkResidency(ctx, memberId, "volume", msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
         return;
       }
       handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
@@ -164,11 +165,12 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
 
     case "coldState":
+      releaseUndrawnPools(ctx, msg.datasetId, msg.drawnModes);
       ctx.state.currentColdState = msg;
       ctx.state.currentEpochs = msg.epochs;
-      ctx.state.coldStateByDataset.set(msg.datasetId, msg);
+      ctx.state.coldStateByDatasetMode.set(datasetModeKey(msg.datasetId, msg.viewMode), msg);
       applyColdState(ctx, msg);
-      ctx.postWantedSet(msg.datasetId);
+      ctx.postWantedSet(msg.datasetId, msg.viewMode);
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -180,15 +182,16 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "coldStateSelection":
       // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
       applyColdStateSelection(ctx, msg);
-      ctx.postWantedSet(msg.datasetId);
+      ctx.postWantedSet(msg.datasetId, msg.viewMode);
       postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDelta":
       // Posted even when the delta was a no-op, matching the full and
       // selection paths.
+      releaseUndrawnPools(ctx, msg.datasetId, msg.drawnModes);
       applyColdStateDelta(ctx, msg);
-      ctx.postWantedSet(msg.datasetId);
+      ctx.postWantedSet(msg.datasetId, msg.viewMode);
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -199,8 +202,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       const failed = new Map(msg.images.map(({ imageId, chunkKeys }) => [imageId, new Set(chunkKeys)]));
       if (failed.size > 0) ctx.state.failedByDataset.set(msg.datasetId, failed);
       else ctx.state.failedByDataset.delete(msg.datasetId);
-      const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
-      if (cold) applyColdState(ctx, cold);
+      for (const mode of ["slice", "volume"] as const) {
+        const cold = ctx.state.coldStateByDatasetMode.get(datasetModeKey(msg.datasetId, mode));
+        if (cold) applyColdState(ctx, cold);
+      }
       return;
     }
 

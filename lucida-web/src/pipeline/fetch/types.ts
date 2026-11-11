@@ -9,6 +9,7 @@ import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 import type { SpatialAxis } from "../../renderer/slicePlane.ts";
+import type { PoolMode } from "../../renderer/workerProtocol.ts";
 
 export interface CpuCacheConfig {
   mainBudgetBytes: number;
@@ -72,8 +73,8 @@ export interface LevelResidency {
  */
 export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
-/** A decoded chunk the CPU cache hands the orchestrator for the GPU worker. */
-export interface ReadyChunkDelivery {
+/** A decoded chunk the CPU cache holds. */
+export interface CachedChunk {
   entityId: string;
   imageId: string;
   level: number;
@@ -103,6 +104,15 @@ export interface ReadyChunkDelivery {
   planes?: readonly [number, number];
   /** The axis {@link planes} lie along. Absent: Z. */
   planeAxis?: SpatialAxis;
+}
+
+/**
+ * A decoded chunk the CPU cache hands the orchestrator for the GPU worker, for
+ * the dataset's pools of `mode`. A chunk both modes want is delivered once to
+ * each.
+ */
+export interface ReadyChunkDelivery extends CachedChunk {
+  mode: PoolMode;
 }
 
 /**

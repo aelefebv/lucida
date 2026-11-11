@@ -365,6 +365,7 @@ mod tests {
 
     #[test]
     fn a_layer_set_aside_lets_its_hold_go_to_a_view_that_draws_it() {
+        use crate::scene::PoolKind;
         use crate::view::{ViewDatasets, ViewLayout};
         let mut scene = lined_up();
         open(&mut scene, "c", [4, 64, 64], 1.0, true);
@@ -384,18 +385,19 @@ mod tests {
                 datasets: ViewDatasets::Only(vec![c.clone()]),
             },
         );
-        // The second view wants c as a volume, so the first, which holds it as
-        // a slice, keeps it from the second.
+        // The second view cuts c at another plane, so the first, which holds
+        // its slice pools at plane 0, keeps it from the second.
         viewport(&mut scene, ViewportCommand::SetActiveView { view: second });
-        viewport(&mut scene, ViewportCommand::SetMode3D);
+        viewport(&mut scene, ViewportCommand::SetZ { z: 2 });
         viewport(&mut scene, ViewportCommand::SetActiveView { view: first });
-        assert_eq!(scene.dataset_holder(&c), Some(first));
+        let holder = |scene: &Scene| scene.dataset_holder(&c, PoolKind::Slice);
+        assert_eq!(holder(&scene), Some(first));
         assert!(!scene.draws(second, &c));
 
         let [a, b] = ids();
         let selection = scene.epochs.selection;
         scene.compare(a, b, CompareMode::Swipe).unwrap();
-        assert_eq!(scene.dataset_holder(&c), Some(second));
+        assert_eq!(holder(&scene), Some(second));
         assert!(scene.draws(second, &c));
         assert!(scene.withheld(second).is_empty());
         // The first view sets c aside, so it holds nothing of it back either.
@@ -405,7 +407,7 @@ mod tests {
         // The view that kept drawing it keeps the hold, and the one that comes
         // back says why it leaves c out.
         scene.end_comparison();
-        assert_eq!(scene.dataset_holder(&c), Some(second));
+        assert_eq!(holder(&scene), Some(second));
         let withheld = scene.withheld(first);
         assert_eq!(withheld.len(), 1);
         assert_eq!((&withheld[0].dataset_id, withheld[0].holder), (&c, second));

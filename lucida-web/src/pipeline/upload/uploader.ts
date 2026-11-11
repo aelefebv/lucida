@@ -14,7 +14,7 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
-import { holderView, type TickContext } from "../../renderLoopTypes.ts";
+import type { TickContext } from "../../renderLoopTypes.ts";
 import type { ResolvedLayer } from "../../resolvedLayers.ts";
 import type {
   ChunkFeedbackReason,
@@ -23,6 +23,7 @@ import type {
   ColdStateDisplayState,
   ColdStateMessage,
   MissingChunk,
+  PoolMode,
 } from "../../renderer/workerProtocol.ts";
 import {
   emptyUploadTickStats,
@@ -61,6 +62,7 @@ import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
 import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
 import type { SliceCut } from "../../renderer/slicePlane.ts";
+import { datasetModeKey } from "../../renderer/poolKeys.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
@@ -74,8 +76,11 @@ export class Uploader {
 
   private readonly lastViewEpochByDataset = new Map<string, number>();
 
-  /** The wanted chunks each dataset's last cold state carried, which a delta diffs against. */
-  private readonly wantedByDataset = new Map<string, WantedChunksByMember>();
+  /**
+   * The wanted chunks each dataset's last cold state of each mode carried,
+   * which a delta diffs against, keyed by `datasetModeKey`.
+   */
+  private readonly wantedByDatasetMode = new Map<string, WantedChunksByMember>();
 
   /** The cache's failure version the worker last heard about. */
   private failedVersionSent = 0;
@@ -114,9 +119,11 @@ export class Uploader {
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     layer: ResolvedLayer | undefined;
+    /** The modes of every view that draws the dataset; the worker frees its other pools. */
+    drawnModes: PoolMode[];
   }): ColdStateMessage {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.wantedByDataset.set(args.datasetId, wanted);
+    this.wantedByDatasetMode.set(datasetModeKey(args.datasetId, args.selection.renderMode), wanted);
     const msg = buildColdState({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -129,6 +136,7 @@ export class Uploader {
       matricesByEntity: args.matricesByEntity,
       layer: args.layer,
       sampleFormat: datasetSampleFormat(args.ctx.datasets.get(args.datasetId)?.manifest),
+      drawnModes: args.drawnModes,
     });
     args.ctx.client.coldState(msg);
     this.lastEpochs = args.epochs;
@@ -147,11 +155,13 @@ export class Uploader {
   sendColdStateDisplay(args: {
     ctx: TickContext;
     datasetId: string;
+    viewMode: PoolMode;
     displayStateByChannel: Record<number, ColdStateDisplayState>;
   }): void {
     args.ctx.client.coldStateDisplay({
       type: "coldStateDisplay",
       datasetId: args.datasetId,
+      viewMode: args.viewMode,
       displayStateByChannel: args.displayStateByChannel,
     });
   }
@@ -166,6 +176,7 @@ export class Uploader {
   sendColdStateSelection(args: {
     ctx: TickContext;
     datasetId: string;
+    viewMode: PoolMode;
     currentT: number;
     currentZ: number;
     /** The re-emitted plan's requests; see {@link sendColdState}. */
@@ -174,10 +185,11 @@ export class Uploader {
     epochs: SceneEpochs;
   }): void {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.wantedByDataset.set(args.datasetId, wanted);
+    this.wantedByDatasetMode.set(datasetModeKey(args.datasetId, args.viewMode), wanted);
     args.ctx.client.coldStateSelection({
       type: "coldStateSelection",
       datasetId: args.datasetId,
+      viewMode: args.viewMode,
       currentT: args.currentT,
       currentZ: args.currentZ,
       visibleRegion: args.visibleRegion,
@@ -208,10 +220,13 @@ export class Uploader {
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     layer: ResolvedLayer | undefined;
+    /** See {@link sendColdState}. */
+    drawnModes: PoolMode[];
   }): ColdStateDeltaMessage {
+    const key = datasetModeKey(args.datasetId, args.selection.renderMode);
     const wanted = wantedChunksFromPlan(args.requests);
-    const wantedChanges = diffWantedChunks(this.wantedByDataset.get(args.datasetId) ?? new Map(), wanted);
-    this.wantedByDataset.set(args.datasetId, wanted);
+    const wantedChanges = diffWantedChunks(this.wantedByDatasetMode.get(key) ?? new Map(), wanted);
+    this.wantedByDatasetMode.set(key, wanted);
     const msg = buildColdStateDelta({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -224,6 +239,7 @@ export class Uploader {
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       layer: args.layer,
+      drawnModes: args.drawnModes,
     });
     args.ctx.client.coldStateDelta(msg);
     this.lastEpochs = args.epochs;
@@ -232,18 +248,20 @@ export class Uploader {
   }
 
   /**
-   * Build and send a viewEpoch hot-state message. Must be posted before
-   * subsequent render messages so the worker's `rayHitPerEntity` is
-   * current when chunk-data eviction fires. Returns `false` (and emits
-   * nothing) if the viewEpoch is unchanged for this dataset.
+   * Build and send a viewEpoch hot-state message, from the ray `view` casts.
+   * Must be posted before subsequent render messages so the worker's
+   * `rayHitPerEntity` is current when chunk-data eviction fires. Returns
+   * `false` (and emits nothing) if the viewEpoch is unchanged for this
+   * dataset.
    */
   sendViewHotStateIfAdvanced(args: {
     ctx: TickContext;
     datasetId: string;
+    view: number;
     coldMsg: ColdStateMessage;
     epochs: SceneEpochs;
   }): boolean {
-    return this.emitViewHotState(args.ctx, args.datasetId, args.epochs, (rayHit) =>
+    return this.emitViewHotState(args.ctx, args.datasetId, args.view, args.epochs, (rayHit) =>
       buildViewHotState({
         coldMsg: args.coldMsg,
         rayHit,
@@ -261,10 +279,11 @@ export class Uploader {
   sendViewHotStateFromMembersIfAdvanced(args: {
     ctx: TickContext;
     datasetId: string;
+    view: number;
     memberIds: Iterable<string>;
     epochs: SceneEpochs;
   }): boolean {
-    return this.emitViewHotState(args.ctx, args.datasetId, args.epochs, (rayHit) =>
+    return this.emitViewHotState(args.ctx, args.datasetId, args.view, args.epochs, (rayHit) =>
       buildViewHotStateFromMembers({
         memberIds: args.memberIds,
         rayHit,
@@ -278,14 +297,13 @@ export class Uploader {
   private emitViewHotState(
     ctx: TickContext,
     datasetId: string,
+    view: number,
     epochs: SceneEpochs,
     build: (rayHit: [number, number, number]) => ReturnType<typeof buildViewHotState>,
   ): boolean {
     const lastView = this.lastViewEpochByDataset.get(datasetId);
     if (lastView === epochs.view) return false;
-    const hit = Array.from(
-      ctx.scene.ray_hit_local_image(holderView(ctx, datasetId).id, datasetId),
-    ) as [number, number, number];
+    const hit = Array.from(ctx.scene.ray_hit_local_image(view, datasetId)) as [number, number, number];
     ctx.client.viewHotState(build(hit));
     this.lastViewEpochByDataset.set(datasetId, epochs.view);
     return true;
@@ -344,9 +362,10 @@ export class Uploader {
    * priority item is sent while `remaining > 0`, even if oversized, and
    * the loop stops after the send drives `remaining <= 0`.
    *
-   * `sliceCutFor` names the plane a dataset's slice view shows, the view's
-   * axis position along the cut clamped into that dataset, or `null` for a
-   * dataset a volume view holds; `null` alone when every view is a volume.
+   * Each delivery goes to the pools of its mode. `sliceCutFor` names the
+   * plane a dataset's slice pools hold, its slice holder's axis position
+   * along the cut clamped into that dataset, or `null` for a dataset no
+   * slice view draws; `null` alone when every view is a volume.
    */
   deliverToWorker(
     ctx: TickContext,
@@ -465,7 +484,7 @@ export class Uploader {
     // dispatch reports the real bytes sent so the frame budget throttles
     // uploads, and at least one always goes so labels never starve.
     let sent: Dispatched | DispatchSkip;
-    const { mode } = holderView(ctx, meta.datasetId);
+    const { mode } = delivery;
     if (meta.isLabel) {
       sent = mode === "slice"
         ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, cut, epochs)
@@ -502,22 +521,24 @@ export class Uploader {
   /** Returns whether a chunk may now be sent again. */
   handleChunkResidency(
     memberId: string,
+    mode: PoolMode,
     tier: ResidencyTier,
     change: ChunkResidencyChange,
     keys: string[],
     cpuCache: CpuCache,
     reason?: ChunkFeedbackReason,
   ): boolean {
-    return this.workerFeedback.handleChunkResidency(memberId, tier, change, keys, cpuCache, reason);
+    return this.workerFeedback.handleChunkResidency(memberId, mode, tier, change, keys, cpuCache, reason);
   }
 
   /** Returns whether a chunk may now be sent again. */
   handleWantedSetDelta(
     datasetId: string,
+    mode: PoolMode,
     missing: MissingChunk[],
     cpuCache: CpuCache,
   ): boolean {
-    return this.workerFeedback.handleWantedSetDelta(datasetId, missing, cpuCache);
+    return this.workerFeedback.handleWantedSetDelta(datasetId, mode, missing, cpuCache);
   }
 
   /** The worker rebuilt its pools empty on a new GPU device: send everything again, held chunks too. */
@@ -536,7 +557,8 @@ export class Uploader {
   clearDataset(datasetId: string): void {
     this.workerResources.clearDataset(datasetId);
     this.lastViewEpochByDataset.delete(datasetId);
-    this.wantedByDataset.delete(datasetId);
+    this.wantedByDatasetMode.delete(datasetModeKey(datasetId, "slice"));
+    this.wantedByDatasetMode.delete(datasetModeKey(datasetId, "volume"));
     // The worker dropped its list with the dataset, so a reopen sends it again.
     this.failedSent.delete(datasetId);
   }

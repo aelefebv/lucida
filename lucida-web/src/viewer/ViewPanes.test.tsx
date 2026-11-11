@@ -100,7 +100,7 @@ describe("why a view leaves a dataset out", () => {
       .toBe("Sample A is shown in view 1 at Z 37, T 0; one dataset at two cuts comes later.");
     expect(withheldMessage({ dataset_id: "a", holder: 0, held: slice(37), wanted: slice(37, 2) }, views, "Sample A"))
       .toBe("Sample A is shown in view 1 at Z 37, T 0; one dataset at two timepoints comes later.");
-    expect(withheldMessage({ dataset_id: "a", holder: 3, held: { kind: "volume", t: 1 }, wanted: slice(0) }, views, "Sample A"))
-      .toBe("Sample A is shown in view 2 in 3D at T 1; one dataset in 2D and 3D at once comes later.");
+    expect(withheldMessage({ dataset_id: "a", holder: 3, held: { kind: "volume", t: 1 }, wanted: { kind: "volume", t: 0 } }, views, "Sample A"))
+      .toBe("Sample A is shown in view 2 in 3D at T 1; one dataset at two timepoints comes later.");
   });
 });

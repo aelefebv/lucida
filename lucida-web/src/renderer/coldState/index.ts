@@ -1,4 +1,4 @@
-export { applyColdState } from "./apply.ts";
+export { applyColdState, releaseUndrawnPools } from "./apply.ts";
 export { applyColdStateDisplay } from "./applyDisplay.ts";
 export { applyColdStateSelection } from "./applySelection.ts";
 export { applyColdStateDelta } from "./applyDelta.ts";

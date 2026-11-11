@@ -5,7 +5,7 @@
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import type { ChunkFeedbackReason, ChunkResidencyChange } from "./workerProtocol.ts";
+import type { ChunkFeedbackReason, ChunkResidencyChange, PoolMode } from "./workerProtocol.ts";
 import { parseCompositeKey } from "./chunkKeys.ts";
 import { chunkPoolTier } from "./poolKeys.ts";
 
@@ -15,18 +15,20 @@ export const LABEL_TIER: ResidencyTier = "detail";
 export function postChunkResidency(
   ctx: WorkerCtx,
   memberId: string,
+  viewMode: PoolMode,
   tier: ResidencyTier,
   change: ChunkResidencyChange,
   keys: string[],
   reason?: ChunkFeedbackReason,
 ): void {
   if (keys.length === 0) return;
-  ctx.post({ type: "chunkResidency", memberId, tier, change, keys, reason });
+  ctx.post({ type: "chunkResidency", memberId, viewMode, tier, change, keys, reason });
 }
 
-/** Report composite slot keys a pool of `tier` no longer holds, one message per member. */
+/** Report composite slot keys a pool of `viewMode` and `tier` no longer holds, one message per member. */
 export function postSlotsLost(
   ctx: WorkerCtx,
+  viewMode: PoolMode,
   tier: ResidencyTier,
   compositeKeys: Iterable<string>,
   reason: ChunkFeedbackReason,
@@ -40,7 +42,7 @@ export function postSlotsLost(
     else byMember.set(parsed.memberId, [parsed.chunkKey]);
   }
   for (const [memberId, keys] of byMember) {
-    postChunkResidency(ctx, memberId, tier, "lost", keys, reason);
+    postChunkResidency(ctx, memberId, viewMode, tier, "lost", keys, reason);
   }
 }
 
@@ -66,21 +68,28 @@ export class ResidencyBatch {
    * Held goes first: a chunk this delivery wrote and a later one in the same
    * batch evicted must end lost on the page, not held.
    */
-  post(ctx: WorkerCtx, memberId: string, tier: ResidencyTier): void {
-    postChunkResidency(ctx, memberId, tier, "held", this.held);
-    postSlotsLost(ctx, tier, this.evicted, "evicted");
+  post(ctx: WorkerCtx, memberId: string, viewMode: PoolMode, tier: ResidencyTier): void {
+    postChunkResidency(ctx, memberId, viewMode, tier, "held", this.held);
+    postSlotsLost(ctx, viewMode, tier, this.evicted, "evicted");
     for (const [reason, keys] of this.refused) {
-      postChunkResidency(ctx, memberId, tier, "refused", keys, reason);
+      postChunkResidency(ctx, memberId, viewMode, tier, "refused", keys, reason);
     }
   }
 }
 
-/** Report every chunk held by a dataset's pools outside `keep`, which the caller is about to free. */
-export function postFreedPools(ctx: WorkerCtx, datasetId: string, keep: ReadonlySet<string>): void {
-  for (const atlases of [ctx.state.volumeAtlases, ctx.state.sliceAtlases]) {
-    for (const [poolKey, atlas] of atlases) {
-      if (atlas.datasetId !== datasetId || keep.has(poolKey)) continue;
-      postSlotsLost(ctx, chunkPoolTier(poolKey), atlas.slots.keys(), "freed");
-    }
+/**
+ * Report every chunk held by a dataset's pools of `viewMode` outside `keep`,
+ * which the caller is about to free.
+ */
+export function postFreedPools(
+  ctx: WorkerCtx,
+  datasetId: string,
+  viewMode: PoolMode,
+  keep: ReadonlySet<string>,
+): void {
+  const atlases = viewMode === "volume" ? ctx.state.volumeAtlases : ctx.state.sliceAtlases;
+  for (const [poolKey, atlas] of atlases) {
+    if (atlas.datasetId !== datasetId || keep.has(poolKey)) continue;
+    postSlotsLost(ctx, viewMode, chunkPoolTier(poolKey), atlas.slots.keys(), "freed");
   }
 }

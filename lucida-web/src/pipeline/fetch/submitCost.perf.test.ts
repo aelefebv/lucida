@@ -56,6 +56,7 @@ function makeRequests(n: number): ChunkRequest[] {
       x: 0,
       lane: "coarse",
       tier: "coarse",
+      mode: "slice",
       priority: 2400 + i,
       chunkKey: "3/0/0/0/0/0",
     });
