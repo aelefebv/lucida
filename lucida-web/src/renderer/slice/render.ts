@@ -303,7 +303,7 @@ export async function handleSliceRenderMultiPass(
   const cr = ctx.getCursorRenderer();
   // The wait holds every message behind this one (`worker/inOrder.ts`).
   await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
-  if (frame.layers.some((layer) => layer.bricks)) await ctx.getVolumeRenderer().compiled;
+  if (frame.layers.some((layer) => layer.bricks)) await ctx.getVolumeRenderer().compileCuts();
 
   const target = beginViewFrame(ctx, frame.view, frame.canvasW, frame.canvasH, frame.rect);
   // The view draws in its own pixels, as if its rectangle were the canvas.

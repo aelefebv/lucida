@@ -871,13 +871,13 @@ export function growVolumeAtlasWatched(
 
 /**
  * Grow a full pool as far as the GPU total has room for, toward what holds
- * every chunk the planner wants. Through its first layer it grows a row at a
- * time, to the rows those chunks fill and one more, room for a step of a
- * slice view's tilted cut without trading its bricks away. Past the first
- * layer it grows a layer at a time, to the wanted layers or double its own
- * if that is more, so a volume view that keeps asking for more grows in few
- * copies. With `reclaim`, grow by one step even when the total has none, if
- * other pools can give it back from chunks the planner doesn't want.
+ * every chunk the planner wants, in one copy. While those chunks and a row
+ * more fit its first layer, it grows to them: the extra row is room for a
+ * step of a slice view's tilted cut without trading its bricks away. Past
+ * that it grows whole layers, the wanted ones or double its own if that is
+ * more, so a volume view that keeps asking for more grows in few copies.
+ * With `reclaim`, grow by one step even when the total has none, if other
+ * pools can give it back from chunks the planner doesn't want.
  */
 export function growVolumePoolWithin(
   ctx: WorkerCtx,
@@ -885,16 +885,19 @@ export function growVolumePoolWithin(
   atlas: AtlasState,
   reclaim: boolean,
 ): boolean {
-  const wanted = wantedSlotsOf(poolKey, atlas);
+  const wantedRows = Math.ceil(wantedSlotsOf(poolKey, atlas) / atlas.slotsX);
   const rows = volumeRows(atlas);
   const inFirstLayer = rows < atlas.slotsY;
+  const targetRows = inFirstLayer && wantedRows < atlas.slotsY
+    ? Math.max(rows + 1, wantedRows + 1)
+    : atlas.slotsY * Math.min(atlas.maxSlotsZ, Math.max(atlas.slotsZ * 2, Math.ceil(wantedRows / atlas.slotsY)));
+  // A first layer's grant comes in rows, and past that layer the texture
+  // takes whole layers, so rows granted past it round down to them.
   const stepRows = inFirstLayer ? 1 : atlas.slotsY;
-  const targetRows = inFirstLayer
-    ? Math.min(atlas.slotsY, Math.max(rows + 1, Math.ceil(wanted / atlas.slotsX) + 1))
-    : atlas.slotsY * Math.min(atlas.maxSlotsZ, Math.max(atlas.slotsZ * 2, Math.ceil(wanted / (atlas.slotsX * atlas.slotsY))));
   const maxSteps = Math.max(0, Math.floor((targetRows - rows) / stepRows));
-  const steps = grantGrowth(ctx, atlas, volumeRowBytes(atlas) * stepRows, maxSteps, reclaim);
-  return steps > 0 && growVolumeAtlasWatched(ctx, poolKey, atlas, rows + steps * stepRows);
+  const granted = rows + grantGrowth(ctx, atlas, volumeRowBytes(atlas) * stepRows, maxSteps, reclaim) * stepRows;
+  const toRows = granted <= atlas.slotsY ? granted : atlas.slotsY * Math.floor(granted / atlas.slotsY);
+  return toRows > rows && growVolumeAtlasWatched(ctx, poolKey, atlas, toRows);
 }
 
 /**

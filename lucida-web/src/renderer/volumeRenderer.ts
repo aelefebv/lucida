@@ -121,6 +121,9 @@ export class VolumeRenderer {
   readonly compiled: Promise<void>;
   /** One pipeline per blend mode for a slice view's tilted cuts ({@link renderCut}). */
   private cutPipelines: Record<BlendMode, GPURenderPipeline> | null = null;
+  private cutsCompiled: Promise<void> | null = null;
+  private readonly shaderModule: GPUShaderModule;
+  private readonly pipelineLayout: GPUPipelineLayout;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -154,13 +157,13 @@ export class VolumeRenderer {
   private nextResourceId = 1;
 
   get isCompiled(): boolean {
-    return this.pipeline !== null && this.cutPipelines !== null;
+    return this.pipeline !== null;
   }
 
   constructor(device: GPUDevice) {
     this.device = device;
 
-    const shaderModule = device.createShaderModule({ code: shaderSource });
+    const shaderModule = this.shaderModule = device.createShaderModule({ code: shaderSource });
 
     const levelTextureEntries: GPUBindGroupLayoutEntry[] = [];
     const levelIndirectionEntries: GPUBindGroupLayoutEntry[] = [];
@@ -235,11 +238,11 @@ export class VolumeRenderer {
       ],
     });
 
-    const pipelineLayout = device.createPipelineLayout({
+    const pipelineLayout = this.pipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
     });
 
-    const main = device.createRenderPipelineAsync({
+    this.compiled = device.createRenderPipelineAsync({
       layout: pipelineLayout,
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
@@ -255,20 +258,6 @@ export class VolumeRenderer {
     }).then((pipeline) => {
       this.pipeline = pipeline;
     });
-    // A cut draws into a slice view's layer target, alongside slice draws
-    // of the same layer, so it blends as they do and keeps no depth.
-    const cuts = Promise.all((["alpha", "additive", "max"] as const).map((mode) =>
-      device.createRenderPipelineAsync({
-        layout: pipelineLayout,
-        vertex: { module: shaderModule, entryPoint: "vs" },
-        fragment: { module: shaderModule, entryPoint: "fsCut", targets: [{ format: OFFSCREEN_FORMAT, blend: LAYER_BLENDS[mode] }] },
-        primitive: { topology: "triangle-list" },
-      }),
-    )).then(([alpha, additive, max]) => {
-      this.cutPipelines = { alpha, additive, max };
-    });
-
-    this.compiled = Promise.all([main, cuts]).then(() => undefined);
 
     this.uniformBuffer = device.createBuffer({
       size: VOLUME_UNIFORM_SIZE,
@@ -698,6 +687,27 @@ export class VolumeRenderer {
       pass.draw(3); // full-screen triangle
     }
     pass.end();
+  }
+
+  /**
+   * Compile the tilted cuts' pipelines, once; resolves when they have. They
+   * compile on a cut's first frame rather than with the main pipeline, which
+   * a volume view's first frame waits on.
+   */
+  compileCuts(): Promise<void> {
+    // A cut draws into a slice view's layer target, alongside slice draws
+    // of the same layer, so it blends as they do and keeps no depth.
+    this.cutsCompiled ??= Promise.all((["alpha", "additive", "max"] as const).map((mode) =>
+      this.device.createRenderPipelineAsync({
+        layout: this.pipelineLayout,
+        vertex: { module: this.shaderModule, entryPoint: "vs" },
+        fragment: { module: this.shaderModule, entryPoint: "fsCut", targets: [{ format: OFFSCREEN_FORMAT, blend: LAYER_BLENDS[mode] }] },
+        primitive: { topology: "triangle-list" },
+      }),
+    )).then(([alpha, additive, max]) => {
+      this.cutPipelines = { alpha, additive, max };
+    });
+    return this.cutsCompiled;
   }
 
   /**

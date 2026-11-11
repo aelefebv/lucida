@@ -337,6 +337,22 @@ describe("volume pool growth", () => {
     expect(reports(posts, "lost")).toEqual([]);
   });
 
+  it("grows from its first row straight to the layers the planner wants, in one copy", () => {
+    const { ctx, copies } = makeGrowthCtx();
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    viewOf(atlas).entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
+    viewOf(atlas).indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+    fill(atlas);
+    // More than a layer of 8×8 wants two layers, which the first row grows to at once.
+    want(ctx, "imgA", Array.from({ length: 70 }, (_, i) => chunkKey(0, 0, 0, i, 0, 0)));
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), "ds1", "imgA");
+
+    expect([atlas.rowsY, atlas.slotsZ]).toEqual([8, 2]);
+    expect(atlas.totalSlots).toBe(128);
+    expect(copies).toEqual([[256, 32, 32]]);
+  });
+
   it("grows to its cap's grid and no further", () => {
     // 64 MiB of 32³ chunks: 1024 slots, in layers of 4×4.
     const { ctx, copies } = makeGrowthCtx(64 * 1024 * 1024);
