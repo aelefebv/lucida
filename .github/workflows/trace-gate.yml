@@ -180,9 +180,9 @@ jobs:
           key: ${{ steps.vulkan-key.outputs.key }}
           restore-keys: ${{ steps.vulkan-key.outputs.prefix }}
 
-      # Cached packages install as a set and never download. A set that lacks
-      # something on this image fails before dpkg changes anything, and the
-      # packages are downloaded afresh.
+      # Cached packages install as a set that may neither download nor remove
+      # anything. A set that does not fit this image fails before dpkg
+      # changes anything, and the packages are downloaded afresh.
       - name: Install a software Vulkan driver
         run: |
           set -euo pipefail
@@ -195,7 +195,7 @@ jobs:
             local debs=("$dir"/*.deb)
             (( ${#debs[@]} )) \
               && sudo cp "${debs[@]}" /var/cache/apt/archives/ \
-              && sudo apt-get install -y -q --no-download "${debs[@]}"
+              && sudo apt-get install -y -q --no-download --no-remove "${debs[@]}"
           }
 
           if install_cached; then
