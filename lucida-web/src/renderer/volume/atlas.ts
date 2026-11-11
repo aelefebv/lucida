@@ -15,7 +15,15 @@ import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
 import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
-import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
+import { planCompaction } from "../poolCompaction.ts";
+import {
+  compactViewSlots,
+  destroyViewIndirection,
+  emptyViewIndirections,
+  growViewSlots,
+  viewIndirectionBytes,
+  type ViewIndirection,
+} from "../viewIndirection.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { applyFailedMarks, failedCellsAt, failedKeysForImage } from "../failedCells.ts";
 import { INDIRECTION_MISS } from "../remap.ts";
@@ -50,12 +58,14 @@ export interface AtlasState {
   texture: GPUTexture;
   /** How the texture holds samples; the dataset's, fixed for the pool's life. */
   format: SampleFormat;
-  indirectionBuf: GPUBuffer;
-  indirectionData: Uint32Array<ArrayBuffer>;
-  /** Composite keys "memberId:chunkKey" → slotIndex (insertion-order = LRU). */
+  /**
+   * Composite keys "memberId|chunkKey" → slotIndex (insertion-order = LRU).
+   * The chunk key names the timepoint, so the pool holds every timepoint its
+   * views draw, each in slots of its own.
+   */
   slots: Map<string, number>;
-  /** slotIndex → globalGridIdx (for eviction cleanup). */
-  slotGridIdx: Int32Array<ArrayBuffer>;
+  /** view id → the view's indirection over the pool, mapping the bricks of its own T. */
+  views: Map<number, ViewIndirection>;
   freeSlots: number[];            // available slot indices (stack)
   /** Slots the texture holds now. */
   totalSlots: number;
@@ -65,11 +75,8 @@ export interface AtlasState {
   slotsX: number; slotsY: number; slotsZ: number;
   /** The layers the pool's cap allows, which it grows toward while the GPU total has room. */
   maxSlotsZ: number;
-  /** Per-entity LOD sections. memberId → array of per-LOD indirection meta with absolute offsets. */
-  entityMetas: Map<string, LodIndirectionMeta[]>;
-  /** Current T and C — shared across all entities in this pool (one cold state per dataset). */
-  t: number; c: number;
-  indirectionDirty: boolean;
+  /** The channel every slot holds, which the pool key names. */
+  c: number;
 }
 
 /**
@@ -610,15 +617,15 @@ function createAtlasTexture(
 /**
  * Create a shared atlas pool one layer of slots deep. It grows toward the
  * grid its cap allows only as chunks fill it and the GPU total has room, so a
- * small volume never holds more than it needs. Indirection is sized later
- * from entityMetas.
+ * small volume never holds more than it needs. Each view that draws from it
+ * adds its indirection.
  */
 function createVolumeAtlas(
   device: GPUDevice,
   datasetId: string,
   capBytes: number,
   chunkX: number, chunkY: number, chunkZ: number,
-  t: number, c: number,
+  c: number,
   format: SampleFormat,
 ): AtlasState {
   const limits = getDeviceLimits(device);
@@ -636,37 +643,23 @@ function createVolumeAtlas(
 
   const texture = createAtlasTexture(device, chunkX, chunkY, chunkZ, slotsX, slotsY, slotsZ, format);
 
-  // Indirection starts at minimum size; cold state handler resizes after computing entityMetas.
-  const indirectionData = new Uint32Array(1);
-  indirectionData[0] = 0xFFFFFFFF;
-  const indirectionBuf = device.createBuffer({
-    size: 4,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(indirectionBuf, 0, indirectionData);
-
   const freeSlots: number[] = [];
   for (let i = totalSlots - 1; i >= 0; i--) freeSlots.push(i);
 
-  const slotGridIdx = new Int32Array(totalSlots);
-  slotGridIdx.fill(-1);
-
   return {
     datasetId,
-    texture, format, indirectionBuf, indirectionData,
-    slots: new Map(), slotGridIdx, freeSlots, totalSlots,
+    texture, format,
+    slots: new Map(), views: new Map(), freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
     slotsX, slotsY, slotsZ,
     maxSlotsZ,
-    entityMetas: new Map(),
-    t, c,
-    indirectionDirty: true,
+    c,
   };
 }
 
-/** The bytes a volume pool's texture and indirection hold now. */
+/** The bytes a volume pool's texture and every view's indirection over it hold now. */
 export function volumeAtlasBytes(atlas: AtlasState): number {
-  return volumeLayerBytes(atlas) * atlas.slotsZ + atlas.indirectionData.length * 4;
+  return volumeLayerBytes(atlas) * atlas.slotsZ + viewIndirectionBytes(atlas);
 }
 
 /** The bytes one layer of a volume pool's slots holds: the step it grows and shrinks by. */
@@ -707,10 +700,7 @@ export function growVolumeAtlas(
   atlas.texture.destroy();
   atlas.texture = texture;
 
-  const slotGridIdx = new Int32Array(totalSlots);
-  slotGridIdx.fill(-1);
-  slotGridIdx.set(atlas.slotGridIdx);
-  atlas.slotGridIdx = slotGridIdx;
+  growViewSlots(atlas, totalSlots);
   for (let i = totalSlots - 1; i >= atlas.totalSlots; i--) atlas.freeSlots.push(i);
   atlas.slotsZ = slotsZ;
   atlas.totalSlots = totalSlots;
@@ -759,31 +749,31 @@ export function shrinkVolumeAtlas(
   atlas.texture.destroy();
   atlas.texture = texture;
 
-  atlas.slotGridIdx = remapSlotEntries(atlas.slots, atlas.slotGridIdx, atlas.indirectionData, plan, layer * slotsZ);
+  compactViewSlots(atlas, atlas.slots, plan, layer * slotsZ);
   atlas.slots = plan.slots;
   atlas.freeSlots = plan.freeSlots;
   atlas.slotsZ = slotsZ;
   atlas.totalSlots = layer * slotsZ;
-  atlas.indirectionDirty = true;
   return plan.dropped;
 }
 
 export function destroyAtlas(atlas: AtlasState): void {
   atlas.texture.destroy();
-  atlas.indirectionBuf.destroy();
+  for (const view of atlas.views.values()) destroyViewIndirection(view);
+  atlas.views.clear();
 }
 
 /**
  * Get or create a shared volume atlas pool for the given (poolKey, chunk dims).
- * Stores the pool in `ctx.state.volumeAtlases`. Cold state handler is responsible
- * for setting entityMetas and resizing the indirection buffer afterward.
+ * Stores the pool in `ctx.state.volumeAtlases`. The cold state handler adds
+ * the view's indirection and lays out its sections afterward.
  */
 export function getOrCreateVolumePool(
   ctx: WorkerCtx,
   poolKey: string,
   datasetId: string,
   chunkX: number, chunkY: number, chunkZ: number,
-  t: number, c: number,
+  c: number,
   format: SampleFormat,
 ): AtlasState {
   const atlases = ctx.state.volumeAtlases;
@@ -792,12 +782,11 @@ export function getOrCreateVolumePool(
     existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ
     && existing.format === format
   ) {
-    existing.t = t;
     existing.c = c;
     return existing;
   }
   if (existing) destroyAtlas(existing);
-  const newAtlas = createWatchedVolumeAtlas(ctx, poolKey, datasetId, chunkX, chunkY, chunkZ, t, c, format);
+  const newAtlas = createWatchedVolumeAtlas(ctx, poolKey, datasetId, chunkX, chunkY, chunkZ, c, format);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
@@ -807,14 +796,14 @@ function createWatchedVolumeAtlas(
   poolKey: string,
   datasetId: string,
   chunkX: number, chunkY: number, chunkZ: number,
-  t: number, c: number,
+  c: number,
   format: SampleFormat,
 ): AtlasState {
   return allocateWatched(
     ctx,
     () => createVolumeAtlas(
       ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
-      chunkX, chunkY, chunkZ, t, c, format,
+      chunkX, chunkY, chunkZ, c, format,
     ),
     (lost) => replaceLostVolumeAtlas(ctx, poolKey, lost),
   );
@@ -846,7 +835,7 @@ export function growVolumePoolWithin(
   atlas: AtlasState,
   reclaim: boolean,
 ): boolean {
-  const wantedLayers = Math.ceil(wantedSlotsOf(ctx.state, "volume", poolKey, atlas) / (atlas.slotsX * atlas.slotsY));
+  const wantedLayers = Math.ceil(wantedSlotsOf(poolKey, atlas) / (atlas.slotsX * atlas.slotsY));
   const maxSteps = Math.min(atlas.maxSlotsZ, Math.max(atlas.slotsZ * 2, wantedLayers)) - atlas.slotsZ;
   const steps = grantGrowth(ctx, atlas, volumeLayerBytes(atlas), maxSteps, reclaim);
   return steps > 0 && growVolumeAtlasWatched(ctx, poolKey, atlas, atlas.slotsZ + steps);
@@ -862,30 +851,23 @@ export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: At
   const atlases = ctx.state.volumeAtlases;
   if (atlases.get(poolKey) !== lost) return;
   postSlotsLost(ctx, "volume", chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
+  // The views' indirection buffers are their own, so a replacement keeps
+  // them, emptied, rather than freeing them with the lost texture.
+  const views = lost.views;
+  lost.views = new Map();
   destroyAtlas(lost);
   atlases.delete(poolKey);
   if (handleGpuOutOfMemory(ctx)) {
     const atlas = createWatchedVolumeAtlas(
-      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.chunkZ, lost.t, lost.c, lost.format,
+      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.chunkZ, lost.c, lost.format,
     );
-    atlas.entityMetas = lost.entityMetas;
-    resizeIndirection(ctx, atlas, lost.indirectionData.length);
-    atlas.indirectionData.fill(0xFFFFFFFF);
-    atlas.indirectionDirty = true;
+    atlas.views = views;
+    emptyViewIndirections(atlas, atlas.totalSlots);
     atlases.set(poolKey, atlas);
+  } else {
+    for (const view of views.values()) destroyViewIndirection(view);
   }
   ctx.postWantedSet(lost.datasetId, "volume");
-}
-
-/** Resize the indirection buffer to the sum of all entity LOD sections. */
-export function resizeIndirection(ctx: WorkerCtx, atlas: AtlasState, totalEntries: number): void {
-  if (totalEntries === atlas.indirectionData.length) return;
-  atlas.indirectionData = new Uint32Array(totalEntries);
-  atlas.indirectionBuf.destroy();
-  atlas.indirectionBuf = ctx.device.createBuffer({
-    size: Math.max(totalEntries * 4, 4),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-  });
 }
 
 /**

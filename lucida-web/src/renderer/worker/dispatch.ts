@@ -14,7 +14,7 @@ import {
   applyColdStateDisplay,
   applyColdStateSelection,
   applyColdStateDelta,
-  releaseUndrawnPools,
+  releaseUndrawnViews,
 } from "../coldState/index.ts";
 import {
   handleLabelSliceChunkData,
@@ -40,7 +40,7 @@ import { handleCaptureFrame } from "./captureFrame.ts";
 import { handleProbe } from "./probe.ts";
 import { handlePresentViews } from "./viewFrame.ts";
 import { postChunkResidency } from "../chunkUploadFeedback.ts";
-import { datasetModeKey, sourceKey } from "../poolKeys.ts";
+import { drawsOf, routeOf } from "./draws.ts";
 
 /**
  * Dispatch one main-thread message. The caller is responsible for
@@ -71,9 +71,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "sliceChunkData": {
       const memberId = msg.memberId;
-      const poolKey = ctx.state.memberSourcePools.slice
-        .get(memberId)
-        ?.get(sourceKey(msg.tier, msg.level));
+      const poolKey = routeOf(ctx.state, "slice", memberId, msg.tier, msg.level, msg.sliceAxis ?? "z");
       if (!poolKey) {
         postChunkResidency(ctx, memberId, "slice", msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
         return;
@@ -96,9 +94,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 
     case "volumeChunkData": {
       const memberId = msg.memberId;
-      const poolKey = ctx.state.memberSourcePools.volume
-        .get(memberId)
-        ?.get(sourceKey(msg.tier, msg.level));
+      const poolKey = routeOf(ctx.state, "volume", memberId, msg.tier, msg.level);
       if (!poolKey) {
         // No section for this (tier, level): cold state hasn't arrived for
         // this member, or the level is no longer a resident level.
@@ -165,12 +161,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
 
     case "coldState":
-      releaseUndrawnPools(ctx, msg.datasetId, msg.drawnModes);
+      releaseUndrawnViews(ctx, msg.datasetId, msg.drawnViews);
       ctx.state.currentColdState = msg;
       ctx.state.currentEpochs = msg.epochs;
-      ctx.state.coldStateByDatasetMode.set(datasetModeKey(msg.datasetId, msg.viewMode), msg);
       applyColdState(ctx, msg);
-      ctx.postWantedSet(msg.datasetId, msg.viewMode);
+      ctx.postWantedSet(msg.datasetId, undefined, msg.view);
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -182,16 +177,16 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "coldStateSelection":
       // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
       applyColdStateSelection(ctx, msg);
-      ctx.postWantedSet(msg.datasetId, msg.viewMode);
+      ctx.postWantedSet(msg.datasetId, undefined, msg.view);
       postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDelta":
       // Posted even when the delta was a no-op, matching the full and
       // selection paths.
-      releaseUndrawnPools(ctx, msg.datasetId, msg.drawnModes);
+      releaseUndrawnViews(ctx, msg.datasetId, msg.drawnViews);
       applyColdStateDelta(ctx, msg);
-      ctx.postWantedSet(msg.datasetId, msg.viewMode);
+      ctx.postWantedSet(msg.datasetId, undefined, msg.view);
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -202,10 +197,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       const failed = new Map(msg.images.map(({ imageId, chunkKeys }) => [imageId, new Set(chunkKeys)]));
       if (failed.size > 0) ctx.state.failedByDataset.set(msg.datasetId, failed);
       else ctx.state.failedByDataset.delete(msg.datasetId);
-      for (const mode of ["slice", "volume"] as const) {
-        const cold = ctx.state.coldStateByDatasetMode.get(datasetModeKey(msg.datasetId, mode));
-        if (cold) applyColdState(ctx, cold);
-      }
+      for (const draw of drawsOf(ctx.state, msg.datasetId)) applyColdState(ctx, draw.cold);
       return;
     }
 

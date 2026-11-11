@@ -30,6 +30,7 @@ import {
   type LabelSlicePool,
 } from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
+import { flushViewIndirection } from "../viewIndirection.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
@@ -162,11 +163,16 @@ function renderLabelLayer(
   return { view: target.createView(), blendMode: layer.blendMode, clip: layer.clip };
 }
 
-/** An atlas as the renderer binds it. */
-function poolBinding(atlas: SliceAtlasState): SlicePoolBinding {
+/**
+ * An atlas as the renderer binds it for `view`: the shared texture, read
+ * through the view's own indirection, written to the GPU first if it changed.
+ */
+function poolBinding(ctx: WorkerCtx, atlas: SliceAtlasState, view: number): SlicePoolBinding {
+  const indirection = atlas.views.get(view)!;
+  flushViewIndirection(ctx.device, indirection);
   return {
     texture: atlas.texture,
-    indirectionBuf: atlas.indirectionBuf,
+    indirectionBuf: indirection.indirectionBuf,
     slotsX: atlas.slotsX,
     slotsY: atlas.slotsY,
   };
@@ -177,8 +183,6 @@ interface ResolvedAggregate {
   /** Kept quad records, re-packed contiguously in batch order. */
   quadData: ArrayBuffer;
   batches: AggregateBatch[];
-  /** Chunk atlases any batch binds — for pre-draw indirection flushes. */
-  atlases: Set<SliceAtlasState>;
 }
 
 /**
@@ -214,7 +218,6 @@ function buildAggregateBatches(
     records: number[];
   }
   const batchesByKey = new Map<string, PendingBatch>();
-  const atlases = new Set<SliceAtlasState>();
   let kept = 0;
 
   for (let r = 0; r < recordCount; r++) {
@@ -224,7 +227,7 @@ function buildAggregateBatches(
     // entry to sample — drop the quad rather than read a stale slot.
     if (memberId === undefined) continue;
 
-    const pools = resolveMemberPools(atlasMap, descIndex, memberId);
+    const pools = resolveMemberPools(atlasMap, descIndex, memberId, msg.view);
     const hasDetail = pools.levels.some((atlas) => atlas !== null);
     const hasCoarse = pools.coarse !== null;
 
@@ -239,14 +242,12 @@ function buildAggregateBatches(
     const rw = srcF32[r * wordsPerRecord + 2];
     const rh = srcF32[r * wordsPerRecord + 3];
     if (rw > 0 && rh > 0) {
-      setCameraUVForMember(ctx.state, memberId, [
+      setCameraUVForMember(ctx.state, msg.view, memberId, [
         (msg.cx - (aggOx + rx * layer.dataW)) / (rw * layer.dataW),
         (msg.cy - (aggOy + ry * layer.dataH)) / (rh * layer.dataH),
       ]);
     }
 
-    for (const atlas of pools.levels) if (atlas) atlases.add(atlas);
-    if (pools.coarse) atlases.add(pools.coarse);
     const key = [
       pools.levels.map((atlas, i) => (atlas ? pools.levelPoolKeys[i] : "")).join(","),
       pools.coarse ? pools.coarsePoolKey : "",
@@ -276,13 +277,13 @@ function buildAggregateBatches(
       write++;
     }
     batches.push({
-      levels: b.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
-      coarse: b.coarse ? poolBinding(b.coarse) : null,
+      levels: b.levels.map((atlas) => (atlas ? poolBinding(ctx, atlas, msg.view) : null)),
+      coarse: b.coarse ? poolBinding(ctx, b.coarse, msg.view) : null,
       firstInstance,
       count: write - firstInstance,
     });
   }
-  return { quadData, batches, atlases };
+  return { quadData, batches };
 }
 
 /** The view center in a per-member layer's [0,1] coordinates: the slice eviction reference. */
@@ -401,18 +402,11 @@ function buildAggregateDraw(
   agg: SliceAggregateParams,
 ): AggregateDrawParams | null {
   const datasetId = ctx.state.memberToDataset.get(agg.poolMemberId);
-  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, "slice") : null;
+  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, msg.view) : null;
   if (!descIndex) return null;
 
   const built = buildAggregateBatches(ctx, msg, layer, agg, descIndex);
   if (built.batches.length === 0) return null;
-
-  for (const atlas of built.atlases) {
-    if (atlas.indirectionDirty) {
-      ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
-      atlas.indirectionDirty = false;
-    }
-  }
 
   const colormapName = descIndex.colormapNameByMember.get(agg.poolMemberId) ?? "gray";
   return {
@@ -453,22 +447,15 @@ function buildMemberDraw(
   // The orchestrator's entity index matches the worker's descriptor build
   // because both use canonical iteration order.
   const datasetId = ctx.state.memberToDataset.get(memberId);
-  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, "slice") : null;
+  const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId, msg.view) : null;
   if (!descIndex) return null;
 
-  const pools = resolveMemberPools(ctx.state.sliceAtlases, descIndex, memberId);
+  const pools = resolveMemberPools(ctx.state.sliceAtlases, descIndex, memberId, msg.view);
   const hasDetail = pools.levels.some((atlas) => atlas !== null);
   const hasCoarse = pools.coarse !== null;
 
   if (hasDetail || hasCoarse) {
-    setCameraUVForMember(ctx.state, memberId, memberCameraUV(msg, layer));
-  }
-
-  for (const atlas of [...pools.levels, pools.coarse]) {
-    if (atlas && atlas.indirectionDirty) {
-      ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
-      atlas.indirectionDirty = false;
-    }
+    setCameraUVForMember(ctx.state, msg.view, memberId, memberCameraUV(msg, layer));
   }
 
   // Anything resident is enough to draw; the shader's sampling chain
@@ -481,8 +468,8 @@ function buildMemberDraw(
   // read by the shader straight from the descriptor.
   const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
   return {
-    levels: pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
-    coarse: pools.coarse ? poolBinding(pools.coarse) : null,
+    levels: pools.levels.map((atlas) => (atlas ? poolBinding(ctx, atlas, msg.view) : null)),
+    coarse: pools.coarse ? poolBinding(ctx, pools.coarse, msg.view) : null,
     colormap: ctx.getOrCreateLUT(colormapName),
     descriptorBuffer: descIndex.buffer,
     entityIndex: layer.entityIndex,

@@ -7,7 +7,6 @@ import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import type { ChunkFeedbackReason, ChunkResidencyChange, PoolMode } from "./workerProtocol.ts";
 import { parseCompositeKey } from "./chunkKeys.ts";
-import { chunkPoolTier } from "./poolKeys.ts";
 
 /** The tier label chunks are delivered under (`pipeline/planning/labelRequests.ts`); label messages carry none. */
 export const LABEL_TIER: ResidencyTier = "detail";
@@ -74,22 +73,5 @@ export class ResidencyBatch {
     for (const [reason, keys] of this.refused) {
       postChunkResidency(ctx, memberId, viewMode, tier, "refused", keys, reason);
     }
-  }
-}
-
-/**
- * Report every chunk held by a dataset's pools of `viewMode` outside `keep`,
- * which the caller is about to free.
- */
-export function postFreedPools(
-  ctx: WorkerCtx,
-  datasetId: string,
-  viewMode: PoolMode,
-  keep: ReadonlySet<string>,
-): void {
-  const atlases = viewMode === "volume" ? ctx.state.volumeAtlases : ctx.state.sliceAtlases;
-  for (const [poolKey, atlas] of atlases) {
-    if (atlas.datasetId !== datasetId || keep.has(poolKey)) continue;
-    postSlotsLost(ctx, viewMode, chunkPoolTier(poolKey), atlas.slots.keys(), "freed");
   }
 }

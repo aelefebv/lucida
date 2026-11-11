@@ -17,9 +17,10 @@ export const ASSUMED_TOUCH_MEMORY_GIB = 4;
 
 export interface DeviceBudgets {
   /**
-   * Everything the render worker holds on the GPU: chunk and label pools,
-   * render targets, and minimap textures. Chunk pools grow toward it as
-   * chunks arrive and share what the rest leave.
+   * Everything the render worker holds on the GPU: chunk pools and each
+   * view's indirection over them, label pools, render targets, and minimap
+   * textures. Chunk pools grow toward it as chunks arrive and share what the
+   * rest leave.
    */
   gpuTotalBytes: number;
   /** One label's volume atlas, chosen by level. */

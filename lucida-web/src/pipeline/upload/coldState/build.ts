@@ -8,7 +8,6 @@ import type {
   ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
-  PoolMode,
   WantedMemberChunks,
 } from "../../../renderer/workerProtocol.ts";
 import type { ResolvedLayer } from "../../../resolvedLayers.ts";
@@ -130,8 +129,10 @@ export function buildColdState(args: {
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   layer: ResolvedLayer | undefined;
   sampleFormat: SampleFormat;
-  /** See {@link ColdStateMessage.drawnModes}. */
-  drawnModes: PoolMode[];
+  /** See {@link ColdStateMessage.view}. */
+  view: number;
+  /** See {@link ColdStateMessage.drawnViews}. */
+  drawnViews: number[];
 }): ColdStateMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
@@ -153,8 +154,9 @@ export function buildColdState(args: {
     renderRadiusView: args.renderRadiusView,
     wantedChunks: args.wantedChunks,
     activeSet: coldActiveSet,
+    view: args.view,
     viewMode: args.selection.renderMode,
-    drawnModes: args.drawnModes,
+    drawnViews: args.drawnViews,
     sampleFormat: args.sampleFormat,
   };
 }
@@ -232,8 +234,10 @@ export function buildColdStateDelta(args: {
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   layer: ResolvedLayer | undefined;
-  /** See {@link ColdStateMessage.drawnModes}. */
-  drawnModes: PoolMode[];
+  /** See {@link ColdStateMessage.view}. */
+  view: number;
+  /** See {@link ColdStateMessage.drawnViews}. */
+  drawnViews: number[];
 }): ColdStateDeltaMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
@@ -268,8 +272,8 @@ export function buildColdStateDelta(args: {
     type: "coldStateDelta",
     epochs: args.epochs,
     datasetId: args.datasetId,
-    viewMode: args.selection.renderMode,
-    drawnModes: args.drawnModes,
+    view: args.view,
+    drawnViews: args.drawnViews,
     currentT: args.selection.t,
     currentZ: workerCutIndex(args.selection),
     visibleRegion: regionInWorkerFrame(args.visibleRegion, cutAxis),

@@ -17,7 +17,6 @@ export {
   removeLabelSlicePoolsForDataset,
   resetLabelSliceAllocWarnings,
   removeSliceAtlasesForDataset,
-  resizeSliceIndirection,
 } from "./atlas.ts";
 
 export {

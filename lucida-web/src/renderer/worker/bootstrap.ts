@@ -9,21 +9,24 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { ColdStateMessage, PoolMode, WorkerToMainMessage } from "../workerProtocol.ts";
+import type { PoolMode, WorkerToMainMessage } from "../workerProtocol.ts";
 import { initGPU, requestGpuDevice } from "../gpuContext.ts";
 import { fitBudgets } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
 import { CursorRenderer } from "../cursorRenderer.ts";
-import { computeWantedSet } from "../wantedSet.ts";
-import { createInitialState, type RendererState } from "./state.ts";
+import { computeWantedSet, type AtlasSnapshot } from "../wantedSet.ts";
+import { createInitialState, type RendererState, type ViewDraw } from "./state.ts";
+import { drawOf, drawsOf } from "./draws.ts";
+import type { SliceAtlasState } from "../slice/atlas.ts";
+import type { AtlasState } from "../volume/atlas.ts";
 import { getOrCreateLUT } from "./resources.ts";
 import { viewLayerTargets } from "./viewResources.ts";
 import { ViewLander } from "../viewLander.ts";
 import { createFrameTiming, type FrameTiming } from "../passTiming.ts";
 import { watchDevice } from "./deviceLoss.ts";
-import { datasetModeKey, sourceKey } from "../poolKeys.ts";
+import { sourceKey } from "../poolKeys.ts";
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 
 /** What is built on one device and rebuilt on its replacement. */
@@ -106,8 +109,8 @@ export async function bootstrapWorker(
     getOrCreateLUT: (name) => getOrCreateLUT(ctx.device, name),
     post,
     postWantedSet,
-    lookupEntityDescriptor(datasetId: string, mode: PoolMode) {
-      return state.descriptorBuffersByDatasetMode.get(datasetModeKey(datasetId, mode)) ?? null;
+    lookupEntityDescriptor(datasetId: string, view: number) {
+      return drawOf(state, datasetId, view)?.descriptor ?? null;
     },
   };
 
@@ -130,28 +133,28 @@ export async function bootstrapWorker(
 export function createWantedSetPoster(
   state: RendererState,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
-): (datasetId?: string, mode?: PoolMode) => void {
-  return function postWantedSet(datasetId?: string, mode?: PoolMode): void {
+): (datasetId?: string, mode?: PoolMode, view?: number) => void {
+  return function postWantedSet(datasetId?: string, mode?: PoolMode, view?: number): void {
     if (datasetId === undefined) {
-      if (state.currentColdState) postFor(state.currentColdState);
+      const cold = state.currentColdState;
+      const draw = cold ? drawOf(state, cold.datasetId, cold.view) : undefined;
+      if (draw) postFor(draw);
       return;
     }
-    for (const each of mode === undefined ? (["slice", "volume"] as const) : [mode]) {
-      const cold = state.coldStateByDatasetMode.get(datasetModeKey(datasetId, each));
-      if (cold) postFor(cold);
+    for (const draw of drawsOf(state, datasetId, mode)) {
+      if (view === undefined || draw.view === view) postFor(draw);
     }
   };
 
-  function postFor(cold: ColdStateMessage): void {
-    const mode = cold.viewMode;
-    const routes = state.memberSourcePools[mode];
+  function postFor(draw: ViewDraw): void {
+    const { cold, mode } = draw;
     const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
     const result = computeWantedSet(
       cold,
-      state.wantedByDatasetMode.get(datasetModeKey(cold.datasetId, mode)) ?? new Map(),
-      state.volumeAtlases,
-      state.sliceAtlases,
-      (memberId, tier, level) => routes.get(memberId)?.get(sourceKey(tier, level)),
+      draw.wanted,
+      mode === "volume" ? viewSnapshots(state.volumeAtlases, draw) : new Map(),
+      mode === "slice" ? viewSnapshots(state.sliceAtlases, draw) : new Map(),
+      (memberId, tier, level) => draw.routes.get(memberId)?.get(sourceKey(tier, level)),
     );
     // Ahead of the missing list, which names these too: the page was told
     // they were held, and a missing chunk it holds is a disagreement.
@@ -175,8 +178,30 @@ export function createWantedSetPoster(
     post({
       type: "entityLevels",
       datasetId: cold.datasetId,
-      viewMode: mode,
+      view: draw.view,
       entities: result.levels,
     });
   }
+}
+
+/**
+ * The pools `draw`'s view draws from, each as that view samples it: the
+ * shared slots, read through the view's sections at the view's Z.
+ */
+function viewSnapshots(
+  atlases: ReadonlyMap<string, SliceAtlasState | AtlasState>,
+  draw: ViewDraw,
+): Map<string, AtlasSnapshot> {
+  const out = new Map<string, AtlasSnapshot>();
+  for (const [poolKey, atlas] of atlases) {
+    const view = atlas.views.get(draw.view);
+    if (!view || atlas.datasetId !== draw.datasetId) continue;
+    out.set(poolKey, {
+      z: draw.cold.currentZ,
+      slots: atlas.slots,
+      planesByChunk: "planesByChunk" in atlas ? atlas.planesByChunk : undefined,
+      entityMetas: view.entityMetas,
+    });
+  }
+  return out;
 }

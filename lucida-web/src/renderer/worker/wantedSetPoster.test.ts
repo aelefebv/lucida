@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createWantedSetPoster } from "./bootstrap.ts";
+import { attachView, fakeDraw } from "../viewIndirectionFixtures.ts";
 import { createInitialState } from "./state.ts";
 import { indexWantedChunks } from "../wantedChunks.ts";
 import type { ColdStateMessage, WorkerToMainMessage } from "../workerProtocol.ts";
@@ -27,8 +28,9 @@ function sliceColdState(z: number): ColdStateMessage {
       invModelMatrix: identity,
       displayStateByChannel: {},
     }],
+    view: 0,
     viewMode: "slice",
-    drawnModes: ["slice"],
+    drawnViews: [0],
     sampleFormat: "u16",
   };
 }
@@ -37,17 +39,21 @@ describe("the wanted-set report", () => {
   it("reports a wanted slot cut from a plane the current Z no longer maps to lost, ahead of the missing list", () => {
     const state = createInitialState();
     const cold = sliceColdState(11);
-    state.coldStateByDatasetMode.set("ds-0|slice", cold);
-    state.wantedByDatasetMode.set("ds-0|slice", indexWantedChunks(cold.wantedChunks));
+    const draw = fakeDraw({ datasetId: "ds-0", mode: "slice", z: 11, wanted: indexWantedChunks(cold.wantedChunks) });
+    draw.cold = cold;
+    draw.routes.set("img:ch0", new Map([["detail:0", "pool"]]));
+    state.draws.set("ds-0|0", draw);
     state.memberToDataset.set("img:ch0", "ds-0");
-    state.memberSourcePools.slice.set("img:ch0", new Map([["detail:0", "pool"]]));
-    state.sliceAtlases.set("pool", {
-      z: 11,
+    const pool = {
+      datasetId: "ds-0",
       // Cut at plane 10, in the same chunk as plane 11.
       slots: new Map([["img:ch0|0/0/0/0/0/0|10", 0]]),
       planesByChunk: new Map([["img:ch0|0/0/0/0/0/0", new Map([[10, 0]])]]),
-      entityMetas: new Map([["img:ch0", [{ level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], levelDims: [64, 128, 128], offset: 0 }]]]),
-    } as never);
+      views: new Map(),
+      totalSlots: 1,
+    };
+    attachView(pool as never, new Map([["img:ch0", [{ level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], levelDims: [64, 128, 128], offset: 0 }]]]), { draw });
+    state.sliceAtlases.set("pool", pool as never);
     const posts: WorkerToMainMessage[] = [];
 
     createWantedSetPoster(state, (msg) => posts.push(msg))("ds-0");

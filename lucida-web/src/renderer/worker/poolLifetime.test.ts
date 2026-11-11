@@ -14,6 +14,7 @@ import type {
   ColdStateMessage,
   GpuCapacityMessage,
   GpuMemoryMessage,
+  SliceChunkDataMessage,
   VolumeChunkDataMessage,
   WorkerToMainMessage,
 } from "../workerProtocol.ts";
@@ -23,6 +24,7 @@ import { getOrCreateLabelVolumePool } from "../volume/index.ts";
 import type { SliceAtlasState } from "../slice/index.ts";
 import { UNTIMED } from "../passTiming.ts";
 import { createInitialState } from "./state.ts";
+import { drawOf } from "./draws.ts";
 import { dispatchMessage } from "./dispatch.ts";
 import { measureGpuMemory } from "./gpuBudget.ts";
 
@@ -149,8 +151,9 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
       chunkKeys: ["2/0/0/0/0/0"],
     })),
     activeSet: [tile(`${datasetId}-img`, 2)],
+    view: 0,
     viewMode: "volume",
-    drawnModes: [opts.viewMode ?? "volume"],
+    drawnViews: [opts.view ?? 0],
     sampleFormat: "u16",
     ...opts,
   };
@@ -174,6 +177,34 @@ function chunkAt(memberId: string): VolumeChunkDataMessage {
     chunkY: 32,
     chunkZ: 32,
   };
+}
+
+/** The plane of level 2's one chunk along Z that full-resolution Z `fullResZ` cuts, at T `t`. */
+function planeAt(memberId: string, fullResZ: number, t = 0): SliceChunkDataMessage {
+  return {
+    type: "sliceChunkData",
+    epochs: EPOCHS,
+    tier: "detail",
+    memberId,
+    chunks: [{ data: new Uint16Array(32 * 32).fill(7).buffer, dataType: "uint16", x: 0, y: 0, z: 0, key: `2/${t}/0/0/0/0` }],
+    level: 2,
+    z: fullResZ,
+    t,
+    c: 0,
+    levelWidth: 64,
+    levelHeight: 64,
+    chunkX: 32,
+    chunkY: 32,
+    chunkZ: 32,
+    fullResDepth: 128,
+    levelDepth: 32,
+    fullResZ,
+  };
+}
+
+/** The views whose indirection over `pool` maps `slot`. */
+function viewsMapping(pool: { views: Map<number, { slotGridIdx: Int32Array }> }, slot: number): number[] {
+  return [...pool.views].filter(([, view]) => view.slotGridIdx[slot] >= 0).map(([id]) => id).sort();
 }
 
 function poolKeysOf(ctx: WorkerCtx, datasetId: string): string[] {
@@ -284,38 +315,109 @@ describe("a cold state frees the pools it no longer routes to", () => {
   it("keeps a dataset's slice and volume pools while views of both modes draw it, and frees a mode's once none does", async () => {
     const gpu = trackingDevice();
     const { ctx, posts } = makeCtx(gpu.device);
-    const both = ["slice", "volume"] as const;
-    await dispatchMessage(ctx, cold("ds1", { drawnModes: [...both] }));
+    // View 0 draws the dataset in 3D and view 1 in 2D.
+    await dispatchMessage(ctx, cold("ds1", { view: 0, drawnViews: [0, 1] }));
     await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
-    await dispatchMessage(ctx, cold("ds1", { viewMode: "slice", drawnModes: [...both] }));
+    await dispatchMessage(ctx, cold("ds1", { view: 1, viewMode: "slice", drawnViews: [0, 1] }));
     const volumePools = [...ctx.state.volumeAtlases.values()];
     expect(volumePools.length).toBeGreaterThan(0);
     expect(ctx.state.sliceAtlases.size).toBeGreaterThan(0);
     expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!.slots.size).toBe(1);
-    // Each mode routes its own uploads and keeps its own cold state.
-    expect(ctx.state.memberSourcePools.volume.get("ds1-img:ch0")?.get("detail:2")).toBe("ds1:ch0:32x32x32:detail");
-    expect(ctx.state.memberSourcePools.slice.get("ds1-img:ch0")?.get("detail:2")).toBe("ds1:ch0:32x32:detail");
-    expect([...ctx.state.coldStateByDatasetMode.keys()].sort()).toEqual(["ds1|slice", "ds1|volume"]);
+    // Each view routes its own uploads and keeps its own cold state.
+    expect(drawOf(ctx.state, "ds1", 0)?.routes.get("ds1-img:ch0")?.get("detail:2")).toBe("ds1:ch0:32x32x32:detail");
+    expect(drawOf(ctx.state, "ds1", 1)?.routes.get("ds1-img:ch0")?.get("detail:2")).toBe("ds1:ch0:32x32:detail");
+    expect([...ctx.state.draws.keys()].sort()).toEqual(["ds1|0", "ds1|1"]);
 
     // Another volume cold state leaves the slice pools be.
     const slicePools = [...ctx.state.sliceAtlases.values()];
-    await dispatchMessage(ctx, cold("ds1", { drawnModes: [...both] }));
+    await dispatchMessage(ctx, cold("ds1", { view: 0, drawnViews: [0, 1] }));
     expect([...ctx.state.sliceAtlases.values()]).toEqual(slicePools);
     posts.length = 0;
 
     // The volume view goes: its pools and what laid them out go too, and the
     // page hears their chunks went.
-    await dispatchMessage(ctx, cold("ds1", { viewMode: "slice", drawnModes: ["slice"] }));
+    await dispatchMessage(ctx, cold("ds1", { view: 1, viewMode: "slice", drawnViews: [1] }));
     expect(ctx.state.volumeAtlases.size).toBe(0);
     expect(volumePools.every((pool) => (pool.texture as unknown as MockTexture).destroyed)).toBe(true);
     expect([...ctx.state.sliceAtlases.values()]).toEqual(slicePools);
-    expect([...ctx.state.coldStateByDatasetMode.keys()]).toEqual(["ds1|slice"]);
-    expect(ctx.state.memberSourcePools.volume.size).toBe(0);
+    expect([...ctx.state.draws.keys()]).toEqual(["ds1|1"]);
     expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
       { type: "chunkResidency", memberId: "ds1-img:ch0", viewMode: "volume", tier: "detail", change: "lost", keys: ["2/0/0/0/0/0"], reason: "freed" },
     );
-    // So does the level readout of the pools.
-    expect(posts).toContainEqual({ type: "entityLevels", datasetId: "ds1", viewMode: "volume", entities: [] });
+    // So does the view's level readout.
+    expect(posts).toContainEqual({ type: "entityLevels", datasetId: "ds1", view: 0, entities: [] });
+  });
+
+  it("holds the chunks two views of one mode draw once, and keeps them until the last of the views goes", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    await dispatchMessage(ctx, cold("ds1", { view: 0, drawnViews: [0, 1] }));
+    await dispatchMessage(ctx, cold("ds1", { view: 1, drawnViews: [0, 1] }));
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    const pool = ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!;
+    // One slot, mapped into each view's own indirection.
+    expect(pool.slots.size).toBe(1);
+    const slot = [...pool.slots.values()][0];
+    expect([...pool.views.keys()].sort()).toEqual([0, 1]);
+    for (const view of pool.views.values()) {
+      expect(view.slotGridIdx[slot]).toBeGreaterThanOrEqual(0);
+      expect(view.indirectionData[view.slotGridIdx[slot]]).toBe(slot);
+    }
+    expect(pool.views.get(0)!.indirectionBuf).not.toBe(pool.views.get(1)!.indirectionBuf);
+    posts.length = 0;
+
+    // View 1 stops drawing the dataset: its indirection goes, the slot stays.
+    const leaving = pool.views.get(1)!.indirectionBuf as unknown as MockBuffer;
+    await dispatchMessage(ctx, cold("ds1", { view: 0, drawnViews: [0] }));
+    expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")).toBe(pool);
+    expect([...pool.views.keys()]).toEqual([0]);
+    expect(leaving.destroyed).toBe(true);
+    expect(pool.slots.size).toBe(1);
+    expect(posts.filter((m) => m.type === "chunkResidency")).toEqual([]);
+  });
+
+  it("maps a brick into the views at its timepoint only, each holding its own slot", async () => {
+    const gpu = trackingDevice();
+    const { ctx } = makeCtx(gpu.device);
+    const atT = (t: number) => [{ memberId: "ds1-img:ch0", tier: "detail" as const, chunkKeys: [`2/${t}/0/0/0/0`] }];
+    await dispatchMessage(ctx, cold("ds1", { view: 0, drawnViews: [0, 1] }));
+    await dispatchMessage(ctx, cold("ds1", { view: 1, currentT: 1, wantedChunks: atT(1), drawnViews: [0, 1] }));
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    await dispatchMessage(ctx, { ...chunkAt("ds1-img:ch0"), t: 1, chunks: [{ ...chunkAt("").chunks[0], key: "2/1/0/0/0/0" }] });
+
+    const pool = ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!;
+    expect(pool.slots.size).toBe(2);
+    expect(viewsMapping(pool, pool.slots.get("ds1-img:ch0|2/0/0/0/0/0")!)).toEqual([0]);
+    expect(viewsMapping(pool, pool.slots.get("ds1-img:ch0|2/1/0/0/0/0")!)).toEqual([1]);
+  });
+
+  it("keeps a plane another view draws when a view moves through the chunk, and re-cuts only its own", async () => {
+    const gpu = trackingDevice();
+    const { ctx } = makeCtx(gpu.device);
+    const slice = { viewMode: "slice" as const, drawnViews: [0, 1] };
+    // Level 2 is 32 planes deep, a quarter of level 0: Z 4 cuts its plane 1, Z 20 its plane 5.
+    await dispatchMessage(ctx, cold("ds1", { ...slice, view: 0, currentZ: 4 }));
+    await dispatchMessage(ctx, cold("ds1", { ...slice, view: 1, currentZ: 20 }));
+    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 4));
+    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 20));
+
+    const pool = ctx.state.sliceAtlases.get("ds1:ch0:32x32:detail")!;
+    const first = pool.slots.get("ds1-img:ch0|2/0/0/0/0/0|1")!;
+    const other = pool.slots.get("ds1-img:ch0|2/0/0/0/0/0|5")!;
+    expect(pool.slots.size).toBe(2);
+    expect(viewsMapping(pool, first)).toEqual([0]);
+    expect(viewsMapping(pool, other)).toEqual([1]);
+
+    // View 0 steps to Z 8, plane 2: it re-cuts its own plane's slot in place,
+    // and view 1's plane stays.
+    await dispatchMessage(ctx, cold("ds1", { ...slice, view: 0, currentZ: 8 }));
+    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 8));
+    expect([...pool.slots].sort()).toEqual([
+      ["ds1-img:ch0|2/0/0/0/0/0|2", first],
+      ["ds1-img:ch0|2/0/0/0/0/0|5", other],
+    ]);
+    expect(viewsMapping(pool, first)).toEqual([0]);
+    expect(viewsMapping(pool, other)).toEqual([1]);
   });
 
   it("frees a chunk shape that no resident level uses after a zoom", async () => {
@@ -375,17 +477,20 @@ describe("label pools live as long as the view mode that draws them", () => {
 describe("the GPU memory report", () => {
   it("counts every holder's bytes from its own geometry, and the chunk slots held", () => {
     const state = createInitialState(256 * 1024 * 1024);
+    // Two views draw from the pool, each through an indirection of 16 cells.
     state.sliceAtlases.set("a", {
       slotsX: 4, slotsY: 2, chunkX: 64, chunkY: 32, format: "u16", totalSlots: 8,
-      slots: new Map([["m|k", 0]]), indirectionData: new Uint32Array(16),
+      slots: new Map([["m|k", 0]]),
+      views: new Map([[0, { indirectionData: new Uint32Array(16) }], [1, { indirectionData: new Uint32Array(16) }]]),
     } as unknown as SliceAtlasState);
     state.labelSlicePools.set("b", { width: 100, height: 50 } as never);
 
 
     expect(measureGpuMemory(state)).toEqual({
       budgetBytes: 256 * 1024 * 1024,
-      bytes: 4 * 64 * 2 * 32 * 2 + 16 * 4 + 100 * 50 * 4,
-      chunkBytes: 4 * 64 * 2 * 32 * 2 + 16 * 4,
+      bytes: 4 * 64 * 2 * 32 * 2 + 2 * 16 * 4 + 100 * 50 * 4,
+      chunkBytes: 4 * 64 * 2 * 32 * 2 + 2 * 16 * 4,
+      indirectionBytes: 2 * 16 * 4,
       labelBytes: 100 * 50 * 4,
 
       targetBytes: 0,

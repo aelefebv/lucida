@@ -1970,15 +1970,15 @@ describe("views of one dataset in two modes", () => {
     return { scene, ctx, coldState, coldStateDelta, cpuCache };
   }
 
-  it("sends each mode's pools a cold state of their own views' requests, both kept", () => {
+  it("sends each view a cold state of its own requests, both kept", () => {
     const { ctx, coldState, cpuCache } = makeTwoModes();
     new TickCoordinator(new Uploader()).planAndFetch(ctx, emptyMinimap);
 
     const sent = coldState.mock.calls.map(([msg]) => msg as ColdStateMessage);
-    expect(sent.map((msg) => msg.viewMode)).toEqual(["slice", "volume"]);
+    expect(sent.map((msg) => [msg.view, msg.viewMode])).toEqual([[0, "slice"], [1, "volume"]]);
     for (const msg of sent) {
       expect(msg.datasetId).toBe("ds1");
-      expect(msg.drawnModes).toEqual(["slice", "volume"]);
+      expect(msg.drawnViews).toEqual([0, 1]);
       expect(msg.activeSet.map((entry) => entry.imageId)).toEqual(["img-0"]);
       expect(msg.wantedChunks.length).toBeGreaterThan(0);
     }
@@ -2008,7 +2008,7 @@ describe("views of one dataset in two modes", () => {
     ]);
   });
 
-  it("tells the worker the modes that still draw the dataset once one view leaves it", () => {
+  it("lays a view out again in full once it draws the dataset in the other mode", () => {
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const { scene, ctx, coldState, coldStateDelta } = makeTwoModes();
@@ -2016,18 +2016,21 @@ describe("views of one dataset in two modes", () => {
       orch.planAndFetch(ctx, emptyMinimap);
       coldState.mockClear();
 
-      // The volume view turns to slices at the slice view's cut, so it draws
-      // the dataset from the slice pools, and no view from the volume pools.
+      // The volume view turns to slices at the slice view's cut, and only the
+      // view epoch moves. The slice view takes the view-move delta, but the
+      // other view's held active set is of the volume pools, so it is sent
+      // whole.
       vi.advanceTimersByTime(500);
       const views = [ctx.views[0], { ...ctx.views[1], mode: "slice" as const }];
       scene.dataset_holder = (_dsId: string, mode: string) => (mode === "slice" ? 0 : undefined);
       const epochs = JSON.parse((scene.epochs as () => string)());
-      scene.epochs = () => JSON.stringify({ ...epochs, view: epochs.view + 1, selection: epochs.selection + 1 });
+      scene.epochs = () => JSON.stringify({ ...epochs, view: epochs.view + 1 });
       orch.planAndFetch({ ...ctx, views } as TickContext, emptyMinimap);
 
+      const deltas = coldStateDelta.mock.calls.map(([msg]) => msg as ColdStateDeltaMessage);
       const sent = coldState.mock.calls.map(([msg]) => msg as ColdStateMessage);
-      expect(coldStateDelta).not.toHaveBeenCalled();
-      expect(sent.map((msg) => [msg.viewMode, msg.drawnModes])).toEqual([["slice", ["slice"]]]);
+      expect(deltas.map((msg) => [msg.view, msg.drawnViews])).toEqual([[0, [0, 1]]]);
+      expect(sent.map((msg) => [msg.view, msg.viewMode, msg.drawnViews])).toEqual([[1, "slice", [0, 1]]]);
     } finally {
       vi.useRealTimers();
     }

@@ -224,20 +224,21 @@ export interface ResolvedMemberPools<A> {
 }
 
 /**
- * Resolve the pools a member's descriptor entry samples against the
- * atlases the worker holds right now. A pool that exists but holds no
- * section for the member resolves to `null`, so the draw binds a dummy
- * there and the shader reads a miss.
+ * Resolve the pools a member's descriptor entry in `view` samples against the
+ * atlases the worker holds right now. A pool where the view lays out no
+ * section for the member resolves to `null`, so the draw binds a dummy there
+ * and the shader reads a miss.
  */
-export function resolveMemberPools<A extends { entityMetas: Map<string, unknown[]> }>(
+export function resolveMemberPools<A extends { views: Map<number, { entityMetas: Map<string, unknown[]> }> }>(
   atlasMap: Map<string, A>,
   descIndex: EntityDescriptorIndex,
   memberId: string,
+  view: number,
 ): ResolvedMemberPools<A> {
   const binding = descIndex.sourceBindingByMember.get(memberId);
   const resident = (key: string | null): A | null => {
     const atlas = key ? atlasMap.get(key) ?? null : null;
-    return atlas && (atlas.entityMetas.get(memberId)?.length ?? 0) > 0 ? atlas : null;
+    return atlas && (atlas.views.get(view)?.entityMetas.get(memberId)?.length ?? 0) > 0 ? atlas : null;
   };
   const levelPoolKeys = binding?.levelPoolKeys ?? [];
   const coarsePoolKey = binding?.coarsePoolKey ?? null;

@@ -41,30 +41,34 @@ export function chunkDistSq(
   return dx * dx + dy * dy + dz * dz;
 }
 
-export interface FindEvictionParams {
-  /** Composite slot keys → slot indices. */
-  slots: Map<string, number>;
-  /** slotIndex → globalGridIdx; `< 0` means slot is stale (unmapped). */
+/** What eviction reads of one view drawing from a pool. */
+export interface EvictionView {
+  /** slotIndex → the view's cell; `< 0` means the view does not map the slot. */
   slotGridIdx: Int32Array;
-  /** Per-entity LOD section metas. */
+  /** The view's per-entity level sections. */
   entityMetas: Map<string, LodIndirectionMeta[]>;
   /**
-   * Per-entity camera reference. Volume callers return a 3-tuple
-   * (rayHit); slice callers return a 2-tuple (camera UV).
+   * Per-entity camera reference in this view. Volume callers return a
+   * 3-tuple (rayHit); slice callers return a 2-tuple (camera UV).
    */
   cameraFor: (memberId: string) => [number, number] | [number, number, number];
   /**
-   * Per-entity target level (`detailLevels[0]` of its cold-state entry),
-   * or `undefined` when the worker holds no cold state for the member. The
-   * pool has no section for a resident chunk finer than it.
+   * Per-entity target level of the view's cold state, or `undefined` when it
+   * has none for the member. The view samples no resident chunk finer.
    */
   targetLevelFor: (memberId: string) => number | undefined;
-  /** Whether the planner wants a resident chunk for the current view. */
+  /** Whether the planner wants a resident chunk for this view. */
   isWanted: (memberId: string, chunkKey: string) => boolean;
+}
+
+export interface FindEvictionParams {
+  /** Composite slot keys → slot indices. */
+  slots: Map<string, number>;
+  /** Every view drawing from the pool. A slot is classed by the views that sample it. */
+  views: readonly EvictionView[];
   /**
    * Volume mode → use 3D distance (include the chunk's Z + camera's
-   * Z). Slice mode → strip Z; the per-Z filter has already constrained
-   * residency to a single Z plane.
+   * Z). Slice mode → strip Z; a view maps one plane of each chunk.
    */
   is3D: boolean;
   /**
@@ -77,18 +81,19 @@ export interface FindEvictionParams {
 /**
  * The three kinds of slot, in the order they are evicted:
  *
- *   - `unsampled`: the shader never reads it. It is finer than its member's
- *     target level, unmapped (another T, C or plane), or has no section.
- *   - `unwanted`: mapped, and the shader may sample it as a fallback, but the
- *     planner does not want it.
- *   - `wanted`: the planner wants it.
+ *   - `unsampled`: no view's shader reads it. In every view it is finer than
+ *     its member's target level, unmapped (another T, C or plane), or has no
+ *     section.
+ *   - `unwanted`: a view maps it, and its shader may sample it as a
+ *     fallback, but the planner wants it for no view that maps it.
+ *   - `wanted`: the planner wants it for a view that maps it.
  */
 export type EvictionClass = "unsampled" | "unwanted" | "wanted";
 
 export interface EvictionCandidate {
   key: string;
   class: EvictionClass;
-  /** Squared distance to the member's camera reference; `Infinity` for `unsampled`. */
+  /** Squared distance to the nearest camera reference of a view that samples it; `Infinity` for `unsampled`. */
   dist: number;
 }
 
@@ -168,20 +173,50 @@ function classifySlot(
   const chunk = parsePlaneChunkKey(parsed.chunkKey, params.sliceAxis);
   if (!chunk) return null;
 
-  const target = params.targetLevelFor(parsed.memberId);
-  const lodMeta = params.slotGridIdx[slotIdx] < 0
-    ? undefined
-    : params.entityMetas.get(parsed.memberId)?.find(m => m.level === chunk.level);
-  if ((target !== undefined && chunk.level < target) || !lodMeta) {
-    return { key: compositeKey, class: "unsampled", dist: Infinity };
+  let sampled = false;
+  let wanted = false;
+  let dist = Infinity;
+  for (const view of params.views) {
+    if (view.slotGridIdx[slotIdx] < 0) continue;
+    const target = view.targetLevelFor(parsed.memberId);
+    if (target !== undefined && chunk.level < target) continue;
+    const lodMeta = view.entityMetas.get(parsed.memberId)?.find(m => m.level === chunk.level);
+    if (!lodMeta) continue;
+    sampled = true;
+    wanted ||= view.isWanted(parsed.memberId, parsed.chunkKey);
+    if (withDistance) dist = Math.min(dist, viewChunkDistSq(params, view, lodMeta, parsed.memberId, chunk));
   }
-  const wanted = params.isWanted(parsed.memberId, parsed.chunkKey);
-  if (!withDistance) return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist: 0 };
-  const cam = params.cameraFor(parsed.memberId);
-  const dist = params.is3D
-    ? chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam)
-    : chunkDistSq(lodMeta, chunk.x, chunk.y, null, cam);
-  return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist };
+  if (!sampled) return { key: compositeKey, class: "unsampled", dist: Infinity };
+  return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist: withDistance ? dist : 0 };
+}
+
+function viewChunkDistSq(
+  params: FindEvictionParams,
+  view: EvictionView,
+  lodMeta: LodIndirectionMeta,
+  memberId: string,
+  chunk: { x: number; y: number; z: number },
+): number {
+  const cam = view.cameraFor(memberId);
+  return params.is3D ? chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam) : chunkDistSq(lodMeta, chunk.x, chunk.y, null, cam);
+}
+
+/**
+ * An arriving chunk's squared distance to the nearest camera reference of a
+ * view with a section for it, the measure {@link mayEvict} weighs against a
+ * wanted resident's. `Infinity` when no view lays one out.
+ */
+export function incomingDistSq(
+  params: FindEvictionParams,
+  memberId: string,
+  chunk: { level: number; x: number; y: number; z: number },
+): number {
+  let dist = Infinity;
+  for (const view of params.views) {
+    const lodMeta = view.entityMetas.get(memberId)?.find(m => m.level === chunk.level);
+    if (lodMeta) dist = Math.min(dist, viewChunkDistSq(params, view, lodMeta, memberId, chunk));
+  }
+  return dist;
 }
 
 /** Whether a wanted incoming chunk at `incomingDist` may take `victim`'s slot. */

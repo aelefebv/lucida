@@ -17,7 +17,6 @@ export {
   removeLabelVolumePool,
   removeLabelVolumePoolsForDataset,
   removeVolumeAtlasesForDataset,
-  resizeIndirection,
 } from "./atlas.ts";
 
 export {

@@ -19,6 +19,7 @@ import { describe, it, expect, vi } from "vitest";
 };
 
 import { applyColdState } from "./apply.ts";
+import { drawOf } from "../worker/draws.ts";
 import { applyColdStateDelta } from "./applyDelta.ts";
 import { applyColdStateDisplay } from "./applyDisplay.ts";
 import type { WorkerCtx } from "../workerContext.ts";
@@ -103,8 +104,9 @@ function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
     },
     wantedChunks: [],
     activeSet,
+    view: 0,
     viewMode: "volume",
-    drawnModes: ["volume"],
+    drawnViews: [0],
     sampleFormat: "u16",
   };
 }
@@ -116,15 +118,12 @@ describe("applyColdStateDelta", () => {
     // reorders to [a, c, d].
     const ctxDelta = makeCtx();
     const cold1 = makeCold([tile("a", "img-a", 1), tile("b", "img-b", 1), tile("c", "img-c", 1)]);
-    // The dispatch handler retains the message; mirror that so the delta has
-    // something to patch.
-    ctxDelta.state.coldStateByDatasetMode.set("ds1|volume", cold1);
     applyColdState(ctxDelta, cold1);
 
     const delta: ColdStateDeltaMessage = {
       type: "coldStateDelta",
-      viewMode: "volume",
-      drawnModes: ["volume"],
+      view: 0,
+      drawnViews: [0],
       datasetId: "ds1",
       epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
@@ -147,19 +146,18 @@ describe("applyColdStateDelta", () => {
       currentT: 0,
       visibleRegion: delta.visibleRegion,
     };
-    ctxFull.state.coldStateByDatasetMode.set("ds1|volume", coldFull);
     applyColdState(ctxFull, coldFull);
 
-    const patched = ctxDelta.state.coldStateByDatasetMode.get("ds1|volume")!;
-    const full = ctxFull.state.coldStateByDatasetMode.get("ds1|volume")!;
+    const patched = drawOf(ctxDelta.state, "ds1", 0)!.cold;
+    const full = drawOf(ctxFull.state, "ds1", 0)!.cold;
 
     // Same entries in the same order — the property that binds descriptor indices.
     expect(patched.activeSet.map((e) => e.entityId)).toEqual(["a", "c", "d"]);
     expect(patched.activeSet).toEqual(full.activeSet);
 
     // Descriptor buffer indices agree with the full rebuild's.
-    const descDelta = ctxDelta.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
-    const descFull = ctxFull.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
+    const descDelta = drawOf(ctxDelta.state, "ds1", 0)!.descriptor!;
+    const descFull = drawOf(ctxFull.state, "ds1", 0)!.descriptor!;
     expect(descDelta.memberByIndex).toEqual(["img-a:ch0", "img-c:ch0", "img-d:ch0"]);
     expect(descDelta.memberByIndex).toEqual(descFull.memberByIndex);
 
@@ -167,8 +165,8 @@ describe("applyColdStateDelta", () => {
     // ghost tile. (Its pool routing is dropped and it never enters the rebuilt
     // descriptor buffer, exactly as a full rebuild on this worker would do.)
     expect(descDelta.indexByMember.has("img-b:ch0")).toBe(false);
-    expect(ctxDelta.state.memberSourcePools.volume.has("img-b:ch0")).toBe(false);
-    expect(ctxDelta.state.currentSourcesByDatasetMode.get("ds1|volume")!.has("img-b:ch0")).toBe(false);
+    expect(drawOf(ctxDelta.state, "ds1", 0)!.routes.has("img-b:ch0")).toBe(false);
+    expect(drawOf(ctxDelta.state, "ds1", 0)!.sources.has("img-b:ch0")).toBe(false);
     expect(descDelta.indexByMember.has("img-c:ch0")).toBe(true);
 
     // The delta re-pointed the retained cold state at the new view.
@@ -185,13 +183,12 @@ describe("applyColdStateDelta", () => {
         { memberId: "img-b", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] },
       ],
     };
-    ctx.state.coldStateByDatasetMode.set("ds1|volume", cold1);
     applyColdState(ctx, cold1);
 
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
-      viewMode: "volume",
-      drawnModes: ["volume"],
+      view: 0,
+      drawnViews: [0],
       datasetId: "ds1",
       epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
@@ -206,10 +203,10 @@ describe("applyColdStateDelta", () => {
       activeSetOrder: ["a"],
     });
 
-    expect(ctx.state.coldStateByDatasetMode.get("ds1|volume")!.wantedChunks).toEqual([
+    expect(drawOf(ctx.state, "ds1", 0)!.cold.wantedChunks).toEqual([
       { memberId: "img-a", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
     ]);
-    const index = ctx.state.wantedByDatasetMode.get("ds1|volume")!;
+    const index = drawOf(ctx.state, "ds1", 0)!.wanted;
     expect([...index.keys()]).toEqual(["detail|img-a"]);
     expect([...index.get("detail|img-a")!]).toEqual(["1/0/0/0/0/1"]);
   });
@@ -223,15 +220,14 @@ describe("applyColdStateDelta", () => {
         { memberId: "img-b:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] },
       ],
     };
-    ctx.state.coldStateByDatasetMode.set("ds1|volume", cold1);
     applyColdState(ctx, cold1);
-    const descriptors = ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")!;
+    const descriptors = drawOf(ctx.state, "ds1", 0)!.descriptor!;
     const writes = vi.mocked(ctx.device.queue.writeBuffer).mock.calls.length;
 
     const delta: ColdStateDeltaMessage = {
       type: "coldStateDelta",
-      viewMode: "volume",
-      drawnModes: ["volume"],
+      view: 0,
+      drawnViews: [0],
       datasetId: "ds1",
       epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
@@ -251,7 +247,7 @@ describe("applyColdStateDelta", () => {
     applyColdStateDelta(ctx, delta);
 
     // No descriptor rewrite and no pool rebuilt.
-    expect(ctx.state.descriptorBuffersByDatasetMode.get("ds1|volume")).toBe(descriptors);
+    expect(drawOf(ctx.state, "ds1", 0)!.descriptor).toBe(descriptors);
     expect(vi.mocked(ctx.device.queue.writeBuffer).mock.calls.length).toBe(writes);
     expect(ctx.state.currentEpochs?.view).toBe(2);
 
@@ -262,21 +258,20 @@ describe("applyColdStateDelta", () => {
       wantedChunks: [{ memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] }],
     };
     applyColdState(ctxFull, full);
-    expect(ctx.state.wantedByDatasetMode.get("ds1|volume")).toEqual(ctxFull.state.wantedByDatasetMode.get("ds1|volume"));
+    expect(drawOf(ctx.state, "ds1", 0)!.wanted).toEqual(drawOf(ctxFull.state, "ds1", 0)!.wanted);
   });
 
   it("re-ingests in full while failed chunks are marked, since the marks follow the wanted set", () => {
     const ctx = makeCtx();
     const cold1 = makeCold([tile("a", "img-a", 1)]);
-    ctx.state.coldStateByDatasetMode.set("ds1|volume", cold1);
     applyColdState(ctx, cold1);
     ctx.state.failedByDataset.set("ds1", new Map([["img-a", new Set(["1/0/0/0/0/0"])]]));
     const writes = vi.mocked(ctx.device.queue.writeBuffer).mock.calls.length;
 
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
-      viewMode: "volume",
-      drawnModes: ["volume"],
+      view: 0,
+      drawnViews: [0],
       datasetId: "ds1",
       epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
@@ -295,8 +290,8 @@ describe("applyColdStateDelta", () => {
     const ctx = makeCtx();
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
-      viewMode: "volume",
-      drawnModes: ["volume"],
+      view: 0,
+      drawnViews: [0],
       datasetId: "never-ingested",
       epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
@@ -310,7 +305,7 @@ describe("applyColdStateDelta", () => {
       upserts: [],
       activeSetOrder: [],
     });
-    expect(ctx.state.coldStateByDatasetMode.size).toBe(0);
+    expect(ctx.state.draws.size).toBe(0);
     expect(ctx.state.currentColdState).toBeNull();
   });
 
@@ -320,14 +315,13 @@ describe("applyColdStateDelta", () => {
     // error. It must fail loudly instead.
     const ctx = makeCtx();
     const cold = makeCold([tile("a", "img-a"), tile("b", "img-b")]);
-    ctx.state.coldStateByDatasetMode.set("ds1|volume", cold);
     applyColdState(ctx, cold);
 
     expect(() =>
       applyColdStateDelta(ctx, {
         type: "coldStateDelta",
-        viewMode: "volume",
-        drawnModes: ["volume"],
+        view: 0,
+        drawnViews: [0],
         datasetId: "ds1",
         epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
         currentT: 0,
@@ -349,13 +343,12 @@ describe("applyColdStateDelta", () => {
     // baked at the last full cold state.
     const ctx = makeCtx();
     const cold = makeCold([tile("a", "img-a"), tile("b", "img-b")]);
-    ctx.state.coldStateByDatasetMode.set("ds1|volume", cold);
     applyColdState(ctx, cold);
 
     applyColdStateDisplay(ctx, {
       type: "coldStateDisplay",
       datasetId: "ds1",
-      viewMode: "volume",
+      view: 0,
       displayStateByChannel: {
         0: { contrastMin: 1000, contrastMax: 2000, gamma: 1, opacity: 1, colormapName: "gray", channelMask: 1 },
       },
@@ -365,8 +358,8 @@ describe("applyColdStateDelta", () => {
     // removed — just a re-point of the view.
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
-      viewMode: "volume",
-      drawnModes: ["volume"],
+      view: 0,
+      drawnViews: [0],
       datasetId: "ds1",
       epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
@@ -381,7 +374,7 @@ describe("applyColdStateDelta", () => {
       activeSetOrder: ["a", "b"],
     });
 
-    const patched = ctx.state.coldStateByDatasetMode.get("ds1|volume")!;
+    const patched = drawOf(ctx.state, "ds1", 0)!.cold;
     for (const entry of patched.activeSet) {
       expect(entry.displayStateByChannel[0].contrastMin).toBe(1000);
       expect(entry.displayStateByChannel[0].contrastMax).toBe(2000);

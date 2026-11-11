@@ -1,5 +1,5 @@
 /**
- * View-move cold-state delta: patch the dataset's retained cold state in place
+ * View-move cold-state delta: patch the view's retained cold state in place
  * (remove, upsert, reorder to `activeSetOrder`) and re-ingest it through
  * {@link applyColdState}, so departed entities release exactly as in a full
  * rebuild. A delta that changed no entry, order or selection re-ingests
@@ -8,7 +8,7 @@
  *
  * The reorder keeps descriptor-buffer entity indices in agreement with the main
  * thread, which computes them from the same order. No-op when no cold state
- * has landed for the dataset yet; a full one will follow.
+ * has landed for the view's draw of the dataset yet; a full one will follow.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -17,9 +17,9 @@ import type {
   ColdStateDeltaMessage,
 } from "../workerProtocol.ts";
 import { applyColdState } from "./apply.ts";
-import { indexWantedChunks, patchWantedChunks, patchWantedIndex } from "../wantedChunks.ts";
+import { patchWantedChunks, patchWantedIndex } from "../wantedChunks.ts";
 import { renderRadiusEnabled } from "../../pipeline/renderRadius.ts";
-import { datasetModeKey } from "../poolKeys.ts";
+import { drawOf } from "../worker/draws.ts";
 
 /** Whether either tier draws only the chunks inside a render radius, which moves with the view. */
 function radiusInPlay(radius: ColdStateDeltaMessage["renderRadiusView"]): boolean {
@@ -30,9 +30,9 @@ export function applyColdStateDelta(
   ctx: WorkerCtx,
   msg: ColdStateDeltaMessage,
 ): void {
-  const key = datasetModeKey(msg.datasetId, msg.viewMode);
-  const cold = ctx.state.coldStateByDatasetMode.get(key);
-  if (!cold) return;
+  const draw = drawOf(ctx.state, msg.datasetId, msg.view);
+  if (!draw) return;
+  const cold = draw.cold;
 
   const laidOutAsBefore =
     msg.removedEntityIds.length === 0 &&
@@ -80,9 +80,7 @@ export function applyColdStateDelta(
   ctx.state.currentColdState = cold;
   ctx.state.currentEpochs = msg.epochs;
   if (laidOutAsBefore) {
-    const index = ctx.state.wantedByDatasetMode.get(key);
-    if (index) patchWantedIndex(index, msg.wantedChunks);
-    else ctx.state.wantedByDatasetMode.set(key, indexWantedChunks(cold.wantedChunks));
+    patchWantedIndex(draw.wanted, msg.wantedChunks);
     return;
   }
   applyColdState(ctx, cold);
