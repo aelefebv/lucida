@@ -7,8 +7,7 @@ import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
-import { labelLevelZ } from "../../../renderer/labelLayout.ts";
-import { sliceLevelPlane, tczyx, toPlaneFrame, type SliceCut, type SpatialAxis } from "../../../renderer/slicePlane.ts";
+import { tczyx, toPlaneFrame, type PoolCut, type SpatialAxis } from "../../../renderer/slicePlane.ts";
 import { decodedSampleBytes } from "../../../renderer/dataTypeUtil.ts";
 
 /**
@@ -123,20 +122,21 @@ function cutSidePlane(
 }
 
 /**
- * Post one chunk to the worker. The slice view draws one plane of a chunk,
- * so it is sent only the plane `cut` maps to, a chunk-depth fraction of the
- * bytes, and a move to another plane of the same chunk sends that plane. It
- * goes in the worker's frame for the plane drawn (`SliceChunkDataMessage`).
- * Posts nothing, and says why, when it cannot place the chunk or the chunk
- * does not hold the plane. A delivery of some planes of a chunk that lacks
- * the plane is `other-plane`: the plan asks for the plane again.
+ * Post one chunk to the worker. A slice view draws one plane of a chunk, so
+ * the slice pools are sent only the plane `cut` names, a chunk-depth fraction
+ * of the bytes, and a move to another plane of the same chunk sends that
+ * plane. It goes in the worker's frame for the plane drawn
+ * (`SliceChunkDataMessage`). Posts nothing, and says why, when it cannot
+ * place the chunk or the chunk does not hold the plane. A delivery of some
+ * planes of a chunk that lacks the plane is `other-plane`: the plan asks for
+ * the plane again.
  */
 export function dispatchChunkDelivery(
   client: UploadClient,
   delivery: ReadyChunkDelivery,
   meta: ManifestEntry,
   viewMode: "slice" | "volume",
-  cut: SliceCut | null,
+  cut: PoolCut | null,
   epochs: SceneEpochs,
 ): Dispatched | DispatchSkip {
   const levelMeta = meta.levels[delivery.level];
@@ -176,14 +176,13 @@ export function dispatchChunkDelivery(
   }
 
   if (cut === null) return "no-meta";
-  const { axis, index } = cut;
+  const { axis, plane: levelPlane } = cut;
   const fullShape = meta.image.multiscale.levels[0].shape;
   // The chunk's place and shape across the screen, down it, and along the cut.
   const [cu, cv, cw] = toPlaneFrame([delivery.x, delivery.y, delivery.z], axis);
   const [levelU, levelV, levelW] = toPlaneFrame([levelWidth, levelHeight, levelDepth], axis);
   const [chunkU, chunkV, chunkW] = toPlaneFrame([chunkX, chunkY, chunkZ], axis);
   const fullResW = fullShape[tczyx(axis)];
-  const levelPlane = sliceLevelPlane(index, fullResW, levelW);
   const depth = Math.max(chunkW, 1);
   if (cw !== Math.floor(levelPlane / depth)) return "other-plane";
   const local = levelPlane - cw * depth;
@@ -199,7 +198,6 @@ export function dispatchChunkDelivery(
     memberId,
     [{ ...chunk, data: plane, x: cu, y: cv, z: cw }],
     delivery.level,
-    index,
     delivery.t,
     delivery.c,
     levelU,
@@ -209,7 +207,7 @@ export function dispatchChunkDelivery(
     chunkW,
     fullResW,
     levelW,
-    index,
+    levelPlane,
     epochs,
     delivery.residencyTier,
     axis,
@@ -232,19 +230,17 @@ export function dispatchLabelChunkDelivery(
   client: UploadClient,
   delivery: ReadyChunkDelivery,
   meta: ManifestEntry,
-  cut: SliceCut | null,
+  cut: PoolCut | null,
   epochs: SceneEpochs,
 ): Dispatched | DispatchSkip {
-  // A label overlay draws only on an XY cut.
+  // A label overlay draws only on an XY cut, from the plane of its level the
+  // cut names.
   if (cut !== null && cut.axis !== "z") return "other-plane";
-  const sliceZ = cut?.index ?? null;
   const levelMeta = meta.levels[delivery.level];
-  if (!levelMeta || sliceZ === null || !meta.labelLevel0 || !meta.labelSourceLevel0) {
-    return "no-meta";
-  }
-  const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
+  if (!levelMeta || cut === null) return "no-meta";
+  const [, , , levelHeight, levelWidth] = levelMeta.shape;
   const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-  const levelZ = labelLevelZ(sliceZ, meta.labelSourceLevel0, meta.labelLevel0, levelDepth);
+  const levelZ = cut.plane;
   const cz = Math.max(chunkZ, 1);
   // This chunk covers a different Z-chunk than the current view — the right
   // one is requested separately; drop this stale plane.

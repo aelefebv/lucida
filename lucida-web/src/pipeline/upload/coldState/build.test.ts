@@ -179,7 +179,7 @@ describe("buildColdState", () => {
       matricesByEntity: makeMatrices(),
       layer: undefined,
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
 
     expect(msg.type).toBe("coldState");
@@ -216,7 +216,7 @@ describe("buildColdState", () => {
       matricesByEntity: makeMatrices(),
       layer: undefined,
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
     expect(msg.sliceAxis).toBe("y");
     expect(msg.currentZ).toBe(3);
@@ -234,7 +234,7 @@ describe("buildColdState", () => {
     const xy = buildColdState({
       datasetId: "ds1", activeSet, entities: [tile], selection: makeSelection({ z: 1 }),
       visibleRegion: makeVisibleRegion(), epochs: makeEpochs(), wantedChunks: [],
-      matricesByEntity: makeMatrices(), layer: undefined, sampleFormat: "u16", view: 0, drawnViews: [0],
+      matricesByEntity: makeMatrices(), layer: undefined, sampleFormat: "u16", view: 0, drawnViews: [0], labels: [],
     });
     expect(xy.sliceAxis).toBeUndefined();
     expect(xy.activeSet[0].levels[0].chunkShape).toEqual([1, 2, 4]);
@@ -268,7 +268,7 @@ describe("buildColdState", () => {
       matricesByEntity: makeMatrices(),
       layer,
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
 
     expect(msg.visibleChannels).toEqual([0, 1]);
@@ -318,7 +318,7 @@ describe("buildColdState", () => {
       matricesByEntity: matrices,
       layer: undefined,
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
 
     expect(msg.activeSet).toHaveLength(2);
@@ -338,7 +338,7 @@ describe("buildColdState", () => {
       matricesByEntity: makeMatrices(),
       layer: undefined,
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
 
     expect(msg.type).toBe("coldState");
@@ -368,7 +368,7 @@ describe("buildColdState", () => {
       matricesByEntity: makeMatrices(),
       layer: undefined,
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
     const msg2 = buildColdState({
       datasetId: "ds2",
@@ -381,7 +381,7 @@ describe("buildColdState", () => {
       matricesByEntity: makeMatrices(),
       layer: undefined,
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
 
     expect(msg1.datasetId).toBe("ds1");
@@ -442,7 +442,7 @@ describe("computeActiveSetIndexMap / iterateActiveSetMembers", () => {
       matricesByEntity: makeMatrices(),
       layer: resolvedLayer("ds1"),
       sampleFormat: "u16",
-      view: 0, drawnViews: [0],
+      view: 0, drawnViews: [0], labels: [],
     });
     const fromActiveSet = computeActiveSetIndexMap(activeSet, [0]);
     // Every member id names its channel, one shown or several.
@@ -474,7 +474,7 @@ describe("buildColdStateDelta", () => {
     wantedChunks: [],
     matricesByEntity: makeMatrices(),
     layer: resolvedLayer("ds1"),
-    view: 0, drawnViews: [0],
+    view: 0, drawnViews: [0], labels: [],
   });
 
   it("carries only changed/added descriptors, removed ids, and the full order", () => {

@@ -11,6 +11,7 @@ function sliceColdState(z: number): ColdStateMessage {
   identity[0] = identity[5] = identity[10] = identity[15] = 1;
   return {
     type: "coldState",
+    labels: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     datasetId: "ds-0",
     currentT: 0,
@@ -36,7 +37,7 @@ function sliceColdState(z: number): ColdStateMessage {
 }
 
 describe("the wanted-set report", () => {
-  it("reports a wanted slot cut from a plane the current Z no longer maps to lost, ahead of the missing list", () => {
+  it("reports a chunk held only at another plane missing at the plane the view cuts", () => {
     const state = createInitialState();
     const cold = sliceColdState(11);
     const draw = fakeDraw({ datasetId: "ds-0", mode: "slice", z: 11, wanted: indexWantedChunks(cold.wantedChunks) });
@@ -58,11 +59,12 @@ describe("the wanted-set report", () => {
 
     createWantedSetPoster(state, (msg) => posts.push(msg))("ds-0");
 
-    expect(posts.map((m) => m.type)).toEqual(["chunkResidency", "wantedSetDelta", "entityLevels"]);
-    expect(posts[0]).toEqual({
-      type: "chunkResidency", memberId: "img:ch0", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "wrong-slice",
-    });
-    const missing = posts[1].type === "wantedSetDelta" ? posts[1].missing : [];
-    expect(missing.map((m) => m.chunkKey)).toEqual(["0/0/0/0/0/0", "0/0/0/0/0/1"]);
+    // The plane another view may draw stays held: only the view's own plane is asked for.
+    expect(posts.map((m) => m.type)).toEqual(["wantedSetDelta", "entityLevels"]);
+    const missing = posts[0].type === "wantedSetDelta" ? posts[0].missing : [];
+    expect(missing.map((m) => [m.chunkKey, m.cut])).toEqual([
+      ["0/0/0/0/0/0", { axis: "z", plane: 11 }],
+      ["0/0/0/0/0/1", { axis: "z", plane: 11 }],
+    ]);
   });
 });

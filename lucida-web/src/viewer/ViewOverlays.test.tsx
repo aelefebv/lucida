@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 /**
  * A comparison's controls stand over the view that holds it, above the
- * notice of what the view leaves out, and a press in them makes that view
+ * notice of the detail the view leaves out, and a press in them makes that view
  * the one they steer.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,17 +9,15 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import type { Comparison, ComparisonActions } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
 import { ViewOverlays } from "./ViewOverlays.tsx";
-import type { Coverage } from "./WithheldNotice.tsx";
+import type { Coverage } from "./CoverageNotice.tsx";
 
 afterEach(cleanup);
 
 const LEFT: ViewPane = {
-  id: 0, shows: "all", draws: ["a", "b"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, withheld: [],
-  setAside: [],
+  id: 0, shows: "all", draws: ["a", "b"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, setAside: [],
 };
 const RIGHT: ViewPane = {
-  id: 3, shows: "all", draws: ["a", "b"], rect: [0.5, 0, 0.5, 1], cameraMode: "slice", active: false, withheld: [],
-  setAside: ["c"],
+  id: 3, shows: "all", draws: ["a", "b"], rect: [0.5, 0, 0.5, 1], cameraMode: "slice", active: false, setAside: ["c"],
 };
 const SWIPE: Comparison = { a: "a", b: "b", mode: "swipe", divider: 0.5, showing: "a" };
 
@@ -64,11 +62,11 @@ describe("a view's overlays", () => {
     const { of } = overlays(new Map([[3, SWIPE]]), { 3: { wanted: 100, short: 40 } });
     const column = of(3).querySelector(".lc-view-overlay-top")!;
     const children = [...column.children];
-    expect(children.map((child) => child.className)).toEqual(["lc-view-comparison-bar", "lc-withheld-notice"]);
+    expect(children.map((child) => child.className)).toEqual(["lc-view-comparison-bar", "lc-coverage-notice"]);
     // A view without a comparison still says what it leaves out.
     cleanup();
     const plain = overlays(new Map(), { 0: { wanted: 100, short: 40 } });
-    expect(plain.of(0).querySelector(".lc-view-overlay-top .lc-withheld-notice")).not.toBeNull();
+    expect(plain.of(0).querySelector(".lc-view-overlay-top .lc-coverage-notice")).not.toBeNull();
   });
 
   it("make their view the active one on a press or focus, before they act", () => {

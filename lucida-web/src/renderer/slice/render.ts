@@ -25,12 +25,12 @@ import type {
 import { resolveMemberPools, type EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import {
   markLabelSliceFailed,
-  retireOtherLabelPlanes,
   type SliceAtlasState,
   type LabelSlicePool,
 } from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 import { flushViewIndirection } from "../viewIndirection.ts";
+import { labelSlicePoolKey } from "../labelPools.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
@@ -132,13 +132,11 @@ function renderLabelLayer(
   targetFor: () => GPUTexture,
 ): CompositeLayer | null {
   const memberId = layer.datasetId;
-  const pool = ctx.state.labelSlicePools.get(memberId);
-  if (!pool) return null;
+  const chunk = layer.labelChunk;
+  const pool = chunk && ctx.state.labelSlicePools.get(labelSlicePoolKey(memberId, chunk.t, chunk.plane));
+  if (!pool || !chunk) return null;
   const target = targetFor();
-  if (layer.labelChunk) {
-    retireOtherLabelPlanes(ctx, memberId, pool, layer.labelChunk.plane);
-    markLabelSliceFailed(ctx, memberId, pool, layer.labelChunk);
-  }
+  markLabelSliceFailed(ctx, memberId, pool, chunk);
 
   const descBuffer = ensureLabelDescriptor(ctx, pool, layer.opacity ?? DEFAULT_LABEL_OPACITY);
   const palette = ensureLabelPalette(ctx, pool, layer.labelColors);

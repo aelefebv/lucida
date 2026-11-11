@@ -401,7 +401,6 @@ function makeSeamHarness(opts: {
       },
     },
     layers: resolvedLayers(resolvedLayer("ds1", [shownChannel(0, { blend_mode: "alpha" })], opts.layer)),
-    sliceLayers: new Map(),
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     entityIndexByDatasetView: new Map([["ds1|0", indexFor(members, 0)]]),
   };

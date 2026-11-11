@@ -27,6 +27,7 @@ import {
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { applyFailedMarks, failedCellsAt, failedKeysForImage } from "../failedCells.ts";
 import { INDIRECTION_MISS } from "../remap.ts";
+import { labelVolumePoolKey } from "../labelPools.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
@@ -90,6 +91,10 @@ export interface AtlasState {
  * place on a T scrub so the label never blanks mid-scrub.
  */
 export interface LabelVolumePool {
+  /** The label overlay's member id. */
+  memberId: string;
+  /** The chunk-T the pool holds (its form, `labelPools.ts`). */
+  t: number;
   /**
    * r32uint 3D slot-grid atlas, size
    * `[slotsX*chunkX, slotsY*chunkY, slotsZ*chunkZ]`. Each axis is
@@ -379,6 +384,7 @@ export function getOrCreateLabelVolumePool(
   ctx: WorkerCtx,
   memberId: string,
   datasetId: string,
+  t: number,
   width: number,
   height: number,
   depth: number,
@@ -397,7 +403,8 @@ export function getOrCreateLabelVolumePool(
   const cz = Math.max(1, Math.min(Math.floor(chunkZ), d));
 
   const pools = ctx.state.labelVolumePools;
-  const existing = pools.get(memberId);
+  const poolKey = labelVolumePoolKey(memberId, t);
+  const existing = pools.get(poolKey);
   if (
     existing &&
     existing.width === w && existing.height === h && existing.depth === d &&
@@ -406,7 +413,7 @@ export function getOrCreateLabelVolumePool(
     existing.datasetId = datasetId;
     return existing;
   }
-  if (existing) removeLabelVolumePool(ctx, memberId, "freed");
+  if (existing) removeLabelVolumePool(ctx, poolKey, "freed");
 
   const sizeKey = `${memberId}|${w}x${h}x${d}`;
   if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
@@ -426,8 +433,9 @@ export function getOrCreateLabelVolumePool(
       (lost) => {
         // A size that ran out of memory once would again on every delivery.
         ctx.state.labelSizesOutOfMemory.add(sizeKey);
-        const pool = ctx.state.labelVolumePools.get(memberId);
-        if (pool?.texture === lost) removeLabelVolumePool(ctx, memberId, "out-of-memory");
+        for (const [key, pool] of ctx.state.labelVolumePools) {
+          if (pool.texture === lost) removeLabelVolumePool(ctx, key, "out-of-memory");
+        }
         handleGpuOutOfMemory(ctx);
       },
     );
@@ -471,8 +479,10 @@ export function getOrCreateLabelVolumePool(
     keys: new Map(),
     datasetId,
     width: w, height: h, depth: d,
+    memberId,
+    t,
   };
-  pools.set(memberId, pool);
+  pools.set(poolKey, pool);
   return pool;
 }
 
@@ -561,22 +571,22 @@ export function destroyLabelVolumePool(pool: LabelVolumePool): void {
 }
 
 /**
- * Remove a member's label volume pool (no-op if absent), reporting every
- * chunk it held lost for `reason` so the page sends what it still wants.
+ * Remove the label volume pool keyed `poolKey` (no-op if absent), reporting
+ * every chunk it held lost for `reason` so the page sends what it still wants.
  */
-export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string, reason: ChunkFeedbackReason): void {
-  const pool = ctx.state.labelVolumePools.get(memberId);
+export function removeLabelVolumePool(ctx: WorkerCtx, poolKey: string, reason: ChunkFeedbackReason): void {
+  const pool = ctx.state.labelVolumePools.get(poolKey);
   if (pool) {
-    postChunkResidency(ctx, memberId, "volume", LABEL_TIER, "lost", [...pool.keys.values()], reason);
+    postChunkResidency(ctx, pool.memberId, "volume", LABEL_TIER, "lost", [...pool.keys.values()], reason);
     destroyLabelVolumePool(pool);
-    ctx.state.labelVolumePools.delete(memberId);
+    ctx.state.labelVolumePools.delete(poolKey);
   }
 }
 
 /**
- * Free every label volume pool whose member key or owning `datasetId` matches
+ * Free every label volume pool whose member or owning `datasetId` matches
  * `idOrDataset`. Dataset removal passes the dataset id, which never equals a
- * pool key, so the `datasetId` match is what frees the texture. With a
+ * member id, so the `datasetId` match is what frees the texture. With a
  * `reason`, the chunks they held are reported lost; a removed dataset's
  * delivery record goes with it, so removal passes none.
  */
@@ -585,11 +595,11 @@ export function removeLabelVolumePoolsForDataset(
   idOrDataset: string,
   reason?: ChunkFeedbackReason,
 ): void {
-  for (const [memberId, pool] of ctx.state.labelVolumePools) {
-    if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
-      if (reason) postChunkResidency(ctx, memberId, "volume", LABEL_TIER, "lost", [...pool.keys.values()], reason);
+  for (const [poolKey, pool] of ctx.state.labelVolumePools) {
+    if (pool.memberId === idOrDataset || pool.datasetId === idOrDataset) {
+      if (reason) postChunkResidency(ctx, pool.memberId, "volume", LABEL_TIER, "lost", [...pool.keys.values()], reason);
       destroyLabelVolumePool(pool);
-      ctx.state.labelVolumePools.delete(memberId);
+      ctx.state.labelVolumePools.delete(poolKey);
     }
   }
 }

@@ -23,33 +23,18 @@ import { readViewLinks, type ViewLinks } from "./viewLinks.ts";
 
 export type CameraMode = "slice" | "arcball" | "fly";
 
-/** What a dataset's GPU pools hold for a view: one slice cut, or the whole volume, at one timepoint. */
-export type PoolForm =
-  | { kind: "slice"; plane: SlicePlane; cut: { start: number; end: number }; t: number }
-  | { kind: "volume"; t: number };
-
-/** A dataset a view shows but leaves out: another view holds its pools in another form. */
-export interface WithheldDataset {
-  readonly dataset_id: string;
-  /** The view that holds the dataset's pools. */
-  readonly holder: number;
-  readonly held: PoolForm;
-  readonly wanted: PoolForm;
-}
-
 /** One view as the page lays it out. */
 export interface ViewPane {
   readonly id: number;
   /** What it shows: every dataset, or these alone. */
   readonly shows: "all" | readonly string[];
-  /** The datasets it draws, in layer order: those it shows, less those it leaves out. */
+  /** The datasets it draws, in layer order. */
   readonly draws: readonly string[];
   /** `[x, y, width, height]` in fractions of the canvas from its top-left corner. */
   readonly rect: readonly [number, number, number, number];
   readonly cameraMode: CameraMode;
   /** Whether commands steer it. */
   readonly active: boolean;
-  readonly withheld: readonly WithheldDataset[];
   /** The layers its comparison sets aside, in layer order. */
   readonly setAside: readonly string[];
 }
@@ -112,7 +97,7 @@ const NO_SCENE_VIEW: SceneView = {
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
-  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, withheld: [], setAside: [] }],
+  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, setAside: [] }],
   layout: "single",
   maximized: null,
   links: null,
@@ -263,7 +248,6 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
       rect: [x, y, width, height],
       cameraMode: (scene.view_camera_mode(id) || "slice") as CameraMode,
       active: id === active,
-      withheld: JSON.parse(scene.withheld(id)) as WithheldDataset[],
       setAside: JSON.parse(scene.set_aside(id)) as string[],
     };
   });

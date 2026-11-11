@@ -84,6 +84,7 @@ function makeColdState(
   const visibleChannels = overrides?.visibleChannels ?? [0];
   return {
     type: "coldState",
+    labels: [],
     epochs: makeEpochs(),
     datasetId: "ds-0",
     currentT: 0,
@@ -243,7 +244,7 @@ describe("computeWantedSet", () => {
     ]);
   });
 
-  it("slice mode - a resident chunk cut from another plane of it is missing, and a stale plane", () => {
+  it("slice mode - a resident chunk cut from another plane of it is missing at the view's plane", () => {
     const coldState = makeColdState({ viewMode: "slice" });
     // Each chunk of FOUR held at the plane of the same index in `planes`.
     const planesAt = (planes: number[]) => new Map(FOUR.map((key, slot) => [vk("img:ch0", key), new Map([[planes[slot], slot]])]));
@@ -259,16 +260,15 @@ describe("computeWantedSet", () => {
     );
 
     expect(run().missing).toEqual([]);
-    expect(run().stalePlanes).toEqual([]);
     // Plane 11 is in the same chunk along Z, so every key still matches.
     atlas.z = 11;
     expect(chunks(run().missing).map((m) => m.chunkKey)).toEqual(FOUR);
     atlas.planesByChunk = planesAt([11, 11, 10, 10]);
     expect(chunks(run().missing).map((m) => m.chunkKey)).toEqual(FOUR.slice(2));
-    expect(run().stalePlanes).toEqual(FOUR.slice(2).map((chunkKey) => ({ memberId: "img:ch0", tier: "detail", chunkKey })));
+    expect(run().missing.map((m) => m.cut)).toEqual([{ axis: "z", plane: 11 }, { axis: "z", plane: 11 }]);
   });
 
-  it("names no stale plane for a wanted chunk with no slot", () => {
+  it("names the plane a slice view wants a chunk with no slot at", () => {
     const coldState = makeColdState({ viewMode: "slice" });
     const sliceAtlases = new Map<string, AtlasSnapshot>([["ds-0:ch0:32x32", {
       slots: new Map(), planesByChunk: new Map(), entityMetas: new Map([["img:ch0", [LEVEL0_SECTION]]]), z: 0,
@@ -279,7 +279,7 @@ describe("computeWantedSet", () => {
     );
 
     expect(chunks(result.missing)).toHaveLength(4);
-    expect(result.stalePlanes).toEqual([]);
+    expect(result.missing.every((m) => m.cut?.axis === "z" && m.cut.plane === 0)).toBe(true);
   });
 
   it("reports detail and coarse chunks against their own tier's pool", () => {

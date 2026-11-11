@@ -1,67 +1,12 @@
 //! How a scene's views share the canvas and the datasets: the layout that
-//! divides the canvas among them, the view commands steer, which datasets
-//! each shows, and which view's form each kind of a dataset's GPU pools holds.
-
-use std::ops::Range;
-
-use serde::Serialize;
+//! divides the canvas among them, the view commands steer, and which
+//! datasets each shows.
 
 use lucida_content::DatasetId;
 
 use super::Scene;
 use crate::camera::Camera;
-use crate::slice_plane::SlicePlane;
 use crate::view::{View, ViewDatasets, ViewId, ViewLayout, ViewRect};
-
-/// Which of a dataset's GPU pools a view draws from: the slice pools of a 2D
-/// view or the volume pools of a 3D one. The two kinds are separate pools, so
-/// a dataset holds both at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PoolKind {
-    Slice,
-    Volume,
-}
-
-impl PoolKind {
-    /// The pools a view with `camera` draws from.
-    pub fn of(camera: &Camera) -> Self {
-        if camera.is_volume() {
-            PoolKind::Volume
-        } else {
-            PoolKind::Slice
-        }
-    }
-}
-
-/// What one kind of a dataset's GPU pools holds for one view: one slice cut,
-/// or the whole volume, at one timepoint. Each kind holds one form at a time,
-/// so every view that draws the dataset from it must want the same one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PoolForm {
-    Slice {
-        plane: SlicePlane,
-        cut: Range<u32>,
-        t: u32,
-    },
-    Volume {
-        t: u32,
-    },
-}
-
-/// A dataset a view shows but leaves out: another view holds the kind of
-/// pools this view draws from in a form this view doesn't want.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Withheld {
-    pub dataset_id: DatasetId,
-    /// The view that holds the dataset's pools.
-    pub holder: ViewId,
-    /// The form the holder keeps them in.
-    pub held: PoolForm,
-    /// The form this view would need.
-    pub wanted: PoolForm,
-}
 
 impl Scene {
     pub fn view_layout(&self) -> ViewLayout {
@@ -215,119 +160,11 @@ impl Scene {
         self.reframe(view);
     }
 
-    /// The view whose form `dataset_id`'s pools of `kind` hold: the first
-    /// view on the canvas to show the dataset from that kind, for as long as
-    /// it does, so a change of active view never moves it. `None` when no
-    /// view does.
-    pub fn dataset_holder(&self, dataset_id: &DatasetId, kind: PoolKind) -> Option<ViewId> {
-        self.holders
-            .get(&(dataset_id.clone(), kind))
-            .copied()
-            .filter(|id| self.can_hold(*id, dataset_id, kind))
-            .or_else(|| {
-                self.shown_views()
-                    .find(|view| self.can_hold(view.id(), dataset_id, kind))
-                    .map(View::id)
-            })
-    }
-
-    /// Whether `view` can hold `dataset_id`'s pools of `kind`: it is on the
-    /// canvas, shows the dataset, and draws from that kind. A view whose
-    /// comparison sets the dataset aside draws nothing of it, so it lets the
-    /// hold go to a view that does, and comes back behind that view once the
-    /// comparison ends, as a view that showed the dataset again would.
-    fn can_hold(&self, view: ViewId, dataset_id: &DatasetId, kind: PoolKind) -> bool {
-        self.is_shown(view)
-            && self.view(view).is_some_and(|v| {
-                v.shows(dataset_id) && !v.sets_aside(dataset_id) && PoolKind::of(&v.camera) == kind
-            })
-    }
-
-    /// Record each dataset's holder of each kind of pools, so it stays until
-    /// it stops drawing the dataset from them or goes away. Returns whether
-    /// any holder changed.
-    pub(crate) fn refresh_holders(&mut self) -> bool {
-        let stale: Vec<(DatasetId, PoolKind)> = self
-            .holders
-            .iter()
-            .filter(|((dataset_id, kind), view)| {
-                !self.document.manifests.contains_key(dataset_id)
-                    || !self.can_hold(**view, dataset_id, *kind)
-            })
-            .map(|(held, _)| held.clone())
-            .collect();
-        let mut changed = !stale.is_empty();
-        for held in stale {
-            self.holders.remove(&held);
-        }
-        let mut unheld = Vec::new();
-        for dataset_id in self.document.manifests.keys() {
-            for kind in [PoolKind::Slice, PoolKind::Volume] {
-                let held = (dataset_id.clone(), kind);
-                if self.holders.contains_key(&held) {
-                    continue;
-                }
-                if let Some(view) = self
-                    .shown_views()
-                    .find(|view| self.can_hold(view.id(), dataset_id, kind))
-                {
-                    unheld.push((held, view.id()));
-                }
-            }
-        }
-        changed |= !unheld.is_empty();
-        self.holders.extend(unheld);
-        changed
-    }
-
-    /// The form `view` needs `dataset_id`'s pools in. `None` for an unknown
-    /// view or dataset.
-    pub fn pool_form(&self, view: ViewId, dataset_id: &DatasetId) -> Option<PoolForm> {
-        let camera = &self.view(view)?.camera;
-        let layer = self.resolved_layer(view, dataset_id)?;
-        Some(match camera {
-            Camera::Slice(slice) => PoolForm::Slice {
-                plane: slice.plane,
-                cut: layer.cut(slice.plane),
-                t: layer.t,
-            },
-            Camera::Arcball(_) | Camera::Fly(_) => PoolForm::Volume { t: layer.t },
-        })
-    }
-
-    /// Whether `view` draws `dataset_id`: it shows the dataset, and holds the
-    /// pools it draws from or wants them in the form their holder keeps.
+    /// Whether `view` draws `dataset_id`: it shows the dataset. Views of one
+    /// dataset share its GPU pools, each through indirection of its own, so
+    /// each draws it at its own cut and timepoint.
     pub fn draws(&self, view: ViewId, dataset_id: &DatasetId) -> bool {
         self.view(view).is_some_and(|v| v.shows(dataset_id))
-            && self.withholding(view, dataset_id).is_none()
-    }
-
-    /// The datasets `view` shows but leaves out, in layer order.
-    pub fn withheld(&self, view: ViewId) -> Vec<Withheld> {
-        self.dataset_order
-            .iter()
-            .filter_map(|dataset_id| self.withholding(view, dataset_id))
-            .collect()
-    }
-
-    fn withholding(&self, view: ViewId, dataset_id: &DatasetId) -> Option<Withheld> {
-        let shown = self.view(view)?;
-        // A view that sets the dataset aside wants none of it to draw.
-        if !shown.shows(dataset_id) || shown.sets_aside(dataset_id) {
-            return None;
-        }
-        let holder = self.dataset_holder(dataset_id, PoolKind::of(&shown.camera))?;
-        if holder == view {
-            return None;
-        }
-        let held = self.pool_form(holder, dataset_id)?;
-        let wanted = self.pool_form(view, dataset_id)?;
-        (held != wanted).then(|| Withheld {
-            dataset_id: dataset_id.clone(),
-            holder,
-            held,
-            wanted,
-        })
     }
 }
 
@@ -479,119 +316,27 @@ mod tests {
         show(&mut scene, second, &["b"]);
         assert!(scene.draws(first, &id("a")) && !scene.draws(first, &id("b")));
         assert!(scene.draws(second, &id("b")) && !scene.draws(second, &id("a")));
-        assert_eq!(
-            scene.dataset_holder(&id("b"), PoolKind::Slice),
-            Some(second)
-        );
-        assert!(scene.withheld(first).is_empty() && scene.withheld(second).is_empty());
         assert!(scene.view_query(first, &id("b")).is_none());
         assert!(scene.view_query(second, &id("b")).is_some());
     }
 
     #[test]
-    fn a_second_view_draws_a_dataset_only_in_its_holders_form() {
+    fn views_of_one_dataset_each_draw_it_at_their_own_cut_and_timepoint() {
         let mut scene = split();
         let [first, second] = both(&scene);
         show(&mut scene, second, &["a"]);
-        // Same cut and timepoint: both draw it from the one set of pools.
-        assert_eq!(scene.dataset_holder(&id("a"), PoolKind::Slice), Some(first));
-        assert!(scene.draws(second, &id("a")));
-
-        // Another cut in the second view: the first keeps the pools.
+        // Another Z in the second view, then another timepoint in 3D.
         apply(&mut scene, ViewportCommand::SetActiveView { view: second });
         apply(&mut scene, ViewportCommand::SetZ { z: 5 });
-        assert!(scene.draws(first, &id("a")));
-        assert!(!scene.draws(second, &id("a")));
-        let withheld = scene.withheld(second);
-        assert_eq!(withheld.len(), 1);
-        assert_eq!(withheld[0].holder, first);
-        assert!(matches!(&withheld[0].held, PoolForm::Slice { cut, .. } if cut.start == 0));
-        assert!(matches!(&withheld[0].wanted, PoolForm::Slice { cut, .. } if cut.start == 5));
-        assert!(scene.view_query(second, &id("a")).is_none());
-    }
-
-    #[test]
-    fn a_slice_view_and_a_volume_view_both_draw_a_dataset() {
-        let mut scene = split();
-        let [first, second] = both(&scene);
-        show(&mut scene, second, &["a"]);
-        apply(&mut scene, ViewportCommand::SetActiveView { view: second });
-        apply(&mut scene, ViewportCommand::SetMode3D);
-        // Each holds the pools it draws from, whatever cut the slice view
-        // stands at.
-        apply(&mut scene, ViewportCommand::SetActiveView { view: first });
-        apply(&mut scene, ViewportCommand::SetZ { z: 5 });
-        assert_eq!(scene.dataset_holder(&id("a"), PoolKind::Slice), Some(first));
-        assert_eq!(
-            scene.dataset_holder(&id("a"), PoolKind::Volume),
-            Some(second)
-        );
         assert!(scene.draws(first, &id("a")) && scene.draws(second, &id("a")));
-        assert!(scene.withheld(first).is_empty() && scene.withheld(second).is_empty());
+        assert!(scene.view_query(second, &id("a")).is_some());
+        apply(&mut scene, ViewportCommand::SetMode3D);
+        apply(&mut scene, ViewportCommand::SetT { t: 1 });
+        apply(&mut scene, ViewportCommand::SetActiveView { view: first });
+        apply(&mut scene, ViewportCommand::SetMode3D);
+        assert!(scene.draws(first, &id("a")) && scene.draws(second, &id("a")));
         assert!(scene.view_query(first, &id("a")).is_some());
         assert!(scene.view_query(second, &id("a")).is_some());
-    }
-
-    #[test]
-    fn two_volume_views_draw_a_dataset_only_at_one_timepoint() {
-        let mut scene = split();
-        let [first, second] = both(&scene);
-        show(&mut scene, second, &["a"]);
-        apply(&mut scene, ViewportCommand::SetMode3D);
-        apply(&mut scene, ViewportCommand::SetActiveView { view: second });
-        apply(&mut scene, ViewportCommand::SetMode3D);
-        assert!(scene.draws(second, &id("a")));
-
-        apply(&mut scene, ViewportCommand::SetT { t: 1 });
-        assert!(scene.draws(first, &id("a")));
-        assert!(!scene.draws(second, &id("a")));
-        let withheld = scene.withheld(second);
-        assert_eq!(withheld.len(), 1);
-        assert_eq!(withheld[0].holder, first);
-        assert_eq!(withheld[0].held, PoolForm::Volume { t: 0 });
-        assert_eq!(withheld[0].wanted, PoolForm::Volume { t: 1 });
-    }
-
-    #[test]
-    fn the_hold_stays_until_its_holder_lets_the_dataset_go() {
-        let mut scene = split();
-        let [first, second] = both(&scene);
-        show(&mut scene, second, &["a"]);
-        apply(&mut scene, ViewportCommand::SetActiveView { view: second });
-        apply(&mut scene, ViewportCommand::SetZ { z: 5 });
-        // Making the first view active again never moves the hold.
-        apply(&mut scene, ViewportCommand::SetActiveView { view: first });
-        assert_eq!(scene.dataset_holder(&id("a"), PoolKind::Slice), Some(first));
-        assert!(!scene.draws(second, &id("a")));
-
-        // Once the first view stops showing it, the second holds it.
-        let epoch = scene.epochs.selection;
-        show(&mut scene, first, &["b"]);
-        assert_eq!(
-            scene.dataset_holder(&id("a"), PoolKind::Slice),
-            Some(second)
-        );
-        assert!(scene.draws(second, &id("a")));
-        assert!(scene.epochs.selection > epoch);
-
-        // And keeps it when the first shows it again.
-        show(&mut scene, first, &["a", "b"]);
-        assert_eq!(
-            scene.dataset_holder(&id("a"), PoolKind::Slice),
-            Some(second)
-        );
-        assert!(!scene.draws(first, &id("a")));
-
-        // A switch to 3D lets go of the slice pools and holds the volume
-        // pools, so the other view takes the slice pools.
-        apply(&mut scene, ViewportCommand::SetActiveView { view: second });
-        apply(&mut scene, ViewportCommand::SetMode3D);
-        assert_eq!(scene.dataset_holder(&id("a"), PoolKind::Slice), Some(first));
-        assert_eq!(
-            scene.dataset_holder(&id("a"), PoolKind::Volume),
-            Some(second)
-        );
-        assert!(scene.draws(first, &id("a")) && scene.draws(second, &id("a")));
     }
 
     #[test]
@@ -615,13 +360,10 @@ mod tests {
     }
 
     #[test]
-    fn a_maximized_view_takes_the_canvas_and_the_others_hold_nothing() {
+    fn a_maximized_view_takes_the_canvas_and_the_others_keep_what_they_show() {
         let mut scene = split();
         let [first, second] = both(&scene);
         show(&mut scene, second, &["a"]);
-        apply(&mut scene, ViewportCommand::SetActiveView { view: second });
-        apply(&mut scene, ViewportCommand::SetZ { z: 5 });
-        assert!(!scene.draws(second, &id("a")));
 
         let maximize = |view| ViewportCommand::MaximizeView { view };
         apply(&mut scene, maximize(Some(second)));
@@ -629,12 +371,8 @@ mod tests {
         assert_eq!(shown, vec![second]);
         assert_eq!(scene.active_view().id(), second);
         assert_eq!(scene.view(second).unwrap().camera.viewport(), [800, 600]);
-        // The hidden view holds nothing, so the maximized one draws it.
-        assert_eq!(
-            scene.dataset_holder(&id("a"), PoolKind::Slice),
-            Some(second)
-        );
         assert!(scene.draws(second, &id("a")));
+        assert!(scene.view(first).unwrap().shows(&id("a")));
 
         apply(&mut scene, maximize(None));
         assert_eq!(scene.shown_views().count(), 2);
@@ -646,14 +384,11 @@ mod tests {
     }
 
     #[test]
-    fn one_view_holds_and_draws_everything_it_shows() {
+    fn one_view_draws_everything_it_shows() {
         let mut scene = Scene::new([800, 600]);
         open(&mut scene, "a");
         let only = scene.active_view().id();
-        assert_eq!(scene.dataset_holder(&id("a"), PoolKind::Slice), Some(only));
-        assert_eq!(scene.dataset_holder(&id("a"), PoolKind::Volume), None);
         assert!(scene.draws(only, &id("a")));
-        assert!(scene.withheld(only).is_empty());
         assert_eq!(scene.resolved_layers(only).len(), 1);
     }
 }

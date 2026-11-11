@@ -1,8 +1,17 @@
 /** Canonical encoding for the chunk atlas pool keys. */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import type { SpatialAxis } from "./slicePlane.ts";
+import type { PoolCut, SpatialAxis } from "./slicePlane.ts";
 import type { PoolMode } from "./workerProtocol.ts";
+
+/**
+ * Which pools a delivered chunk goes to, as the page's record of what the
+ * worker holds keys it: a dataset's volume pools, or one plane of the chunk
+ * in its slice pools of one axis. A chunk is held for each target on its own.
+ */
+export function deliveryTarget(mode: PoolMode, cut?: PoolCut): string {
+  return mode === "volume" || cut === undefined ? mode : `slice:${cut.axis}${cut.plane}`;
+}
 
 /** Key of what the page records for one dataset's pools of one mode. */
 export function datasetModeKey(datasetId: string, mode: PoolMode): string {

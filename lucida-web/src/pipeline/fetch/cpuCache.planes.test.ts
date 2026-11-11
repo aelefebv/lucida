@@ -181,6 +181,27 @@ describe("a chunk a slice view and a volume view both want", () => {
   });
 });
 
+describe("a chunk two slice views cut at different planes", () => {
+  it("goes to the slice pools once for each plane, and again only for the plane they lose", async () => {
+    const { source, cache, submit } = setup();
+    const at = (plane: number) => request({ plane, planes: [0, 3], cut: { axis: "z", plane } });
+    submit(at(1), at(2));
+    expect(source.asked).toHaveLength(1);
+    source.land(`${CHUNK}#0:3`);
+    await landed();
+
+    const deliveries = [...cache.getDeliverable()];
+    expect(deliveries.map((d) => d.cut)).toEqual([{ axis: "z", plane: 1 }, { axis: "z", plane: 2 }]);
+    for (const delivery of deliveries) cache.markSent(delivery);
+    cache.markChunksHeld("img", 0, "slice:z1", "detail", ["0/0/0/0/0/0"]);
+    cache.markChunksHeld("img", 0, "slice:z2", "detail", ["0/0/0/0/0/0"]);
+    expect([...cache.getDeliverable()]).toEqual([]);
+
+    cache.markChunksLost("img", 0, "slice:z2", "detail", ["0/0/0/0/0/0"], "evicted");
+    expect([...cache.getDeliverable()].map((d) => d.cut)).toEqual([{ axis: "z", plane: 2 }]);
+  });
+});
+
 describe("the whole chunk", () => {
   it("takes the place of its planes, in the view, without waking the page for a plane it already drew", async () => {
     const { source, cache, submit } = setup();

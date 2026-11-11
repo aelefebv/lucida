@@ -1938,14 +1938,13 @@ describe("multi-dataset planning", () => {
 describe("views of one dataset in two modes", () => {
   const emptyMinimap = new Map<string, never[]>();
 
-  /** A slice view and a volume view of ds1, each holding the pools of its mode. */
+  /** A slice view and a volume view of ds1, each drawing from the pools of its mode. */
   function makeTwoModes() {
     const scene = createMockScene() as Record<string, unknown>;
     const views = [
       { id: 0, mode: "slice" as const, rect: [0, 0, 400, 600] as const },
       { id: 1, mode: "volume" as const, rect: [400, 0, 400, 600] as const },
     ];
-    scene.dataset_holder = (_dsId: string, mode: string) => (mode === "slice" ? 0 : 1);
     const coldState = vi.fn();
     const coldStateDelta = vi.fn();
     const cpuCache = createMockCpuCache();
@@ -2022,7 +2021,6 @@ describe("views of one dataset in two modes", () => {
       // whole.
       vi.advanceTimersByTime(500);
       const views = [ctx.views[0], { ...ctx.views[1], mode: "slice" as const }];
-      scene.dataset_holder = (_dsId: string, mode: string) => (mode === "slice" ? 0 : undefined);
       const epochs = JSON.parse((scene.epochs as () => string)());
       scene.epochs = () => JSON.stringify({ ...epochs, view: epochs.view + 1 });
       orch.planAndFetch({ ...ctx, views } as TickContext, emptyMinimap);

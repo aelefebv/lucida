@@ -46,22 +46,10 @@ export interface AtlasSnapshot {
   entityMetas?: Map<string, AtlasLevelMeta[]>;
 }
 
-/** A wanted chunk whose slot holds a plane the current Z no longer maps to. */
-export interface StalePlane {
-  memberId: string;
-  tier: ResidencyTier;
-  chunkKey: string;
-}
-
 export interface WantedSetResult {
   missing: MissingChunk[];
   /** One report per tile entry with a target level, in active-set order. */
   levels: EntityLevelReport[];
-  /**
-   * The missing chunks that still have a slot, cut from another plane. The
-   * page was told they were held, so the worker reports them lost.
-   */
-  stalePlanes: StalePlane[];
 }
 
 /**
@@ -94,10 +82,9 @@ export function computeWantedSet(
 ): WantedSetResult {
   const missing: MissingChunk[] = [];
   const levels: EntityLevelReport[] = [];
-  const stalePlanes: StalePlane[] = [];
 
   if (coldState.activeSet.length === 0) {
-    return { missing, levels, stalePlanes };
+    return { missing, levels };
   }
 
   const atlases = coldState.viewMode === "volume" ? volumeAtlases : sliceAtlases;
@@ -148,10 +135,8 @@ export function computeWantedSet(
               memberId,
               c: channel,
               chunkKey,
+              ...(context.viewMode === "slice" ? { cut: { axis: sliceAxis, plane: currentPlane(grid, context) } } : {}),
             });
-            if ((atlas.planesByChunk?.get(makeCompositeKey(memberId, chunkKey))?.size ?? 0) > 0) {
-              stalePlanes.push({ memberId, tier, chunkKey });
-            }
           }
           if (tier === "detail" && chunk.level === targetLevel) {
             tally.record(servingLevel(sampled, grid, [chunk.x, chunk.y, chunk.z], context));
@@ -170,7 +155,7 @@ export function computeWantedSet(
     }
   }
 
-  return { missing, levels, stalePlanes };
+  return { missing, levels };
 }
 
 /** The finest and coarsest serving level seen over one entity's wanted target-level chunks. */
@@ -276,8 +261,12 @@ function holdsCurrentData(
 ): boolean {
   const key = makeCompositeKey(context.memberId, chunkKey);
   if (context.viewMode !== "slice" || atlas.planesByChunk === undefined) return atlas.slots.has(key);
-  const plane = sliceLevelPlane(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
-  return atlas.planesByChunk.get(key)?.has(plane) ?? false;
+  return atlas.planesByChunk.get(key)?.has(currentPlane(grid, context)) ?? false;
+}
+
+/** The plane of a level the view's Z maps to. */
+function currentPlane(grid: LevelGrid, context: SampleContext): number {
+  return sliceLevelPlane(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
 }
 
 /** One section the shader may sample for a member, with the pool it reads. */

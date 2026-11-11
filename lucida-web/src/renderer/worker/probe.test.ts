@@ -19,6 +19,7 @@ import type { AtlasState, LabelVolumePool, LodIndirectionMeta } from "../volume/
 import { INDIRECTION_FAILED } from "../remap.ts";
 import { identityIndirection } from "../failedCells.ts";
 import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
+import { labelSlicePoolKey, labelVolumePoolKey } from "../labelPools.ts";
 import type { ViewDraw } from "./state.ts";
 import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
@@ -315,6 +316,9 @@ describe("the worker's pixel probe", () => {
       keys: new Map(),
       planes: new Map(),
       datasetId: "ds",
+      memberId: "img:label:regions",
+      t: 0,
+      plane: 0,
       width: 40,
       height: 40,
     };
@@ -322,7 +326,7 @@ describe("the worker's pixel probe", () => {
     label.planes.set(labelCellKey(2, 1), 0);
     label.planes.set(labelCellKey(0, 0), 0);
     label.indirection[4] = INDIRECTION_FAILED;
-    state.labelSlicePools.set("img:label:regions", label);
+    state.labelSlicePools.set(labelSlicePoolKey("img:label:regions", 0, 0), label);
     const frame = [...state.lastFrames.values()][0] as SliceRenderMultiPassMessage;
     frame.layers.push({
       datasetId: "img:label:regions",
@@ -332,6 +336,7 @@ describe("the worker's pixel probe", () => {
       entityIndex: 0,
       entityId: "entity",
       isLabel: true,
+      labelChunk: { level: 0, t: 0, z: 0, plane: 0 },
     });
 
     const labelSample = { datasetId: "ds", entityId: "entity", labelImageId: "img:label:regions" };
@@ -470,7 +475,7 @@ describe("the worker's pixel probe of a 3D label overlay", () => {
       chunkX: 8, chunkY: 8, chunkZ: 8,
       width: side, height: side, depth: side,
     } as unknown as LabelVolumePool;
-    ctx.state.labelVolumePools.set("vol:label:regions", label);
+    ctx.state.labelVolumePools.set(labelVolumePoolKey("vol:label:regions", 0), label);
     const frame = [...ctx.state.lastFrames.values()][0] as VolumeRenderMultiPassMessage;
     const entry = ctx.state.draws.get("ds|0")!.cold.activeSet[0];
     frame.layers.push({
@@ -480,6 +485,7 @@ describe("the worker's pixel probe of a 3D label overlay", () => {
       entityIndex: 0,
       entityId: "entity",
       isLabel: true,
+      labelChunk: { level: 0, t: 0 },
       modelMatrix: entry.modelMatrix,
       invModelMatrix: entry.invModelMatrix,
     });

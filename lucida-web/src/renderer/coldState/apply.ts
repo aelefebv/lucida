@@ -15,16 +15,15 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateMessage, PoolMode } from "../workerProtocol.ts";
 import { destroyDescriptorBuffer, iterateColdMembers, rebuildDescriptorBuffer } from "../descriptorBuffer.ts";
 import { targetLevelOf, type EntitySource } from "../entitySources.ts";
+import { syncLabelPools } from "../labelPools.ts";
 import {
   getOrCreateVolumePool,
-  removeLabelVolumePoolsForDataset,
   remapIndirection,
   type AtlasState,
   type LodIndirectionMeta,
 } from "../volume/index.ts";
 import {
   getOrCreateSlicePool,
-  removeLabelSlicePoolsForDataset,
   remapSliceIndirection,
   type SliceAtlasState,
 } from "../slice/index.ts";
@@ -261,7 +260,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   // goes, its chunks reported lost so the page resends what a recreated one
   // needs.
   detachView(ctx, msg.datasetId, msg.view, new Set(groups.keys()));
-  releaseUndrawnLabels(ctx, msg.datasetId);
+  syncLabelPools(ctx, msg.datasetId);
 
   draw.sources = currentSources;
 
@@ -295,7 +294,7 @@ function detachFrom<A extends SliceAtlasState | AtlasState>(
       atlas.views.delete(view);
     }
     if (atlas.views.size > 0) continue;
-    postSlotsLost(ctx, mode, chunkPoolTier(poolKey), atlas.slots.keys(), "freed");
+    postSlotsLost(ctx, mode, chunkPoolTier(poolKey), atlas.slots.keys(), "freed", "axis" in atlas ? atlas.axis : undefined);
     destroy(atlas);
     atlases.delete(poolKey);
   }
@@ -331,20 +330,6 @@ export function releaseDraw(ctx: WorkerCtx, draw: ViewDraw): void {
     state.cameraUVs.get(draw.view)?.delete(memberId);
     state.rayHits.get(draw.view)?.delete(memberId);
   }
-  releaseUndrawnLabels(ctx, draw.datasetId);
+  syncLabelPools(ctx, draw.datasetId);
   if (state.currentColdState === draw.cold) state.currentColdState = null;
-}
-
-/**
- * Free the dataset's label pools of a mode no view draws it in. A side view
- * draws no label overlay, so the slice ones go too once no view cuts XY.
- * Their chunks are reported lost, so a view that draws them again has them
- * sent again.
- */
-function releaseUndrawnLabels(ctx: WorkerCtx, datasetId: string): void {
-  const draws = drawsOf(ctx.state, datasetId);
-  if (!draws.some((draw) => draw.mode === "volume")) removeLabelVolumePoolsForDataset(ctx, datasetId, "freed");
-  if (!draws.some((draw) => draw.mode === "slice" && (draw.cold.sliceAxis ?? "z") === "z")) {
-    removeLabelSlicePoolsForDataset(ctx, datasetId, "freed");
-  }
 }

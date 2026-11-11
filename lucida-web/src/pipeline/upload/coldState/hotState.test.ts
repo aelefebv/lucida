@@ -30,6 +30,7 @@ function makeColdMsg(
   const epochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
   return {
     type: "coldState",
+    labels: [],
     epochs,
     datasetId: "ds1",
     currentT: 0,

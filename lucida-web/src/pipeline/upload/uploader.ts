@@ -22,6 +22,7 @@ import type {
   ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
+  LabelForm,
   MissingChunk,
   PoolMode,
 } from "../../renderer/workerProtocol.ts";
@@ -61,7 +62,6 @@ import { CountedPhaseIndex, PointEvent } from "../../trace/types.ts";
 import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
 import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
-import type { SliceCut } from "../../renderer/slicePlane.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
@@ -132,6 +132,8 @@ export class Uploader {
     view: number;
     /** Every view that draws the dataset; the worker drops what it kept for any other. */
     drawnViews: number[];
+    /** The label overlays the view draws, each in its form. */
+    labels: LabelForm[];
   }): ColdStateMessage {
     const wanted = wantedChunksFromPlan(args.requests);
     this.rememberWanted(args.datasetId, args.view, wanted);
@@ -149,6 +151,7 @@ export class Uploader {
       sampleFormat: datasetSampleFormat(args.ctx.datasets.get(args.datasetId)?.manifest),
       view: args.view,
       drawnViews: args.drawnViews,
+      labels: args.labels,
     });
     args.ctx.client.coldState(msg);
     this.lastEpochs = args.epochs;
@@ -195,6 +198,8 @@ export class Uploader {
     requests: readonly ChunkRequest[];
     visibleRegion: VisibleRegion;
     epochs: SceneEpochs;
+    /** See {@link sendColdState}. */
+    labels: LabelForm[];
   }): void {
     const wanted = wantedChunksFromPlan(args.requests);
     this.rememberWanted(args.datasetId, args.view, wanted);
@@ -206,6 +211,7 @@ export class Uploader {
       currentZ: args.currentZ,
       visibleRegion: args.visibleRegion,
       wantedChunks: [...wanted.values()],
+      labels: args.labels,
       epochs: args.epochs,
     });
     this.lastEpochs = args.epochs;
@@ -236,6 +242,8 @@ export class Uploader {
     view: number;
     /** See {@link sendColdState}. */
     drawnViews: number[];
+    /** See {@link sendColdState}. */
+    labels: LabelForm[];
   }): ColdStateDeltaMessage {
     const wanted = wantedChunksFromPlan(args.requests);
     const held = this.wantedByDatasetView.get(args.datasetId)?.get(args.view);
@@ -255,6 +263,7 @@ export class Uploader {
       layer: args.layer,
       view: args.view,
       drawnViews: args.drawnViews,
+      labels: args.labels,
     });
     args.ctx.client.coldStateDelta(msg);
     this.lastEpochs = args.epochs;
@@ -382,16 +391,10 @@ export class Uploader {
    * priority item is sent while `remaining > 0`, even if oversized, and
    * the loop stops after the send drives `remaining <= 0`.
    *
-   * Each delivery goes to the pools of its mode. `sliceCutFor` names the
-   * plane a dataset's slice pools hold, its slice holder's axis position
-   * along the cut clamped into that dataset, or `null` for a dataset no
-   * slice view draws; `null` alone when every view is a volume.
+   * Each delivery goes to the pools of its mode, and to a slice pool cut at
+   * the plane it names.
    */
-  deliverToWorker(
-    ctx: TickContext,
-    budget: number,
-    sliceCutFor: ((datasetId: string) => SliceCut | null) | null,
-  ): boolean {
+  deliverToWorker(ctx: TickContext, budget: number): boolean {
     const tickStart = performance.now();
     if (this.heldBacklog) budget = Math.max(budget, HELD_UPLOAD_BUDGET_BYTES);
     this.currentUploadStats = emptyUploadTickStats();
@@ -444,7 +447,6 @@ export class Uploader {
         delivery,
         ctx,
         manifestByImage,
-        sliceCutFor,
         epochs,
       });
       if (sent === 0) continue;
@@ -487,17 +489,16 @@ export class Uploader {
     delivery: ReadyChunkDelivery;
     ctx: TickContext;
     manifestByImage: Map<string, ManifestEntry>;
-    sliceCutFor: ((datasetId: string) => SliceCut | null) | null;
     epochs: SceneEpochs;
   }): number {
-    const { delivery, ctx, manifestByImage, sliceCutFor, epochs } = args;
+    const { delivery, ctx, manifestByImage, epochs } = args;
 
     const meta = manifestByImage.get(delivery.imageId);
     if (!meta || !meta.levels[delivery.level]) {
       this.currentUploadStats.skippedNoMeta++;
       return 0;
     }
-    const cut = sliceCutFor ? sliceCutFor(meta.datasetId) : null;
+    const cut = delivery.cut ?? null;
 
     // Label overlays go to the r32uint label pool. The slice view sends one
     // Z-plane of each chunk and the volume view the whole chunk. Every
@@ -538,17 +539,17 @@ export class Uploader {
 
   // Worker feedback (wired in renderLoop.start)
 
-  /** Returns whether a chunk may now be sent again. */
+  /** Returns whether a chunk may now be sent again. `target` is the pools' `deliveryTarget`. */
   handleChunkResidency(
     memberId: string,
-    mode: PoolMode,
+    target: string,
     tier: ResidencyTier,
     change: ChunkResidencyChange,
     keys: string[],
     cpuCache: CpuCache,
     reason?: ChunkFeedbackReason,
   ): boolean {
-    return this.workerFeedback.handleChunkResidency(memberId, mode, tier, change, keys, cpuCache, reason);
+    return this.workerFeedback.handleChunkResidency(memberId, target, tier, change, keys, cpuCache, reason);
   }
 
   /** Returns whether a chunk may now be sent again. */

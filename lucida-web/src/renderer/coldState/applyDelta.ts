@@ -20,6 +20,7 @@ import { applyColdState } from "./apply.ts";
 import { patchWantedChunks, patchWantedIndex } from "../wantedChunks.ts";
 import { renderRadiusEnabled } from "../../pipeline/renderRadius.ts";
 import { drawOf } from "../worker/draws.ts";
+import { syncLabelPools } from "../labelPools.ts";
 
 /** Whether either tier draws only the chunks inside a render radius, which moves with the view. */
 function radiusInPlay(radius: ColdStateDeltaMessage["renderRadiusView"]): boolean {
@@ -75,12 +76,14 @@ export function applyColdStateDelta(
   cold.currentT = msg.currentT;
   cold.currentZ = msg.currentZ;
   cold.renderRadiusView = msg.renderRadiusView;
+  cold.labels = msg.labels;
   cold.epochs = msg.epochs;
 
   ctx.state.currentColdState = cold;
   ctx.state.currentEpochs = msg.epochs;
   if (laidOutAsBefore) {
     patchWantedIndex(draw.wanted, msg.wantedChunks);
+    syncLabelPools(ctx, msg.datasetId);
     return;
   }
   applyColdState(ctx, cold);

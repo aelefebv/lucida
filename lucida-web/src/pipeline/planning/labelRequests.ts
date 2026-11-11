@@ -22,6 +22,7 @@ import type {
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
 import { slicePlaneIn, type PlaneInChunks } from "./emit.ts";
 import type { SpatialAxis } from "../../renderer/slicePlane.ts";
+import type { LabelForm } from "../../renderer/workerProtocol.ts";
 import type { ChunkRequest } from "./types.ts";
 
 /** Cap on the chosen level's per-plane chunk count in slice mode. */
@@ -498,6 +499,26 @@ export function computeLabelChunkRequests(args: LabelRequestArgs): ChunkRequest[
 }
 
 /**
+ * The form each visible label takes in a view: its chunk-T, and on an XY cut
+ * the plane of its level. The worker keeps one pool per label and form, so
+ * views drawing a label alike share it. The labels and their chunks are the
+ * ones {@link computeLabelChunkRequests} asks for.
+ */
+export function labelFormsFor(args: LabelRequestArgs): LabelForm[] {
+  if (args.mode !== "volume" && (args.cutAxis ?? "z") !== "z") return [];
+  const volume = args.mode === "volume";
+  return resolveVisibleLabels(args.manifest, args.labelSettings, {
+    mode: args.mode,
+    maxLevelDim: args.maxLevelDim,
+    maxChunksPerPlane: args.maxChunksPerPlane,
+  }).map((resolved) => {
+    const at = labelChunkAt(resolved, args.t, volume ? undefined : args.z);
+    const memberId = resolved.label.image.image_id;
+    return at.plane === null ? { memberId, t: at.t } : { memberId, t: at.t, plane: at.plane };
+  });
+}
+
+/**
  * The chunk a label draws from at source timepoint `t`: its chosen level, the
  * label's own chunk-T, and, given a source `z`, the plane slice mode draws
  * and the chunk-Z holding it. The mapping is per label because labels carry
@@ -576,6 +597,8 @@ function appendLabelChunkRequests(
       req.plane = slice.plane;
       req.planes = slice.planes;
     }
+    // A label overlay draws on an XY cut alone, from its label level's plane.
+    if (!volume && at.plane !== null) req.cut = { axis: "z", plane: at.plane };
     requests.push(req);
   };
 

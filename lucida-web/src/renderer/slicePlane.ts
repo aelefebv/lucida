@@ -58,6 +58,16 @@ export interface SliceCut {
 }
 
 /**
+ * One plane of a chunk as a slice pool holds it: the axis the pool cuts, and
+ * the plane of the chunk's level along it. Views at different cuts of one
+ * chunk need different planes of it, each in a slot of its own.
+ */
+export interface PoolCut {
+  axis: SpatialAxis;
+  plane: number;
+}
+
+/**
  * `[x, y, z]` values in the frame of the plane cutting `axis`: across the
  * screen, down it, and along the cut.
  */

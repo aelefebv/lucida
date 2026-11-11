@@ -1,5 +1,5 @@
 /* Across the column at the view's top (`ViewOverlays.css`). */
-.lc-withheld-notice {
+.lc-coverage-notice {
   align-self: stretch;
   display: flex;
   flex-direction: column;
@@ -19,6 +19,6 @@
   pointer-events: none;
 }
 
-.lc-withheld-notice p {
+.lc-coverage-notice p {
   margin: 0;
 }

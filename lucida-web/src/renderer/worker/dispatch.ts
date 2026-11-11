@@ -73,7 +73,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       const memberId = msg.memberId;
       const poolKey = routeOf(ctx.state, "slice", memberId, msg.tier, msg.level, msg.sliceAxis ?? "z");
       if (!poolKey) {
-        postChunkResidency(ctx, memberId, "slice", msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
+        postChunkResidency(
+          ctx, memberId, "slice", msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool",
+          { axis: msg.sliceAxis ?? "z", plane: msg.plane },
+        );
         return;
       }
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);

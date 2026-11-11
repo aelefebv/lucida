@@ -13,6 +13,7 @@ import type {
   PoolMode,
 } from "../../../renderer/workerProtocol.ts";
 import { debugLog } from "../../../debug/logging.ts";
+import { deliveryTarget } from "../../../renderer/poolKeys.ts";
 import type { ResendGuard } from "./resendGuard.ts";
 import {
   channelFromChunkKey,
@@ -28,13 +29,14 @@ export class WorkerFeedback {
   }
 
   /**
-   * Apply one residency report. `cpuCache` is a parameter because the
-   * uploader owns no cpuCache reference (it gets one through `ctx.cpuCache`).
-   * Returns whether a chunk may now be sent again.
+   * Apply one residency report about the pools of `target`
+   * (`deliveryTarget`). `cpuCache` is a parameter because the uploader owns
+   * no cpuCache reference (it gets one through `ctx.cpuCache`). Returns
+   * whether a chunk may now be sent again.
    */
   handleChunkResidency(
     memberId: string,
-    mode: PoolMode,
+    target: string,
     tier: ResidencyTier,
     change: ChunkResidencyChange,
     keys: string[],
@@ -52,22 +54,22 @@ export class WorkerFeedback {
     }
 
     if (change === "held") {
-      for (const [c, group] of byChannel) cpuCache.markChunksHeld(parsed.imageId, c, mode, tier, group);
+      for (const [c, group] of byChannel) cpuCache.markChunksHeld(parsed.imageId, c, target, tier, group);
       return false;
     }
 
     const why = reason ?? (change === "lost" ? "evicted" : "atlas-policy");
     for (const [c, group] of byChannel) {
-      if (change === "lost") cpuCache.markChunksLost(parsed.imageId, c, mode, tier, group, why);
-      else cpuCache.markChunksRefused(parsed.imageId, c, mode, tier, group, why);
+      if (change === "lost") cpuCache.markChunksLost(parsed.imageId, c, target, tier, group, why);
+      else cpuCache.markChunksRefused(parsed.imageId, c, target, tier, group, why);
       if (this.guard) {
-        for (const key of group) this.guard.noteReturned(parsed.imageId, c, mode, key, why);
+        for (const key of group) this.guard.noteReturned(parsed.imageId, c, target, key, why);
       }
     }
     debugLog("orch", "upload.worker_chunk_feedback", {
       memberId,
       imageId: parsed.imageId,
-      mode,
+      target,
       tier,
       change,
       reason: why,
@@ -93,8 +95,9 @@ export class WorkerFeedback {
     for (const entry of missing) {
       const parsed = parseWorkerMemberId(entry.memberId);
       const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
-      if (cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, mode, entry.tier)) {
-        this.guard?.noteMissing(parsed.imageId, c, mode, entry.chunkKey);
+      const target = deliveryTarget(mode, entry.cut);
+      if (cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, target, entry.tier)) {
+        this.guard?.noteMissing(parsed.imageId, c, target, entry.chunkKey);
         disagreements.push(`${entry.memberId}/${entry.chunkKey} [${entry.tier}]`);
       }
     }

@@ -4,6 +4,7 @@
  */
 import type { LevelGeometry } from "../../../manifestTypes.ts";
 import type {
+  LabelForm,
   ColdStateActiveEntry,
   ColdStateDeltaMessage,
   ColdStateDisplayState,
@@ -133,6 +134,8 @@ export function buildColdState(args: {
   view: number;
   /** See {@link ColdStateMessage.drawnViews}. */
   drawnViews: number[];
+  /** See {@link ColdStateMessage.labels}. */
+  labels: LabelForm[];
 }): ColdStateMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
@@ -154,6 +157,7 @@ export function buildColdState(args: {
     renderRadiusView: args.renderRadiusView,
     wantedChunks: args.wantedChunks,
     activeSet: coldActiveSet,
+    labels: args.labels,
     view: args.view,
     viewMode: args.selection.renderMode,
     drawnViews: args.drawnViews,
@@ -238,6 +242,8 @@ export function buildColdStateDelta(args: {
   view: number;
   /** See {@link ColdStateMessage.drawnViews}. */
   drawnViews: number[];
+  /** See {@link ColdStateMessage.labels}. */
+  labels: LabelForm[];
 }): ColdStateDeltaMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
@@ -274,6 +280,7 @@ export function buildColdStateDelta(args: {
     datasetId: args.datasetId,
     view: args.view,
     drawnViews: args.drawnViews,
+    labels: args.labels,
     currentT: args.selection.t,
     currentZ: workerCutIndex(args.selection),
     visibleRegion: regionInWorkerFrame(args.visibleRegion, cutAxis),

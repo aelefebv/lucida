@@ -1,9 +1,9 @@
 /**
  * What lies over each view's rectangle beside its pane: a comparison's swipe
  * divider across it, and one column at its top holding the compare bar and,
- * below it, the notice of what the view leaves out. The column keeps the two
- * from covering each other, and the bar comes first so a notice coming or
- * going never moves it under the pointer.
+ * below it, the notice that the view covers less than it asks for. The column
+ * keeps the two from covering each other, and the bar comes first so a notice
+ * coming or going never moves it under the pointer.
  *
  * They lie beside the pane, not in it: the viewers listen on the pane itself,
  * and a press on a control would also pan the view. A press or focus in them
@@ -15,7 +15,7 @@ import { useSyncExternalStore } from "react";
 import { setAsideNote, type ComparisonActions } from "../comparison.ts";
 import { ComparisonBar, SwipeDivider } from "../components/Comparison.tsx";
 import type { SceneStore, ViewPane } from "../sceneStore.ts";
-import { WithheldNotice, type Coverage } from "./WithheldNotice.tsx";
+import { CoverageNotice, type Coverage } from "./CoverageNotice.tsx";
 import "./ViewOverlays.css";
 
 interface Props {
@@ -66,7 +66,7 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
                   />
                 </div>
               )}
-              <WithheldNotice withheld={pane.withheld} views={views} nameOf={nameOf} coverage={coverageOf(pane.id)} />
+              <CoverageNotice coverage={coverageOf(pane.id)} />
             </div>
           </div>
         );

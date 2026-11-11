@@ -5,7 +5,7 @@
  * emission and chunk delivery.
  */
 
-import { drawnView, holderView, type TickContext, type TickView } from "../renderLoopTypes.ts";
+import { drawnView, type TickContext, type TickView } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { getSceneSettings } from "../tickCommon.ts";
@@ -31,7 +31,7 @@ import {
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
 import { buildViewSnapshot, sliceCut } from "./planning/snapshot.ts";
-import { cutAxis, type SlicePlane, type SpatialAxis } from "../renderer/slicePlane.ts";
+import type { SlicePlane, SpatialAxis } from "../renderer/slicePlane.ts";
 import {
   applyViewQueryDelta,
   makeEntitySnapshot,
@@ -41,7 +41,7 @@ import {
 } from "./planning/snapshotDelta.ts";
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
-import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
+import { computeLabelChunkRequests, labelFormsFor } from "./planning/labelRequests.ts";
 import { admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
 import { tallyViewCoverage, type ViewCoverage } from "./planning/viewCoverage.ts";
 import { requestIdentity } from "./planning/plan.ts";
@@ -96,11 +96,6 @@ export interface TickCoordinatorResult {
    * first view that draws it, the drawn view whenever that one does.
    */
   layers: ReadonlyMap<string, ResolvedLayer>;
-  /**
-   * Each layer a slice view draws, as its slice holder resolved it for this
-   * plan: what fixes the cut its slice pools hold.
-   */
-  sliceLayers: ReadonlyMap<string, ResolvedLayer>;
   epochs: SceneEpochs;
   /**
    * Per dataset and view, keyed by `datasetViewKey`, the memberId → entity
@@ -131,17 +126,6 @@ function leadLayers(ctx: TickContext, layersByView: ReadonlyMap<number, Resolved
     }
   }
   return lead;
-}
-
-/** Each dataset's layer as its slice holder resolves it, for each dataset a slice view draws. */
-function sliceHolderLayers(ctx: TickContext, layersByView: ReadonlyMap<number, ResolvedLayers>): ResolvedLayers {
-  const held = new Map<string, ResolvedLayer>();
-  for (const dsId of ctx.datasets.keys()) {
-    const holder = holderView(ctx, dsId, "slice");
-    const layer = holder && layersByView.get(holder.id)?.get(dsId);
-    if (layer) held.set(dsId, layer);
-  }
-  return held;
 }
 
 /** One view of a planned dataset. */
@@ -435,13 +419,10 @@ function admitDatasetPlans(
   return admitPlans(
     plans.map(({ dsId, requests }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
-      // A dataset's slice pools hold the plane its slice holder cuts.
-      const holder = holderView(ctx, dsId, "slice");
-      const sliceAxis = holder ? cutAxis(ctx.scene.slice_plane(holder.id) as SlicePlane) : "z";
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
-        slotOf: gpuSlotsFor(manifest, report, gpuTotalBytes, sliceAxis),
+        slotOf: gpuSlotsFor(manifest, report, gpuTotalBytes),
       };
     }),
     ctx.cpuCache.tierCapacity(),
@@ -809,9 +790,6 @@ export class TickCoordinator {
     const layersByView = new Map(views.map((view) => [view.id, readResolvedLayers(ctx.scene, view.id)]));
     // With one view, the fast paths and the result describe what it draws.
     const layers = views.length === 1 ? layersByView.get(drawn.id)! : leadLayers(ctx, layersByView);
-    const sliceLayers = views.length === 1
-      ? (drawn.mode === "slice" ? layers : new Map<string, ResolvedLayer>())
-      : sliceHolderLayers(ctx, layersByView);
     const planningConfig = configStore.get();
 
     const structural = isStructural(causes);
@@ -891,16 +869,12 @@ export class TickCoordinator {
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
-      // Each view that draws the dataset plans it, the holder of each mode's
-      // pools ahead of the other views of that mode, since the cold state of
-      // those pools is built from its plan. A view that leaves the dataset
-      // out gets no view query for it. A layer a view's cut misses, or its
-      // comparison sets aside, draws nothing there, so nothing of it is
-      // planned for that view.
-      const holds = (view: TickView): number => Number(holderView(ctx, dsId, view.mode)?.id === view.id);
+      // Each view that draws the dataset plans it. A view that leaves the
+      // dataset out gets no view query for it. A layer a view's cut misses,
+      // or its comparison sets aside, draws nothing there, so nothing of it
+      // is planned for that view.
       const viewsOfDataset = views
-        .filter((view) => plansLayer(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)))
-        .sort((a, b) => holds(b) - holds(a));
+        .filter((view) => plansLayer(layersByView.get(view.id)!.get(dsId), viewCutPlane(ctx, view)));
       if (viewsOfDataset.length === 0) continue;
 
       const planningStateForDataset = this.planningState.get(dsId)
@@ -1041,6 +1015,15 @@ export class TickCoordinator {
           datasetId: dsId,
           activeSet: share.activeSet,
           requests: share.requests,
+          labels: labelFormsFor({
+            datasetId: dsId,
+            manifest: ctx.datasets.get(dsId)!.manifest,
+            t: snapshot.selection.t,
+            z: snapshot.selection.z,
+            labelSettings: dsSettings?.label_settings,
+            mode: view.mode,
+            cutAxis: snapshot.selection.cut.axis,
+          }),
           entities,
           selection: snapshot.selection,
           visibleRegion: snapshot.visibleRegion,
@@ -1153,7 +1136,7 @@ export class TickCoordinator {
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
     this.cachedResult = {
-      memberRosterByDatasetView, settings, layers, sliceLayers, epochs: outputEpochs, entityIndexByDatasetView,
+      memberRosterByDatasetView, settings, layers, epochs: outputEpochs, entityIndexByDatasetView,
     };
     this.lastRebuildManifests = new Map(
       [...ctx.datasets].map(([dsId, ds]) => [dsId, ds.manifest]),
@@ -1546,6 +1529,15 @@ export class TickCoordinator {
         ctx,
         datasetId: p.dsId,
         view: drawn.id,
+        labels: labelFormsFor({
+          datasetId: p.dsId,
+          manifest: ctx.datasets.get(p.dsId)!.manifest,
+          t: p.selection.t,
+          z: p.selection.z,
+          labelSettings: p.dsSettings?.label_settings,
+          mode,
+          cutAxis: p.selection.cut.axis,
+        }),
         currentT: p.selection.t,
         currentZ: workerCutIndex(p.selection),
         requests: p.requests,
@@ -1565,8 +1557,7 @@ export class TickCoordinator {
     // state.
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
-    // The fast path runs in a lone slice view, whose layers fix the cut.
-    this.cachedResult = { ...this.cachedResult, settings, layers, sliceLayers: layers, epochs: outputEpochs };
+    this.cachedResult = { ...this.cachedResult, settings, layers, epochs: outputEpochs };
     this.plannedMinimap = new Map(minimapPendingFetch);
     this.lastRebuildScalars = { ...scalars, t: newT };
     this.lastRebuildAt = performance.now();

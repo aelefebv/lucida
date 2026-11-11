@@ -188,7 +188,6 @@ function makeSliceMsg(memberId: string, chunks: Chunk[], overrides?: Partial<Sli
     memberId,
     chunks,
     level: 0,
-    z: 0,
     t: 0,
     c: 0,
     levelWidth: 128,
@@ -198,7 +197,7 @@ function makeSliceMsg(memberId: string, chunks: Chunk[], overrides?: Partial<Sli
     chunkZ: 4,
     fullResDepth: 64,
     levelDepth: 64,
-    fullResZ: 0,
+    plane: 0,
     ...overrides,
   };
 }
@@ -669,13 +668,12 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
   it("refuses a wanted chunk that does not hold the plane the sender's Z maps to", () => {
     const { ctx, posts } = makeMockCtx();
     const atlas = slicePool(ctx);
-    // fullResDepth=64, levelDepth=64 keeps the plane: fullResZ=4, chunkZ=4 →
-    // levelZ = 4, target chunk = 1.
+    // Plane 4 with chunkZ=4 is in chunk 1 along Z.
     const chunkAtZ0 = makeSliceChunk(0, 0, 0, 0, 0, 0);
     const chunkAtZ1 = makeSliceChunk(0, 0, 0, 1, 0, 0);
     want(ctx, "imgA", [chunkAtZ0.key, chunkAtZ1.key]);
 
-    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunkAtZ0, chunkAtZ1], { fullResZ: 4 }), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunkAtZ0, chunkAtZ1], { plane: 4 }), epochs(), "ds1", "imgA");
 
     expect([...atlas.slots.keys()]).toEqual([sk(chunkAtZ1.key, 4)]);
     expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([
@@ -751,7 +749,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     // Planes 4 and 5 are both in chunk 1 along Z (chunks are 4 planes deep).
     const chunk = makeSliceChunk(0, 0, 0, 1, 0, 0);
     want(ctx, "imgA", [chunk.key]);
-    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 4 }), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { plane: 4 }), epochs(), "ds1", "imgA");
     const slot = atlas.slots.get(sk(chunk.key, 4))!;
     expect(viewOf(atlas).indirectionData[0]).toBe(slot);
 
@@ -764,15 +762,19 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     const writeCount = () => (ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
     const writes = writeCount();
     posts.length = 0;
-    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { plane: 5 }), epochs(), "ds1", "imgA");
     expect([...atlas.slots]).toEqual([[sk(chunk.key, 5), slot]]);
     expect(viewOf(atlas).indirectionData[0]).toBe(slot);
     expect(writeCount()).toBe(writes + 1);
-    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
+    // Plane 4 is handed back, so a view that cuts it again is sent it.
+    expect(reports(posts).map((r) => [r.change, r.keys, r.cut?.plane])).toEqual([
+      ["held", [chunk.key], 5],
+      ["lost", [chunk.key], 4],
+    ]);
 
     // The same plane again is already resident: held, and nothing written.
     posts.length = 0;
-    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { plane: 5 }), epochs(), "ds1", "imgA");
     expect(writeCount()).toBe(writes + 1);
     expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
   });
@@ -782,12 +784,12 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     const atlas = slicePool(ctx, 4);
     const chunk = makeSliceChunk(0, 0, 0, 1, 0, 0);
     want(ctx, "imgA", [chunk.key]);
-    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 4 }), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { plane: 4 }), epochs(), "ds1", "imgA");
     const drawn = atlas.slots.get(sk(chunk.key, 4))!;
 
     // Plane 5 of the same chunk, cut ahead of a cold state that still draws plane 4.
     posts.length = 0;
-    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { plane: 5 }), epochs(), "ds1", "imgA");
 
     const other = atlas.slots.get(sk(chunk.key, 5))!;
     expect(other).not.toBe(drawn);

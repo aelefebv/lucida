@@ -93,6 +93,7 @@ function tile(entityId: string, imageId: string, level = 0): ColdStateActiveEntr
 function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
   return {
     type: "coldState",
+    labels: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     datasetId: "ds1",
     currentT: 0,
@@ -122,6 +123,7 @@ describe("applyColdStateDelta", () => {
 
     const delta: ColdStateDeltaMessage = {
       type: "coldStateDelta",
+      labels: [],
       view: 0,
       drawnViews: [0],
       datasetId: "ds1",
@@ -187,6 +189,7 @@ describe("applyColdStateDelta", () => {
 
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
+      labels: [],
       view: 0,
       drawnViews: [0],
       datasetId: "ds1",
@@ -226,6 +229,7 @@ describe("applyColdStateDelta", () => {
 
     const delta: ColdStateDeltaMessage = {
       type: "coldStateDelta",
+      labels: [],
       view: 0,
       drawnViews: [0],
       datasetId: "ds1",
@@ -270,6 +274,7 @@ describe("applyColdStateDelta", () => {
 
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
+      labels: [],
       view: 0,
       drawnViews: [0],
       datasetId: "ds1",
@@ -290,6 +295,7 @@ describe("applyColdStateDelta", () => {
     const ctx = makeCtx();
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
+      labels: [],
       view: 0,
       drawnViews: [0],
       datasetId: "never-ingested",
@@ -320,6 +326,7 @@ describe("applyColdStateDelta", () => {
     expect(() =>
       applyColdStateDelta(ctx, {
         type: "coldStateDelta",
+        labels: [],
         view: 0,
         drawnViews: [0],
         datasetId: "ds1",
@@ -358,6 +365,7 @@ describe("applyColdStateDelta", () => {
     // removed — just a re-point of the view.
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
+      labels: [],
       view: 0,
       drawnViews: [0],
       datasetId: "ds1",

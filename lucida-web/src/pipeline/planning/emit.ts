@@ -12,7 +12,7 @@
  */
 
 import { Axis } from "../../axes.ts";
-import { sliceLevelPlane, tczyx, type SliceCut, type SpatialAxis } from "../../renderer/slicePlane.ts";
+import { sliceLevelPlane, tczyx, type PoolCut, type SliceCut, type SpatialAxis } from "../../renderer/slicePlane.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
   MINIMAP_SEED_FAST_MAX_CHUNKS,
@@ -103,6 +103,22 @@ function slicePlaneAt(
   const a = tczyx(axis);
   const levelPlane = sliceLevelPlane(index, full.shape[a], geo.shape[a]);
   return slicePlaneIn(levelPlane, geo.shape[a], geo.chunk_shape[a], config.sliceBandPlanes, axis);
+}
+
+/**
+ * The plane of `level` the slice view cuts, which a slice pool holds of each
+ * of its chunks there, or undefined in the volume view. Every level has one,
+ * generated levels too, since the upload cuts the same plane from a whole
+ * chunk (`sliceLevelPlane`).
+ */
+function poolCutAt(entity: EntitySnapshot, level: number, snapshot: DatasetView): PoolCut | undefined {
+  if (snapshot.selection.renderMode !== "slice") return undefined;
+  const full = entity.levels[0];
+  const geo = entity.levels[level];
+  if (full === undefined || geo === undefined) return undefined;
+  const { axis, index } = snapshot.selection.cut;
+  const a = tczyx(axis);
+  return { axis, plane: sliceLevelPlane(index, full.shape[a], geo.shape[a]) };
 }
 
 /** A chunk's index along `axis`. */
@@ -318,6 +334,7 @@ function emitQuery(
   whole = false,
 ): void {
   const channels = snapshot.selection.visibleChannels;
+  const cut = poolCutAt(entity, level, snapshot);
   chunks.found.forEach(query, (x, y, z, distance) => {
     const holdsPlane = slice !== null && chunkAlong(slice.axis, x, y, z) === slice.chunk;
     if (whole && !holdsPlane) return;
@@ -344,6 +361,7 @@ function emitQuery(
         req.planes = slice.planes;
         if (slice.axis !== "z") req.planeAxis = slice.axis;
       }
+      if (cut) req.cut = cut;
       push(req, key);
     }
   });

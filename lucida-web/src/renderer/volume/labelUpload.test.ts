@@ -11,6 +11,10 @@ import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import { handleLabelVolumeChunkData } from "./upload.ts";
 import { computeLabelVolumeSizing, labelPaddedVolumeBytes } from "./atlas.ts";
 import { destroyAllVolumeResources, removeVolumeResources } from "./index.ts";
+import { labelVolumePoolKey } from "../labelPools.ts";
+
+/** The pool of the label at T 0, where `labelVolumeMsg` writes by default. */
+const KEY = labelVolumePoolKey("img-0:label:region-b", 0);
 
 const SENTINEL = 0xffffffff;
 
@@ -82,8 +86,8 @@ function mkChunk(ids: Uint32Array, x: number, y: number, z: number): Chunk {
   } as Chunk;
 }
 
-/** A message with one or more whole 3D chunks for one label overlay member. */
-function labelVolumeMsg(chunks: Chunk[], dims: Dims): LabelVolumeChunkDataMessage {
+/** A message with one or more whole 3D chunks for one label overlay member, at T `t`. */
+function labelVolumeMsg(chunks: Chunk[], dims: Dims, t = 0): LabelVolumeChunkDataMessage {
   return {
     type: "labelVolumeChunkData",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
@@ -91,7 +95,7 @@ function labelVolumeMsg(chunks: Chunk[], dims: Dims): LabelVolumeChunkDataMessag
     datasetId: "ds-0",
     chunks,
     level: 0,
-    t: 0,
+    t,
     c: 0,
     ...dims,
   };
@@ -109,8 +113,8 @@ describe("handleLabelVolumeChunkData", () => {
 
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(ids, 0, 0, 0)], DIMS_2));
 
-    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(true);
-    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
+    expect(ctx.state.labelVolumePools.has(KEY)).toBe(true);
+    const pool = ctx.state.labelVolumePools.get(KEY)!;
     // Level extent (for the descriptor / ray mapping).
     expect(pool.width).toBe(2);
     expect(pool.height).toBe(2);
@@ -135,24 +139,25 @@ describe("handleLabelVolumeChunkData", () => {
     expect(pool.indirectionData[0]).toBe(0);
   });
 
-  it("reuses the pool IN PLACE across T steps (never blanks)", () => {
+  it("writes each timepoint into the pool of its own form", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2));
-    const poolAfterT0 = ctx.state.labelVolumePools.get("img-0:label:region-b");
-    const textureT0 = poolAfterT0?.texture;
+    const first = ctx.state.labelVolumePools.get(KEY)!;
+    const texture = first.texture;
 
+    // The same form again overwrites its pool in place, in the cell's own slot.
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([9, 10, 11, 12, 13, 14, 15, 16]), 0, 0, 0)], DIMS_2));
-    const poolAfterT1 = ctx.state.labelVolumePools.get("img-0:label:region-b");
-
-    // Same pool + same texture object: overwritten in place, not destroyed +
-    // recreated (which would blank the overlay mid-scrub).
-    expect(poolAfterT1).toBe(poolAfterT0);
-    expect(poolAfterT1!.texture).toBe(textureT0);
-    expect(writes).toHaveLength(2);
+    expect(ctx.state.labelVolumePools.get(KEY)).toBe(first);
+    expect(first.texture).toBe(texture);
     expect(new Uint32Array(writes[1].buffer)[0]).toBe(9);
-    // The cell reuses its own slot on the scrub (no eviction churn).
-    expect(poolAfterT1!.indirectionData[0]).toBe(0);
+    expect(first.indirectionData[0]).toBe(0);
+
+    // Another timepoint, as a second view stands at, has a pool of its own.
+    handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array(8), 0, 0, 0)], DIMS_2, 1));
+    const other = ctx.state.labelVolumePools.get(labelVolumePoolKey("img-0:label:region-b", 1))!;
+    expect(other).not.toBe(first);
+    expect(other.texture).not.toBe(texture);
   });
 
   it("routes each chunk to a distinct slot via its indirection entry", () => {
@@ -166,7 +171,7 @@ describe("handleLabelVolumeChunkData", () => {
       ],
       DIMS_4,
     ));
-    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
+    const pool = ctx.state.labelVolumePools.get(KEY)!;
     expect([pool.gridX, pool.gridY, pool.gridZ]).toEqual([2, 2, 2]);
     expect(pool.indirectionData.length).toBe(8);
 
@@ -204,7 +209,7 @@ describe("handleLabelVolumeChunkData", () => {
           chunks.push(mkChunk(new Uint32Array(8).fill(1), x, y, z));
     handleLabelVolumeChunkData(ctx, labelVolumeMsg(chunks, DIMS_4));
 
-    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
+    const pool = ctx.state.labelVolumePools.get(KEY)!;
     expect(pool.indirectionData.length).toBe(8);
     // All 8 cells resident, each in a distinct slot, no eviction.
     const resident = new Set<number>();
@@ -227,7 +232,7 @@ describe("handleLabelVolumeChunkData", () => {
       [mkChunk(new Uint32Array(2 * 2 * 2), 40, 0, 0)],
       { levelWidth: 128, levelHeight: 128, levelDepth: 128, chunkX: 2, chunkY: 2, chunkZ: 2 },
     ));
-    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
+    const pool = ctx.state.labelVolumePools.get(KEY)!;
     // Atlas texture: every axis within the device limit.
     expect(textureSizes).toHaveLength(1);
     for (const axis of textureSizes[0]) expect(axis).toBeLessThanOrEqual(64);
@@ -244,7 +249,7 @@ describe("handleLabelVolumeChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2));
-    expect(ctx.state.labelVolumePools.get("img-0:label:region-b")!.datasetId).toBe("ds-0");
+    expect(ctx.state.labelVolumePools.get(KEY)!.datasetId).toBe("ds-0");
   });
 
   it("drops a stale-epoch delivery so it can't overwrite the pool with an old T", () => {
@@ -254,7 +259,7 @@ describe("handleLabelVolumeChunkData", () => {
     ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, request: 1 };
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2));
     expect(writes).toHaveLength(0);
-    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelVolumePools.has(KEY)).toBe(false);
   });
 
   it("skips the label (no throw, no pool) when the atlas can't be allocated", () => {
@@ -266,7 +271,7 @@ describe("handleLabelVolumeChunkData", () => {
       throw new Error("texture dimension overflow");
     });
     expect(() => handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2))).not.toThrow();
-    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelVolumePools.has(KEY)).toBe(false);
     expect(writes).toHaveLength(0);
     // Refused, so the page does not count the chunk as resident.
     expect(ctx.post).toHaveBeenCalledWith(expect.objectContaining({ type: "chunkResidency", change: "refused", reason: "atlas-policy" }));
@@ -278,14 +283,14 @@ describe("label volume pool cleanup on dataset removal", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2));
-    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
+    const pool = ctx.state.labelVolumePools.get(KEY)!;
     const destroyed = pool.texture.destroy as unknown as ReturnType<typeof vi.fn>;
 
-    // removeLayerResources passes the dataset id ("ds-0"), which is not the
-    // pool's key ("img-0:label:region-b").
+    // removeLayerResources passes the dataset id ("ds-0"), which is not in
+    // the pool's key.
     removeVolumeResources(ctx, "ds-0");
 
-    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelVolumePools.has(KEY)).toBe(false);
     expect(destroyed).toHaveBeenCalled(); // the (large) 3D atlas is freed
   });
 
@@ -294,7 +299,7 @@ describe("label volume pool cleanup on dataset removal", () => {
     const ctx = makeCtx(writes);
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2));
     removeVolumeResources(ctx, "some-other-dataset");
-    expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(true);
+    expect(ctx.state.labelVolumePools.has(KEY)).toBe(true);
   });
 
   it("destroyAllVolumeResources frees every label volume pool", () => {

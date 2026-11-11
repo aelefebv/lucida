@@ -8,15 +8,15 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import type { ViewPane } from "../sceneStore.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
 import { DATASET_DRAG_TYPE, isViewPane } from "./viewPane.ts";
-import { coverageMessage, withheldMessage } from "./withheld.ts";
+import { coverageMessage } from "./coverage.ts";
 
 afterEach(cleanup);
 
 const LEFT: ViewPane = {
-  id: 0, shows: "all", draws: ["a"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, withheld: [], setAside: [],
+  id: 0, shows: "all", draws: ["a"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, setAside: [],
 };
 const RIGHT: ViewPane = {
-  id: 3, shows: [], draws: [], rect: [0.5, 0, 0.5, 1], cameraMode: "arcball", active: false, withheld: [], setAside: [],
+  id: 3, shows: [], draws: [], rect: [0.5, 0, 0.5, 1], cameraMode: "arcball", active: false, setAside: [],
 };
 
 function panes(views: ViewPane[], maximized: number | null = null) {
@@ -96,19 +96,5 @@ describe("a view that covers less", () => {
     expect(coverageMessage(1200, 340)).toBe(
       "This view shows less detail: 340 of the 1,200 chunks it needs don't fit in the memory the views share.",
     );
-  });
-});
-
-describe("why a view leaves a dataset out", () => {
-  const views = [LEFT, RIGHT];
-  const slice = (start: number, t = 0) => ({ kind: "slice" as const, plane: "xy" as const, cut: { start, end: start + 1 }, t });
-
-  it("names the view that holds it, where, and what comes later", () => {
-    expect(withheldMessage({ dataset_id: "a", holder: 0, held: slice(37), wanted: slice(5) }, views, "Sample A"))
-      .toBe("Sample A is shown in view 1 at Z 37, T 0; one dataset at two cuts comes later.");
-    expect(withheldMessage({ dataset_id: "a", holder: 0, held: slice(37), wanted: slice(37, 2) }, views, "Sample A"))
-      .toBe("Sample A is shown in view 1 at Z 37, T 0; one dataset at two timepoints comes later.");
-    expect(withheldMessage({ dataset_id: "a", holder: 3, held: { kind: "volume", t: 1 }, wanted: { kind: "volume", t: 0 } }, views, "Sample A"))
-      .toBe("Sample A is shown in view 2 in 3D at T 1; one dataset at two timepoints comes later.");
   });
 });

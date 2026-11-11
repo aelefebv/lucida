@@ -76,9 +76,10 @@ describe("gpuSlotsFor", () => {
     expect(gpuSlotsFor(manifest, { ...report, budgetBytes: 512 * MIB }, 1536 * MIB)(level1)?.slots).toBe(2048);
   });
 
-  it("puts each chunk in the pools of the mode that asked, so one dataset's slice and volume pools both admit", () => {
-    const slotOf = gpuSlotsFor(manifest, null, 256 * MIB, "y");
-    expect(slotOf(request())?.pool).toBe("ds:ch1:128x32@y:detail");
+  it("puts each chunk in the pools of the mode that asked, a slice view's in those of the axis it cuts", () => {
+    const slotOf = gpuSlotsFor(manifest, null, 256 * MIB);
+    expect(slotOf(request({ cut: { axis: "y", plane: 3 } }))?.pool).toBe("ds:ch1:128x32@y:detail");
+    expect(slotOf(request({ cut: { axis: "z", plane: 3 } }))?.pool).toBe("ds:ch1:128x128:detail");
     expect(slotOf(request({ mode: "volume" }))?.pool).toBe("ds:ch1:128x128x32:detail");
   });
 

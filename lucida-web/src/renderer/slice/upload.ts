@@ -23,7 +23,7 @@ import { asUint32Slice, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.
 import { makeSliceSlotKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
 import { findEvictionSlot, incomingDistSq, mayEvict } from "../eviction.ts";
-import { sliceLevelPlane } from "../slicePlane.ts";
+import type { PoolCut } from "../slicePlane.ts";
 import { anyViewWants } from "../worker/draws.ts";
 import { anySection, anyViewHolds, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
 import { sliceEvictionParams } from "./eviction.ts";
@@ -39,19 +39,20 @@ import {
 import { drawsPlane, viewDrawsPlane } from "./zRetarget.ts";
 
 /**
- * Write pre-sliced uint32 label planes into the member's r32uint label pool.
- * The delivery path already extracted the current Z-plane, so each
- * `chunk.data` is `chunkY*chunkX` ids. Ids are categorical, so they keep full
- * 32-bit width. Each cell records the plane it holds, so a frame drawing
- * another plane can hand the chunk back (`retireOtherLabelPlanes`).
+ * Write pre-sliced uint32 label planes into the r32uint pool of the label's
+ * form they were cut for, its plane at its chunk-T. The delivery path already
+ * extracted the plane, so each `chunk.data` is `chunkY*chunkX` ids. Ids are
+ * categorical, so they keep full 32-bit width. Each cell records the plane it
+ * holds, which it keeps drawing when the pool moves to another plane.
  */
 export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
   msg: LabelSliceChunkDataMessage,
 ): void {
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
+  const cut: PoolCut = { axis: "z", plane: msg.plane };
   const refuseAll = (reason: ChunkFeedbackReason): void =>
-    postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason);
+    postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason, cut);
 
   // A previous timepoint's plane racing in must not overwrite the pool.
   if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) {
@@ -59,14 +60,14 @@ export function handleLabelSliceChunkData(
     return;
   }
 
-  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY);
+  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, msg.t, msg.plane, levelWidth, levelHeight, chunkX, chunkY);
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.
     refuseAll("atlas-policy");
     return;
   }
 
-  const batch = new ResidencyBatch();
+  const batch = new ResidencyBatch(cut);
   const replaced: string[] = [];
   for (const chunk of msg.chunks) {
     const xOff = chunk.x * chunkX;
@@ -99,7 +100,7 @@ export function handleLabelSliceChunkData(
   }
   batch.post(ctx, memberId, "slice", LABEL_TIER);
   // After held, so a chunk this batch wrote and then overwrote ends lost.
-  postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", replaced, "replaced");
+  postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", replaced, "replaced", cut);
 }
 
 export function handleSliceChunkData(
@@ -109,11 +110,12 @@ export function handleSliceChunkData(
   poolKey: string,
   memberId: string,
 ): void {
-  const { level, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
+  const { level, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth } = msg;
 
   const { tier } = msg;
+  const cut: PoolCut = { axis: msg.sliceAxis ?? "z", plane: msg.plane };
   const refuseAll = (reason: ChunkFeedbackReason): void =>
-    postChunkResidency(ctx, memberId, "slice", tier, "refused", msg.chunks.map(c => c.key), reason);
+    postChunkResidency(ctx, memberId, "slice", tier, "refused", msg.chunks.map(c => c.key), reason, cut);
 
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     refuseAll("stale");
@@ -157,10 +159,13 @@ export function handleSliceChunkData(
     zInfoByLevel.set(level, { chunkZ, fullResDepth, levelDepth });
   }
 
-  const levelZ = sliceLevelPlane(fullResZ, fullResDepth, levelDepth);
+  const levelZ = msg.plane;
   const targetChunkZ = Math.floor(levelZ / chunkZ);
 
-  const batch = new ResidencyBatch();
+  const batch = new ResidencyBatch(cut);
+  // Planes of the batch's chunks whose slots it took, by plane: no view draws
+  // them, and the page counts them held until it hears they are gone.
+  const replaced = new Map<number, string[]>();
   let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
@@ -181,7 +186,13 @@ export function handleSliceChunkData(
         continue;
       }
 
-      const existingSlot = takeUndrawnPlane(atlas, memberId, chunk.key, level, msg.t);
+      const taken = takeUndrawnPlane(atlas, memberId, chunk.key, level, msg.t);
+      const existingSlot = taken?.slot;
+      if (taken) {
+        const keys = replaced.get(taken.plane);
+        if (keys) keys.push(chunk.key);
+        else replaced.set(taken.plane, [chunk.key]);
+      }
       // A pool grows only once every slot it has holds a chunk, and freely
       // only while the GPU total has room (`worker/gpuBudget.ts`).
       if (existingSlot === undefined && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
@@ -249,6 +260,9 @@ export function handleSliceChunkData(
   }
 
   batch.post(ctx, memberId, "slice", tier);
+  for (const [plane, keys] of replaced) {
+    postChunkResidency(ctx, memberId, "slice", tier, "lost", keys, "replaced", { axis: atlas.axis, plane });
+  }
   if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId), "slice");
 
   if (failure !== null) throw failure;
@@ -256,9 +270,8 @@ export function handleSliceChunkData(
 
 /**
  * Free the slot of a plane of `chunkKey` that no view draws, and return it
- * for the arriving plane, or undefined when there is none. Its chunk key is
- * the arriving one's, which the page already counts as sent, so nothing is
- * reported lost.
+ * and the plane it held for the arriving plane, or undefined when there is
+ * none.
  */
 function takeUndrawnPlane(
   atlas: SliceAtlasState,
@@ -266,14 +279,14 @@ function takeUndrawnPlane(
   chunkKey: string,
   level: number,
   t: number,
-): number | undefined {
+): { slot: number; plane: number } | undefined {
   const held = heldPlanesOf(atlas, memberId, chunkKey);
   if (!held) return undefined;
   for (const [plane, slot] of held) {
     if (drawsPlane(atlas, memberId, level, t, plane)) continue;
     dropSliceSlot(atlas, makeSliceSlotKey(memberId, chunkKey, plane));
     unmapSlot(atlas, slot);
-    return slot;
+    return { slot, plane };
   }
   return undefined;
 }
