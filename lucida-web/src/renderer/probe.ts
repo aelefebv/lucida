@@ -141,7 +141,7 @@ export function levelZeroPosition(
 export interface SliceHit {
   memberId: string;
   uv: [number, number];
-  label?: { entityId: string | undefined; dataW: number; dataH: number };
+  label?: { entityId: string | undefined; dataW: number; dataH: number; chunk?: { t: number; plane: number } };
 }
 
 /** Words per aggregate quad record (`SliceAggregateParams.quads`). */
@@ -173,7 +173,7 @@ export function sliceHits(
         hits.push({
           memberId: layer.datasetId,
           uv: [u, v],
-          label: { entityId: layer.entityId, dataW, dataH },
+          label: { entityId: layer.entityId, dataW, dataH, chunk: layer.labelChunk },
         });
       }
       continue;

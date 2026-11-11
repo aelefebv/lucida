@@ -49,7 +49,7 @@ export function handleLabelVolumeChunkData(
   }
 
   const pool = getOrCreateLabelVolumePool(
-    ctx, memberId, datasetId, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ,
+    ctx, memberId, datasetId, msg.t, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ,
   );
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.

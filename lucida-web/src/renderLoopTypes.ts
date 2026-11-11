@@ -127,35 +127,6 @@ export function drawnView(ctx: Pick<TickContext, "views">): TickView {
   return ctx.views[0];
 }
 
-const holdersByTick = new WeakMap<readonly TickView[], Map<string, TickView | null>>();
-
-/**
- * The view whose form `datasetId`'s pools of `mode` hold
- * (`Scene::dataset_holder`), or null when no view draws the dataset in that
- * mode. What the worker keeps in those pools is what this view draws. Read
- * once a tick.
- */
-export function holderView(
-  ctx: Pick<TickContext, "views" | "scene">,
-  datasetId: string,
-  mode: TickView["mode"],
-): TickView | null {
-  if (ctx.views.length === 1) return ctx.views[0].mode === mode ? ctx.views[0] : null;
-  let holders = holdersByTick.get(ctx.views);
-  if (!holders) {
-    holders = new Map();
-    holdersByTick.set(ctx.views, holders);
-  }
-  const key = `${datasetId}|${mode}`;
-  let holder = holders.get(key);
-  if (holder === undefined) {
-    const id = ctx.scene.dataset_holder(datasetId, mode);
-    holder = ctx.views.find((view) => view.id === id && view.mode === mode) ?? null;
-    holders.set(key, holder);
-  }
-  return holder;
-}
-
 /**
  * The canvas a view draws in, in pixels of the view's backing scale, and
  * that scale in backing pixels per device pixel.

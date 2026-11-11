@@ -25,7 +25,6 @@ import type {
 } from "../../renderer/workerProtocol.ts";
 import { setCameraUVForMember } from "../../renderer/slice/eviction.ts";
 import { memberCameraUV } from "../../renderer/slice/render.ts";
-import { retireOtherLabelPlanes } from "../../renderer/slice/atlas.ts";
 import { INDIRECTION_FAILED } from "../../renderer/remap.ts";
 import { chunkPoolTier } from "../../renderer/poolKeys.ts";
 import { drawOf } from "../../renderer/worker/draws.ts";
@@ -264,8 +263,6 @@ export class SimulatedWorker {
       if (layer.isLabel) {
         if (!layer.labelChunk) continue;
         this.drawnLabelChunks.set(layer.datasetId, layer.labelChunk);
-        const pool = this.ctx.state.labelSlicePools.get(layer.datasetId);
-        if (pool) retireOtherLabelPlanes(this.ctx, layer.datasetId, pool, layer.labelChunk.plane);
         continue;
       }
       if (layer.aggregate) continue;
@@ -282,9 +279,10 @@ export class SimulatedWorker {
    */
   staleLabelCells(): string[] {
     const out: string[] = [];
-    for (const [memberId, pool] of this.ctx.state.labelSlicePools) {
+    for (const pool of this.ctx.state.labelSlicePools.values()) {
+      const memberId = pool.memberId;
       const drawn = this.drawnLabelChunks.get(memberId);
-      if (!drawn) continue;
+      if (!drawn || pool.t !== drawn.t || pool.plane !== drawn.plane) continue;
       for (const [cell, plane] of pool.planes) {
         const key = pool.keys.get(cell);
         const [level, t, , z] = (key ?? "").split("/").map(Number);

@@ -139,7 +139,6 @@ describe("worker dispatch upload feedback", () => {
       memberId: "img-0:ch1",
       chunks: [{ data: new ArrayBuffer(8), dataType: "uint16", x: 0, y: 0, z: 0, key: "0/0/1/0/0/0" }],
       level: 0,
-      z: 0,
       t: 0,
       c: 1,
       levelWidth: 1,
@@ -149,7 +148,7 @@ describe("worker dispatch upload feedback", () => {
       chunkZ: 1,
       fullResDepth: 1,
       levelDepth: 1,
-      fullResZ: 0,
+      plane: 0,
       epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     });
 
@@ -162,6 +161,7 @@ describe("worker dispatch upload feedback", () => {
         change: "refused",
         keys: ["0/0/1/0/0/0"],
         reason: "missing-pool",
+        cut: { axis: "z", plane: 0 },
       },
     ]);
   });
@@ -328,6 +328,7 @@ describe("worker dispatch upload feedback", () => {
         frustumPlanes: null,
       },
       wantedChunks: [],
+      labels: [],
       epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
     });
 
@@ -349,6 +350,7 @@ describe("worker dispatch upload feedback", () => {
       datasetId: "ds-not-yet-ingested",
       view: 0,
       drawnViews: [0],
+      labels: [],
       currentT: 0,
       currentZ: 0,
       visibleRegion: {

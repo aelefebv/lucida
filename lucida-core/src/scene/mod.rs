@@ -19,7 +19,6 @@ pub use types::{
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
     RenderMode, declared_channels,
 };
-pub use views::{PoolForm, PoolKind, Withheld};
 
 use std::collections::HashMap;
 
@@ -137,10 +136,6 @@ pub struct Scene {
     /// of. Client-local.
     #[serde(skip)]
     canvas: [u32; 2],
-    /// Per dataset and kind of pools, the view whose form they hold. See
-    /// [`Scene::dataset_holder`]. Client-local.
-    #[serde(skip)]
-    holders: HashMap<(DatasetId, PoolKind), ViewId>,
     /// How the two views of a layout of two follow each other. Client-local.
     #[serde(skip)]
     links: ViewLinks,
@@ -253,7 +248,6 @@ impl Scene {
             next_view_id: first_added_view_id(),
             maximized: None,
             canvas: viewport,
-            holders: HashMap::new(),
             links: ViewLinks::default(),
             document: DocumentState::default(),
             display: DisplayState::default(),

@@ -28,7 +28,8 @@ import { createInitialState } from "../../renderer/worker/state.ts";
 import { handleLabelSliceChunkData } from "../../renderer/slice/upload.ts";
 import { handleLabelVolumeChunkData } from "../../renderer/volume/upload.ts";
 import type { LabelVolumeChunkDataMessage } from "../../renderer/workerProtocol.ts";
-import { computeLabelChunkRequests } from "../planning/labelRequests.ts";
+import { computeLabelChunkRequests, labelFormsFor } from "../planning/labelRequests.ts";
+import { labelSlicePoolKey, labelVolumePoolKey } from "../../renderer/labelPools.ts";
 import { buildManifestByImage } from "./delivery/manifestIndex.ts";
 import { dispatchLabelChunkDelivery, dispatchLabelVolumeChunkDelivery } from "./delivery/dispatch.ts";
 
@@ -155,15 +156,15 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       }),
     } as unknown as UploadClient;
 
-    // sliceZ=1 → the delivery path extracts the z=1 plane (last 4 ids).
-    const result = dispatchLabelChunkDelivery(client, delivery, meta!, { axis: "z", index: 1 }, EPOCHS);
+    // Plane 1 → the delivery path extracts the z=1 plane (last 4 ids).
+    const result = dispatchLabelChunkDelivery(client, delivery, meta!, { axis: "z", plane: 1 }, EPOCHS);
     // Only ONE 2x2 plane crosses (16 bytes), never the whole 8-id chunk (32).
     expect(result).toEqual({ memberId: "img-0:label:region-b", bytes: 16 });
     // The delivery stamped the owning dataset id (from the ManifestEntry key).
     expect(vi.mocked(client.labelSliceChunkData).mock.calls[0][1]).toBe("ds-0");
 
     // 4. The plane landed in the pool sized to the label's own dims.
-    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b");
+    const pool = ctx.state.labelSlicePools.get(labelSlicePoolKey("img-0:label:region-b", 0, 1));
     expect(pool).toBeDefined();
     expect(pool!.width).toBe(2);
     expect(pool!.height).toBe(2);
@@ -194,7 +195,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       mode: "slice",
     };
     const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
-    const result = dispatchLabelChunkDelivery(client, delivery, meta!, { axis: "z", index: 1 }, EPOCHS);
+    const result = dispatchLabelChunkDelivery(client, delivery, meta!, { axis: "z", plane: 1 }, EPOCHS);
     expect(result).toBe("other-plane");
     expect(client.labelSliceChunkData).not.toHaveBeenCalled();
   });
@@ -238,12 +239,20 @@ describe("label chunk flow: planes of a deeper chunk", () => {
     const [req] = computeLabelChunkRequests({
       datasetId: "ds-0", manifest: deepManifest, t: 0, z: 4, labelSettings: [{ visible: true, opacity: 0.5 }],
     });
-    expect(req).toMatchObject({ z: 0, plane: 4, planes: [2, 7] });
+    expect(req).toMatchObject({ z: 0, plane: 4, planes: [2, 7], cut: { axis: "z", plane: 4 } });
+  });
+
+  it("names the form a view draws the label in: its plane and chunk-T on an XY cut, its chunk-T in 3D", () => {
+    const args = { datasetId: "ds-0", manifest: deepManifest, t: 0, z: 4, labelSettings: [{ visible: true, opacity: 0.5 }] };
+    expect(labelFormsFor(args)).toEqual([{ memberId: "img-0:label:deep", t: 0, plane: 4 }]);
+    expect(labelFormsFor({ ...args, mode: "volume" })).toEqual([{ memberId: "img-0:label:deep", t: 0 }]);
+    // A side view draws no label.
+    expect(labelFormsFor({ ...args, cutAxis: "y" })).toEqual([]);
   });
 
   it("cuts the plane drawn out of a delivery of some planes, at its offset among them", () => {
     const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
-    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", index: 4 }, EPOCHS)).toEqual({
+    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", plane: 4 }, EPOCHS)).toEqual({
       memberId: "img-0:label:deep",
       bytes: 16,
     });
@@ -256,8 +265,8 @@ describe("label chunk flow: planes of a deeper chunk", () => {
       labelSliceChunkData: vi.fn(),
       labelVolumeChunkData: vi.fn(),
     } as unknown as UploadClient;
-    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", index: 6 }, EPOCHS)).toBe("other-plane");
-    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", index: 2 }, EPOCHS)).toBe("other-plane");
+    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", plane: 6 }, EPOCHS)).toBe("other-plane");
+    expect(dispatchLabelChunkDelivery(client, band(), meta, { axis: "z", plane: 2 }, EPOCHS)).toBe("other-plane");
     expect(dispatchLabelVolumeChunkDelivery(client, band(), meta, EPOCHS)).toBe("other-plane");
     expect(client.labelSliceChunkData).not.toHaveBeenCalled();
     expect(client.labelVolumeChunkData).not.toHaveBeenCalled();
@@ -326,7 +335,7 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
 
     // 4. The chunk landed in the volume pool sized to the label's own dims,
     //    stamped with the owning dataset for removal.
-    const pool = ctx.state.labelVolumePools.get("img-0:label:region-b");
+    const pool = ctx.state.labelVolumePools.get(labelVolumePoolKey("img-0:label:region-b", 0));
     expect(pool).toBeDefined();
     expect(pool!.width).toBe(2);
     expect(pool!.height).toBe(2);

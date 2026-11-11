@@ -8,8 +8,14 @@ import type { LabelSliceChunkDataMessage } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
 import { handleLabelSliceChunkData } from "./upload.ts";
 import { destroyAllSliceResources, removeSliceResources } from "./index.ts";
-import { resetLabelSliceAllocWarnings, retireOtherLabelPlanes } from "./atlas.ts";
+import { resetLabelSliceAllocWarnings } from "./atlas.ts";
 import { clearGpuErrorReports } from "../worker/gpuErrors.ts";
+import { labelSlicePoolKey } from "../labelPools.ts";
+
+const MEMBER = "img-0:label:region-b";
+/** The pool of the label's plane 0 at T 0, where `labelPlaneMsg` writes by default. */
+const KEY = labelSlicePoolKey(MEMBER, 0, 0);
+const CUT = { axis: "z", plane: 0 } as const;
 
 interface WriteTextureCall {
   origin: [number, number, number] | undefined;
@@ -43,7 +49,7 @@ function labelPlaneMsg(plane: Uint32Array, z = 0): LabelSliceChunkDataMessage {
   return {
     type: "labelSliceChunkData",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
-    memberId: "img-0:label:region-b",
+    memberId: MEMBER,
     datasetId: "ds-0",
     chunks: [{ data: plane.buffer as ArrayBuffer, dataType: "Uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
     level: 0,
@@ -69,8 +75,8 @@ describe("handleLabelSliceChunkData", () => {
 
     handleLabelSliceChunkData(ctx, labelPlaneMsg(plane));
 
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(true);
-    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(true);
+    const pool = ctx.state.labelSlicePools.get(KEY)!;
     expect(pool.width).toBe(2);
     expect(pool.height).toBe(2);
 
@@ -80,24 +86,25 @@ describe("handleLabelSliceChunkData", () => {
     expect(written[1]).toBe(92801); // full 32-bit id survives
   });
 
-  it("reuses the pool IN PLACE across Z steps (never blanks)", () => {
+  it("writes each plane into the pool of its own form", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
-    // Z=5 plane, then Z=6 plane — same dims, different ids.
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
-    const poolAfterZ5 = ctx.state.labelSlicePools.get("img-0:label:region-b");
-    const textureZ5 = poolAfterZ5?.texture;
+    const first = ctx.state.labelSlicePools.get(KEY)!;
+    const texture = first.texture;
 
+    // The same form again overwrites its pool in place.
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([5, 6, 7, 8])));
-    const poolAfterZ6 = ctx.state.labelSlicePools.get("img-0:label:region-b");
-
-    // Same pool + same texture object: overwritten in place, not destroyed
-    // + recreated (which would blank the overlay mid-scrub).
-    expect(poolAfterZ6).toBe(poolAfterZ5);
-    expect(poolAfterZ6!.texture).toBe(textureZ5);
-    expect(writes).toHaveLength(2);
-    // The second (new-Z) plane was written.
+    expect(ctx.state.labelSlicePools.get(KEY)).toBe(first);
+    expect(first.texture).toBe(texture);
     expect(new Uint32Array(writes[1].buffer)[0]).toBe(5);
+
+    // Another plane, as a second view cuts it, has a pool of its own.
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([9, 9, 9, 9]), 6));
+    const other = ctx.state.labelSlicePools.get(labelSlicePoolKey(MEMBER, 0, 6))!;
+    expect(other).not.toBe(first);
+    expect(other.texture).not.toBe(texture);
+    expect([...ctx.state.labelSlicePools.keys()].sort()).toEqual([KEY, labelSlicePoolKey(MEMBER, 0, 6)]);
   });
 
   it("reports each chunk it writes held, and the one a rewrite of its cell replaces lost", () => {
@@ -110,36 +117,12 @@ describe("handleLabelSliceChunkData", () => {
     next.chunks[0].key = "0/1/0/0/0/0";
     handleLabelSliceChunkData(ctx, next);
 
+    const report = { type: "chunkResidency", memberId: MEMBER, viewMode: "slice", tier: "detail", cut: CUT };
     expect(post.mock.calls.map(([msg]) => msg)).toEqual([
-      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
-      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "held", keys: ["0/1/0/0/0/0"], reason: undefined },
-      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
+      { ...report, change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
+      { ...report, change: "held", keys: ["0/1/0/0/0/0"], reason: undefined },
+      { ...report, change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
     ]);
-  });
-
-  it("hands back a chunk whose cell holds another plane than the frame draws, once", () => {
-    const writes: WriteTextureCall[] = [];
-    const ctx = makeCtx(writes);
-    const post = ctx.post as unknown as ReturnType<typeof vi.fn>;
-    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4]), 5));
-    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
-
-    // The plane it holds: nothing to send.
-    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 5);
-    expect(post).toHaveBeenCalledTimes(1);
-
-    // A Z move to plane 6 of the same chunk keeps its key.
-    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
-    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
-    expect(post.mock.calls.slice(1).map(([msg]) => msg)).toEqual([
-      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
-    ]);
-    // The old plane stays drawn until the new one lands, which reports no loss.
-    expect(writes).toHaveLength(1);
-    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([5, 6, 7, 8]), 6));
-    expect(post.mock.calls.at(-1)![0]).toMatchObject({ change: "held", keys: ["0/0/0/0/0/0"] });
-    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
-    expect(post).toHaveBeenCalledTimes(3);
   });
 
   it("clamps the pool texture to the device's max 2D dimension", () => {
@@ -154,7 +137,7 @@ describe("handleLabelSliceChunkData", () => {
       chunkX: 128,
       chunkY: 128,
     });
-    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
+    const pool = ctx.state.labelSlicePools.get(KEY)!;
     expect(pool.width).toBeLessThanOrEqual(64);
     expect(pool.height).toBeLessThanOrEqual(64);
     expect(writes).toHaveLength(1);
@@ -164,7 +147,7 @@ describe("handleLabelSliceChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
-    expect(ctx.state.labelSlicePools.get("img-0:label:region-b")!.datasetId).toBe("ds-0");
+    expect(ctx.state.labelSlicePools.get(KEY)!.datasetId).toBe("ds-0");
   });
 
   it("drops a stale-epoch delivery so it can't overwrite the pool with an old T/Z", () => {
@@ -174,7 +157,7 @@ describe("handleLabelSliceChunkData", () => {
     ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, request: 1 };
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect(writes).toHaveLength(0);
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(false);
   });
 
   it("skips the label (no throw, no pool) when the texture can't be allocated", () => {
@@ -185,17 +168,18 @@ describe("handleLabelSliceChunkData", () => {
       throw new Error("out of memory");
     });
     expect(() => handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])))).not.toThrow();
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(false);
     expect(writes).toHaveLength(0);
     // Refused, so the page does not count the plane as resident.
     expect(ctx.post).toHaveBeenCalledWith({
       type: "chunkResidency",
-      memberId: "img-0:label:region-b",
+      memberId: MEMBER,
       viewMode: "slice",
       tier: "detail",
       change: "refused",
       keys: ["0/0/0/0/0/0"],
       reason: "atlas-policy",
+      cut: CUT,
     });
   });
 
@@ -207,11 +191,11 @@ describe("handleLabelSliceChunkData", () => {
       Promise.resolve(outOfMemory),
     );
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(true);
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(true);
 
     await Promise.resolve();
     await Promise.resolve();
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(false);
     expect(ctx.post).toHaveBeenCalledWith(expect.objectContaining({ type: "gpuError", kind: "out-of-memory" }));
 
     const allocations = (ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
@@ -237,7 +221,7 @@ describe("handleLabelSliceChunkData", () => {
     });
 
     expect(() => handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])))).not.toThrow();
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(false);
     expect(writes).toHaveLength(0);
     expect(textureDestroy).toHaveBeenCalled();
   });
@@ -248,14 +232,14 @@ describe("label slice pool cleanup on dataset removal", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
-    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
+    const pool = ctx.state.labelSlicePools.get(KEY)!;
     const destroyed = pool.texture.destroy as unknown as ReturnType<typeof vi.fn>;
 
-    // removeLayerResources passes the dataset id ("ds-0"), which is not the
-    // pool's key ("img-0:label:region-b").
+    // removeLayerResources passes the dataset id ("ds-0"), which is not in
+    // the pool's key.
     removeSliceResources(ctx, "ds-0");
 
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(false);
     expect(destroyed).toHaveBeenCalled(); // the label texture is freed
   });
 
@@ -264,7 +248,7 @@ describe("label slice pool cleanup on dataset removal", () => {
     const ctx = makeCtx(writes);
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     removeSliceResources(ctx, "some-other-dataset");
-    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(true);
+    expect(ctx.state.labelSlicePools.has(KEY)).toBe(true);
   });
 
   it("destroyAllSliceResources frees every label slice pool", () => {

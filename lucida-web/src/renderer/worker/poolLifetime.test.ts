@@ -14,6 +14,7 @@ import type {
   ColdStateMessage,
   GpuCapacityMessage,
   GpuMemoryMessage,
+  LabelSliceChunkDataMessage,
   SliceChunkDataMessage,
   VolumeChunkDataMessage,
   WorkerToMainMessage,
@@ -23,6 +24,7 @@ import { getOrCreateLabelSlicePool } from "../slice/index.ts";
 import { getOrCreateLabelVolumePool } from "../volume/index.ts";
 import type { SliceAtlasState } from "../slice/index.ts";
 import { UNTIMED } from "../passTiming.ts";
+import { labelSlicePoolKey } from "../labelPools.ts";
 import { createInitialState } from "./state.ts";
 import { drawOf } from "./draws.ts";
 import { dispatchMessage } from "./dispatch.ts";
@@ -132,6 +134,7 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
   const visibleChannels = opts.visibleChannels ?? [0];
   return {
     type: "coldState",
+    labels: [],
     epochs: EPOCHS,
     datasetId,
     currentT: 0,
@@ -179,8 +182,8 @@ function chunkAt(memberId: string): VolumeChunkDataMessage {
   };
 }
 
-/** The plane of level 2's one chunk along Z that full-resolution Z `fullResZ` cuts, at T `t`. */
-function planeAt(memberId: string, fullResZ: number, t = 0): SliceChunkDataMessage {
+/** Plane `plane` of level 2's one chunk along Z, at T `t`. */
+function planeAt(memberId: string, plane: number, t = 0): SliceChunkDataMessage {
   return {
     type: "sliceChunkData",
     epochs: EPOCHS,
@@ -188,7 +191,6 @@ function planeAt(memberId: string, fullResZ: number, t = 0): SliceChunkDataMessa
     memberId,
     chunks: [{ data: new Uint16Array(32 * 32).fill(7).buffer, dataType: "uint16", x: 0, y: 0, z: 0, key: `2/${t}/0/0/0/0` }],
     level: 2,
-    z: fullResZ,
     t,
     c: 0,
     levelWidth: 64,
@@ -198,7 +200,7 @@ function planeAt(memberId: string, fullResZ: number, t = 0): SliceChunkDataMessa
     chunkZ: 32,
     fullResDepth: 128,
     levelDepth: 32,
-    fullResZ,
+    plane,
   };
 }
 
@@ -226,8 +228,8 @@ describe("removing a dataset", () => {
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 1] }));
     await dispatchMessage(ctx, chunkAt(`ds1-img:ch0`));
     expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!.slots.size).toBe(1);
-    getOrCreateLabelSlicePool(ctx, "label", "ds1", 64, 64, 32, 32);
-    getOrCreateLabelVolumePool(ctx, "label", "ds1", 64, 64, 32, 32, 32, 32);
+    getOrCreateLabelSlicePool(ctx, "label", "ds1", 0, 0, 64, 64, 32, 32);
+    getOrCreateLabelVolumePool(ctx, "label", "ds1", 0, 64, 64, 32, 32, 32, 32);
     expect(gpu.live().textures).toBeGreaterThan(baseline.textures);
 
     await dispatchMessage(ctx, { type: "removeLayerResources", datasetId: "ds1" });
@@ -398,8 +400,8 @@ describe("a cold state frees the pools it no longer routes to", () => {
     // Level 2 is 32 planes deep, a quarter of level 0: Z 4 cuts its plane 1, Z 20 its plane 5.
     await dispatchMessage(ctx, cold("ds1", { ...slice, view: 0, currentZ: 4 }));
     await dispatchMessage(ctx, cold("ds1", { ...slice, view: 1, currentZ: 20 }));
-    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 4));
-    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 20));
+    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 1));
+    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 5));
 
     const pool = ctx.state.sliceAtlases.get("ds1:ch0:32x32:detail")!;
     const first = pool.slots.get("ds1-img:ch0|2/0/0/0/0/0|1")!;
@@ -411,7 +413,7 @@ describe("a cold state frees the pools it no longer routes to", () => {
     // View 0 steps to Z 8, plane 2: it re-cuts its own plane's slot in place,
     // and view 1's plane stays.
     await dispatchMessage(ctx, cold("ds1", { ...slice, view: 0, currentZ: 8 }));
-    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 8));
+    await dispatchMessage(ctx, planeAt("ds1-img:ch0", 2));
     expect([...pool.slots].sort()).toEqual([
       ["ds1-img:ch0|2/0/0/0/0/0|2", first],
       ["ds1-img:ch0|2/0/0/0/0/0|5", other],
@@ -444,33 +446,84 @@ describe("a cold state frees the pools it no longer routes to", () => {
   });
 });
 
-describe("label pools live as long as the view mode that draws them", () => {
+/** Plane `plane` of the label's one chunk at level 0, T 0. */
+function labelPlane(plane: number): LabelSliceChunkDataMessage {
+  return {
+    type: "labelSliceChunkData",
+    epochs: EPOCHS,
+    memberId: "label",
+    datasetId: "ds1",
+    chunks: [{ data: new Uint32Array(32 * 32).buffer, dataType: "uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
+    level: 0, t: 0, c: 0,
+    levelWidth: 64, levelHeight: 64, chunkX: 32, chunkY: 32, plane,
+  };
+}
+
+/** A slice view `view` of ds1 drawing the label at plane `plane`, beside the views `drawnViews`. */
+function sliceWithLabel(view: number, plane: number, drawnViews: number[] = [view]): ColdStateMessage {
+  return cold("ds1", { viewMode: "slice", view, drawnViews, labels: [{ memberId: "label", t: 0, plane }] });
+}
+
+function residency(posts: unknown[]): unknown[] {
+  return posts.filter((m) => (m as { type: string }).type === "chunkResidency");
+}
+
+describe("label pools live as long as a view draws their form", () => {
   it("frees the other mode's label pool on a switch and reports its chunks lost", async () => {
     const gpu = trackingDevice();
     const { ctx, posts } = makeCtx(gpu.device);
-    await dispatchMessage(ctx, cold("ds1", { viewMode: "slice" }));
-    await dispatchMessage(ctx, {
-      type: "labelSliceChunkData",
-      epochs: EPOCHS,
-      memberId: "label",
-      datasetId: "ds1",
-      chunks: [{ data: new Uint32Array(32 * 32).buffer, dataType: "uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
-      level: 0, t: 0, c: 0,
-      levelWidth: 64, levelHeight: 64, chunkX: 32, chunkY: 32, plane: 0,
-    });
-    const labelTexture = ctx.state.labelSlicePools.get("label")!.texture as unknown as MockTexture;
-    expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
-      { type: "chunkResidency", memberId: "label", viewMode: "slice", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
-    );
+    await dispatchMessage(ctx, sliceWithLabel(0, 0));
+    await dispatchMessage(ctx, labelPlane(0));
+    const labelTexture = ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 0))!.texture as unknown as MockTexture;
+    const report = { type: "chunkResidency", memberId: "label", viewMode: "slice", tier: "detail", cut: { axis: "z", plane: 0 } };
+    expect(residency(posts)).toContainEqual({ ...report, change: "held", keys: ["0/0/0/0/0/0"], reason: undefined });
     posts.length = 0;
 
     await dispatchMessage(ctx, cold("ds1"));
 
     expect(ctx.state.labelSlicePools.size).toBe(0);
     expect(labelTexture.destroyed).toBe(true);
-    expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
-      { type: "chunkResidency", memberId: "label", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "freed" },
-    );
+    expect(residency(posts)).toContainEqual({ ...report, change: "lost", keys: ["0/0/0/0/0/0"], reason: "freed" });
+  });
+
+  it("gives each plane two views cut a label at its own pool, and frees one when both cut the same plane", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    await dispatchMessage(ctx, sliceWithLabel(0, 1, [0, 1]));
+    await dispatchMessage(ctx, sliceWithLabel(1, 5, [0, 1]));
+    await dispatchMessage(ctx, labelPlane(1));
+    await dispatchMessage(ctx, labelPlane(5));
+    expect([...ctx.state.labelSlicePools.keys()].sort()).toEqual([
+      labelSlicePoolKey("label", 0, 1), labelSlicePoolKey("label", 0, 5),
+    ]);
+    const kept = ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 1))!;
+    const freed = ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 5))!.texture as unknown as MockTexture;
+    posts.length = 0;
+
+    await dispatchMessage(ctx, sliceWithLabel(1, 1, [0, 1]));
+
+    expect([...ctx.state.labelSlicePools]).toEqual([[labelSlicePoolKey("label", 0, 1), kept]]);
+    expect(freed.destroyed).toBe(true);
+    expect(residency(posts)).toEqual([expect.objectContaining({ change: "lost", reason: "freed", cut: { axis: "z", plane: 5 } })]);
+  });
+
+  it("re-cuts a view's label pool in place when it moves to a plane no pool holds", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    await dispatchMessage(ctx, sliceWithLabel(0, 1));
+    await dispatchMessage(ctx, labelPlane(1));
+    const pool = ctx.state.labelSlicePools.get(labelSlicePoolKey("label", 0, 1))!;
+    posts.length = 0;
+
+    await dispatchMessage(ctx, sliceWithLabel(0, 2));
+
+    // The pool keeps its texels drawing until plane 2 lands, and hands back
+    // plane 1's chunk so the page sends plane 2's.
+    expect([...ctx.state.labelSlicePools]).toEqual([[labelSlicePoolKey("label", 0, 2), pool]]);
+    expect((pool.texture as unknown as MockTexture).destroyed).toBe(false);
+    expect(residency(posts)).toEqual([expect.objectContaining({
+      change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced", cut: { axis: "z", plane: 1 },
+    })]);
   });
 });
 

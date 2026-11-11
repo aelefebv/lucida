@@ -6,7 +6,7 @@ import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import type { BlendMode } from "./layerCompositor.ts";
 import type { DeviceLimits } from "./gpuContext.ts";
-import type { SpatialAxis } from "./slicePlane.ts";
+import type { PoolCut, SpatialAxis } from "./slicePlane.ts";
 
 export interface InitMessage {
   type: "init";
@@ -76,7 +76,6 @@ export interface SliceChunkDataMessage {
   memberId: string;
   chunks: Chunk[];
   level: number;
-  z: number;
   t: number;
   c: number;
   levelWidth: number;
@@ -86,7 +85,8 @@ export interface SliceChunkDataMessage {
   chunkZ: number;
   fullResDepth: number;
   levelDepth: number;
-  fullResZ: number;
+  /** The plane of the level along {@link sliceAxis} the chunks were cut at. */
+  plane: number;
   /** The axis the planes were cut along, as the cold state's `sliceAxis`. Absent: Z. */
   sliceAxis?: SpatialAxis;
 }
@@ -647,6 +647,8 @@ export interface ColdStateMessage {
    */
   wantedChunks: WantedMemberChunks[];
   activeSet: ColdStateActiveEntry[];
+  /** The label overlays the view draws over the dataset, each in its form. */
+  labels: LabelForm[];
   /** The view this cold state lays out the dataset for. */
   view: number;
   /** The mode of {@link view}, whose pools it draws the dataset from. */
@@ -658,6 +660,19 @@ export interface ColdStateMessage {
   drawnViews: number[];
   /** How this dataset's atlases hold samples, and so how its descriptors read them. */
   sampleFormat: SampleFormat;
+}
+
+/**
+ * A label overlay a view draws, in the form it draws it: the label's chunk-T,
+ * and on an XY cut the plane of its level. The worker keeps one pool per label
+ * and form, shared by every view that draws that form.
+ */
+export interface LabelForm {
+  /** The label overlay's member id, its image id. */
+  memberId: string;
+  t: number;
+  /** The plane of the label's level an XY cut draws. Absent in a volume view, which draws every plane. */
+  plane?: number;
 }
 
 /** The chunks the planner wants for one member in one tier. */
@@ -715,6 +730,8 @@ export interface ColdStateSelectionMessage {
   visibleRegion: VisibleRegion;
   /** Every wanted chunk at the new selection; see {@link ColdStateMessage.wantedChunks}. */
   wantedChunks: WantedMemberChunks[];
+  /** See {@link ColdStateMessage.labels}. */
+  labels: LabelForm[];
   epochs: SceneEpochs;
 }
 
@@ -735,6 +752,8 @@ export interface ColdStateDeltaMessage {
   view: number;
   /** See {@link ColdStateMessage.drawnViews}. */
   drawnViews: number[];
+  /** See {@link ColdStateMessage.labels}. */
+  labels: LabelForm[];
   epochs: SceneEpochs;
   currentT: number;
   currentZ: number;
@@ -927,6 +946,12 @@ export interface ChunkResidencyMessage {
   keys: string[];
   /** Absent for `held`. */
   reason?: ChunkFeedbackReason;
+  /**
+   * The plane of the chunks a slice pool held or lost, and the axis its pool
+   * cuts: a slice pool holds each plane of a chunk on its own. Absent for
+   * volume pools, which hold whole chunks.
+   */
+  cut?: PoolCut;
 }
 
 /** A wanted chunk the worker does not hold as the current selection draws it. */
@@ -941,6 +966,8 @@ export type MissingChunk = {
   /** The member's channel. */
   c: number;
   chunkKey: string;
+  /** The plane of the chunk a slice view draws and its pool lacks. Absent in a volume view. */
+  cut?: PoolCut;
 };
 
 /**

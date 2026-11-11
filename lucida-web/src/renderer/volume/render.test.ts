@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
   UNIFORM: 0x40,
 };
 
+import { labelVolumePoolKey } from "../labelPools.ts";
 import type { EntityDescriptorIndex, MemberSourceBinding } from "../descriptorBuffer.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { UNTIMED } from "../passTiming.ts";
@@ -472,11 +473,11 @@ describe("handleVolumeRenderMultiPass", () => {
 
     it("draws a frame with a label layer whole", async () => {
       const { renderer, ctx, msg } = bandedFrame();
-      ctx.state.labelVolumePools.set("labels", {} as never);
+      ctx.state.labelVolumePools.set(labelVolumePoolKey("labels", 0), {} as never);
       // The stand-in label pool cannot draw; the batches before it already have.
       await handleVolumeRenderMultiPass(ctx, {
         ...msg,
-        layers: [...msg.layers, { ...msg.layers[0], datasetId: "labels", isLabel: true }],
+        layers: [...msg.layers, { ...msg.layers[0], datasetId: "labels", isLabel: true, labelChunk: { level: 0, t: 0 } }],
       }).catch(() => {});
       expect(renderer.renderMembers.mock.calls.map((call) => call[9])).toEqual([undefined, undefined]);
     });

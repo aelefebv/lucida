@@ -23,6 +23,7 @@ import { failedChunkReport, summarizeFailedChunks } from "./pipeline/failedChunk
 import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
+import { deliveryTarget } from "./renderer/poolKeys.ts";
 import { subscribeAppearance } from "./theme/appearance.ts";
 import { AdaptiveResolution, cappedPixelRatioScale } from "./renderResolution.ts";
 import { FramePacer, bandsFor } from "./framePacing.ts";
@@ -135,7 +136,9 @@ export class RenderLoop implements TraceEnvironment {
   /** Whether a view's chunk is held in the CPU cache and on the GPU. */
   private readonly chunkResidency: ChunkResidency = {
     holds: (req) => this.session.cpuCache.holds(req),
-    onGpu: (req) => this.session.cpuCache.deliveryState.isChunkHeld(req.imageId, req.c, req.chunkKey, req.tier, req.mode),
+    onGpu: (req) => this.session.cpuCache.deliveryState.isChunkHeld(
+      req.imageId, req.c, req.chunkKey, req.tier, deliveryTarget(req.mode, req.cut),
+    ),
   };
   /** Each view's mode at the latest tick, so a 2D/3D switch is seen once. */
   private viewModes = new Map<number, "slice" | "volume">();
@@ -238,12 +241,11 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Start planning and delivery over, as a fresh loop would. A dataset's
-   * slice pools and volume pools each have a holder, so a view's 2D/3D switch
-   * moves the view onto the other kind: its datasets' pools of the mode it
-   * left go once no view draws from them, and those of the mode it joins fill
-   * from a full cold state. Starting over keeps a lone view's switch what a
-   * fresh loop's start was, and opens a run as one did.
+   * Start planning and delivery over, as a fresh loop would. A view's 2D/3D
+   * switch moves it onto the other kind of its datasets' pools: those of the
+   * mode it left go once no view draws from them, and those of the mode it
+   * joins fill from a full cold state. Starting over keeps a lone view's
+   * switch what a fresh loop's start was, and opens a run as one did.
    */
   private restartPipeline(): void {
     this.tickCoordinator.dispose();
@@ -268,7 +270,7 @@ export class RenderLoop implements TraceEnvironment {
     // A tick runs only when one makes a chunk sendable again.
     this.client.onChunkResidency = (msg) => {
       const resend = this.uploader.handleChunkResidency(
-        msg.memberId, msg.viewMode, msg.tier, msg.change, msg.keys, this.session.cpuCache, msg.reason,
+        msg.memberId, deliveryTarget(msg.viewMode, msg.cut), msg.tier, msg.change, msg.keys, this.session.cpuCache, msg.reason,
       );
       if (resend) {
         this.setDirty("residency", "chunk_residency");

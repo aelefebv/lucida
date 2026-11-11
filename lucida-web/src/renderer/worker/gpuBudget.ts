@@ -292,7 +292,7 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
       const keep = rankSlotsToKeep(sliceEvictionParams(state, atlas, tier)).map((slot) => slot.key);
       dropped = shrinkSliceAtlas(ctx.device, atlas, spare.steps - freeSteps, keep);
     }
-    postSlotsLost(ctx, spare.kind, tier, dropped, "evicted");
+    postSlotsLost(ctx, spare.kind, tier, dropped, "evicted", "axis" in spare.atlas ? spare.atlas.axis : undefined);
     needed -= freeSteps * spare.stepBytes;
     const { datasetId } = spare.atlas;
     touched.set(datasetModeKey(datasetId, spare.kind), { datasetId, mode: spare.kind });

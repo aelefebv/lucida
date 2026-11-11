@@ -10,11 +10,10 @@
  */
 
 import { assertCanvasSize } from "./applyAndSend.ts";
-import { sliceCut } from "./pipeline/planning/snapshot.ts";
 import type { MinimapChunkCoord, TickCoordinator, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
-import { drawnView, holderView, type TickContext, type TickView } from "./renderLoopTypes.ts";
+import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
 import { readResolvedLayers } from "./resolvedLayers.ts";
 import { renderSliceView, scaleRect, sliceFrameScale } from "./slicePath.ts";
 import { renderVolumeView, volumeFrameScale } from "./volumePath.ts";
@@ -37,7 +36,7 @@ export function tickViews(
 
   const plan = coordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!plan) return false;
-  const backlogged = deliver(ctx, coordinator, uploader, plan);
+  const backlogged = deliver(ctx, coordinator, uploader);
   if (!frame.render) return backlogged;
   if (ctx.views.length === 1) drawOnlyView(ctx, plan, ctx.views[0]);
   else drawViews(ctx, plan, redraws.select(ctx, frame.newChunks));
@@ -45,19 +44,13 @@ export function tickViews(
 }
 
 /** Deliver decoded chunks, unless a short volume view's move holds them. */
-function deliver(ctx: TickContext, coordinator: TickCoordinator, uploader: Uploader, plan: TickCoordinatorResult): boolean {
+function deliver(ctx: TickContext, coordinator: TickCoordinator, uploader: Uploader): boolean {
   // Read after the plan, which notes whether the view moved.
   if (drawnView(ctx).mode === "volume" && coordinator.msUntilUploadsResume(performance.now()) !== null) {
     uploader.holdDelivery();
     return false;
   }
-  if (ctx.views.every((view) => view.mode === "volume")) {
-    return uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
-  }
-  return uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, (datasetId) => {
-    const holder = holderView(ctx, datasetId, "slice");
-    return holder ? sliceCut(ctx.scene, holder.id, plan.sliceLayers.get(datasetId)) : null;
-  });
+  return uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES);
 }
 
 /** The one view across the canvas, which draws straight onto it. */

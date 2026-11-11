@@ -13,6 +13,8 @@ import type { RowBand, VolumeMemberDraw, VolumePoolBinding } from "../volumeRend
 import { batchLayers, type BatchLayer } from "../layerBatches.ts";
 import { resolveMemberPools } from "../descriptorBuffer.ts";
 import { flushViewIndirection } from "../viewIndirection.ts";
+import { labelVolumePoolKey } from "../labelPools.ts";
+
 import {
   type AtlasState,
   type LabelVolumePool,
@@ -26,6 +28,11 @@ import { heldViewDepth, trimViewLayerTargets, viewDepth } from "../worker/viewRe
 import { beginViewFrame } from "../worker/viewFrame.ts";
 
 /** Defensive fallback model transform. A real label layer always carries its source member's matrices. */
+/** The pool of the label form a volume layer draws, its chunk-T. */
+function labelVolumePoolOf(ctx: WorkerCtx, layer: VolumeLayerParams): LabelVolumePool | undefined {
+  return layer.labelChunk && ctx.state.labelVolumePools.get(labelVolumePoolKey(layer.datasetId, layer.labelChunk.t));
+}
+
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
 ]);
@@ -117,7 +124,7 @@ function renderLabelVolumeLayer(
   isFirstLayer: boolean,
 ): boolean {
   const memberId = layer.datasetId;
-  const pool = ctx.state.labelVolumePools.get(memberId);
+  const pool = labelVolumePoolOf(ctx, layer);
   if (!pool) return false;
   if (layer.labelChunk) markLabelVolumeFailed(ctx, memberId, pool, layer.labelChunk);
 
@@ -264,7 +271,7 @@ export async function handleVolumeRenderMultiPass(
     // Label overlays render from their own r32uint pool, independent of the
     // cold-state chunk pipeline.
     if (layer.isLabel) {
-      if (!ctx.state.labelVolumePools.has(memberId)) continue;
+      if (!labelVolumePoolOf(ctx, layer)) continue;
       drawn.push({ label: layer });
       batchInput.push({ rect: layer.scissorRect, blendMode: layer.blendMode, alone: true });
       lastMode = 0;

@@ -652,10 +652,6 @@ impl Scene {
         if followed.axes && self.epochs.selection == epochs.selection {
             self.epochs.selection += 1;
         }
-        // With one view, its holding is all there is and draws nothing new.
-        if self.refresh_holders() && self.views().len() > 1 {
-            self.epochs.selection += 1;
-        }
     }
 
     fn apply_command(&mut self, cmd: Command) {

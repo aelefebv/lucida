@@ -58,6 +58,7 @@ function makeCold(
 ): ColdStateMessage {
   return {
     type: "coldState",
+    labels: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     datasetId: "ds1",
     currentT: 0,

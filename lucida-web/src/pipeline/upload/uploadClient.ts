@@ -83,7 +83,6 @@ export interface UploadClient {
       key: string;
     }[],
     level: number,
-    z: number,
     t: number,
     c: number,
     levelWidth: number,
@@ -93,7 +92,7 @@ export interface UploadClient {
     chunkZ: number,
     fullResDepth: number,
     levelDepth: number,
-    fullResZ: number,
+    plane: number,
     epochs: SceneEpochs,
     tier: ResidencyTier,
     sliceAxis?: SpatialAxis,

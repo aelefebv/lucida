@@ -147,6 +147,7 @@ const display = { contrastMin: 0, contrastMax: 1, gamma: 1, opacity: 1, colormap
 function cold(datasetId: string): ColdStateMessage {
   return {
     type: "coldState",
+    labels: [],
     epochs: EPOCHS,
     datasetId,
     currentT: 0,

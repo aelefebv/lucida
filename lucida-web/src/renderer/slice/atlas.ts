@@ -26,6 +26,7 @@ import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wan
 import { planCompaction } from "../poolCompaction.ts";
 import type { SpatialAxis } from "../slicePlane.ts";
 import { makeCompositeKey, makeSliceSlotKey, parseCompositeKey } from "../chunkKeys.ts";
+import { labelSlicePoolKey } from "../labelPools.ts";
 import {
   compactViewSlots,
   destroyViewIndirection,
@@ -36,15 +37,21 @@ import {
 } from "../viewIndirection.ts";
 
 /**
- * A label overlay's slice pool: one `r32uint` texture holding the current
- * Z-slice of the mask, with each chunk at its place in the plane. No shared
- * LRU slots, because a label overlay is one member with a bounded 2D
- * footprint.
+ * A label overlay's slice pool: one `r32uint` texture holding one plane of the
+ * mask at one chunk-T (its form, `labelPools.ts`), with each chunk at its
+ * place in the plane. No shared LRU slots, because a label overlay is one
+ * member with a bounded 2D footprint.
  *
- * The texture is written in place as Z/T slices arrive, so a label never
- * blanks mid-scrub.
+ * A view moving to another plane takes the pool of the form it left when no
+ * other view draws that form, and the texture is written in place as the new
+ * plane arrives, so a label never blanks mid-scrub.
  */
 export interface LabelSlicePool {
+  /** The label overlay's member id. */
+  memberId: string;
+  /** The chunk-T and the plane of the label level the pool holds. */
+  t: number;
+  plane: number;
   texture: GPUTexture; // r32uint, size [width, height]
   /**
    * One entry per chunk cell of the plane, mapping the cell to itself, so a
@@ -95,9 +102,9 @@ export function resetLabelSliceAllocWarnings(): void {
 }
 
 /**
- * Get or create the label slice pool for `memberId`, sized to the level's 2D
- * dims clamped to the device's max 2D texture dimension. Reused in place while
- * the dims are unchanged, so a Z/T scrub never blanks the overlay.
+ * Get or create the label slice pool for `memberId`'s plane `plane` at
+ * chunk-T `t`, sized to the level's 2D dims clamped to the device's max 2D
+ * texture dimension. Reused in place while the dims are unchanged.
  *
  * Returns `null` when the texture or indirection buffer fails to allocate,
  * after unwinding any partial allocation, so the caller skips the label, for
@@ -108,6 +115,8 @@ export function getOrCreateLabelSlicePool(
   ctx: WorkerCtx,
   memberId: string,
   datasetId: string,
+  t: number,
+  plane: number,
   width: number,
   height: number,
   chunkX: number,
@@ -120,12 +129,13 @@ export function getOrCreateLabelSlicePool(
   const cy = Math.max(1, chunkY);
 
   const pools = ctx.state.labelSlicePools;
-  const existing = pools.get(memberId);
+  const poolKey = labelSlicePoolKey(memberId, t, plane);
+  const existing = pools.get(poolKey);
   if (existing && existing.width === w && existing.height === h && existing.chunkX === cx && existing.chunkY === cy) {
     existing.datasetId = datasetId;
     return existing;
   }
-  if (existing) removeLabelSlicePool(ctx, memberId, "freed");
+  if (existing) removeLabelSlicePool(ctx, poolKey, "freed");
 
   const sizeKey = `${memberId}|${w}x${h}`;
   if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
@@ -142,7 +152,9 @@ export function getOrCreateLabelSlicePool(
       (lost) => {
         // A size that ran out of memory once would again on every delivery.
         ctx.state.labelSizesOutOfMemory.add(sizeKey);
-        if (pools.get(memberId)?.texture === lost) removeLabelSlicePool(ctx, memberId, "out-of-memory");
+        for (const [key, pool] of pools) {
+          if (pool.texture === lost) removeLabelSlicePool(ctx, key, "out-of-memory");
+        }
         handleGpuOutOfMemory(ctx);
       },
     );
@@ -168,11 +180,12 @@ export function getOrCreateLabelSlicePool(
   ctx.device.queue.writeBuffer(indirectionBuf, 0, indirection);
 
   const pool: LabelSlicePool = {
+    memberId, t, plane,
     texture, indirectionBuf, indirection, markedFailed: new Set(),
     chunkX: cx, chunkY: cy, grid,
     keys: new Map(), planes: new Map(), datasetId, width: w, height: h,
   };
-  pools.set(memberId, pool);
+  pools.set(poolKey, pool);
   return pool;
 }
 
@@ -212,29 +225,6 @@ export function markLabelSliceFailed(
   return changed;
 }
 
-/**
- * Report lost each chunk whose cell holds another plane than `plane`, the one
- * the view draws now. A Z move inside one chunk along Z keeps the chunk key,
- * and the page sends a key it holds as delivered only once it hears the key
- * is gone. The cell draws its old plane until the new one lands, as on a T
- * scrub.
- */
-export function retireOtherLabelPlanes(
-  ctx: WorkerCtx,
-  memberId: string,
-  pool: LabelSlicePool,
-  plane: number,
-): void {
-  const lost: string[] = [];
-  for (const [cell, drawn] of pool.planes) {
-    const key = pool.keys.get(cell);
-    if (drawn === plane || key === undefined) continue;
-    lost.push(key);
-    pool.keys.delete(cell);
-  }
-  postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", lost, "replaced");
-}
-
 export function destroyLabelSlicePool(pool: LabelSlicePool): void {
   pool.texture.destroy();
   pool.indirectionBuf.destroy();
@@ -243,22 +233,28 @@ export function destroyLabelSlicePool(pool: LabelSlicePool): void {
 }
 
 /**
- * Remove a member's label pool (no-op if absent), reporting every chunk it
- * held lost for `reason` so the page sends what it still wants.
+ * Remove the label pool keyed `poolKey` (no-op if absent), reporting every
+ * chunk it held lost for `reason` so the page sends what it still wants.
  */
-export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string, reason: ChunkFeedbackReason): void {
-  const pool = ctx.state.labelSlicePools.get(memberId);
+export function removeLabelSlicePool(ctx: WorkerCtx, poolKey: string, reason: ChunkFeedbackReason): void {
+  const pool = ctx.state.labelSlicePools.get(poolKey);
   if (pool) {
-    postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", [...pool.keys.values()], reason);
+    postLabelSliceLost(ctx, pool, reason);
     destroyLabelSlicePool(pool);
-    ctx.state.labelSlicePools.delete(memberId);
+    ctx.state.labelSlicePools.delete(poolKey);
   }
 }
 
+function postLabelSliceLost(ctx: WorkerCtx, pool: LabelSlicePool, reason: ChunkFeedbackReason): void {
+  postChunkResidency(
+    ctx, pool.memberId, "slice", LABEL_TIER, "lost", [...pool.keys.values()], reason, { axis: "z", plane: pool.plane },
+  );
+}
+
 /**
- * Free every label slice pool whose member key or owning `datasetId` matches
+ * Free every label slice pool whose member or owning `datasetId` matches
  * `idOrDataset`. Dataset removal passes the dataset id, which never equals a
- * pool key, so the `datasetId` match is what frees the texture. With a
+ * member id, so the `datasetId` match is what frees the texture. With a
  * `reason`, the chunks they held are reported lost; a removed dataset's
  * delivery record goes with it, so removal passes none.
  */
@@ -267,11 +263,11 @@ export function removeLabelSlicePoolsForDataset(
   idOrDataset: string,
   reason?: ChunkFeedbackReason,
 ): void {
-  for (const [memberId, pool] of ctx.state.labelSlicePools) {
-    if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
-      if (reason) postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", [...pool.keys.values()], reason);
+  for (const [poolKey, pool] of ctx.state.labelSlicePools) {
+    if (pool.memberId === idOrDataset || pool.datasetId === idOrDataset) {
+      if (reason) postLabelSliceLost(ctx, pool, reason);
       destroyLabelSlicePool(pool);
-      ctx.state.labelSlicePools.delete(memberId);
+      ctx.state.labelSlicePools.delete(poolKey);
     }
   }
 }
@@ -624,7 +620,7 @@ function createWatchedSliceAtlas(
 export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: SliceAtlasState): void {
   const atlases = ctx.state.sliceAtlases;
   if (atlases.get(poolKey) !== lost) return;
-  postSlotsLost(ctx, "slice", chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
+  postSlotsLost(ctx, "slice", chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory", lost.axis);
   // The views' indirection buffers are their own, so a replacement keeps
   // them, emptied, rather than freeing them with the lost texture.
   const views = lost.views;

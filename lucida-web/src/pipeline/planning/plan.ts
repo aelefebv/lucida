@@ -105,6 +105,7 @@ function emitLanes(
 export function requestIdentity(req: ChunkRequest): string {
   return [
     req.imageId, req.tier, req.mode, req.chunkKey, req.planeAxis ?? "", req.plane ?? "", req.planes?.join(",") ?? "",
+    req.cut ? `${req.cut.axis}${req.cut.plane}` : "",
   ].join("|");
 }
 

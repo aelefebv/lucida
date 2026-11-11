@@ -7,7 +7,7 @@ import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { VisibleRegion } from "../viewport.ts";
-import type { SliceCut, SpatialAxis } from "../../renderer/slicePlane.ts";
+import type { PoolCut, SliceCut, SpatialAxis } from "../../renderer/slicePlane.ts";
 import type { PoolMode } from "../../renderer/workerProtocol.ts";
 
 /**
@@ -320,6 +320,13 @@ export interface ChunkRequest {
   planes?: readonly [number, number];
   /** The axis {@link plane} and {@link planes} lie along. Absent: Z. */
   planeAxis?: SpatialAxis;
+  /**
+   * The plane of the chunk's level the asking slice view cuts, which the
+   * slice pools hold of it. Views of one dataset at different cuts ask for
+   * different planes of a chunk, each delivered and held on its own. Absent
+   * in the volume view, whose pools hold the whole chunk.
+   */
+  cut?: PoolCut;
 }
 
 /** One entry per visible tile, plus pass-through entries for invisible entities. */

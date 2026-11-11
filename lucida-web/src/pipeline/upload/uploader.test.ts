@@ -192,9 +192,12 @@ function makeCpuCache(deliveries: ReadyChunkDelivery[] = []): CpuCache {
 /** One 256 x 256 plane of uint16 samples, the mock level's whole chunk. */
 const PLANE_BYTES = 256 * 256 * 2;
 
+/** A delivery of chunk 0, by default to the slice pools cut at plane 0. */
 function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkDelivery {
+  const sliceCut = (overrides?.mode ?? "slice") === "slice" ? { cut: { axis: "z" as const, plane: 0 } } : {};
   return {
     mode: "slice",
+    ...sliceCut,
     entityId: "tile-0",
     imageId: "img-0",
     level: 0,
@@ -280,7 +283,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(markSent.mock.calls.map(c => c[0])).toEqual([chunk]);
@@ -296,7 +299,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
@@ -312,7 +315,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
@@ -331,10 +334,10 @@ describe("Uploader unified delivery", () => {
     });
     const uploader = new Uploader();
 
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
-      uploader.handleChunkResidency("img-0", "slice", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
-      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+      uploader.handleChunkResidency("img-0", "slice:z0", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
+      uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
     }
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
     const held = recordPointEvent.mock.calls.filter(([kind]) => kind === PointEvent.Held);
@@ -343,11 +346,11 @@ describe("Uploader unified delivery", () => {
     ]);
 
     // Held: the next ticks send nothing and ask for no further tick.
-    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }))).toBe(false);
+    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024)).toBe(false);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", view: 0, displayStateByChannel: {} });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateSelection({
@@ -359,8 +362,9 @@ describe("Uploader unified delivery", () => {
       requests: [],
       visibleRegion: { xyBoundsVox: [0, 0, 1, 1], zRangeVox: [1, 2], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
       epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
+      labels: [],
     });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 2);
     recordPointEvent.mockRestore();
   });
@@ -381,7 +385,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, null);
+    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024);
 
     expect(volumeChunkData).toHaveBeenCalledTimes(1);
     expect(volumeChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
@@ -404,16 +408,16 @@ describe("Uploader unified delivery", () => {
     const uploader = new Uploader();
 
     uploader.holdDelivery();
-    expect(uploader.deliverToWorker(ctx, 4 * MIB, null)).toBe(true);
+    expect(uploader.deliverToWorker(ctx, 4 * MIB)).toBe(true);
     expect(volumeChunkData).toHaveBeenCalledTimes(HELD_UPLOAD_BUDGET_BYTES / (4 * MIB));
 
     // The rest fit, so the backlog is gone and the caller's budget is back.
     deliverable = deliverable.slice(HELD_UPLOAD_BUDGET_BYTES / (4 * MIB));
-    uploader.deliverToWorker(ctx, 4 * MIB, null);
+    uploader.deliverToWorker(ctx, 4 * MIB);
     expect(volumeChunkData).toHaveBeenCalledTimes(12);
     volumeChunkData.mockClear();
     deliverable = chunks(3);
-    uploader.deliverToWorker(ctx, 4 * MIB, null);
+    uploader.deliverToWorker(ctx, 4 * MIB);
     expect(volumeChunkData).toHaveBeenCalledTimes(1);
   });
 
@@ -442,7 +446,7 @@ describe("Uploader unified delivery", () => {
     const volumeChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
 
-    new Uploader().deliverToWorker(ctx, 1000, null);
+    new Uploader().deliverToWorker(ctx, 1000);
 
     expect(volumeChunkData).toHaveBeenCalledTimes(2);
     expect(volumeChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
@@ -464,7 +468,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
 
     expect(sliceChunkData.mock.calls[0][1][0].data.byteLength).toBe(PLANE_BYTES);
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(PLANE_BYTES);
@@ -479,7 +483,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 1024, null);
+    uploader.deliverToWorker(ctx, 1024);
 
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
@@ -495,7 +499,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => ({ axis: "z", index: 0 }));
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
 
     // The send loop itself is unaffected by the telemetry gate.
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
@@ -513,7 +517,6 @@ describe("Uploader unified delivery", () => {
     uploader.deliverToWorker(
       makeCtx({ cpuCache, scene, client: { sliceChunkData } }),
       8 * 1024 * 1024,
-      () => ({ axis: "z", index: 0 }),
     );
 
     expect(sliceChunkData.mock.calls[0][0]).toBe("img-0:ch2");
@@ -524,21 +527,21 @@ describe("Uploader unified delivery", () => {
 });
 
 describe("Uploader worker feedback", () => {
-  it("forwards each residency report to CpuCache by image, channel and tier", () => {
+  it("forwards each residency report to CpuCache by image, channel, tier and target", () => {
     const cpuCache = makeCpuCache();
     const uploader = new Uploader();
 
-    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "detail", "held", ["0/0/1/0/0/0"], cpuCache)).toBe(false);
-    expect(cpuCache.markChunksHeld).toHaveBeenCalledWith("img-0", 1, "slice", "detail", ["0/0/1/0/0/0"]);
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice:z0", "detail", "held", ["0/0/1/0/0/0"], cpuCache)).toBe(false);
+    expect(cpuCache.markChunksHeld).toHaveBeenCalledWith("img-0", 1, "slice:z0", "detail", ["0/0/1/0/0/0"]);
 
-    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "coarse", "lost", ["2/0/1/0/0/0"], cpuCache, "evicted")).toBe(true);
-    expect(cpuCache.markChunksLost).toHaveBeenCalledWith("img-0", 1, "slice", "coarse", ["2/0/1/0/0/0"], "evicted");
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice:z0", "coarse", "lost", ["2/0/1/0/0/0"], cpuCache, "evicted")).toBe(true);
+    expect(cpuCache.markChunksLost).toHaveBeenCalledWith("img-0", 1, "slice:z0", "coarse", ["2/0/1/0/0/0"], "evicted");
 
     // A full atlas waits for the next plan; any other refusal may go again now.
-    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "detail", "refused", ["0/0/1/0/0/1"], cpuCache, "atlas-policy")).toBe(false);
-    expect(uploader.handleChunkResidency("img-0:ch1", "slice", "detail", "refused", ["0/0/1/0/0/2"], cpuCache, "stale")).toBe(true);
-    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "slice", "detail", ["0/0/1/0/0/1"], "atlas-policy");
-    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "slice", "detail", ["0/0/1/0/0/2"], "stale");
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice:z0", "detail", "refused", ["0/0/1/0/0/1"], cpuCache, "atlas-policy")).toBe(false);
+    expect(uploader.handleChunkResidency("img-0:ch1", "slice:z0", "detail", "refused", ["0/0/1/0/0/2"], cpuCache, "stale")).toBe(true);
+    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "slice:z0", "detail", ["0/0/1/0/0/1"], "atlas-policy");
+    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "slice:z0", "detail", ["0/0/1/0/0/2"], "stale");
   });
 
   it("checks a missing chunk against the residency mirror, and asks for a tick only on a disagreement", () => {
@@ -550,11 +553,13 @@ describe("Uploader worker feedback", () => {
       memberId: "img-0:ch2",
       c: 2,
       chunkKey: "0/0/2/0/0/0",
+      cut: { axis: "z", plane: 3 },
     };
     const uploader = new Uploader();
 
+    // A slice view's missing chunk is checked against the plane it wants.
     expect(uploader.handleWantedSetDelta("ds1", "slice", [missing], cpuCache)).toBe(false);
-    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "slice", "detail");
+    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "slice:z3", "detail");
 
     vi.mocked(cpuCache.markChunkMissing).mockReturnValue(true);
     expect(uploader.handleWantedSetDelta("ds1", "slice", [missing], cpuCache)).toBe(true);

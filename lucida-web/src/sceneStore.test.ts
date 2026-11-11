@@ -11,7 +11,6 @@ function fakeScene() {
     mode: "slice",
     views: [0],
     active: 0,
-    withheld: "[]",
     comparisons: {} as Record<number, unknown>,
     setAside: [] as string[],
     links: null as unknown,
@@ -29,7 +28,6 @@ function fakeScene() {
     maximized_view: () => undefined,
     view_rect: (id: number) => (state.views.length === 1 ? [0, 0, 1, 1] : [state.views.indexOf(id) / 2, 0, 0.5, 1]),
     view_camera_mode: () => state.mode,
-    withheld: (id: number) => (id === state.active ? "[]" : state.withheld),
     set_aside: () => JSON.stringify(state.setAside),
     slice_plane: () => "xy",
     cut_index: () => state.z,
@@ -66,12 +64,10 @@ describe("SceneStore", () => {
     store.subscribe(() => {});
     state.views = [0, 2];
     state.active = 2;
-    state.withheld = JSON.stringify([{ dataset_id: "a", holder: 2, held: { kind: "volume", t: 0 }, wanted: { kind: "volume", t: 1 } }]);
     state.epochs.view++;
     noteSceneWrite();
     const { views } = store.getView();
     expect(views.map((view) => [view.id, view.rect[0], view.active])).toEqual([[0, 0, false], [2, 0.5, true]]);
-    expect(views[0].withheld[0]).toMatchObject({ dataset_id: "a", holder: 2 });
 
     state.epochs.view++;
     noteSceneWrite();

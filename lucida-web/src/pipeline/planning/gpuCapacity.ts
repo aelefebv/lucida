@@ -38,28 +38,27 @@ export function gpuChunkRoomBytes(report: GpuCapacityReport | null, fallbackTota
 
 /**
  * Where each request's chunk goes on the GPU: into the pools of the mode of
- * the view that asked, so a dataset's slice and volume pools are each
- * admitted for their own views. `sliceAxis` is the axis the dataset's slice
- * pools cut. Only the detail and coarse lanes upload into chunk pools;
- * prefetch and minimap chunks never do.
+ * the view that asked, a slice view's into the slice pools of the axis it
+ * cuts, so each pool is admitted for every view that draws from it. Two
+ * requests for different planes of one chunk take a slot each. Only the
+ * detail and coarse lanes upload into chunk pools; prefetch and minimap
+ * chunks never do.
  */
 export function gpuSlotsFor(
   manifest: DatasetManifest,
   report: GpuCapacityReport | null,
   fallbackTotalBytes: number,
-  sliceAxis: SpatialAxis = "z",
 ): (req: ChunkRequest) => GpuSlot | null {
   const reported = new Map(report?.pools.map((pool) => [pool.poolKey, pool]) ?? []);
   const texel = bytesPerTexel(datasetSampleFormat(manifest));
   const limits = report?.limits ?? MIN_LIMITS;
   const cap = poolCapBytes(limits, report?.budgetBytes ?? fallbackTotalBytes);
-  const chunkDims = new Map<string, Map<number, { volume: number[]; slice: number[] }>>();
+  const chunkDims = new Map<string, Map<number, [number, number, number]>>();
   for (const image of manifest.images) {
-    const byLevel = new Map<number, { volume: number[]; slice: number[] }>();
+    const byLevel = new Map<number, [number, number, number]>();
     for (const level of image.multiscale.levels) {
       const [, , z, y, x] = level.chunk_shape;
-      // A slice pool's slots are the plane's chunk across and down the screen.
-      byLevel.set(level.level_index, { volume: [x, y, z], slice: toPlaneFrame([x, y, z], sliceAxis).slice(0, 2) });
+      byLevel.set(level.level_index, [x, y, z]);
     }
     chunkDims.set(image.image_id, byLevel);
   }
@@ -67,8 +66,11 @@ export function gpuSlotsFor(
   return (req) => {
     if (req.lane !== "detail" && req.lane !== "coarse") return null;
     const mode = req.mode;
-    const dims = chunkDims.get(req.imageId)?.get(req.level)?.[mode];
-    if (!dims) return null;
+    const xyzDims = chunkDims.get(req.imageId)?.get(req.level);
+    if (!xyzDims) return null;
+    const sliceAxis: SpatialAxis = req.cut?.axis ?? "z";
+    // A slice pool's slots are the plane's chunk across and down the screen.
+    const dims = mode === "volume" ? xyzDims : toPlaneFrame(xyzDims, sliceAxis).slice(0, 2);
     const pool = chunkTierPoolKey(req.datasetId, req.tier, req.c, dims, mode === "volume" ? "z" : sliceAxis);
     const known = reported.get(pool);
     if (known) return { pool, slots: known.maxSlots, slotBytes: known.slotBytes };

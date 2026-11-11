@@ -43,10 +43,6 @@ function makeCtx(views: TickView[]) {
     inv_view_proj: (view: number) => [camera.get(view)],
     clip_distance: () => 0,
     clip_mode: () => "none",
-    // The volume view holds "a"'s volume pools and the slice view its slice
-    // pools; no slice view draws "b".
-    dataset_holder: (dsId: string, mode: string) => (mode === "volume" ? 0 : dsId === "a" ? 1 : undefined),
-    cut_index: () => 7,
     set_viewport: vi.fn(),
   };
   const ctx = {
@@ -60,7 +56,6 @@ function makeCtx(views: TickView[]) {
   const coordinator = {
     planAndFetch: () => ({
       layers: new Map(),
-      sliceLayers: new Map(),
       memberRosterByDatasetMode: new Map(),
       entityIndexByDatasetMode: new Map(),
     }),
@@ -105,14 +100,6 @@ describe("a tick of every view", () => {
       { view: 0, rect: [0, 0, 400, 600] },
       { view: 1, rect: [400, 0, 400, 600] },
     ]);
-  });
-
-  it("cuts a dataset's slice chunks at its slice holder's plane, and none for a dataset no slice view draws", () => {
-    const h = makeCtx([LEFT, RIGHT]);
-    tick(h, new ViewRedraws());
-    const [, , cutFor] = h.uploader.deliverToWorker.mock.calls[0] as unknown as [unknown, unknown, (id: string) => unknown];
-    expect(cutFor("a")).toEqual({ axis: "z", index: 7 });
-    expect(cutFor("b")).toBeNull();
   });
 });
 

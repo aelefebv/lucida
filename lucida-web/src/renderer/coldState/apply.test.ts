@@ -141,6 +141,7 @@ function makeCold(
 ): ColdStateMessage {
   return {
     type: "coldState",
+    labels: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     datasetId: opts?.datasetId ?? "ds1",
     currentT: opts?.currentT ?? 0,
@@ -705,10 +706,11 @@ describe("Suite A — applyColdState", () => {
         tier: "detail",
         memberId: "imgA:ch0",
         chunks: [{ data: data.buffer, dataType: "uint16", x: 0, y: 0, z, key: `${level}/0/0/${z}/0/0` }],
-        level, z, t: 0, c: 0,
+        // Full-resolution Z 20 is plane 20 of level 0 and plane 10 of level 1.
+        level, t: 0, c: 0,
         levelWidth: lm.levelDims[2], levelHeight: lm.levelDims[1],
         chunkX: 64, chunkY: 64, chunkZ: 16,
-        fullResDepth: 32, levelDepth: lm.levelDims[0], fullResZ: 20,
+        fullResDepth: 32, levelDepth: lm.levelDims[0], plane: level === 0 ? 20 : 10,
       };
     };
     const ctx = makeCtx(makeMockDevice());

@@ -8,7 +8,7 @@ use crate::framing::PlaneBox;
 use crate::placement::{Affine, CameraSpace, UserTransform};
 use crate::saved_view::SavedView;
 use crate::scene::{
-    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, PoolKind, Scene,
+    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, Scene,
     member_transform,
 };
 use crate::view::{AxisPositions, View, ViewId, ViewLayout};
@@ -724,26 +724,6 @@ impl WasmScene {
             ViewLayout::Rows => "rows",
         }
         .to_string()
-    }
-
-    /// The view whose form `dataset_id`'s GPU pools of one kind hold: its
-    /// slice pools for `mode` `"slice"`, its volume pools for `"volume"`. None
-    /// when no view draws the dataset from them.
-    pub fn dataset_holder(&self, dataset_id: &str, mode: &str) -> Option<u32> {
-        let kind = if mode == "volume" {
-            PoolKind::Volume
-        } else {
-            PoolKind::Slice
-        };
-        self.inner
-            .dataset_holder(&DatasetId(dataset_id.into()), kind)
-            .map(|view| view.0)
-    }
-
-    /// The datasets `view` shows but leaves out, since another view holds
-    /// their pools in another form, as a JSON array of `Withheld`.
-    pub fn withheld(&self, view: u32) -> String {
-        serde_json::to_string(&self.inner.withheld(ViewId(view))).unwrap_or_default()
     }
 
     /// What `view`'s scale bar shows, as a JSON `ScaleBar`, or `"null"` when

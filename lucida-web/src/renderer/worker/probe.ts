@@ -10,6 +10,7 @@
 import type { WorkerCtx } from "../workerContext.ts";
 import { coversCanvas } from "./viewFrame.ts";
 import { drawOf } from "./draws.ts";
+import { labelSlicePoolKey, labelVolumePoolKey } from "../labelPools.ts";
 import type { ViewDraw } from "./state.ts";
 import type {
   ColdStateActiveEntry,
@@ -371,7 +372,8 @@ function settleMarch<A extends ProbeAtlas>(
  * reads as not loaded rather than as background.
  */
 function probeSliceLabel(ctx: WorkerCtx, view: number, hit: SliceHit, samples: ProbeSample[], reads: TexelReads): void {
-  const pool = ctx.state.labelSlicePools.get(hit.memberId);
+  const chunk = hit.label?.chunk;
+  const pool = chunk && ctx.state.labelSlicePools.get(labelSlicePoolKey(hit.memberId, chunk.t, chunk.plane));
   if (!pool || !hit.label) return;
   const readable: ReadablePool = {
     texture: pool.texture,
@@ -425,7 +427,7 @@ function probeVolumeLabel(
   samples: ProbeSample[],
   reads: TexelReads,
 ): void {
-  const pool = ctx.state.labelVolumePools.get(layer.datasetId);
+  const pool = layer.labelChunk && ctx.state.labelVolumePools.get(labelVolumePoolKey(layer.datasetId, layer.labelChunk.t));
   const model = layer.modelMatrix;
   const invModel = layer.invModelMatrix;
   if (!pool || !model || !invModel) return;

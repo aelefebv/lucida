@@ -5,6 +5,7 @@
  * `cpuCache.ts` next to the constants they use.
  */
 
+import type { PoolCut } from "../../renderer/slicePlane.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { InteractionMode } from "./interactionMode.ts";
@@ -113,6 +114,8 @@ export interface CachedChunk {
  */
 export interface ReadyChunkDelivery extends CachedChunk {
   mode: PoolMode;
+  /** The plane of the chunk a slice pool takes. Absent for the volume pools, which take it whole. */
+  cut?: PoolCut;
 }
 
 /**

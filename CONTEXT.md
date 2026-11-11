@@ -273,7 +273,9 @@ _Avoid_: personal view (a saved view with `personal` visibility)
 One camera onto a scene: its 2D or 3D mode, its slice plane and axis
 positions, the datasets it shows, and the rectangle of the canvas it draws in.
 A scene holds a list of views, one by default, and they share its datasets,
-display settings and memory budgets. Commands steer the active view.
+display settings, memory budgets and GPU pools: views of one dataset hold its
+chunks once, each drawing them at its own cut and timepoint. Commands steer
+the active view.
 _Avoid_: viewport (the canvas size a camera is fitted to)
 
 **View layout**:
@@ -291,15 +293,6 @@ basis*; any others compare in their own samples, the *voxel basis*. Two views
 over one region link pan, zoom, orientation and T by default, and two at one
 scale but apart link zoom and orientation and keep their own centers.
 _Avoid_: sync (unqualified)
-
-**Holder**:
-The view whose form one kind of a dataset's GPU pools holds: its slice pools
-hold one slice cut and its volume pools the whole volume, each at one
-timepoint. The two kinds are held at once, so a 2D and a 3D view of a dataset
-both draw it. The first view to draw a dataset from one kind holds it until
-it stops, or sets the dataset aside in a comparison. Another view drawing from
-the same kind draws the dataset only while it wants the same form, and
-otherwise leaves it out and says why.
 
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on

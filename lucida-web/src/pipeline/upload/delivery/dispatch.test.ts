@@ -131,16 +131,16 @@ describe("dispatchChunkDelivery", () => {
     const delivery = makeChunkDelivery();
     const { client, sliceChunkData, volumeChunkData, posted } = makeMockClient();
 
-    // Level 0 is as deep as full resolution, so z 3 is plane 1 of chunk 1.
-    const sent = dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", index: 3 }, EPOCHS);
+    // Plane 3 is plane 1 of chunk 1.
+    const sent = dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", plane: 3 }, EPOCHS);
 
     expect(volumeChunkData).not.toHaveBeenCalled();
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     const call = sliceChunkData.mock.calls[0];
     // Positional layout:
-    // (workerMemberId, [chunkData], level, z, t, c,
+    // (workerMemberId, [chunkData], level, t, c,
     //  levelWidth, levelHeight, chunkX, chunkY, chunkZ,
-    //  fullResDepth, levelDepth, fullResZ, epochs, tier, sliceAxis)
+    //  fullResDepth, levelDepth, plane, epochs, tier, sliceAxis)
     expect(call[0]).toBe("img-0:ch0");
     expect(call[1]).toHaveLength(1);
     expect(call[1][0]).toMatchObject({ dataType: "uint16", x: 3, y: 2, z: 1, key: "0/0/0/1/2/3" });
@@ -149,40 +149,40 @@ describe("dispatchChunkDelivery", () => {
     // The cache keeps its whole chunk for the next delivery.
     expect(delivery.data.byteLength).toBe(2 * PLANE * 2);
     expect(call[2]).toBe(0); // level
-    expect(call[3]).toBe(3); // sliceZ argument
-    expect(call[4]).toBe(0); // t
-    expect(call[5]).toBe(0); // c
-    expect(call[6]).toBe(1024); // levelWidth
-    expect(call[7]).toBe(1024); // levelHeight
-    expect(call[8]).toBe(256); // chunkX
-    expect(call[9]).toBe(256); // chunkY
-    expect(call[10]).toBe(2); // chunkZ
-    expect(call[11]).toBe(4); // fullResDepth
-    expect(call[12]).toBe(4); // levelDepth
-    expect(call[13]).toBe(3); // fullResZ === sliceZ
-    expect(call[14]).toBe(EPOCHS);
-    expect(call[15]).toBe("detail");
+    expect(call[3]).toBe(0); // t
+    expect(call[4]).toBe(0); // c
+    expect(call[5]).toBe(1024); // levelWidth
+    expect(call[6]).toBe(1024); // levelHeight
+    expect(call[7]).toBe(256); // chunkX
+    expect(call[8]).toBe(256); // chunkY
+    expect(call[9]).toBe(2); // chunkZ
+    expect(call[10]).toBe(4); // fullResDepth
+    expect(call[11]).toBe(4); // levelDepth
+    expect(call[12]).toBe(3); // plane
+    expect(call[13]).toBe(EPOCHS);
+    expect(call[14]).toBe("detail");
     expect(sent).toEqual({ memberId: "img-0:ch0", bytes: PLANE * 2 });
   });
 
-  it("maps a full-resolution Z onto a level downsampled along Z", () => {
+  it("cuts the plane of the delivery's level, which a level downsampled along Z numbers on its own", () => {
     const meta = makeMeta();
     const delivery = makeChunkDelivery({ level: 1, data: new Uint16Array(PLANE).fill(5).buffer });
     const { client, sliceChunkData } = makeMockClient();
 
-    // Level 1 is 2 planes deep: z 3 lands on its plane 1, chunk 1.
-    const sent = dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", index: 3 }, EPOCHS);
+    // Level 1 is 2 planes deep in chunks of 1: its plane 1 is chunk 1.
+    const sent = dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", plane: 1 }, EPOCHS);
 
     expect(sent).toEqual({ memberId: "img-0:ch0", bytes: PLANE * 2 });
-    expect(sliceChunkData.mock.calls[0][12]).toBe(2); // levelDepth
+    expect(sliceChunkData.mock.calls[0][11]).toBe(2); // levelDepth
+    expect(sliceChunkData.mock.calls[0][12]).toBe(1); // plane
   });
 
   it("posts nothing for a chunk that does not hold the plane", () => {
     const meta = makeMeta();
     const { client, sliceChunkData } = makeMockClient();
 
-    // z 1 is in chunk 0; the delivery is chunk 1.
-    expect(dispatchChunkDelivery(client, makeChunkDelivery(), meta, "slice", { axis: "z", index: 1 }, EPOCHS)).toBe("other-plane");
+    // Plane 1 is in chunk 0; the delivery is chunk 1.
+    expect(dispatchChunkDelivery(client, makeChunkDelivery(), meta, "slice", { axis: "z", plane: 1 }, EPOCHS)).toBe("other-plane");
     expect(sliceChunkData).not.toHaveBeenCalled();
   });
 
@@ -191,7 +191,7 @@ describe("dispatchChunkDelivery", () => {
     const delivery = makeChunkDelivery({ data: new ArrayBuffer(PLANE * 2) });
     const { client, sliceChunkData } = makeMockClient();
 
-    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", index: 3 }, EPOCHS)).toBe("no-meta");
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", plane: 3 }, EPOCHS)).toBe("no-meta");
     expect(sliceChunkData).not.toHaveBeenCalled();
   });
 
@@ -201,7 +201,7 @@ describe("dispatchChunkDelivery", () => {
     const delivery = makeChunkDelivery({ data: new Uint16Array(PLANE).fill(7).buffer, planes: [1, 2] });
     const { client, posted } = makeMockClient();
 
-    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", index: 3 }, EPOCHS)).toEqual({
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", plane: 3 }, EPOCHS)).toEqual({
       memberId: "img-0:ch0",
       bytes: PLANE * 2,
     });
@@ -213,8 +213,8 @@ describe("dispatchChunkDelivery", () => {
     const delivery = makeChunkDelivery({ data: new Uint16Array(PLANE).buffer, planes: [0, 1] });
     const { client, sliceChunkData, volumeChunkData } = makeMockClient();
 
-    // z 3 is plane 1 of chunk 1, which the delivery does not hold.
-    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", index: 3 }, EPOCHS)).toBe("other-plane");
+    // Plane 3 is plane 1 of chunk 1, which the delivery does not hold.
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", plane: 3 }, EPOCHS)).toBe("other-plane");
     // Nor are planes a chunk to the volume view.
     expect(dispatchChunkDelivery(client, delivery, meta, "volume", null, EPOCHS)).toBe("other-plane");
     expect(sliceChunkData).not.toHaveBeenCalled();
@@ -254,7 +254,7 @@ describe("dispatchChunkDelivery", () => {
     const delivery = makeChunkDelivery({ level: 99 });
     const { client, sliceChunkData, volumeChunkData } = makeMockClient();
 
-    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", index: 0 }, EPOCHS)).toBe("no-meta");
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", { axis: "z", plane: 0 }, EPOCHS)).toBe("no-meta");
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(volumeChunkData).not.toHaveBeenCalled();
@@ -288,7 +288,7 @@ describe("dispatchChunkDelivery", () => {
     // An XZ cut at Y 517 is row 5 of the chunk at grid y 2.
     const xz = makeMockClient();
     const sent = dispatchChunkDelivery(
-      xz.client, makeChunkDelivery({ data: rows.buffer }), meta, "slice", { axis: "y", index: 517 }, EPOCHS,
+      xz.client, makeChunkDelivery({ data: rows.buffer }), meta, "slice", { axis: "y", plane: 517 }, EPOCHS,
     );
     expect(sent).toEqual({ memberId: "img-0:ch0", bytes: 2 * 256 * 2 });
     const plane = new Uint16Array(xz.posted[0]);
@@ -296,14 +296,14 @@ describe("dispatchChunkDelivery", () => {
     const args = xz.sliceChunkData.mock.calls[0];
     // The chunk's place and the level's geometry across, down and along the cut.
     expect(args[1][0]).toMatchObject({ x: 3, y: 1, z: 2, key: "0/0/0/1/2/3" });
-    expect(args.slice(6, 14)).toEqual([1024, 4, 256, 2, 256, 1024, 1024, 517]);
+    expect(args.slice(5, 13)).toEqual([1024, 4, 256, 2, 256, 1024, 1024, 517]);
     // The axis it was cut along, so the worker never files it in another plane's pool.
-    expect(args[16]).toBe("y");
+    expect(args[15]).toBe("y");
 
     // A YZ cut at X 770 is column 2 of the chunk at grid x 3: Y across.
     const yz = makeMockClient();
     dispatchChunkDelivery(
-      yz.client, makeChunkDelivery({ data: columns.buffer }), meta, "slice", { axis: "x", index: 770 }, EPOCHS,
+      yz.client, makeChunkDelivery({ data: columns.buffer }), meta, "slice", { axis: "x", plane: 770 }, EPOCHS,
     );
     const side = new Uint16Array(yz.posted[0]);
     expect([side[0], side[255], side[256]]).toEqual([2, 2, 1002]);
@@ -312,7 +312,7 @@ describe("dispatchChunkDelivery", () => {
     // A plane in another chunk along the cut is not this chunk's to send.
     const other = makeMockClient();
     expect(dispatchChunkDelivery(
-      other.client, makeChunkDelivery(), meta, "slice", { axis: "y", index: 100 }, EPOCHS,
+      other.client, makeChunkDelivery(), meta, "slice", { axis: "y", plane: 100 }, EPOCHS,
     )).toBe("other-plane");
   });
 
@@ -327,7 +327,7 @@ describe("dispatchChunkDelivery", () => {
     dispatchChunkDelivery(
       held.client,
       makeChunkDelivery({ data: band.buffer, planes: [4, 6], planeAxis: "y" }),
-      meta, "slice", { axis: "y", index: 517 }, EPOCHS,
+      meta, "slice", { axis: "y", plane: 517 }, EPOCHS,
     );
     const plane = new Uint16Array(held.posted[0]);
     expect([plane[0], plane[256]]).toEqual([5, 1005]);
@@ -335,7 +335,7 @@ describe("dispatchChunkDelivery", () => {
     const zPlanes = makeMockClient();
     expect(dispatchChunkDelivery(
       zPlanes.client, makeChunkDelivery({ data: band.buffer, planes: [0, 1] }),
-      meta, "slice", { axis: "y", index: 517 }, EPOCHS,
+      meta, "slice", { axis: "y", plane: 517 }, EPOCHS,
     )).toBe("other-plane");
   });
 });
