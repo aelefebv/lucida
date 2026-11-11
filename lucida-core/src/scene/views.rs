@@ -96,8 +96,8 @@ impl Scene {
     }
 
     /// Give each view its rectangle: the layout's, or the whole canvas for a
-    /// maximized view. A camera whose size changed fits again when its pose
-    /// is the fit or a stand-in.
+    /// maximized view. A placed camera keeps the region it showed in its new
+    /// rectangle, and one whose pose is the fit or a stand-in fits again.
     fn arrange(&mut self) {
         let rects = self.layout.rects();
         let canvas = self.canvas;
@@ -111,7 +111,7 @@ impl Scene {
             };
             view.rect = rect;
             let before = view.camera.clone();
-            view.resize(rect.size_on(canvas), None);
+            view.keep_region_at(rect.size_on(canvas));
             if view.camera != before {
                 resized.push(view.id());
             }
@@ -388,6 +388,32 @@ mod tests {
         // The view the layout adds shows nothing yet.
         assert_eq!(views[1].datasets, ViewDatasets::Only(Vec::new()));
         assert!(scene.resolved_layers(views[1].id()).is_empty());
+    }
+
+    #[test]
+    fn a_placed_view_keeps_its_region_through_a_split_and_back() {
+        let mut scene = Scene::new([800, 600]);
+        open(&mut scene, "a");
+        apply(&mut scene, ViewportCommand::SetZoom { value: 2.0 });
+        let slice = |scene: &Scene| match &scene.active_view().camera {
+            Camera::Slice(slice) => (slice.zoom, slice.center),
+            _ => panic!("a slice camera"),
+        };
+        let (_, center) = slice(&scene);
+        layout(&mut scene, ViewLayout::Columns);
+        // Half as wide, so the region shows at half the zoom, around the same center.
+        assert_eq!(slice(&scene), (1.0, center));
+        // Back across the canvas it shows what it showed before the split,
+        // however often the layout changes.
+        for _ in 0..3 {
+            layout(&mut scene, ViewLayout::Single);
+            assert_eq!(slice(&scene), (2.0, center));
+            layout(&mut scene, ViewLayout::Columns);
+        }
+        // A steer in the split is the region to keep from then on.
+        apply(&mut scene, ViewportCommand::SetZoom { value: 3.0 });
+        layout(&mut scene, ViewLayout::Single);
+        assert_eq!(slice(&scene).0, 3.0);
     }
 
     #[test]
