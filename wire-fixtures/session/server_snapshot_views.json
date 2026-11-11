@@ -1,0 +1,123 @@
+{
+  "type": "snapshot",
+  "seq": 42,
+  "document": {
+    "manifests": {},
+    "registered_layouts": {},
+    "active_layout_ids": {},
+    "annotations": {}
+  },
+  "peers": [
+    {
+      "client_id": 5,
+      "camera": {
+        "mode": "arcball",
+        "target": [
+          2048.0,
+          2048.0,
+          50.0
+        ],
+        "theta": 0.7853981633974483,
+        "phi": 1.0471975511965979,
+        "distance": 6000.0,
+        "fov": 0.7853981633974483,
+        "viewport": [
+          1920,
+          1080
+        ],
+        "near": 1.0,
+        "far": 50000.0,
+        "clip_distance": 120.0,
+        "clip_mode": "sphere"
+      },
+      "view": {
+        "t": 1
+      },
+      "display": {
+        "contrast_min": 120.0,
+        "contrast_max": 4096.0,
+        "gamma": 0.85
+      },
+      "views": {
+        "layout": "columns",
+        "active": 1,
+        "maximized": 1,
+        "views": [
+          {
+            "camera": {
+              "mode": "slice",
+              "center": [
+                1024.5,
+                -512.25
+              ],
+              "zoom": 1.5,
+              "viewport": [
+                1920,
+                1080
+              ]
+            },
+            "axes": {
+              "z": {
+                "start": 10.0,
+                "end": 14.0
+              },
+              "t": 2,
+              "y": -6.5
+            },
+            "datasets": {
+              "only": [
+                "wds-0f3a"
+              ]
+            }
+          },
+          {
+            "camera": {
+              "mode": "arcball",
+              "target": [
+                2048.0,
+                2048.0,
+                50.0
+              ],
+              "theta": 0.7853981633974483,
+              "phi": 1.0471975511965979,
+              "distance": 6000.0,
+              "fov": 0.7853981633974483,
+              "viewport": [
+                1920,
+                1080
+              ],
+              "near": 1.0,
+              "far": 50000.0,
+              "clip_distance": 120.0,
+              "clip_mode": "sphere"
+            },
+            "axes": {
+              "t": 1
+            },
+            "datasets": "all"
+          }
+        ],
+        "links": {
+          "datasets": [
+            "wds-0f3a",
+            "wds-7c21"
+          ],
+          "basis": "physical",
+          "modes": {
+            "pan": "off",
+            "zoom": "linked",
+            "orientation": "off",
+            "z": "off",
+            "t": "relative",
+            "contrast": "off",
+            "colormap": "off"
+          }
+        }
+      },
+      "following": null,
+      "cursor": null
+    }
+  ],
+  "your_id": 7,
+  "generated_availability": {}
+}

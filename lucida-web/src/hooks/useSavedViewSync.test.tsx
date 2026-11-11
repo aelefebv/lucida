@@ -71,7 +71,9 @@ interface MockScene {
   export_presence: () => string;
   export_dataset_presence: () => string;
   camera_space: () => string;
+  export_views: () => string;
   user_transforms: () => string;
+  import_views: (json: string) => void;
   import_presence: (json: string) => void;
 }
 
@@ -127,7 +129,9 @@ function makeMockScene(): MockScene {
     export_presence: () => JSON.stringify(presence),
     export_dataset_presence: () => JSON.stringify({ dataset_order: [], dataset_settings: {} }),
     camera_space: () => "null",
+    export_views: () => "null",
     user_transforms: () => "{}",
+    import_views: () => {},
     import_presence: (json: string) => {
       const obj = JSON.parse(json);
       m.importedViews.push(obj.view);

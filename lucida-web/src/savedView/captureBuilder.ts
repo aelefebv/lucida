@@ -14,6 +14,7 @@ import type {
   LayoutId,
   SavedView,
   ViewState,
+  ViewsRecord,
 } from "./types.ts";
 import { SAVED_VIEW_VERSION } from "./types.ts";
 import { readUserTransforms } from "../userTransform.ts";
@@ -129,6 +130,9 @@ export function buildCapture({
   // Recorded even when empty, so a restore puts back a dataset moved since.
   const userTransforms = readUserTransforms(scene);
 
+  // Null for one view of every dataset, which `camera` and `view` describe.
+  const views = JSON.parse(scene.export_views()) as ViewsRecord | null;
+
   return {
     v: SAVED_VIEW_VERSION,
     datasets: orderedUrls,
@@ -141,6 +145,7 @@ export function buildCapture({
     auto_contrast: Object.keys(autoContrast).length > 0 ? autoContrast : undefined,
     camera_space: cameraSpace ?? undefined,
     user_transforms: userTransforms,
+    views: views ?? undefined,
   };
 }
 
