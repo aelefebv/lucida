@@ -175,6 +175,7 @@ impl Scene {
                 }
             }
         }
+        self.keep_comparison_lined_up();
         let followed = self.restore_links(record.and_then(|r| r.links.as_ref()));
         self.note_import(&before, followed);
     }
