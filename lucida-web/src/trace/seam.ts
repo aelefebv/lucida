@@ -565,7 +565,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       const controls = scriptControls();
       if (!controls) return noControls();
       if (!isLinkProperty(property)) {
-        return refused(`a link is of pan, zoom, orientation, z or t, not ${property}`);
+        return refused(`a link is of pan, zoom, orientation, z, t, contrast or colormap, not ${property}`);
       }
       if (!isLinkMode(mode)) return refused(`a link is linked, relative or off, not ${mode}`);
       return controls.link(property, mode);
