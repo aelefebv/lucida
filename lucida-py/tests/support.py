@@ -4,11 +4,20 @@ views in memory the way the server does."""
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
+import os
+import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import unquote, urlparse
+from urllib.request import urlopen
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
@@ -117,3 +126,70 @@ def workspace_record(workspace_id="w1", name="Demo", default_saved_view_id=None)
         "last_opened_at": None,
         "pinned_at": None,
     }
+
+
+def server_binary() -> Path | None:
+    """``LUCIDA_SERVER_BIN``, else a cargo build in the repository's ``target/``."""
+    configured = os.environ.get("LUCIDA_SERVER_BIN")
+    if configured:
+        return Path(configured)
+    name = "lucida-server.exe" if os.name == "nt" else "lucida-server"
+    for profile in ("debug", "release"):
+        candidate = ROOT.parent / "target" / profile / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@contextlib.contextmanager
+def running_server(tmp_path: Path, env: dict[str, str] | None = None):
+    """A lucida-server of its own on a free port, yielding its URL. Without a
+    server build the test skips, unless ``LUCIDA_REQUIRE_SERVER_TESTS`` is
+    set, as CI sets it."""
+    binary = server_binary()
+    if binary is None:
+        message = "no lucida-server build; set LUCIDA_SERVER_BIN or `cargo build -p lucida-server`"
+        if os.environ.get("LUCIDA_REQUIRE_SERVER_TESTS"):
+            pytest.fail(message)
+        pytest.skip(message)
+
+    port = free_port()
+    # A loopback bind runs with auth disabled, and the database defaults to a
+    # file in the working directory. The caller's own LUCIDA_* settings must
+    # not reach this server.
+    server_env = {key: value for key, value in os.environ.items() if not key.startswith("LUCIDA_")}
+    server_env.update(
+        {
+            "LUCIDA_BIND": f"127.0.0.1:{port}",
+            "LUCIDA_GENERATED_COARSE_CACHE_DIR": str(tmp_path / "coarse-cache"),
+            **(env or {}),
+        }
+    )
+    log_path = tmp_path / "server.log"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            [str(binary)], cwd=tmp_path, env=server_env, stdout=log, stderr=subprocess.STDOUT
+        )
+        url = f"http://127.0.0.1:{port}"
+        try:
+            deadline = time.monotonic() + 60
+            while True:
+                if process.poll() is not None:
+                    pytest.fail(f"lucida-server exited early:\n{log_path.read_text()}")
+                try:
+                    with urlopen(f"{url}/healthz", timeout=2):
+                        break
+                except (URLError, ConnectionError):
+                    if time.monotonic() > deadline:
+                        pytest.fail(f"lucida-server never became healthy:\n{log_path.read_text()}")
+                    time.sleep(0.1)
+            yield url
+        finally:
+            process.terminate()
+            process.wait(timeout=10)
