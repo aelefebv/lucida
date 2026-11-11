@@ -1,0 +1,63 @@
+/* The Move and scale tool's outline and corner handles. Positions are written
+   per frame as inline transforms; everything static lives here. */
+
+.lc-move-scale {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Only the outline and its handles take the pointer. */
+  pointer-events: none;
+  z-index: var(--lc-z-float);
+}
+
+.lc-move-scale-box,
+.lc-move-scale-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.lc-move-scale-box {
+  box-sizing: border-box;
+  border: 1.5px dashed var(--lc-accent-text);
+  /* A dark halo keeps the outline readable over bright data. */
+  box-shadow: var(--lc-annotation-shadow);
+  background: color-mix(in oklab, var(--lc-accent) 8%, transparent);
+  cursor: move;
+  will-change: transform;
+}
+
+.lc-move-scale-handle {
+  --handle-size: 10px;
+  width: var(--handle-size);
+  height: var(--handle-size);
+  margin: calc(var(--handle-size) / -2) 0 0 calc(var(--handle-size) / -2);
+  box-sizing: border-box;
+  border: 1.5px solid var(--lc-accent-text);
+  border-radius: calc(var(--lc-radius-sm) / 2);
+  background: var(--lc-bg);
+  box-shadow: var(--lc-annotation-shadow);
+  will-change: transform;
+}
+
+.lc-move-scale-handle[data-corner="nw"],
+.lc-move-scale-handle[data-corner="se"] {
+  cursor: nwse-resize;
+}
+
+.lc-move-scale-handle[data-corner="ne"],
+.lc-move-scale-handle[data-corner="sw"] {
+  cursor: nesw-resize;
+}
+
+@media (pointer: coarse) {
+  .lc-move-scale-handle {
+    --handle-size: 18px;
+  }
+}
+
+.lc-move-scale [hidden] {
+  display: none;
+}

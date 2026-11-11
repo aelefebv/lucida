@@ -8,6 +8,7 @@ use lucida_content::{
 use lucida_protocol::DatasetOpened;
 
 use crate::camera::{Camera, Framing};
+use crate::placement::UserTransform;
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 use crate::slice_plane::SlicePlane;
 use crate::view::{ViewDatasets, ViewId, ViewLayout};
@@ -147,6 +148,15 @@ pub enum DocumentCommand {
         annotation_id: String,
         id: String,
         text: String,
+    },
+    /// Place `dataset_id` by `transform`, on top of where its declared frame
+    /// puts it; the identity puts it back. Every peer places it alike, and
+    /// it persists with the workspace. An unknown dataset, or a transform no
+    /// scene can place by ([`UserTransform::is_valid`]), is a no-op. Bumps
+    /// `epochs.layout` when the placement changes.
+    SetUserTransform {
+        dataset_id: DatasetId,
+        transform: UserTransform,
     },
 }
 
@@ -770,10 +780,24 @@ impl Scene {
                         // state, so comment edits share the annotation epoch.
                         self.epochs.annotation += 1;
                     }
+                    // Followed once the document holds the new placement.
+                    DocumentCommand::SetUserTransform { .. } => {}
                 }
+                let moved = match &doc_cmd {
+                    DocumentCommand::SetUserTransform { dataset_id, .. } => Some((
+                        dataset_id.clone(),
+                        self.document.user_transforms.get(dataset_id).copied(),
+                    )),
+                    _ => None,
+                };
                 self.document.apply(doc_cmd);
                 if reframes {
                     self.content_changed(spaces_before);
+                }
+                if let Some((id, before)) = moved
+                    && self.document.user_transforms.get(&id).copied() != before
+                {
+                    self.dataset_moved();
                 }
             }
             Command::Viewport(vp_cmd) => self.apply_viewport(vp_cmd),

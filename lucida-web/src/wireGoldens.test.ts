@@ -1617,6 +1617,16 @@ const commandCases: [string, ClaimedFixture, Record<string, unknown>][] = [
     // hooks/useDatasetSettings.ts handleLayerRename.
     { type: "rename_dataset", id: "wds-0f3a", name: "multichannel volume (processed)" },
   ],
+  [
+    "set_user_transform",
+    claimFixture("session/client_command_set_user_transform.json"),
+    // hooks/useUserTransforms.ts commit() / savedView/applier.ts.
+    {
+      type: "set_user_transform",
+      dataset_id: "wds-0f3a",
+      transform: { translation: [12.5, -4, 0], rotation: [0, 0, 0, 1], scale: [2, 2, 2] },
+    },
+  ],
 ];
 
 describe("wire goldens: client messages through Bridge senders", () => {

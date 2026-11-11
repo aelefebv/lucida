@@ -111,6 +111,17 @@ pub struct View {
     /// shares or saves it yet.
     #[serde(skip)]
     pub comparison: Option<Comparison>,
+    /// The cameras before the layout last moved them, kept while nothing else
+    /// moves them ([`Self::keep_region_at`]). Client-local.
+    #[serde(skip)]
+    layout_base: Option<LayoutBase>,
+}
+
+/// A view's cameras before and after the layout last gave it a rectangle.
+#[derive(Debug, Clone, PartialEq)]
+struct LayoutBase {
+    chosen: (Camera, Option<Camera>),
+    arranged: (Camera, Option<Camera>),
 }
 
 impl View {
@@ -125,6 +136,7 @@ impl View {
             datasets: ViewDatasets::All,
             rect: ViewRect::WHOLE,
             comparison: None,
+            layout_base: None,
         }
     }
 
@@ -188,6 +200,30 @@ impl View {
             }
             camera.set_viewport(size[0], size[1]);
         }
+    }
+
+    /// Move both cameras onto a rectangle of `size` device pixels, each
+    /// keeping the region it showed ([`Camera::fit_region_to_viewport`]), as
+    /// a layout that halves or restores the view's rectangle does. A framed
+    /// camera fits again afterwards anyway.
+    ///
+    /// The region is the one the cameras showed before the layout last moved
+    /// them, while nothing else has: fitting the region each new rectangle
+    /// shows would grow it with every split and restore.
+    pub(crate) fn keep_region_at(&mut self, size: [u32; 2]) {
+        let now = (self.camera.clone(), self.parked_camera.clone());
+        let (camera, parked) = match self.layout_base.take() {
+            Some(LayoutBase { chosen, arranged }) if arranged == now => chosen,
+            _ => now,
+        };
+        let chosen = (camera.clone(), parked.clone());
+        self.camera = camera;
+        self.parked_camera = parked;
+        for camera in self.cameras_mut() {
+            camera.fit_region_to_viewport(size);
+        }
+        let arranged = (self.camera.clone(), self.parked_camera.clone());
+        self.layout_base = Some(LayoutBase { chosen, arranged });
     }
 
     /// Switch to the slice camera: the one this view last had, or a new one.

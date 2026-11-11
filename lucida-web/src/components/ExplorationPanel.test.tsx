@@ -423,7 +423,9 @@ describe("ExplorationPanel — Home on a page", () => {
       buildCapture({ scene: page, urlByDatasetId: new Map(), datasetReferenceMode: "workspace-dataset-id" });
     await renderPanel({
       captureBuilder: live ? capture : () => null,
-      applyView: (view) => applier.apply(view),
+      applyView: async (view) => {
+        await applier.apply(view);
+      },
       datasetId: datasetId(f),
       dims: fixtureDims(f),
       // The viewer passes the canvas's client size, in CSS pixels.

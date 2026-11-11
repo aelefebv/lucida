@@ -286,10 +286,11 @@ while it wants the same form, and otherwise leaves it out and says why.
 
 **Framing**:
 What chose a camera's pose. A *placed* camera is one someone chose, and on
-another canvas it keeps the region it showed. A *framed* camera is the fit of
-every visible dataset, which a new canvas or new content fits again. An
-*unframed* camera is a stand-in nothing chose: the scene fits it as soon as
-there is data, and a client never persists it.
+another canvas, or in the rectangle a new view layout gives it, it keeps the
+region it showed; a canvas resized under it keeps its scale. A *framed*
+camera is the fit of every visible dataset, which a new canvas or new content
+fits again. An *unframed* camera is a stand-in nothing chose: the scene fits
+it as soon as there is data, and a client never persists it.
 _Avoid_: auto-fit (fitting follows the camera's state, not an event such as an open)
 
 **Scene frame**:
@@ -300,6 +301,12 @@ views it directly, and the volume cameras view it as world space. When either
 changes, a placed camera moves into the new one and keeps its region, and a
 saved view records the one its camera was saved in.
 _Avoid_: world (unqualified; world space is the volume cameras' view of it)
+
+**User transform**:
+Where a person put a dataset by hand: a move and a per-axis scale on top of
+where its declared frame places it in the scene frame. It changes no data and
+persists with the workspace.
+_Avoid_: transform (unqualified; a manifest's coordinate transforms are declared)
 
 **Slice plane**:
 The plane of the scene frame a slice view cuts: `xy`, `xz` or `yz`. The two
@@ -314,8 +321,8 @@ _Avoid_: orientation, section (unqualified)
 **Comparison**:
 Two datasets that line up shown against each other in one view: split by a
 divider dragged across it (swipe), or shown in turn (blink). Two datasets line
-up when each declares length units and their extents in the scene frame
-overlap. Both stay in the wanted set however they are shown.
+up when each declares length units or has a user transform, and their extents
+in the scene frame overlap. Both stay in the wanted set however they are shown.
 
 ## Surfaces
 

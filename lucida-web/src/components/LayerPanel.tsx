@@ -43,6 +43,8 @@ import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapPicker } from "./ColormapPicker.tsx";
 import { colormapTitle } from "./colormapSwatch.ts";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
+import { UserTransformFields } from "./UserTransformFields.tsx";
+import type { UserTransform } from "../userTransform.ts";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
 import type { LevelRange } from "../renderer/workerProtocol.ts";
 import type { DatasetImportWarning } from "../bridge.ts";
@@ -142,6 +144,10 @@ export interface LayerInfo {
    * that does. Without, it is placed by its declared numbers alone.
    */
   physicalScale: boolean;
+  /** Where someone put the layer by hand, or `null` where it sits as its metadata places it. */
+  userTransform: UserTransform | null;
+  /** The length unit each axis declares, `[x, y, z]`, which an offset is in. */
+  units: readonly [string | null, string | null, string | null];
 }
 
 interface Props {
@@ -170,6 +176,8 @@ interface Props {
   onAddData: () => void;
   /** Why a layer can't be compared with another, or null when it can. */
   comparisonBlocker?: (id: string, other: string) => string | null;
+  /** Says when a layer lines up with another because someone placed one by hand. */
+  comparisonNote?: (id: string, other: string) => string | null;
   /** Compare a layer with another. Without it the layer menu offers no comparison. */
   onCompare?: (id: string, other: string) => void;
   /** Where a layer shows when several views divide the canvas. Without it the
@@ -199,6 +207,10 @@ interface Props {
   layoutRegistry: LayoutRegistry | null;
   sendCommand: (json: string) => void;
   onLayoutChange?: () => void;
+  /** Place a layer by hand, from where it was. Without it the layer shows no placement fields. */
+  onSetUserTransform?: (id: string, from: UserTransform, to: UserTransform) => void;
+  /** Put a layer back where its metadata places it. */
+  onResetUserTransform?: (id: string) => void;
 }
 
 const CHANNEL_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const satisfies readonly KeyCombo[];
@@ -371,6 +383,16 @@ function LayerRow(props: LayerRowProps) {
             {layer.name}
           </span>
         )}
+        {layer.userTransform && (
+          <span
+            className="lc-layer-moved"
+            data-testid={`layer-moved-${layer.id}`}
+            aria-label="Moved by hand"
+            title="Moved by hand, not where its metadata places it. Advanced has the numbers and the reset."
+          >
+            <Badge tone="accent">Moved</Badge>
+          </span>
+        )}
         {layer.labelRows && layer.labelRows.length > 0 && (
           <span data-testid={`layer-label-count-${layer.id}`}>
             <Badge>{`${layer.labelRows.length} label${layer.labelRows.length === 1 ? "" : "s"}`}</Badge>
@@ -433,11 +455,12 @@ function LayerRow(props: LayerRowProps) {
                 .filter((other) => other.id !== layer.id)
                 .map((other) => {
                   const blocker = props.comparisonBlocker?.(layer.id, other.id) ?? null;
+                  const note = blocker ?? props.comparisonNote?.(layer.id, other.id) ?? null;
                   return (
                     <MenuItem
                       key={other.id}
                       icon={SplitHorizontalIcon}
-                      description={blocker ?? undefined}
+                      description={note ?? undefined}
                       isDisabled={blocker !== null}
                       onAction={() => props.onCompare?.(layer.id, other.id)}
                     >
@@ -861,10 +884,20 @@ function Advanced(props: LayerRowProps) {
             <p
               className="lc-level-meta"
               aria-label={`${layer.name} physical scale`}
-              title="The data names no length units, so it is placed by its declared scale alone and may not line up with data that does."
+              title="The data names no length units, so it is placed by its declared scale alone and may not line up with data that does. Give it a scale under Position and size to line it up by hand."
             >
               No physical scale
             </p>
+          )}
+          {props.onSetUserTransform && props.onResetUserTransform && (
+            <UserTransformFields
+              name={layer.name}
+              transform={layer.userTransform}
+              units={layer.units}
+              canEdit={props.canEdit}
+              onChange={(from, to) => props.onSetUserTransform?.(layer.id, from, to)}
+              onReset={() => props.onResetUserTransform?.(layer.id)}
+            />
           )}
         </div>
       )}

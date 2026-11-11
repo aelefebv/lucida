@@ -10,8 +10,9 @@ import {
 } from "./urlSync.ts";
 import { encode } from "./encoder.ts";
 import { SavedViewApplier } from "./applier.ts";
-import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
-import { loadWasm } from "../viewProperties.ts";
+import { SAVED_VIEW_VERSION, type SavedView, type UserTransform } from "./types.ts";
+import { VIEWPORTS, fixture, joinedScene, loadWasm, renamed } from "../viewProperties.ts";
+import { buildCapture } from "./captureBuilder.ts";
 
 beforeAll(() => loadWasm());
 
@@ -880,5 +881,53 @@ describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () =
 
     expect(win.location.hash.startsWith("#view=")).toBe(true);
     sync.destroy();
+  });
+});
+
+describe("UrlSync restores never undo a placement by hand", () => {
+  const moved: UserTransform = { translation: [5, 0, 0], rotation: [0, 0, 0, 1], scale: [2, 2, 2] };
+  const setB = JSON.stringify({ type: "set_user_transform", dataset_id: "wds-b", transform: moved });
+
+  /** Member B's page: the workspace's two datasets, and what B sends. */
+  function memberB() {
+    const scene = joinedScene(VIEWPORTS[0], 1, [renamed(fixture("volume"), "wds-a"), renamed(fixture("volume"), "wds-b")]);
+    const sent: string[] = [];
+    const applier = new SavedViewApplier(
+      { sendOpenRemoteDataset: () => {}, sendCommand: (json) => sent.push(json) },
+      () => scene,
+      (url) => url,
+      1000,
+      "workspace-dataset-id",
+      "broadcast",
+    );
+    return { scene, sent, applier };
+  }
+
+  it("keeps the move A made when B opens on a last view, the default view, a link or a profile saved before it", async () => {
+    const before = memberB();
+    // B's view from before A's move records both datasets where they declare.
+    const old = buildCapture({ scene: before.scene, urlByDatasetId: new Map(), datasetReferenceMode: "workspace-dataset-id" });
+    expect(old.user_transforms).toEqual({});
+    // Something of the view a restore does put back.
+    old.display.gamma = 1.7;
+    const resolved = async () => ({ id: "old", view: old });
+    const sources: [string, string, string, ConstructorParameters<typeof UrlSync>[2]][] = [
+      ["last view", "", "", { fetchLastView: resolved, restoreLastViewEnabled: () => true }],
+      ["default view", "", "", { fetchDefaultSavedView: resolved, restoreLastViewEnabled: () => false }],
+      ["saved-view link", "#b=old", "", { fetchSavedViewById: resolved }],
+      ["view link", `#view=${encode(old)}`, "", {}],
+      ["viewer profile", "", "?viewer_profile=cli.default", { fetchViewerProfile: resolved }],
+    ];
+    for (const [name, hash, search, options] of sources) {
+      // A moved B's dataset; the document B opens holds the move.
+      const { scene, sent, applier } = memberB();
+      scene.apply_command(setB);
+      const sync = new UrlSync(() => null, applier, { ...options, window: makeFakeWindow(hash, "/", search) });
+      await sync.bootstrap();
+      sync.destroy();
+      expect(JSON.parse(scene.export_presence()).display.gamma, name).toBe(1.7);
+      expect(JSON.parse(scene.dataset_user_transform("wds-b")), name).toEqual(moved);
+      expect(sent.filter((c) => c.includes('"set_user_transform"')), name).toEqual([]);
+    }
   });
 });

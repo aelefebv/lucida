@@ -16,6 +16,7 @@ import type {
   ViewState,
 } from "./types.ts";
 import { SAVED_VIEW_VERSION } from "./types.ts";
+import { readUserTransforms } from "../userTransform.ts";
 
 /**
  * Maps a source-derived global `DatasetId` (`ds-{blake3-prefix}`) back to the
@@ -125,6 +126,9 @@ export function buildCapture({
   // the restoring scene's may not be.
   const cameraSpace = JSON.parse(scene.camera_space()) as CameraSpace | null;
 
+  // Recorded even when empty, so a restore puts back a dataset moved since.
+  const userTransforms = readUserTransforms(scene);
+
   return {
     v: SAVED_VIEW_VERSION,
     datasets: orderedUrls,
@@ -136,6 +140,7 @@ export function buildCapture({
     dataset_settings: datasetPresence.dataset_settings,
     auto_contrast: Object.keys(autoContrast).length > 0 ? autoContrast : undefined,
     camera_space: cameraSpace ?? undefined,
+    user_transforms: userTransforms,
   };
 }
 

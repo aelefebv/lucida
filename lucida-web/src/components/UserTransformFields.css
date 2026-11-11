@@ -1,0 +1,33 @@
+.lc-user-transform {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+}
+
+.lc-user-transform-grid {
+  display: grid;
+  grid-template-columns: auto repeat(3, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--lc-space-1) var(--lc-space-2);
+}
+
+.lc-user-transform-axis {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-xs);
+  text-align: center;
+}
+
+.lc-user-transform-row {
+  font-size: var(--lc-text-sm);
+}
+
+.lc-user-transform-grid .lc-number-input {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The ghost button's own padding would indent its text past the labels. */
+.lc-user-transform-reset {
+  align-self: flex-start;
+  margin-left: calc(-1 * var(--lc-space-2));
+}

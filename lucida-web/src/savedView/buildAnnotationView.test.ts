@@ -42,6 +42,7 @@ function mockScene(presenceView: unknown) {
     dataset_ids: () => JSON.stringify(["wds-a"]),
     available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
     camera_space: () => "null",
+    user_transforms: () => JSON.stringify({ "ds-a": { translation: [1, 0, 0], rotation: [0, 0, 0, 1], scale: [1, 1, 1] } }),
   } as never;
 }
 
@@ -53,6 +54,12 @@ describe("buildAnnotationView", () => {
     // It still references the workspace-local dataset by id.
     expect(view!.dataset_order).toEqual(["wds-a"]);
     expect(view!.active_layouts).toEqual({ "wds-a": "source" });
+  });
+
+  it("leaves placement by hand out, so opening the pin never moves a dataset", () => {
+    const view = buildAnnotationView(mockScene({ z_range: { start: 0, end: 1 }, t: 0, c: 0 }));
+    expect(view).not.toBeNull();
+    expect("user_transforms" in view!).toBe(false);
   });
 
   it("carries the scene's z slab, t, c, and multi-channel flag", () => {

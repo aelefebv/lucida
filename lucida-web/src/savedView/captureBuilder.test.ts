@@ -130,6 +130,7 @@ describe("buildCapture workspace dataset references", () => {
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
       camera_space: () => "null",
+      user_transforms: () => "{}",
     };
 
     const view = buildCapture({
@@ -171,6 +172,7 @@ describe("buildCapture workspace dataset references", () => {
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
       camera_space: () => "null",
+      user_transforms: () => "{}",
     };
 
     const view = buildCapture({
@@ -206,6 +208,7 @@ describe("buildCapture workspace dataset references", () => {
       dataset_ids: () => JSON.stringify(["wds-a"]),
       available_layouts: () => JSON.stringify([{ id: "source", active: true }]),
       camera_space: () => "null",
+      user_transforms: () => "{}",
     };
 
     const view = buildCapture({
@@ -225,6 +228,8 @@ describe("buildCapture camera space", () => {
     world: { extent: 512, top: 256 },
   };
 
+  let transforms = "{}";
+
   function sceneWithSpace(json: string) {
     return {
       export_presence: () => JSON.stringify({
@@ -236,17 +241,28 @@ describe("buildCapture camera space", () => {
       dataset_ids: () => "[]",
       available_layouts: () => "[]",
       camera_space: () => json,
+      user_transforms: () => transforms,
     };
   }
 
-  it("records the spaces the camera is in, last, as the Rust view serializes", () => {
+  it("records the spaces the camera is in, then the placement, as the Rust view serializes", () => {
     const view = buildCapture({
       scene: sceneWithSpace(JSON.stringify(space)) as never,
       urlByDatasetId: new Map(),
     });
     expect(view.camera_space).toEqual(space);
     const keys = Object.keys(JSON.parse(JSON.stringify(view)) as object);
-    expect(keys[keys.length - 1]).toBe("camera_space");
+    expect(keys.slice(-2)).toEqual(["camera_space", "user_transforms"]);
+  });
+
+  it("records where datasets sit by hand, and an empty record when none was moved", () => {
+    const moved = { translation: [2, 0, 0], rotation: [0, 0, 0, 1], scale: [3, 3, 3] };
+    transforms = JSON.stringify({ "ds-a": moved });
+    const view = buildCapture({ scene: sceneWithSpace("null") as never, urlByDatasetId: new Map() });
+    expect(view.user_transforms).toEqual({ "ds-a": moved });
+    transforms = "{}";
+    const none = buildCapture({ scene: sceneWithSpace("null") as never, urlByDatasetId: new Map() });
+    expect(none.user_transforms).toEqual({});
   });
 
   it("leaves it out while no dataset fixes them", () => {
