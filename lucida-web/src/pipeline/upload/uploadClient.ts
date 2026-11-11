@@ -7,6 +7,7 @@ import type {
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
+  DatasetUnplannedMessage,
   FailedChunksMessage,
   ChunkResidencyMessage,
   ViewHotStateMessage,
@@ -60,6 +61,9 @@ export interface UploadClient {
   /** Replace one dataset's list of chunks the source failed for good. See {@link FailedChunksMessage}. */
   failedChunks(msg: FailedChunksMessage): void;
 
+  /** Say no view plans a dataset any more. See {@link DatasetUnplannedMessage}. */
+  datasetUnplanned(msg: DatasetUnplannedMessage): void;
+
   /**
    * Must be sent before subsequent render messages so the view's ray hits
    * are current when chunk-data eviction fires.
@@ -67,8 +71,8 @@ export interface UploadClient {
   viewHotState(msg: ViewHotStateMessage): void;
 
   /**
-   * Deliver one Z-plane of each chunk, the plane `fullResZ` maps to at
-   * `level`, in the frame of the plane cutting `sliceAxis`. Each
+   * Deliver one plane of each chunk, plane `plane` of `level` along
+   * `sliceAxis`, in the frame of the plane cutting that axis. Each
    * `chunk.data` is transferred, so it must be a buffer cut for the worker,
    * never the cache's own.
    */

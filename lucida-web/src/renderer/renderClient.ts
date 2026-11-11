@@ -20,6 +20,7 @@ import type {
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
+  DatasetUnplannedMessage,
   FailedChunksMessage,
   ViewHotStateMessage,
   RgbaColor,
@@ -597,6 +598,10 @@ export class RenderClient implements UploadClient {
   }
 
   failedChunks(msg: FailedChunksMessage) {
+    this.worker.postMessage(msg);
+  }
+
+  datasetUnplanned(msg: DatasetUnplannedMessage) {
     this.worker.postMessage(msg);
   }
 

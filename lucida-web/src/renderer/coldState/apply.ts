@@ -301,6 +301,18 @@ function detachFrom<A extends SliceAtlasState | AtlasState>(
 }
 
 /**
+ * Want none of the dataset's chunks in any view, keeping its layout and its
+ * slots: no view plans it. Its retained cold states want nothing either, so
+ * a re-ingest, as a failed-chunk list makes, does not want them back.
+ */
+export function wantNothingOf(ctx: WorkerCtx, datasetId: string): void {
+  for (const draw of drawsOf(ctx.state, datasetId)) {
+    draw.cold.wantedChunks = [];
+    draw.wanted = indexWantedChunks([]);
+  }
+}
+
+/**
  * Drop what the worker kept of the dataset for each view that no longer draws
  * it, and free what only those views drew from, as {@link releaseDraw} does.
  * A cold state names every view that draws its dataset, so a page that starts

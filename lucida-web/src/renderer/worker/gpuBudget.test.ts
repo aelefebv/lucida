@@ -27,6 +27,7 @@ import {
   viewLayerTargets,
 } from "./viewResources.ts";
 import { grantGrowth, handleGpuOutOfMemory, measureGpuMemory } from "./gpuBudget.ts";
+import { wantNothingOf } from "../coldState/apply.ts";
 
 const MIB = 1024 * 1024;
 const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
@@ -75,14 +76,20 @@ function testDraw(ctx: WorkerCtx): ViewDraw {
   return draw;
 }
 
-function heldPool(ctx: WorkerCtx, poolKey: string, member: string, layers: number): { atlas: AtlasState; keys: string[] } {
-  const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, "u16");
+function heldPool(
+  ctx: WorkerCtx,
+  poolKey: string,
+  member: string,
+  layers: number,
+  draw: ViewDraw = testDraw(ctx),
+): { atlas: AtlasState; keys: string[] } {
+  const atlas = getOrCreateVolumePool(ctx, poolKey, draw.datasetId, 32, 32, 32, 0, "u16");
   while (atlas.slotsZ < layers) {
     atlas.slotsZ++;
     atlas.totalSlots = atlas.slotsX * atlas.slotsY * atlas.slotsZ;
   }
   const gridZ = Math.ceil(atlas.totalSlots / 64);
-  const view = attachView(atlas, new Map([[member, [{ level: 0, gridDims: [gridZ, 8, 8], chunkDims: [32, 32, 32], levelDims: [gridZ * 32, 256, 256], offset: 0 }]]]), { draw: testDraw(ctx) });
+  const view = attachView(atlas, new Map([[member, [{ level: 0, gridDims: [gridZ, 8, 8], chunkDims: [32, 32, 32], levelDims: [gridZ * 32, 256, 256], offset: 0 }]]]), { draw });
   const keys: string[] = [];
   for (let slot = 0; slot < atlas.totalSlots; slot++) {
     const key = `0/0/0/${Math.floor(slot / 64)}/${Math.floor(slot / 8) % 8}/${slot % 8}`;
@@ -92,12 +99,12 @@ function heldPool(ctx: WorkerCtx, poolKey: string, member: string, layers: numbe
     keys.push(key);
   }
   atlas.freeSlots = [];
-  ctx.state.memberToDataset.set(member, "ds1");
+  ctx.state.memberToDataset.set(member, draw.datasetId);
   return { atlas, keys };
 }
 
-function want(ctx: WorkerCtx, member: string, keys: string[]): void {
-  (testDraw(ctx).wanted as Map<string, ReadonlySet<string>>).set(wantedEntryKey("detail", member), new Set(keys));
+function want(ctx: WorkerCtx, member: string, keys: string[], draw: ViewDraw = testDraw(ctx)): void {
+  (draw.wanted as Map<string, ReadonlySet<string>>).set(wantedEntryKey("detail", member), new Set(keys));
 }
 
 function lost(posts: WorkerToMainMessage[]): ChunkResidencyMessage[] {
@@ -166,6 +173,31 @@ describe("when the GPU total is reached", () => {
     expect(posts).toContainEqual({
       type: "chunkResidency", memberId: "label", viewMode: "volume", tier: "detail", change: "refused", keys: ["0/0/0/0/0/0"], reason: "atlas-policy",
     });
+  });
+});
+
+describe("a dataset no view plans", () => {
+  it("wants none of its chunks: its pools keep them while nothing needs the room, and give them back first", () => {
+    const { ctx, posts } = makeCtx();
+    const shown = heldPool(ctx, "ds1:ch0:32x32x32:detail", "imgA", 1);
+    const hiddenDraw = fakeDraw({ datasetId: "ds2" });
+    ctx.state.draws.set("ds2|0", hiddenDraw);
+    const hidden = heldPool(ctx, "ds2:ch0:32x32x32:detail", "imgB", 2, hiddenDraw);
+    want(ctx, "imgA", shown.keys);
+    want(ctx, "imgB", hidden.keys, hiddenDraw);
+    ctx.state.gpuTotalBytes = measureGpuMemory(ctx.state).bytes;
+    // While the other dataset wants every chunk it holds, nothing gives way.
+    expect(grantGrowth(ctx, shown.atlas, volumeLayerBytes(shown.atlas), 1, true)).toBe(0);
+
+    wantNothingOf(ctx, "ds2");
+    expect(hiddenDraw.cold.wantedChunks).toEqual([]);
+    expect(hidden.atlas.slots.size).toBe(128);
+    expect(lost(posts)).toEqual([]);
+
+    expect(grantGrowth(ctx, shown.atlas, volumeLayerBytes(shown.atlas), 1, true)).toBe(1);
+    expect(hidden.atlas.slotsZ).toBe(1);
+    expect(lost(posts).flatMap((m) => m.keys)).toHaveLength(64);
+    expect(lost(posts).every((m) => m.memberId === "imgB" && m.reason === "evicted")).toBe(true);
   });
 });
 
