@@ -38,9 +38,11 @@ interface Props {
   linkNotices?: readonly ViewLinkNotices[];
   /** Move `axis`'s plane to `fraction` of the way across `view`, as dragging its line does. */
   dragPlane?: (view: number, axis: SpatialAxis, fraction: number) => void;
+  /** Whether a running blink holds still, as a capture asks. */
+  still?: boolean;
 }
 
-export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane }: Props) {
+export function ViewOverlays({ views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, dragPlane, still }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
     <div className="lc-view-overlays">
@@ -77,6 +79,7 @@ export function ViewOverlays({ views, store, actions, nameOf, activate, coverage
                     setAside={setAsideNote(pane.setAside)}
                     byHand={byHand(comparison.a, comparison.b)}
                     active={pane.active}
+                    still={still}
                   />
                 </div>
               )}

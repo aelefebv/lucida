@@ -11,10 +11,11 @@ use serde::Serialize;
 
 use crate::camera::Camera;
 use crate::command::{Command, ViewportCommand};
+use crate::placement::LineUp;
 use crate::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use crate::scene::{
-    DocumentState, FrameTarget, LinkMode, LinkNotice, LinkProperty, PropertyLink, Scene,
-    Unlinkable, ViewsRecord,
+    BLINK_RATES, CompareMode, DocumentState, FrameTarget, LinkMode, LinkNotice, LinkProperty,
+    PropertyLink, Scene, Unlinkable, ViewsRecord,
 };
 use crate::view::{View, ViewDatasets, ViewId, ViewLayout};
 
@@ -363,6 +364,7 @@ impl ProfileScene {
             _ => {}
         }
         self.check_views(command)?;
+        self.check_comparison(command)?;
         if let Some(bounds) = visible_index_bounds(scene) {
             match command {
                 ViewportCommand::SetZ { z } if *z >= bounds.z => {
@@ -530,6 +532,80 @@ impl ProfileScene {
         Ok(())
     }
 
+    /// A comparison needs a pair that lines up, and a change to one needs a
+    /// comparison it can change, as the compare bar offers its controls.
+    fn check_comparison(&self, command: &ViewportCommand) -> Result<(), ProfileCommandError> {
+        use ProfileCommandError as E;
+        let scene = &self.scene;
+        let current = scene.comparison();
+        let needs = |mode: Option<CompareMode>| match current {
+            None => Err(E::CannotCompare(
+                "the active view compares nothing; start a comparison first".into(),
+            )),
+            Some(c) if mode.is_some_and(|mode| c.mode != mode) => Err(E::CannotCompare(
+                "only a blink flips or runs at a rate; show the comparison as a blink first".into(),
+            )),
+            Some(_) => Ok(()),
+        };
+        match command {
+            ViewportCommand::Compare { a, b, .. } => {
+                self.known_dataset(&a.0)?;
+                self.known_dataset(&b.0)?;
+                let name = |id: &DatasetId| {
+                    scene
+                        .document
+                        .manifests
+                        .get(id)
+                        .map_or_else(|| id.0.clone(), |manifest| manifest.name.clone())
+                };
+                let names =
+                    |ids: &[DatasetId]| ids.iter().map(name).collect::<Vec<_>>().join(" and ");
+                let reason = match scene.line_up(a, b) {
+                    LineUp::Yes => return Ok(()),
+                    LineUp::Same => "a dataset can't be compared with itself".to_string(),
+                    LineUp::Apart => format!(
+                        "{} and {} don't overlap in physical space",
+                        name(a),
+                        name(b)
+                    ),
+                    LineUp::Missing { datasets } => {
+                        format!("{} has no image yet", names(&datasets))
+                    }
+                    LineUp::NoPhysicalScale { datasets } => format!(
+                        "{} declares no physical scale to line up by; give it one with \
+                         `dataset transform --scale` to line up by hand",
+                        names(&datasets)
+                    ),
+                };
+                Err(E::CannotCompare(reason))
+            }
+            ViewportCommand::EndComparison | ViewportCommand::SetComparisonMode { .. } => {
+                needs(None)
+            }
+            ViewportCommand::SetComparisonDivider { at } => {
+                needs(None)?;
+                if !(0.0..=1.0).contains(at) {
+                    return Err(E::InvalidValue(
+                        "the divider is a fraction of the view's width, from 0 to 1".into(),
+                    ));
+                }
+                Ok(())
+            }
+            ViewportCommand::FlipComparison => needs(Some(CompareMode::Blink)),
+            ViewportCommand::SetBlinkRate { rate } => {
+                needs(Some(CompareMode::Blink))?;
+                if rate.is_some_and(|rate| !BLINK_RATES.contains(&rate)) {
+                    return Err(E::InvalidValue(format!(
+                        "a blink runs at {} flips a second",
+                        BLINK_RATES.map(|rate| rate.to_string()).join(", ")
+                    )));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn known_view(&self, view: ViewId) -> Result<(), ProfileCommandError> {
         match self.scene.view(view) {
             Some(_) => Ok(()),
@@ -618,6 +694,8 @@ pub enum ProfileCommandError {
     UnknownView(ViewId),
     /// A link the views as they stand cannot take.
     CannotLink(String),
+    /// A comparison the datasets or the active view cannot take.
+    CannotCompare(String),
 }
 
 impl ProfileCommandError {
@@ -681,7 +759,7 @@ impl fmt::Display for ProfileCommandError {
                 "the layout has {count} view(s), counted from 0; view {requested} was requested"
             ),
             Self::UnknownView(id) => write!(f, "the scene holds no view with id {}", id.0),
-            Self::CannotLink(reason) => f.write_str(reason),
+            Self::CannotLink(reason) | Self::CannotCompare(reason) => f.write_str(reason),
         }
     }
 }
@@ -1450,5 +1528,102 @@ mod tests {
                 ViewDatasets::Only(ids(&["wds-a"]))
             ]
         );
+    }
+
+    /// Two micrometer volumes over one region, which line up.
+    fn lined_up() -> ProfileScene {
+        let mut document = DocumentState::default();
+        for id in ["wds-p", "wds-q"] {
+            let mut opened = make_dataset_opened_with_shape(
+                id,
+                id,
+                1,
+                [1, 1, 16, 128, 128],
+                [1, 1, 16, 64, 64],
+                1,
+            );
+            let unit = Some("micrometer".to_string());
+            opened.manifest = opened.manifest.with_space(lucida_content::PhysicalSpace {
+                units: [unit.clone(), unit.clone(), unit],
+                origin: [0.0; 3],
+            });
+            document.apply(DocumentCommand::DatasetOpened(opened));
+        }
+        ProfileScene::fitted(&document)
+    }
+
+    fn compare(mode: crate::scene::CompareMode) -> ViewportCommand {
+        let [a, b] = ["wds-p", "wds-q"].map(|id| DatasetId(id.into()));
+        ViewportCommand::Compare { a, b, mode }
+    }
+
+    #[test]
+    fn a_swipe_set_by_commands_is_stored_and_comes_back() {
+        use crate::scene::CompareMode;
+        let mut profile = lined_up();
+        profile.apply(compare(CompareMode::Swipe)).unwrap();
+        profile
+            .apply(ViewportCommand::SetComparisonDivider { at: 0.4 })
+            .unwrap();
+        let view = profile.saved_view();
+        let reopened = ProfileScene::open(&document_of(&profile), &view);
+        let comparison = reopened.scene.comparison().expect("the swipe comes back");
+        assert_eq!(
+            (comparison.mode, comparison.divider),
+            (CompareMode::Swipe, 0.4)
+        );
+        assert_eq!(reopened.saved_view(), view);
+    }
+
+    #[test]
+    fn a_blink_runs_at_a_rate_the_compare_bar_offers() {
+        use crate::scene::CompareMode;
+        let mut profile = lined_up();
+        let rate = |rate| ViewportCommand::SetBlinkRate { rate };
+        profile.apply(compare(CompareMode::Swipe)).unwrap();
+        assert!(matches!(
+            profile.apply(rate(Some(2.0))),
+            Err(ProfileCommandError::CannotCompare(_))
+        ));
+        profile
+            .apply(ViewportCommand::SetComparisonMode {
+                mode: CompareMode::Blink,
+            })
+            .unwrap();
+        assert!(matches!(
+            profile.apply(rate(Some(3.0))),
+            Err(ProfileCommandError::InvalidValue(_))
+        ));
+        profile.apply(rate(Some(2.0))).unwrap();
+        profile.apply(ViewportCommand::FlipComparison).unwrap();
+        let comparison = profile.scene.comparison().unwrap();
+        assert_eq!(comparison.rate, Some(2.0));
+        assert_eq!(comparison.showing, crate::scene::Side::B);
+        profile.apply(ViewportCommand::EndComparison).unwrap();
+        assert_eq!(profile.scene.comparison(), None);
+        assert!(matches!(
+            profile.apply(ViewportCommand::EndComparison),
+            Err(ProfileCommandError::CannotCompare(_))
+        ));
+    }
+
+    #[test]
+    fn a_pair_that_does_not_line_up_is_refused_with_why() {
+        let mut profile = two();
+        let [a, b] = ["wds-a", "wds-b"].map(|id| DatasetId(id.into()));
+        let refused = profile.apply(ViewportCommand::Compare {
+            a,
+            b,
+            mode: crate::scene::CompareMode::Swipe,
+        });
+        let Err(ProfileCommandError::CannotCompare(reason)) = refused else {
+            panic!("expected a refusal, got {refused:?}");
+        };
+        assert!(reason.contains("no physical scale"), "{reason}");
+        assert_eq!(profile.scene.comparison(), None);
+    }
+
+    fn document_of(profile: &ProfileScene) -> DocumentState {
+        profile.scene.document.clone()
     }
 }

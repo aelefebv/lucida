@@ -74,6 +74,8 @@ interface Props {
   onAxisChange: (axis: SpatialAxis, index: number) => void;
   /** What the move tool places the selected layer with. */
   userTransforms: UserTransformActions;
+  /** Whether a running blink holds still, as a capture asks. */
+  still?: boolean;
 }
 
 export function CanvasLayers({
@@ -100,6 +102,7 @@ export function CanvasLayers({
   viewLayout,
   onAxisChange,
   userTransforms,
+  still = false,
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
@@ -283,6 +286,7 @@ export function CanvasLayers({
           coverageOf={(view) => settles.find((settle) => settle.view === view)}
           byHand={(a, b) => (wasmScene ? placedByHandNote(readLineUpByHand(wasmScene, a, b), nameOf) : null)}
           linkNotices={links?.notices}
+          still={still}
           dragPlane={(view, axis, fraction) => {
             const index = wasmScene?.plane_line_position(view, axis, fraction) ?? -1;
             if (index >= 0) onAxisChange(axis, Number(index));

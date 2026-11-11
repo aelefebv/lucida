@@ -18,25 +18,31 @@ from lucida.client import LucidaClient, LucidaError, WorkspaceResource  # noqa: 
 A, B = "wds-0f3a", "wds-0f3b"
 
 
-def two_datasets() -> dict:
+def two_datasets(physical: bool = False) -> dict:
     """The snapshot fixture with a second dataset of the same shape and
-    placement, so two views of the pair link everything by default."""
+    placement, both in micrometers when ``physical``, so the pair lines up."""
     snapshot = wire_fixture("session", "server_snapshot")
     manifests = snapshot["document"]["manifests"]
     twin = copy.deepcopy(manifests[A])
     twin["dataset_id"] = B
     twin["name"] = "twin-volume.zarr"
     manifests[B] = twin
+    document = snapshot["document"]
+    document["registered_layouts"][B] = copy.deepcopy(document["registered_layouts"][A])
+    document["active_layout_ids"][B] = document["active_layout_ids"][A]
+    if physical:
+        for manifest in manifests.values():
+            manifest["space"] = {"units": ["micrometer"] * 3, "origin": [0.0, 0.0, 0.0]}
     return snapshot
 
 
-def workspace(tmp_path):
+def workspace(tmp_path, physical: bool = False):
     server = ProfileServer()
     client = LucidaClient(
         "http://127.0.0.1:9988",
         config_path=tmp_path / "config.json",
         transport=server,
-        ws_connect=SnapshotConnector(two_datasets()),
+        ws_connect=SnapshotConnector(two_datasets(physical)),
     )
     return WorkspaceResource(client, workspace_record()), server
 
@@ -114,6 +120,41 @@ def test_four_up_shows_the_named_dataset_in_every_view(tmp_path):
     assert result["views"]["views"][3]["camera"]["mode"] == "arcball"
 
 
+def comparison(result: dict, view: int = 0) -> dict | None:
+    return result["views"]["views"][view].get("comparison")
+
+
+def test_a_swipe_and_a_blink_set_through_the_client(tmp_path):
+    ws, server = workspace(tmp_path, physical=True)
+
+    swiped = ws.view.compare(A, "twin-volume.zarr", swipe=0.4)
+    assert comparison(swiped) == {"a": A, "b": B, "mode": "swipe", "divider": 0.4, "showing": "a"}
+    stored = server.profiles[("w1", "default")]["view"]["views"]["views"][0]
+    assert stored["comparison"] == comparison(swiped)
+
+    blinking = ws.view.compare(B, A, blink=2)
+    assert comparison(blinking)["mode"] == "blink"
+    assert (comparison(blinking)["a"], comparison(blinking)["rate"]) == (B, 2.0)
+    assert "rate" not in comparison(ws.view.compare(A, B, blink=True))
+
+    assert comparison(ws.view.end_comparison()) is None
+
+
+def test_a_comparison_the_pair_cannot_take_is_refused(tmp_path):
+    ws, _ = workspace(tmp_path)
+    with pytest.raises(LucidaError) as error:
+        ws.view.compare(A, B)
+    assert error.value.kind == "config"
+    assert "physical scale" in error.value.message
+
+    physical, _ = workspace(tmp_path / "physical", physical=True)
+    with pytest.raises(LucidaError) as error:
+        physical.view.compare(A, B, blink=3)
+    assert error.value.kind == "config"
+    with pytest.raises(LucidaError):
+        physical.view.end_comparison()
+
+
 def test_refusals_change_nothing(tmp_path):
     ws, server = workspace(tmp_path)
     ws.viewer.state()
@@ -151,6 +192,9 @@ def test_a_screenshot_runs_the_cli_as_this_client(tmp_path, monkeypatch):
     assert argv[6:10] == ["viewer", "--profile", "default", "screenshot"]
     assert "--each-view" in argv
     assert argv[argv.index("--device-pixel-ratio") + 1] == "2"
+    assert "--plane-lines" not in argv
+    ws.viewer.screenshot("quad.png", each_view=True, plane_lines=True)
+    assert "--plane-lines" in ran["argv"]
     assert ran["env"]["LUCIDA_CONFIG_PATH"] == str(tmp_path / "config.json")
 
 

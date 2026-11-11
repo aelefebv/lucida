@@ -859,15 +859,17 @@ class ViewerResource:
         height: int = 800,
         device_pixel_ratio: float = 1.0,
         scale_bar: bool = True,
+        plane_lines: bool = False,
         timeout: float = 60.0,
     ) -> dict[str, Any]:
         """Capture this profile's view once every view has settled.
 
         Writes the viewer page to ``output``; with ``view``, that view alone;
         with ``each_view``, the canvas alone and each view beside it as
-        ``<stem>-view-<N>.png``, all from one load. Returns what the CLI's
-        ``viewer screenshot --json`` reports, whose ``captured`` lists each
-        image written.
+        ``<stem>-view-<N>.png``, all from one load. A view or the canvas
+        alone leaves out four-up's plane lines unless ``plane_lines`` asks
+        for them. Returns what the CLI's ``viewer screenshot --json``
+        reports, whose ``captured`` lists each image written.
 
         The capture runs the ``lucida`` CLI, which drives a local Chrome, so
         both clients share one browser driver. It takes the CLI from
@@ -890,6 +892,8 @@ class ViewerResource:
         ]
         if not scale_bar:
             args.append("--no-scale-bar")
+        if plane_lines:
+            args.append("--plane-lines")
         return self._workspace._run_cli(
             ["viewer", "--profile", self.profile, *args], timeout=timeout
         )
@@ -1100,6 +1104,45 @@ class ViewResource:
         property takes the active view's value, or ``view``'s."""
         command = {"type": "set_view_link", "property": property, "mode": mode}
         return self._apply(command, view, timeout)
+
+    def compare(
+        self,
+        a: str,
+        b: str,
+        *,
+        swipe: float | None = None,
+        blink: float | bool | None = None,
+        view: int | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Compare two datasets that line up, by id or name, in ``view`` or
+        the active view.
+
+        Splits the view by a divider, ``a`` left of it (``swipe``, the
+        default, at that fraction of the view's width), or shows them in turn
+        (``blink``: ``True`` to wait to be flipped, or 1, 2 or 4 flips a
+        second). Every other dataset the view shows is set aside while they
+        compare. A capture of a blink shows ``a``.
+        """
+        if swipe is not None and blink not in (None, False):
+            raise LucidaError("config", "a comparison is a swipe or a blink, not both")
+        blinking = blink not in (None, False)
+
+        def change(scene: Any, snapshot: dict[str, Any]) -> None:
+            pair = [snapshot_dataset_id(snapshot, item) for item in (a, b)]
+            mode = "blink" if blinking else "swipe"
+            scene.apply(json.dumps({"type": "compare", "a": pair[0], "b": pair[1], "mode": mode}), view)
+            if not blinking:
+                at = 0.5 if swipe is None else swipe
+                scene.apply(json.dumps({"type": "set_comparison_divider", "at": at}))
+            elif blink is not True:
+                scene.apply(json.dumps({"type": "set_blink_rate", "rate": blink}))
+
+        return self._workspace.viewer._apply_change(change, timeout=timeout)
+
+    def end_comparison(self, *, view: int | None = None, timeout: float = 30.0) -> dict[str, Any]:
+        """Stop comparing in ``view`` or the active view."""
+        return self._apply({"type": "end_comparison"}, view, timeout)
 
     def _apply(self, command: dict[str, Any], view: int | None, timeout: float) -> dict[str, Any]:
         return self._workspace.viewer.apply(command, view=view, timeout=timeout)

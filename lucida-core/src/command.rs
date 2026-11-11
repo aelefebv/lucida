@@ -10,7 +10,7 @@ use lucida_protocol::DatasetOpened;
 
 use crate::camera::{Camera, Framing};
 use crate::placement::UserTransform;
-use crate::scene::{BlendMode, Colormap, LinkMode, LinkProperty, RenderMode, Scene};
+use crate::scene::{BlendMode, Colormap, CompareMode, LinkMode, LinkProperty, RenderMode, Scene};
 use crate::slice_plane::SlicePlane;
 use crate::view::{ViewDatasets, ViewId, ViewLayout};
 
@@ -210,6 +210,31 @@ pub enum ViewportCommand {
     SetViewLink {
         property: LinkProperty,
         mode: LinkMode,
+    },
+    // Comparison, in the active view
+    /// Compare `a` with `b` in `mode` ([`crate::scene::Scene::compare`]):
+    /// the divider in the middle and a blink showing `a`, still. A pair that
+    /// doesn't line up is left alone.
+    Compare {
+        a: DatasetId,
+        b: DatasetId,
+        mode: CompareMode,
+    },
+    EndComparison,
+    SetComparisonMode {
+        mode: CompareMode,
+    },
+    /// Put the swipe divider at `at`, a fraction of the view's width.
+    SetComparisonDivider {
+        at: f64,
+    },
+    /// Show the other dataset of a blink.
+    FlipComparison,
+    /// Run a blink at `rate` flips a second, one of
+    /// [`crate::scene::BLINK_RATES`], or hold it with `None`.
+    SetBlinkRate {
+        #[serde(default)]
+        rate: Option<f64>,
     },
     // 2D camera
     Pan {
@@ -464,6 +489,10 @@ enum ViewportScope {
     /// active one. A change bumps `epochs.links`, and a view it moved bumps
     /// `epochs.view` or `epochs.selection`.
     Links,
+    /// Mutates the active view's comparison, through the one write that
+    /// bumps `epochs.comparison`, and `epochs.selection` when it sets layers
+    /// aside or brings them back.
+    Comparison,
 }
 
 impl ViewportCommand {
@@ -519,6 +548,12 @@ impl ViewportCommand {
             | ViewportCommand::MoveDatasetToView { .. }
             | ViewportCommand::MaximizeView { .. } => ViewportScope::Views,
             ViewportCommand::SetViewLink { .. } => ViewportScope::Links,
+            ViewportCommand::Compare { .. }
+            | ViewportCommand::EndComparison
+            | ViewportCommand::SetComparisonMode { .. }
+            | ViewportCommand::SetComparisonDivider { .. }
+            | ViewportCommand::FlipComparison
+            | ViewportCommand::SetBlinkRate { .. } => ViewportScope::Comparison,
         }
     }
 
@@ -579,7 +614,13 @@ impl ViewportCommand {
             | ViewportCommand::SetViewDatasets { .. }
             | ViewportCommand::MoveDatasetToView { .. }
             | ViewportCommand::MaximizeView { .. }
-            | ViewportCommand::SetViewLink { .. } => true,
+            | ViewportCommand::SetViewLink { .. }
+            | ViewportCommand::Compare { .. }
+            | ViewportCommand::EndComparison
+            | ViewportCommand::SetComparisonMode { .. }
+            | ViewportCommand::FlipComparison => true,
+            ViewportCommand::SetComparisonDivider { at } => at.is_finite(),
+            ViewportCommand::SetBlinkRate { rate } => rate.is_none_or(f64::is_finite),
             ViewportCommand::Pan { dx, dy } | ViewportCommand::Pan3D { dx, dy } => {
                 dx.is_finite() && dy.is_finite()
             }
@@ -939,6 +980,8 @@ impl Scene {
                     self.epochs.selection += 1;
                 }
             }
+            // The comparison's own write moves its epochs.
+            ViewportScope::Comparison => self.mutate_viewport(cmd),
             ViewportScope::DatasetDisplay => {
                 let visible_before = matches!(cmd, ViewportCommand::SetDatasetVisible { .. })
                     .then(|| self.visible_set());
@@ -981,6 +1024,16 @@ impl Scene {
             ViewportCommand::SetViewLink { property, mode } => {
                 self.set_link(property, mode);
             }
+            ViewportCommand::Compare { a, b, mode } => {
+                // The verdict is the caller's to read first: a command
+                // carries no answer back.
+                let _ = self.compare(a, b, mode);
+            }
+            ViewportCommand::EndComparison => self.end_comparison(),
+            ViewportCommand::SetComparisonMode { mode } => self.set_comparison_mode(mode),
+            ViewportCommand::SetComparisonDivider { at } => self.set_comparison_divider(at),
+            ViewportCommand::FlipComparison => self.flip_comparison(),
+            ViewportCommand::SetBlinkRate { rate } => self.set_blink_rate(rate),
             ViewportCommand::SetMode3D => {
                 self.set_mode_3d();
             }
