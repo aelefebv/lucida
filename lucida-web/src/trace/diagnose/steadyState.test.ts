@@ -203,16 +203,16 @@ describe("the reading and the run's own findings", () => {
     const document = diagnoseRun(budgetBoundCoarseRun(), {
       steadyState: refetchLoopSteadyState(budgetBoundCoarseRun()),
       // A baseline twice as fast makes the run's own phases regress, so the
-      // list holds a stall and two steady-state findings at once.
+      // list holds a failure and two steady-state findings at once.
       baseline: fasterBaseline(),
     });
 
     const severities = document.findings.map((finding) => finding.severity);
-    expect(severities[0]).toBe("stall");
+    expect(severities[0]).toBe("fail");
     expect(severities).toContain("steady-state");
-    // Every stall precedes every steady-state finding: one is about the run,
+    // Every failure precedes every steady-state finding: one is about the run,
     // the other about the interval after it.
-    expect(severities.lastIndexOf("stall")).toBeLessThan(severities.indexOf("steady-state"));
+    expect(severities.lastIndexOf("fail")).toBeLessThan(severities.indexOf("steady-state"));
     // The attribution is the run's answer to what it was waiting on, so it
     // rides the leading finding about the run rather than about the interval.
     expect(document.findings[0].attribution).not.toBeNull();
@@ -226,7 +226,7 @@ describe("the reading and the run's own findings", () => {
     });
 
     const summary = renderDiagnostic(document).text;
-    expect(summary.match(/STEADY-STATE|STALL/g)?.length).toBeLessThanOrEqual(3);
+    expect(summary.match(/STEADY-STATE|FAIL/g)?.length).toBeLessThanOrEqual(3);
 
     const deep = renderDiagnostic(document, { depth: "phases" }).text;
     expect(deep).toContain(RULES.budgetBound.why);

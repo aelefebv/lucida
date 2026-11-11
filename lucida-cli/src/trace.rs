@@ -1886,12 +1886,13 @@ fn parse_run_file(text: &str, path: &Path) -> Result<TraceRunFile, CliError> {
 
 /// Why an opt-in gate should fail, or `None`.
 ///
-/// A stall verdict and a run that never finished are one result in CI, so they
-/// share one flag. Coverage never fails a gate: 87% of a healthy local cold
-/// open is pre-instrument boot, so a gate that fires on coverage fires on every
-/// green run. A steady-state verdict fails too: the view settled and the
-/// pipeline went on, and a regression there is as much a build failure as a
-/// stall.
+/// A failing verdict and a run that never finished are one result in CI, so
+/// they share one flag. Coverage never fails a gate: 87% of a healthy local
+/// cold open is pre-instrument boot, so a gate that fires on coverage fires on
+/// every green run. Nor does a bound verdict: every run spends most of itself
+/// somewhere, and the ceilings judge whether that phase was too slow. A
+/// steady-state verdict fails: the view settled and the pipeline went on, and
+/// a regression there is as much a build failure as a ceiling crossed.
 ///
 /// The gate reads four things: the header's settled flag, the socket outages
 /// the document records, the errors the page raised, and the closed run's
@@ -3319,13 +3320,24 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_fails_on_a_stall_and_on_a_run_that_never_settled() {
-        let stalled = run_file(
-            json!({ "verdict": { "kind": "stall", "text": "wire held 4,200 ms" } }),
+    fn the_gate_fails_on_a_failing_verdict_and_on_a_run_that_never_settled() {
+        let failed = run_file(
+            json!({ "verdict": { "kind": "fail", "text": "browser.wire ran p95 1600 ms" } }),
             true,
             "quiescent",
         );
-        assert!(gate_failure(&stalled).unwrap().contains("wire held"));
+        assert_eq!(
+            gate_failure(&failed).as_deref(),
+            Some("fail: browser.wire ran p95 1600 ms")
+        );
+
+        // A page whose ruleset predates `fail` calls the same finding `stall`.
+        let older = run_file(
+            json!({ "verdict": { "kind": "stall", "text": "browser.wire ran p95 1600 ms" } }),
+            true,
+            "quiescent",
+        );
+        assert!(gate_failure(&older).unwrap().contains("browser.wire"));
 
         let unsettled = run_file(
             json!({ "verdict": { "kind": "clear", "text": "nothing crossed a threshold" } }),
@@ -3335,7 +3347,7 @@ mod tests {
         assert!(gate_failure(&unsettled).unwrap().contains("never settled"));
     }
 
-    /// The page's diagnostic reads the page's scroll into a stall, so the
+    /// The page's diagnostic reads the page's scroll into a failure, so the
     /// gate fails a run that settled clear in every phase on a page that
     /// overflows its viewport.
     #[test]
@@ -3343,18 +3355,18 @@ mod tests {
         let overflowing = run_file(
             json!({
                 "verdict": {
-                    "kind": "stall",
+                    "kind": "fail",
                     "text": "its document is 390x924 CSS pixels in a 390x844 viewport; \
                              the page under the viewer should neither scroll nor overflow"
                 },
-                "findings": [{ "rule": "page.scroll", "severity": "stall" }]
+                "findings": [{ "rule": "page.scroll", "severity": "fail" }]
             }),
             true,
             "quiescent",
         );
         let failure = gate_failure(&overflowing).unwrap();
         assert!(
-            failure.starts_with("stall: its document is 390x924"),
+            failure.starts_with("fail: its document is 390x924"),
             "{failure}"
         );
     }
@@ -3417,14 +3429,14 @@ mod tests {
     }
 
     /// An interaction run over the frame-time ceiling reaches the gate as a
-    /// stall verdict naming the input, and only once the run has closed. A
+    /// failing verdict naming the input, and only once the run has closed. A
     /// run that never went quiescent fails as unsettled before its verdict is
     /// read.
     #[test]
     fn the_gate_fails_a_slow_interaction_run_once_it_has_closed() {
         let verdict = json!({
             "verdict": {
-                "kind": "stall",
+                "kind": "fail",
                 "text": "orbit ran at p95 80 ms per main-thread frame, over the 50 ms ceiling for an interaction run"
             },
             "run": { "cause": { "epoch": "view", "dirtyKind": "interactive", "source": "orbit" } }
@@ -3441,8 +3453,8 @@ mod tests {
     }
 
     /// "The view settled and the pipeline went on" is a regression a build
-    /// should catch, so a steady-state verdict fails the gate as a stall
-    /// does.
+    /// should catch, so a steady-state verdict fails the gate as a failing
+    /// finding does.
     #[test]
     fn the_gate_fails_on_a_steady_state_verdict() {
         let refetching = run_file(
@@ -3461,10 +3473,11 @@ mod tests {
     }
 
     /// A view whose budgets hold less than it wants settles covering less,
-    /// and that is the planned behavior, so it passes. A view that stopped
-    /// without settling fails, and says what it waited on.
+    /// and that is the planned behavior, so it passes, as a view bound by one
+    /// phase does. A view that stopped without settling fails, and says what
+    /// it waited on.
     #[test]
-    fn the_gate_passes_a_view_that_settled_covering_less_and_fails_a_stall() {
+    fn the_gate_passes_a_view_that_settled_covering_less_or_bound_and_fails_a_stall() {
         let budget_bound = run_file(
             json!({
                 "verdict": {
@@ -3476,6 +3489,19 @@ mod tests {
             "quiescent",
         );
         assert_eq!(gate_failure(&budget_bound), None);
+
+        let bound = run_file(
+            json!({
+                "verdict": {
+                    "kind": "bound",
+                    "text": "bound by browser.upload: it held 270 ms, 31% of the chain, and nothing failed"
+                },
+                "findings": [{ "rule": "share.dominant", "severity": "bound", "subject": "browser.upload" }]
+            }),
+            true,
+            "quiescent",
+        );
+        assert_eq!(gate_failure(&bound), None);
 
         let mut stalled = run_file(json!({}), false, "stalled");
         stalled.header.stall_reason = Some("server_pending".to_string());
@@ -3496,7 +3522,7 @@ mod tests {
     /// The steady-state rules read closed intervals, and the gate reads the
     /// closed run's verdict. A provisional reading that named a steady-state
     /// finding over its moving window is not a verdict and cannot fail a
-    /// build, exactly as a provisional stall cannot.
+    /// build, exactly as any other provisional finding cannot.
     #[test]
     fn the_gate_ignores_a_steady_state_finding_in_a_provisional_window() {
         let file = run_file(
@@ -3536,7 +3562,7 @@ mod tests {
     /// run, and the gate trusts only the verdict of a closed one, so a reading
     /// riding beside a clear verdict changes nothing, whatever its window saw.
     #[test]
-    fn the_gate_ignores_a_stall_in_a_provisional_window_beside_a_clear_verdict() {
+    fn the_gate_ignores_a_provisional_window_beside_a_clear_verdict() {
         let provisional = json!({
             "provisional": true,
             "window": { "startMs": 7300, "endMs": 12300, "spanMs": 5000 },
@@ -3546,7 +3572,7 @@ mod tests {
                 "subject": "scheduler.admission"
             },
             "findings": [
-                { "severity": "stall", "rule": "share.dominant", "subject": "render.frame" },
+                { "severity": "bound", "rule": "share.dominant", "subject": "render.frame" },
                 { "severity": "saturated", "rule": "queue.backlog", "subject": "scheduler.admission" }
             ],
             "statement": "provisional — over the last 5000 ms, scheduler.admission held 19,800 requests behind a cap of 24 and the backlog is not shrinking"
@@ -4842,7 +4868,7 @@ mod tests {
                 "phases": "CRITICAL PATH",
                 "script": { "steps": [
                     step("wait", None, Value::Null),
-                    step("orbit", Some("run-7-3"), json!({ "kind": "stall", "text": "frame time over the ceiling" })),
+                    step("orbit", Some("run-7-3"), json!({ "kind": "fail", "text": "frame time over the ceiling" })),
                     step("scrub", Some("run-7-4"), json!({ "kind": "clear", "text": "fine" })),
                 ] },
                 "trace": { "runs": [] }
@@ -4865,13 +4891,13 @@ mod tests {
         assert!(file.header.settled);
         assert_eq!(
             gate_failure(&file).as_deref(),
-            Some("step 2 (orbit 30°,0°) stall: frame time over the ceiling")
+            Some("step 2 (orbit 30°,0°) fail: frame time over the ceiling")
         );
 
         let text = format_run_human(&file, Path::new("/tmp/run.json"), None);
         assert!(text.contains("steps     3: wait, orbit, scrub\n"), "{text}");
         assert!(text.contains("run run-7-3 (orbit) · quiescent"), "{text}");
-        assert!(text.contains("verdict stall"), "{text}");
+        assert!(text.contains("verdict fail"), "{text}");
 
         let json = serde_json::to_string(&file).unwrap();
         let back = parse_run_file(&json, Path::new("run.json")).unwrap();
