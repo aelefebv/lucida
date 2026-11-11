@@ -111,9 +111,9 @@ describe("handleLabelSliceChunkData", () => {
     handleLabelSliceChunkData(ctx, next);
 
     expect(post.mock.calls.map(([msg]) => msg)).toEqual([
-      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
-      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "held", keys: ["0/1/0/0/0/0"], reason: undefined },
-      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
+      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "held", keys: ["0/1/0/0/0/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
     ]);
   });
 
@@ -132,7 +132,7 @@ describe("handleLabelSliceChunkData", () => {
     retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
     retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
     expect(post.mock.calls.slice(1).map(([msg]) => msg)).toEqual([
-      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
+      { type: "chunkResidency", memberId: "img-0:label:region-b", viewMode: "slice", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
     ]);
     // The old plane stays drawn until the new one lands, which reports no loss.
     expect(writes).toHaveLength(1);
@@ -191,6 +191,7 @@ describe("handleLabelSliceChunkData", () => {
     expect(ctx.post).toHaveBeenCalledWith({
       type: "chunkResidency",
       memberId: "img-0:label:region-b",
+      viewMode: "slice",
       tier: "detail",
       change: "refused",
       keys: ["0/0/0/0/0/0"],

@@ -224,7 +224,7 @@ export function retireOtherLabelPlanes(
     lost.push(key);
     pool.keys.delete(cell);
   }
-  postChunkResidency(ctx, memberId, LABEL_TIER, "lost", lost, "replaced");
+  postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", lost, "replaced");
 }
 
 export function destroyLabelSlicePool(pool: LabelSlicePool): void {
@@ -241,7 +241,7 @@ export function destroyLabelSlicePool(pool: LabelSlicePool): void {
 export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string, reason: ChunkFeedbackReason): void {
   const pool = ctx.state.labelSlicePools.get(memberId);
   if (pool) {
-    postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
+    postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", [...pool.keys.values()], reason);
     destroyLabelSlicePool(pool);
     ctx.state.labelSlicePools.delete(memberId);
   }
@@ -261,7 +261,7 @@ export function removeLabelSlicePoolsForDataset(
 ): void {
   for (const [memberId, pool] of ctx.state.labelSlicePools) {
     if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
-      if (reason) postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
+      if (reason) postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "lost", [...pool.keys.values()], reason);
       destroyLabelSlicePool(pool);
       ctx.state.labelSlicePools.delete(memberId);
     }
@@ -477,7 +477,7 @@ export function growSlicePoolWithin(
   atlas: SliceAtlasState,
   reclaim: boolean,
 ): boolean {
-  const wantedRows = Math.ceil(wantedSlotsOf(ctx.state, poolKey, atlas) / atlas.slotsX);
+  const wantedRows = Math.ceil(wantedSlotsOf(ctx.state, "slice", poolKey, atlas) / atlas.slotsX);
   const maxSteps = Math.min(atlas.maxSlotsY, Math.max(atlas.slotsY * 2, wantedRows)) - atlas.slotsY;
   const steps = grantGrowth(ctx, atlas, sliceRowBytes(atlas), maxSteps, reclaim);
   return steps > 0 && growSliceAtlasWatched(ctx, poolKey, atlas, atlas.slotsY + steps);
@@ -593,7 +593,7 @@ function createWatchedSliceAtlas(
 export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: SliceAtlasState): void {
   const atlases = ctx.state.sliceAtlases;
   if (atlases.get(poolKey) !== lost) return;
-  postSlotsLost(ctx, chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
+  postSlotsLost(ctx, "slice", chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
   destroySliceAtlas(lost);
   atlases.delete(poolKey);
   if (handleGpuOutOfMemory(ctx)) {
@@ -608,7 +608,7 @@ export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: Sli
     atlas.indirectionDirty = true;
     atlases.set(poolKey, atlas);
   }
-  ctx.postWantedSet(lost.datasetId);
+  ctx.postWantedSet(lost.datasetId, "slice");
 }
 
 /** Resize the slice pool's indirection to the new total size. */

@@ -27,11 +27,13 @@ interface BarProps {
   comparison: Comparison | null;
   actions: ComparisonActions;
   nameOf: (datasetId: string) => string;
+  /** What it says of the layers the comparison sets aside, or null for none. */
+  setAside: string | null;
   /** Says when the pair lines up because someone placed it by hand, or null. */
   byHand?: string | null;
 }
 
-export function ComparisonBar({ comparison, actions, nameOf, byHand }: BarProps) {
+export function ComparisonBar({ comparison, actions, nameOf, setAside, byHand }: BarProps) {
   // A running blink belongs to the pair it was started on, so a new
   // comparison starts still.
   const pair = comparison ? `${comparison.a}\n${comparison.b}` : null;
@@ -67,6 +69,7 @@ export function ComparisonBar({ comparison, actions, nameOf, byHand }: BarProps)
           <Badge tone="accent">By hand</Badge>
         </span>
       )}
+      {setAside && <span className="lc-comparison-aside">{setAside}</span>}
       <SegmentedControl<CompareMode>
         label="Compare by"
         size="sm"

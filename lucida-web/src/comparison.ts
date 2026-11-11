@@ -1,13 +1,14 @@
 /**
  * Two datasets compared in one view, as the scene holds it: split by a
  * divider (swipe) or shown in turn (blink). lucida-core decides whether a
- * pair lines up and what of the view's width each one shows; the web turns
- * that into pixels, controls and copy.
+ * pair lines up, what of the view's width each one shows, and which other
+ * layers it sets aside; the web turns that into pixels, controls and copy.
  */
 import type { WasmScene } from "lucida-core";
 import { noteSceneWrite } from "./sceneStore.ts";
 import type { InvalidationSink } from "./invalidation.ts";
 import type { PixelRect } from "./renderer/layerBatches.ts";
+import type { ResolvedLayers } from "./resolvedLayers.ts";
 
 export type CompareMode = "swipe" | "blink";
 
@@ -85,8 +86,9 @@ export function lineUpReason(lineUp: LineUp, nameOf: (id: string) => string): st
 
 /**
  * Where a dataset may show on a target of `width` × `height` pixels under the
- * view's comparison: everywhere (null), nowhere (`"hidden"`), or a column of
- * the target.
+ * view's comparison: everywhere (null) when there is none, nowhere
+ * (`"hidden"`), or a column of the target. A layer the comparison sets aside
+ * resolves as not visible, so it never gets this far.
  */
 export type ComparisonClip = PixelRect | null | "hidden";
 
@@ -104,6 +106,14 @@ export function comparisonClip(
   const from = Math.round(span[0] * width);
   const to = Math.round(span[1] * width);
   return to > from ? [from, 0, to - from, height] : "hidden";
+}
+
+/** What the compare bar says of the layers the comparison sets aside, or null for none. */
+export function setAsideNote(layers: ResolvedLayers): string | null {
+  let count = 0;
+  for (const layer of layers.values()) if (layer.set_aside) count++;
+  if (count === 0) return null;
+  return `${count} other ${count === 1 ? "layer" : "layers"} hidden while comparing`;
 }
 
 /** The pixels two rects share, or null when they share none. */

@@ -85,6 +85,7 @@ function emitLanes(
     config,
     Math.max(0, lanes.topBand) + 1,
     lanes,
+    views[0]?.view.selection.renderMode,
   );
 
   const requests = lanes.finish();
@@ -93,13 +94,14 @@ function emitLanes(
 
 /**
  * `requests`, sorted, with each chunk two views ask for alike kept once, at
- * the more urgent of the two priorities.
+ * the more urgent of the two priorities. Views of two modes never ask alike,
+ * since each mode's pools need the chunk sent to them.
  */
 function distinctRequests(requests: ChunkRequest[]): ChunkRequest[] {
   const seen = new Set<string>();
   return requests.filter((req) => {
     const key = [
-      req.imageId, req.tier, req.chunkKey, req.planeAxis ?? "", req.plane ?? "", req.planes?.join(",") ?? "",
+      req.imageId, req.tier, req.mode, req.chunkKey, req.planeAxis ?? "", req.plane ?? "", req.planes?.join(",") ?? "",
     ].join("|");
     if (seen.has(key)) return false;
     seen.add(key);
@@ -108,11 +110,11 @@ function distinctRequests(requests: ChunkRequest[]): ChunkRequest[] {
 }
 
 /**
- * The views' active sets as one, the set the worker holds: an entity any
- * view shows is a tile holding every view's detail levels, finest first. One
- * view's set is returned as it is.
+ * The views' active sets as one, the set pools the views share hold: an
+ * entity any view shows is a tile holding every view's detail levels, finest
+ * first. One view's set is returned as it is.
  */
-function mergeActiveSets(sets: readonly ActiveSetEntry[][]): ActiveSetEntry[] {
+export function mergeActiveSets(sets: readonly ActiveSetEntry[][]): ActiveSetEntry[] {
   if (sets.length === 1) return sets[0];
   const merged = new Map<string, ActiveSetEntry>();
   for (const set of sets) {

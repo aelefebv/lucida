@@ -139,6 +139,7 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
     // Each planner lane stamps its own tier. Mirror that so a lane-only
     // override still matches a real request.
     tier: lane === "coarse" || lane === "overview" || lane === "minimap" ? "coarse" : "detail",
+    mode: "slice",
     priority: 0,
     chunkKey: `${overrides?.level ?? 0}/${overrides?.t ?? 0}/${overrides?.c ?? 0}/${overrides?.z ?? 0}/${overrides?.y ?? 0}/${overrides?.x ?? 0}`,
     ...overrides,
@@ -295,7 +296,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan([detail, ahead]));
       await flush();
       const [delivery] = consumeDeliverables(cache);
-      cache.markChunksHeld(delivery.imageId, delivery.c, "detail", [delivery.chunkKey]);
+      cache.markChunksHeld(delivery.imageId, delivery.c, "slice", "detail", [delivery.chunkKey]);
 
       // Frames with nothing new, as an orbit draws: one walk finds nothing,
       // and the demand counts settling reads are not counted again either.
@@ -375,20 +376,20 @@ describe("CpuCache", () => {
       expect(Array.from(cache.getDeliverable())).toEqual([]);
 
       // Held until the worker reports it lost.
-      cache.markChunksHeld(detail.imageId, detail.c, "detail", [detail.chunkKey]);
+      cache.markChunksHeld(detail.imageId, detail.c, "slice", "detail", [detail.chunkKey]);
       expect(Array.from(cache.getDeliverable())).toEqual([]);
-      cache.markChunksLost(detail.imageId, detail.c, "detail", [detail.chunkKey], "evicted");
+      cache.markChunksLost(detail.imageId, detail.c, "slice", "detail", [detail.chunkKey], "evicted");
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
 
       // A missing report clears a held chunk, a disagreement between the records.
       cache.markSent(first[0]);
-      cache.markChunksHeld(detail.imageId, detail.c, "detail", [detail.chunkKey]);
-      expect(cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey, "detail")).toBe(true);
+      cache.markChunksHeld(detail.imageId, detail.c, "slice", "detail", [detail.chunkKey]);
+      expect(cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey, "slice", "detail")).toBe(true);
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
 
       // A full atlas refuses it until the next plan.
       cache.markSent(first[0]);
-      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "atlas-policy");
+      cache.markChunksRefused(detail.imageId, detail.c, "slice", "detail", [detail.chunkKey], "atlas-policy");
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
 
@@ -403,7 +404,7 @@ describe("CpuCache", () => {
 
       const [delivery] = Array.from(cache.getDeliverable());
       cache.markSent(delivery);
-      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "stale");
+      cache.markChunksRefused(detail.imageId, detail.c, "slice", "detail", [detail.chunkKey], "stale");
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
     });
 
@@ -490,7 +491,7 @@ describe("CpuCache", () => {
 
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
 
-      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "atlas-policy");
+      cache.markChunksRefused(detail.imageId, detail.c, "slice", "detail", [detail.chunkKey], "atlas-policy");
 
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
@@ -1062,13 +1063,13 @@ describe("CpuCache", () => {
       cache.submit(makePlan([gone, kept], [makeActiveEntry("entity-1"), makeActiveEntry("entity-2")]));
       await flush();
       expect(consumeDeliverables(cache)).toHaveLength(2);
-      cache.markChunksHeld("image-1", 0, "detail", [gone.chunkKey]);
-      cache.markChunksHeld("image-2", 0, "detail", [kept.chunkKey]);
+      cache.markChunksHeld("image-1", 0, "slice", "detail", [gone.chunkKey]);
+      cache.markChunksHeld("image-2", 0, "slice", "detail", [kept.chunkKey]);
 
       cache.cancelDataset("ds-1", ["entity-1"]);
 
-      expect(cache.deliveryState.wasChunkSent("image-1", 0, gone.chunkKey, "detail")).toBe(false);
-      expect(cache.deliveryState.isChunkHeld("image-2", 0, kept.chunkKey, "detail")).toBe(true);
+      expect(cache.deliveryState.wasChunkSent("image-1", 0, gone.chunkKey, "detail", "slice")).toBe(false);
+      expect(cache.deliveryState.isChunkHeld("image-2", 0, kept.chunkKey, "detail", "slice")).toBe(true);
       // A reopened dataset keeps its ids, and its chunk goes to the worker again.
       cache.submit(makePlan([gone, kept], [makeActiveEntry("entity-1"), makeActiveEntry("entity-2")]));
       await flush();

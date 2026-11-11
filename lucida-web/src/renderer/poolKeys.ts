@@ -2,6 +2,12 @@
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { SpatialAxis } from "./slicePlane.ts";
+import type { PoolMode } from "./workerProtocol.ts";
+
+/** Key of what the worker keeps for one dataset's pools of one mode. */
+export function datasetModeKey(datasetId: string, mode: PoolMode): string {
+  return `${datasetId}|${mode}`;
+}
 
 /**
  * Chunk-pool key for the worker's shared atlas pools, one per channel.

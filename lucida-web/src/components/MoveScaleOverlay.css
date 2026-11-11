@@ -22,8 +22,8 @@
 .lc-move-scale-box {
   box-sizing: border-box;
   border: 1.5px dashed var(--lc-accent-text);
-  /* A dark rim keeps the outline readable over bright data. */
-  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45);
+  /* A dark halo keeps the outline readable over bright data. */
+  box-shadow: var(--lc-annotation-shadow);
   background: color-mix(in oklab, var(--lc-accent) 8%, transparent);
   cursor: move;
   will-change: transform;

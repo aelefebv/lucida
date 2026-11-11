@@ -47,6 +47,7 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
     // Each planner lane stamps its own tier. Mirror that so a lane-only
     // override still matches a real request.
     tier: lane === "coarse" || lane === "overview" || lane === "minimap" ? "coarse" : "detail",
+    mode: "slice",
     priority: 0,
     chunkKey: `${level}/0/0/0/${y}/${x}`,
     ...overrides,
@@ -308,7 +309,7 @@ describe("cache point events", () => {
 
     cache.submit(makePlan([makeRequest({ level: 1 })], [tile("entity-1", "image-1", 1)]));
     await flush();
-    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "evicted");
+    cache.markChunksLost("image-1", 0, "slice", "detail", ["1/0/0/0/0/0"], "evicted");
 
     const evictions = eventsOfKind(exportedEvents(), "eviction");
     expect(evictions.map(e => [e.reason, e.chunk?.chunkKey, e.chunk?.level])).toEqual([
@@ -322,9 +323,9 @@ describe("cache point events", () => {
 
     cache.submit(makePlan([makeRequest({ level: 1 })], [tile("entity-1", "image-1", 1)]));
     await flush();
-    cache.markChunksRefused("image-1", 0, "detail", ["1/0/0/0/0/0"], "stale");
-    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "freed");
-    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "wrong-slice");
+    cache.markChunksRefused("image-1", 0, "slice", "detail", ["1/0/0/0/0/0"], "stale");
+    cache.markChunksLost("image-1", 0, "slice", "detail", ["1/0/0/0/0/0"], "freed");
+    cache.markChunksLost("image-1", 0, "slice", "detail", ["1/0/0/0/0/0"], "wrong-slice");
 
     const events = exportedEvents();
     expect(eventsOfKind(events, "rejection").map(e => [e.reason, e.chunk?.chunkKey])).toEqual([
@@ -341,7 +342,7 @@ describe("cache point events", () => {
     // event has to say so — a chunk key is not unique across the two.
     cache.submit(makePlan([makeRequest({ lane: "coarse" })]));
     await flush();
-    cache.markChunksLost("image-1", 0, "coarse", ["0/0/0/0/0/0"], "evicted");
+    cache.markChunksLost("image-1", 0, "slice", "coarse", ["0/0/0/0/0/0"], "evicted");
 
     const evictions = eventsOfKind(exportedEvents(), "eviction");
     expect(evictions[0].chunk?.residencyTier).toBe("coarse");

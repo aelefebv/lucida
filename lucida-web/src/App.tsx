@@ -8,6 +8,7 @@ import {
 import { LayerPanel, type LayerViewPlacement } from "./components/LayerPanel.tsx";
 import { useSceneView } from "./hooks/useSceneView.ts";
 import { ComparisonBar, SwipeDivider } from "./components/Comparison.tsx";
+import { setAsideNote } from "./comparison.ts";
 import { Minimap } from "./components/Minimap.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { sceneClipDepth } from "./components/clipDepth.ts";
@@ -1166,6 +1167,7 @@ function Viewer({
                       comparison={comparison.current}
                       actions={comparison.actions}
                       nameOf={comparison.nameOf}
+                      setAside={setAsideNote(dims.layers)}
                       byHand={comparison.current && comparison.byHand(comparison.current.a, comparison.current.b)}
                     />
                   )}

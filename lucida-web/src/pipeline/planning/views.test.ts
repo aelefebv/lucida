@@ -86,6 +86,24 @@ describe("a plan for several views", () => {
     expect(keys(two.requests)).toEqual(keys(one.requests));
   });
 
+  it("asks for a chunk once for each mode that draws it, stamped with the mode whose pools it goes to", () => {
+    const sliceView = viewAt(0, 40);
+    const volumeView = { ...viewAt(1, 40), selection: { ...viewAt(1, 40).selection, renderMode: "volume" as const } };
+    const both = plan(
+      createSyntheticSnapshot({ views: [sliceView, volumeView] }),
+      createSyntheticState(),
+      noPrefetch,
+    );
+    const detail = both.requests.filter((req) => req.lane === "detail");
+    const slice = detail.filter((req) => req.mode === "slice");
+    const volume = detail.filter((req) => req.mode === "volume");
+    expect(slice.length).toBeGreaterThan(0);
+    expect(slice.every((req) => req.plane !== undefined)).toBe(true);
+    expect(volume.every((req) => req.plane === undefined)).toBe(true);
+    // The slice view's plane lies in a chunk the volume view also wants whole.
+    expect(volume.map((req) => req.chunkKey)).toEqual(expect.arrayContaining(slice.map((req) => req.chunkKey)));
+  });
+
   it("asks for what each view draws", () => {
     const near = plan(createSyntheticSnapshot({ views: [viewAt(0, 10)] }), createSyntheticState(), noPrefetch);
     const far = plan(createSyntheticSnapshot({ views: [viewAt(1, 80)] }), createSyntheticState(), noPrefetch);

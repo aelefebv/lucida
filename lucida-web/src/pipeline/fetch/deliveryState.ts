@@ -8,10 +8,14 @@
  * cold-state rebuild changes nothing here, and a chunk the worker holds is
  * never sent again until it reports the chunk lost.
  *
+ * A dataset's slice pools and volume pools each hold a chunk on their own, so
+ * every record is per pool mode as well as per tier.
+ *
  * Pure collaborator: no I/O, no clocks, no worker-member-id knowledge.
  */
 
 import type { ResidencyTier } from "../residencyTier.ts";
+import type { PoolMode } from "../../renderer/workerProtocol.ts";
 
 type ChunkDelivery = "sent" | "held";
 
@@ -19,8 +23,8 @@ function channelKeyFor(imageId: string, c: number): string {
   return `${imageId}|${c}`;
 }
 
-function tierKeyFor(chunkKey: string, tier?: ResidencyTier): string {
-  return `${tier ?? "detail"}|${chunkKey}`;
+function slotKeyFor(chunkKey: string, tier: ResidencyTier, mode: PoolMode): string {
+  return `${mode}|${tier}|${chunkKey}`;
 }
 
 export class DeliveryState {
@@ -43,9 +47,9 @@ export class DeliveryState {
   }
 
   /** Posted to the worker; awaits its answer. */
-  markChunkSent(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): void {
+  markChunkSent(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, mode: PoolMode): void {
     const byKey = this.channel(imageId, c, true)!;
-    const key = tierKeyFor(chunkKey, tier);
+    const key = slotKeyFor(chunkKey, tier, mode);
     const prior = byKey.get(key);
     if (prior === "held") return;
     if (prior === undefined) this.unanswered++;
@@ -53,24 +57,24 @@ export class DeliveryState {
   }
 
   /** The worker wrote the chunk, or already held it. */
-  markChunkHeld(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): void {
+  markChunkHeld(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, mode: PoolMode): void {
     const byKey = this.channel(imageId, c, true)!;
-    const key = tierKeyFor(chunkKey, tier);
+    const key = slotKeyFor(chunkKey, tier, mode);
     if (byKey.get(key) === "sent") this.unanswered--;
     byKey.set(key, "held");
   }
 
   /** The worker did not place the chunk, so it may be sent again. */
-  markChunkRefused(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): void {
-    this.drop(imageId, c, tierKeyFor(chunkKey, tier));
+  markChunkRefused(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, mode: PoolMode): void {
+    this.drop(imageId, c, slotKeyFor(chunkKey, tier, mode));
   }
 
   /**
    * The worker stopped holding the chunk. A copy sent since stays `sent`: the
    * loss is of the slot it replaces, and its own answer is still to come.
    */
-  markChunkLost(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): void {
-    const key = tierKeyFor(chunkKey, tier);
+  markChunkLost(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, mode: PoolMode): void {
+    const key = slotKeyFor(chunkKey, tier, mode);
     if (this.channel(imageId, c, false)?.get(key) === "held") this.drop(imageId, c, key);
   }
 
@@ -79,20 +83,20 @@ export class DeliveryState {
    * mirror held it, a disagreement, after which the chunk may be sent again.
    * A `sent` chunk is left alone: the report predates its answer.
    */
-  markChunkMissing(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): boolean {
-    const key = tierKeyFor(chunkKey, tier);
+  markChunkMissing(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, mode: PoolMode): boolean {
+    const key = slotKeyFor(chunkKey, tier, mode);
     if (this.channel(imageId, c, false)?.get(key) !== "held") return false;
     this.drop(imageId, c, key);
     return true;
   }
 
   /** Sent and not yet answered, or held: either way, not to be sent again. */
-  wasChunkSent(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): boolean {
-    return this.channel(imageId, c, false)?.has(tierKeyFor(chunkKey, tier)) ?? false;
+  wasChunkSent(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, mode: PoolMode): boolean {
+    return this.channel(imageId, c, false)?.has(slotKeyFor(chunkKey, tier, mode)) ?? false;
   }
 
-  isChunkHeld(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): boolean {
-    return this.channel(imageId, c, false)?.get(tierKeyFor(chunkKey, tier)) === "held";
+  isChunkHeld(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, mode: PoolMode): boolean {
+    return this.channel(imageId, c, false)?.get(slotKeyFor(chunkKey, tier, mode)) === "held";
   }
 
   clearChunksForImage(imageId: string): void {
@@ -121,12 +125,12 @@ export class DeliveryState {
     return byKey;
   }
 
-  private drop(imageId: string, c: number, tierKey: string): void {
+  private drop(imageId: string, c: number, slotKey: string): void {
     const channelKey = channelKeyFor(imageId, c);
     const byKey = this.chunks.get(channelKey);
     if (!byKey) return;
-    if (byKey.get(tierKey) === "sent") this.unanswered--;
-    if (byKey.delete(tierKey)) this.releases++;
+    if (byKey.get(slotKey) === "sent") this.unanswered--;
+    if (byKey.delete(slotKey)) this.releases++;
     if (byKey.size === 0) this.chunks.delete(channelKey);
   }
 }

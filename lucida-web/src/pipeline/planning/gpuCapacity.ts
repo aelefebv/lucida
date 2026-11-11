@@ -37,12 +37,14 @@ export function gpuChunkRoomBytes(report: GpuCapacityReport | null, fallbackTota
 }
 
 /**
- * Where each request's chunk goes on the GPU. Only the detail and coarse
- * lanes upload into chunk pools; prefetch and minimap chunks never do.
+ * Where each request's chunk goes on the GPU: into the pools of the mode of
+ * the view that asked, so a dataset's slice and volume pools are each
+ * admitted for their own views. `sliceAxis` is the axis the dataset's slice
+ * pools cut. Only the detail and coarse lanes upload into chunk pools;
+ * prefetch and minimap chunks never do.
  */
 export function gpuSlotsFor(
   manifest: DatasetManifest,
-  mode: "slice" | "volume",
   report: GpuCapacityReport | null,
   fallbackTotalBytes: number,
   sliceAxis: SpatialAxis = "z",
@@ -51,20 +53,21 @@ export function gpuSlotsFor(
   const texel = bytesPerTexel(datasetSampleFormat(manifest));
   const limits = report?.limits ?? MIN_LIMITS;
   const cap = poolCapBytes(limits, report?.budgetBytes ?? fallbackTotalBytes);
-  const chunkDims = new Map<string, Map<number, number[]>>();
+  const chunkDims = new Map<string, Map<number, { volume: number[]; slice: number[] }>>();
   for (const image of manifest.images) {
-    const byLevel = new Map<number, number[]>();
+    const byLevel = new Map<number, { volume: number[]; slice: number[] }>();
     for (const level of image.multiscale.levels) {
       const [, , z, y, x] = level.chunk_shape;
       // A slice pool's slots are the plane's chunk across and down the screen.
-      byLevel.set(level.level_index, mode === "volume" ? [x, y, z] : toPlaneFrame([x, y, z], sliceAxis).slice(0, 2));
+      byLevel.set(level.level_index, { volume: [x, y, z], slice: toPlaneFrame([x, y, z], sliceAxis).slice(0, 2) });
     }
     chunkDims.set(image.image_id, byLevel);
   }
   const sized = new Map<string, GpuSlot>();
   return (req) => {
     if (req.lane !== "detail" && req.lane !== "coarse") return null;
-    const dims = chunkDims.get(req.imageId)?.get(req.level);
+    const mode = req.mode;
+    const dims = chunkDims.get(req.imageId)?.get(req.level)?.[mode];
     if (!dims) return null;
     const pool = chunkTierPoolKey(req.datasetId, req.tier, req.c, dims, mode === "volume" ? "z" : sliceAxis);
     const known = reported.get(pool);

@@ -5,7 +5,8 @@ import type { WasmScene } from "lucida-core";
 import { buildLayerInfos } from "./useDatasetSettings.ts";
 import type { DatasetState } from "../types.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../manifestTypes.ts";
-import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
+import type { DatasetLevels, LevelsByMode } from "../pipeline/datasetLevels.ts";
+import { withLevels } from "./useDatasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 
 // A single-level image with the given dtype + [Y, X] shape (chunked so a small
@@ -84,7 +85,7 @@ function datasetsWith(labels: LabelSpec[]): Map<string, DatasetState> {
 const emptyMaps = {
   autoContrast: new Map<string, boolean>(),
   contrastFit: new Map<string, ChannelFit>(),
-  levels: new Map<string, DatasetLevels>(),
+  levels: new Map<string, LevelsByMode>(),
 };
 
 // The full per-dataset settings shape the scene serializes, with the
@@ -356,9 +357,11 @@ describe("buildLayerInfos level readout", () => {
     const infos = buildLayerInfos(scene, datasetsWith([]), {
       ...emptyMaps,
       levels: new Map([["ds-0", {
-        target: { min: 1, max: 1 },
-        displayed: { min: 1, max: 3 },
-        coarserThanTarget: true,
+        slice: {
+          target: { min: 1, max: 1 },
+          displayed: { min: 1, max: 3 },
+          coarserThanTarget: true,
+        },
       }]]),
     });
     expect(infos[0]).toMatchObject({
@@ -366,6 +369,39 @@ describe("buildLayerInfos level readout", () => {
       displayedLevel: { min: 1, max: 3 },
       displayedCoarserThanTarget: true,
     });
+  });
+
+  it("reads the levels of the pools the active view's mode draws from, when a 2D and a 3D view both draw it", () => {
+    const slice: DatasetLevels = { target: { min: 1, max: 1 }, displayed: { min: 1, max: 1 }, coarserThanTarget: false };
+    const volume: DatasetLevels = { target: { min: 2, max: 2 }, displayed: { min: 3, max: 3 }, coarserThanTarget: true };
+    const maps = { ...emptyMaps, levels: new Map([["ds-0", { slice, volume }]]) };
+
+    expect(buildLayerInfos(scene, datasetsWith([]), maps, "2d")[0]).toMatchObject({
+      targetLevel: { min: 1, max: 1 },
+      displayedLevel: { min: 1, max: 1 },
+      displayedCoarserThanTarget: false,
+    });
+    expect(buildLayerInfos(scene, datasetsWith([]), maps, "3d")[0]).toMatchObject({
+      targetLevel: { min: 2, max: 2 },
+      displayedLevel: { min: 3, max: 3 },
+      displayedCoarserThanTarget: true,
+    });
+    // An active view whose mode draws the dataset from no pools shows no level.
+    const onlyVolume = { ...emptyMaps, levels: new Map([["ds-0", { volume }]]) };
+    expect(buildLayerInfos(scene, datasetsWith([]), onlyVolume, "2d")[0].targetLevel).toBeNull();
+  });
+
+  it("keeps each mode's readout apart, and drops one the worker reports empty", () => {
+    const slice: DatasetLevels = { target: { min: 1, max: 1 }, displayed: null, coarserThanTarget: false };
+    const volume: DatasetLevels = { target: { min: 2, max: 2 }, displayed: null, coarserThanTarget: false };
+    let levels = withLevels(new Map(), "ds-0", "slice", slice);
+    levels = withLevels(levels, "ds-0", "volume", volume);
+    expect(levels.get("ds-0")).toEqual({ slice, volume });
+    expect(withLevels(levels, "ds-0", "volume", { ...volume })).toBe(levels);
+
+    levels = withLevels(levels, "ds-0", "volume", null);
+    expect(levels.get("ds-0")).toEqual({ slice });
+    expect(withLevels(levels, "ds-0", "slice", null).has("ds-0")).toBe(false);
   });
 
   it("leaves the levels null before the worker has reported the dataset", () => {
