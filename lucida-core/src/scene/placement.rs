@@ -278,7 +278,7 @@ impl Scene {
 
     /// The box `dataset_id`'s members fill in the scene frame, on all three
     /// axes. `None` for a dataset the scene doesn't hold or one with no image.
-    fn placed_extent(&self, dataset_id: &DatasetId) -> Option<([f64; 3], [f64; 3])> {
+    pub(super) fn placed_extent(&self, dataset_id: &DatasetId) -> Option<([f64; 3], [f64; 3])> {
         let to_scene = self.placement(dataset_id)?;
         self.derived
             .get(dataset_id)?

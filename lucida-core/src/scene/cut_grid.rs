@@ -41,6 +41,13 @@ impl CutGrid {
         self.min + (f64::from(index) + 0.5) * self.step
     }
 
+    /// The cell of this grid's spacing that holds `place`, counted on past
+    /// either end, so a place past the grid stays past it.
+    pub fn cell_at(&self, place: f64) -> Range<f64> {
+        let start = self.min + ((place - self.min) / self.step).floor() * self.step;
+        start..start + self.step
+    }
+
     /// The position holding `place`, or the nearest end for a place past
     /// either.
     pub fn index_of(&self, place: f64) -> u32 {

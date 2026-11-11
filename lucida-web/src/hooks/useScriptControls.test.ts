@@ -299,16 +299,17 @@ describe("useScriptControls", () => {
       properties: [
         { property: "zoom", mode: "linked" },
         { property: "orientation", mode: "linked", unlinkable: "cameras" },
-        { property: "z", mode: "off", unlinkable: "not_yet" },
+        { property: "t", mode: "off", unlinkable: "empty" },
       ],
+      notices: [],
     };
     await expect(scriptControls()!.link("zoom", "relative")).resolves.toEqual({ applied: true, reason: null });
     // A property the cameras don't share yet keeps its mode for when they do.
     await expect(scriptControls()!.link("orientation", "off")).resolves.toEqual({ applied: true, reason: null });
     expect(link.mock.calls).toEqual([["zoom", "relative"], ["orientation", "off"]]);
-    await expect(scriptControls()!.link("z", "linked")).resolves.toEqual({
+    await expect(scriptControls()!.link("t", "linked")).resolves.toEqual({
       applied: false,
-      reason: "Z links once depth is a physical place.",
+      reason: "Each view needs a layer to link.",
     });
     unmount();
   });

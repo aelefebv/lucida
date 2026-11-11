@@ -99,7 +99,7 @@ export function CanvasLayers({
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
-  const { viewMode, zPlace, t, layers, views, maximized } = useSceneView(engine.store);
+  const { viewMode, zPlace, t, layers, views, maximized, links } = useSceneView(engine.store);
   // Each view's settle and coverage, with several views.
   const settles = useSyncExternalStore(viewSettleSignal.subscribe, viewSettleSignal.get);
   const scaleBars = useScaleBarShown();
@@ -278,6 +278,7 @@ export function CanvasLayers({
           activate={viewLayout.activate}
           coverageOf={(view) => settles.find((settle) => settle.view === view)}
           byHand={(a, b) => (wasmScene ? placedByHandNote(readLineUpByHand(wasmScene, a, b), nameOf) : null)}
+          linkNotices={links?.notices}
         />
       )}
       {viewers && panesRoot && (

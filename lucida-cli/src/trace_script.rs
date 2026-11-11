@@ -862,9 +862,9 @@ impl clap::Args for ScriptArgs {
                     .action(ArgAction::Append)
                     .help(
                         "Multiply the view's scale by FACTOR, about a point in CSS pixels from the \
-                         canvas's top-left corner, or about its center. Wheel events in slice mode, \
-                         quantised to the viewer's notch; one wheel event in volume mode. Add /MS \
-                         to spread the wheel events over that many milliseconds",
+                         canvas's top-left corner, or about its center, as wheel events of about a \
+                         mouse notch each. Add /MS to send one per display frame over that many \
+                         milliseconds instead",
                     ),
             )
             .arg(
@@ -1311,24 +1311,20 @@ fn parse_number(text: &str) -> Result<f64, String> {
 /// page applies. The defaults are the viewers' values for a page too old to
 /// publish any.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct InputScale {
     /// Radians of orbit per CSS pixel of drag in the volume view.
     pub orbit_radians_per_pixel: f64,
-    /// The slice view's zoom per wheel event, in and out.
-    pub slice_zoom_in_per_notch: f64,
-    pub slice_zoom_out_per_notch: f64,
-    /// The volume view scales its camera distance by `1 + deltaY × this` per wheel event.
-    pub volume_zoom_per_wheel_delta: f64,
+    /// Every view zooms by `exp(-deltaY × this)` per wheel event, so events
+    /// compound to the zoom of their summed delta.
+    pub wheel_zoom_per_pixel: f64,
 }
 
 impl Default for InputScale {
     fn default() -> Self {
         Self {
             orbit_radians_per_pixel: 0.005,
-            slice_zoom_in_per_notch: 1.1,
-            slice_zoom_out_per_notch: 0.9,
-            volume_zoom_per_wheel_delta: 0.001,
+            wheel_zoom_per_pixel: 1.1_f64.ln() / WHEEL_NOTCH_DELTA,
         }
     }
 }
@@ -1370,29 +1366,17 @@ pub fn orbit_drag(theta_degrees: f64, phi_degrees: f64, scale: InputScale) -> (f
     )
 }
 
-/// The wheel notches that zoom a slice view by about `factor`: positive in,
-/// negative out, with the factor the notches reach, since the viewer zooms
-/// by a fixed step per notch. A factor between one notch out and one in
-/// still sends one notch, because a zoom step that sent nothing would not
-/// be a zoom.
-pub fn slice_zoom_notches(factor: f64, scale: InputScale) -> (i64, f64) {
-    if factor > 1.0 {
-        let step = scale.slice_zoom_in_per_notch;
-        let notches = (factor.ln() / step.ln()).round().max(1.0) as i64;
-        (notches, step.powi(notches as i32))
-    } else {
-        let step = scale.slice_zoom_out_per_notch;
-        let notches = (factor.ln() / step.ln()).round().max(1.0) as i64;
-        (-notches, step.powi(notches as i32))
-    }
+/// The wheel delta, in CSS pixels, that zooms a view by `factor`: negative
+/// in, positive out.
+pub fn wheel_zoom_delta(factor: f64, scale: InputScale) -> f64 {
+    -factor.ln() / scale.wheel_zoom_per_pixel
 }
 
-/// The wheel delta each of `events` equal wheel events carries so that
-/// together they scale a volume view by `factor`: the camera distance
-/// divides by the factor, so zooming in by 2 halves it. The viewer scales
-/// the distance per event, so the events compound rather than add.
-pub fn volume_zoom_step(factor: f64, events: u32, scale: InputScale) -> f64 {
-    ((1.0 / factor).powf(1.0 / f64::from(events.max(1))) - 1.0) / scale.volume_zoom_per_wheel_delta
+/// The wheel events a burst splits a zoom's `delta` into: about a notch
+/// each, as a mouse sends them, and at least one, because a zoom step that
+/// sent nothing would not be a zoom.
+pub fn wheel_notches(delta: f64) -> u32 {
+    (delta.abs() / WHEEL_NOTCH_DELTA).round().max(1.0) as u32
 }
 
 /// The interval paced input is sent at: one event per frame of a 60 Hz
@@ -1489,8 +1473,7 @@ pub enum SentInput {
         span_ms: Option<f64>,
     },
     /// `notches` wheel events at `at`, each reaching the page with `delta_y`,
-    /// which amount to a zoom by `factor`: the asked-for factor in volume
-    /// mode, and the nearest the slice view's fixed step reaches otherwise.
+    /// which amount to a zoom by `factor`.
     #[serde(rename_all = "camelCase")]
     Wheel {
         at: [f64; 2],
@@ -1829,13 +1812,12 @@ async fn run_step(
             });
         }
         ScriptStep::Zoom { factor, at, .. } => {
-            let (rect, mode) = gesture_target(page, *target, mode, wait).await?;
+            let (rect, _) = gesture_target(page, *target, mode, wait).await?;
             let zoom = wheel_zoom(
                 page,
                 rect,
                 *factor,
                 *at,
-                mode.as_deref(),
                 scale,
                 viewport.device_scale_factor,
                 pace,
@@ -2247,29 +2229,18 @@ async fn wheel_zoom(
     rect: CanvasRect,
     factor: f64,
     at: Option<[f64; 2]>,
-    mode: Option<&str>,
     scale: InputScale,
     device_pixel_ratio: f64,
     pace: Option<Duration>,
     wait: Duration,
 ) -> Result<SentInput, CliError> {
     let point = at.map(|at| rect.point(at)).unwrap_or_else(|| rect.center());
-    // The slice viewer zooms a fixed step per wheel event, so pacing spreads
-    // its notches over the span. The volume viewer zooms by the event's
-    // delta, so a paced zoom there is one event per frame, each a share of
-    // the factor.
-    let (delta_y, notches, reached) = if mode == Some("slice") {
-        let (notches, reached) = slice_zoom_notches(factor, scale);
-        let delta = if notches > 0 {
-            -WHEEL_NOTCH_DELTA
-        } else {
-            WHEEL_NOTCH_DELTA
-        };
-        (delta, notches.unsigned_abs() as u32, reached)
-    } else {
-        let events = pace.map_or(1, |span| paced_moves(span) as u32 + 1);
-        (volume_zoom_step(factor, events, scale), events, factor)
-    };
+    // Every view zooms by the delta, so any split reaches the factor. A
+    // burst sends a mouse's notches, and a paced zoom one event per frame,
+    // as a trackpad does.
+    let delta = wheel_zoom_delta(factor, scale);
+    let notches = pace.map_or_else(|| wheel_notches(delta), |span| paced_moves(span) as u32 + 1);
+    let delta_y = delta / f64::from(notches);
     // Paced, every event but the last goes out on time without waiting for
     // the page, as a drag's moves do, and the last waits for it.
     let start = tokio::time::Instant::now();
@@ -2297,7 +2268,7 @@ async fn wheel_zoom(
         at: [point.0, point.1],
         delta_y,
         notches,
-        factor: reached,
+        factor,
         span_ms,
     })
 }
@@ -3237,45 +3208,52 @@ mod tests {
         assert!((orbit_drag(30.0, 0.0, coarser).0 + 52.36).abs() < 0.01);
         let published: InputScale = serde_json::from_value(json!({
             "orbitRadiansPerPixel": 0.01,
-            "sliceZoomInPerNotch": 1.2,
-            "sliceZoomOutPerNotch": 0.8,
-            "volumeZoomPerWheelDelta": 0.002
+            "wheelZoomPerPixel": 0.002
         }))
         .unwrap();
-        assert_eq!(published.slice_zoom_in_per_notch, 1.2);
+        assert_eq!(published.wheel_zoom_per_pixel, 0.002);
+        // A page that publishes another shape keeps the defaults for what it lacks.
+        let older: InputScale = serde_json::from_value(json!({
+            "orbitRadiansPerPixel": 0.01,
+            "sliceZoomInPerNotch": 1.1
+        }))
+        .unwrap();
+        assert_eq!(older.wheel_zoom_per_pixel, scale.wheel_zoom_per_pixel);
     }
 
+    /// A notch, 100 px, zooms a view by 1.1, and a zoom's delta is the sum
+    /// its events compound to.
     #[test]
-    fn a_slice_zoom_is_a_count_of_notches_and_says_what_it_reaches() {
+    fn a_zoom_is_the_wheel_delta_whose_notches_reach_its_factor() {
         let scale = InputScale::default();
-        assert_eq!(slice_zoom_notches(2.0, scale).0, 7);
-        assert!((slice_zoom_notches(2.0, scale).1 - 1.1_f64.powi(7)).abs() < 1e-9);
-        assert_eq!(slice_zoom_notches(0.5, scale).0, -7);
-        assert!((slice_zoom_notches(0.5, scale).1 - 0.9_f64.powi(7)).abs() < 1e-9);
+        assert!((wheel_zoom_delta(1.1, scale) + 100.0).abs() < 1e-9);
+        assert!((wheel_zoom_delta(1.0 / 1.1, scale) - 100.0).abs() < 1e-9);
+        let delta = wheel_zoom_delta(2.0, scale);
+        assert!((delta + 2.0_f64.ln() / 1.1_f64.ln() * 100.0).abs() < 1e-9);
+        assert_eq!(wheel_notches(delta), 7);
+        assert_eq!(wheel_notches(wheel_zoom_delta(0.5, scale)), 7);
+        assert_eq!(wheel_notches(wheel_zoom_delta(4.0, scale)), 15);
         // A factor short of one notch still sends one: a zoom sends something.
-        assert_eq!(slice_zoom_notches(1.01, scale), (1, 1.1));
-        assert_eq!(slice_zoom_notches(0.99, scale), (-1, 0.9));
-    }
-
-    #[test]
-    fn a_volume_zoom_is_one_wheel_event_that_divides_the_distance() {
-        let scale = InputScale::default();
-        assert!((volume_zoom_step(2.0, 1, scale) - (-500.0)).abs() < 1e-9);
-        assert!((volume_zoom_step(0.5, 1, scale) - 1000.0).abs() < 1e-9);
+        assert_eq!(wheel_notches(wheel_zoom_delta(1.01, scale)), 1);
+        let notches = wheel_notches(delta);
+        let reached = (-delta / f64::from(notches) * scale.wheel_zoom_per_pixel)
+            .exp()
+            .powi(notches as i32);
+        assert!((reached - 2.0).abs() < 1e-9, "{reached}");
     }
 
     /// The page receives a dispatched wheel delta divided by the emulated
-    /// ratio, so a zoom step scales the camera distance by the same factor
-    /// at every ratio.
+    /// ratio, so a zoom step scales the view by the same factor at every
+    /// ratio.
     #[test]
-    fn a_volume_zoom_divides_the_distance_alike_at_every_device_pixel_ratio() {
+    fn a_zoom_scales_the_view_alike_at_every_device_pixel_ratio() {
         let scale = InputScale::default();
-        let delta = volume_zoom_step(2.0, 1, scale);
+        let delta = wheel_zoom_delta(2.0, scale);
         for ratio in [1.0, 2.0, 3.0] {
             let event = wheel_event((720.0, 450.0), delta, ratio);
             let received = event["deltaY"].as_f64().unwrap() / ratio;
-            let distance = 1.0 + received * scale.volume_zoom_per_wheel_delta;
-            assert!((distance - 0.5).abs() < 1e-9, "ratio {ratio}: {distance}");
+            let zoom = (-received * scale.wheel_zoom_per_pixel).exp();
+            assert!((zoom - 2.0).abs() < 1e-9, "ratio {ratio}: {zoom}");
             assert_eq!(event["type"], "mouseWheel");
             assert_eq!(
                 (event["x"].as_f64(), event["y"].as_f64()),
@@ -4016,8 +3994,8 @@ mod tests {
     }
 
     /// A paced gesture sends one event per display frame across its span,
-    /// the first at the start and the last at the end, and a paced volume
-    /// zoom's events compound to the asked-for factor.
+    /// the first at the start and the last at the end, and a paced zoom's
+    /// events compound to the asked-for factor.
     #[test]
     fn a_paced_gesture_spreads_its_events_across_its_span() {
         let span = Duration::from_millis(2000);
@@ -4030,9 +4008,9 @@ mod tests {
 
         let scale = InputScale::default();
         let events = 31;
-        let step = volume_zoom_step(2.0, events, scale);
-        let distance = (1.0 + step * scale.volume_zoom_per_wheel_delta).powi(events as i32);
-        assert!((distance - 0.5).abs() < 1e-9, "{distance}");
+        let step = wheel_zoom_delta(2.0, scale) / f64::from(events);
+        let zoom = (-step * scale.wheel_zoom_per_pixel).exp().powi(events);
+        assert!((zoom - 2.0).abs() < 1e-9, "{zoom}");
     }
 
     #[test]
