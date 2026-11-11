@@ -726,13 +726,15 @@ impl WasmScene {
         .to_string()
     }
 
-    /// How the canvas divides among the views: `"single"`, `"columns"` or
-    /// `"rows"`.
+    /// How the canvas divides among the views: `"single"`, `"columns"`,
+    /// `"rows"`, `"grid"` or `"four_up"`.
     pub fn view_layout(&self) -> String {
         match self.inner.view_layout() {
             ViewLayout::Single => "single",
             ViewLayout::Columns => "columns",
             ViewLayout::Rows => "rows",
+            ViewLayout::Grid => "grid",
+            ViewLayout::FourUp => "four_up",
         }
         .to_string()
     }

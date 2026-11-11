@@ -1,4 +1,4 @@
-import { ColumnsIcon, PauseIcon, PlayIcon, RowsIcon, VideoCameraIcon } from "@phosphor-icons/react";
+import { PauseIcon, PlayIcon, VideoCameraIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { stepIndex, type IndexChange } from "../axes.ts";
 import type { ClipDepth } from "../components/clipDepth.ts";
@@ -10,10 +10,13 @@ import { Card } from "../ui/Card.tsx";
 import { Popover } from "../ui/Popover.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { useShortcut, type KeyCombo } from "../ui/shortcuts.ts";
-import { useCommand } from "../ui/commands.ts";
+import { useCommands } from "../ui/commands.ts";
 import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import { AxisScrubber } from "./AxisScrubber.tsx";
 import { LinkPopover, type LinkPopoverProps } from "./LinkPopover.tsx";
+import { LayoutPopover } from "./LayoutPopover.tsx";
+import { LAYOUT_LABELS } from "../viewLayout.ts";
+import type { ViewLayoutName } from "../commands.ts";
 import type { PlaceLabel } from "../sceneStore.ts";
 import "./DimensionBar.css";
 
@@ -42,12 +45,11 @@ export type CameraMode = "arcball" | "fly";
 export interface DimensionBarProps {
   viewMode: "2d" | "3d";
   onViewModeToggle: () => void;
-  /** Whether two views divide the canvas. */
-  split: boolean;
-  /** Whether a split stacks the views, as a phone does, rather than setting them side by side. */
-  stacked: boolean;
-  /** Divide the canvas into two views, or show one again. */
-  onSplitToggle: () => void;
+  /** How the canvas divides among the views. */
+  layout: ViewLayoutName;
+  /** The layouts this screen offers. */
+  layouts: readonly ViewLayoutName[];
+  onLayoutChange: (layout: ViewLayoutName) => void;
   /** How the two views link, while two views divide the canvas. */
   links?: LinkPopoverProps;
   /** The plane the 2D view cuts. Its choice shows only in 2D, and only with depth to cut. */
@@ -81,9 +83,9 @@ export interface DimensionBarProps {
 export function DimensionBar({
   viewMode,
   onViewModeToggle,
-  split,
-  stacked,
-  onSplitToggle,
+  layout,
+  layouts,
+  onLayoutChange,
   links,
   slicePlane,
   onSlicePlaneChange,
@@ -122,13 +124,7 @@ export function DimensionBar({
     group: "View",
     onTrigger: onViewModeToggle,
   });
-  useCommand({
-    id: "view.split",
-    label: split ? "Show one view" : "Split view",
-    group: "View",
-    keywords: ["layout", "side by side", "compare", "two views"],
-    run: onSplitToggle,
-  });
+  useLayoutCommands(layouts, onLayoutChange);
   useShortcut({
     id: "view.cyclePlane",
     keys: PLANE_KEYS,
@@ -198,14 +194,8 @@ export function DimensionBar({
             if (mode !== viewMode) onViewModeToggle();
           }}
         />
-        <IconButton
-          icon={stacked ? RowsIcon : ColumnsIcon}
-          size="sm"
-          label={split ? "Show one view" : "Split view"}
-          isSelected={split}
-          onSelectedChange={onSplitToggle}
-        />
-        {split && links && <LinkPopover {...links} />}
+        <LayoutPopover layout={layout} layouts={layouts} onChange={onLayoutChange} />
+        {(layout === "columns" || layout === "rows") && links && <LinkPopover {...links} />}
         {viewMode === "3d" && <CameraPopover mode={cameraMode} onToggle={onCameraModeToggle} clipDepth={clipDepth} />}
         {showPlane && (
           <SegmentedControl
@@ -264,6 +254,19 @@ function usePlayback(playing: boolean, step: () => void): void {
     const id = window.setInterval(() => stepRef.current(), PLAYBACK_INTERVAL_MS);
     return () => window.clearInterval(id);
   }, [playing]);
+}
+
+/** A palette command for each layout this screen offers. */
+function useLayoutCommands(layouts: readonly ViewLayoutName[], onLayoutChange: (layout: ViewLayoutName) => void) {
+  useCommands(
+    layouts.map((layout) => ({
+      id: `view.layout.${layout}`,
+      label: `Layout: ${LAYOUT_LABELS[layout]}`,
+      group: "View",
+      keywords: ["layout", "split", "views", "four-up", "side by side", "stacked"],
+      run: () => onLayoutChange(layout),
+    })),
+  );
 }
 
 function CameraPopover({ mode, onToggle, clipDepth }: { mode: CameraMode; onToggle: () => void; clipDepth?: ClipDepth }) {

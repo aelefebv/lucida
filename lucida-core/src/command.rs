@@ -631,6 +631,7 @@ impl ViewportCommand {
 impl Scene {
     pub fn apply(&mut self, cmd: Command) {
         let leader = self.link_leader(&cmd);
+        let axes_before = self.active_view().axes.clone();
         let epochs = self.epochs.clone();
         self.apply_command(cmd);
         // A command that changes what a view shows can give the views a new
@@ -645,11 +646,13 @@ impl Scene {
         {
             followed = self.follow_links(id, &camera, &axes);
         }
+        // Every view of a four-up layout stands where the active one does.
+        let crossed = self.share_crossing(&axes_before);
         // One move of the epoch says the views moved, whichever moved first.
         if followed.camera && self.epochs.view == epochs.view {
             self.epochs.view += 1;
         }
-        if followed.axes && self.epochs.selection == epochs.selection {
+        if (followed.axes || crossed) && self.epochs.selection == epochs.selection {
             self.epochs.selection += 1;
         }
     }
