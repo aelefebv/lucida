@@ -105,10 +105,11 @@ export interface UploadClient {
   /**
    * Deliver pre-sliced uint32 label planes to the r32uint label pool
    * (categorical overlay path). Distinct from {@link sliceChunkData}: routed
-   * by the label image id; each `chunk.data` is a single 2D Z-plane already
+   * by the label image id; each `chunk.data` is a single plane already
    * extracted for the current view (so only ~64 KB crosses, not the ~8 MB
-   * 3D chunk), and is transferred like {@link sliceChunkData}'s. `plane` is
-   * the label level's Z plane they were cut at. `datasetId` is stamped on
+   * 3D chunk), and is transferred like {@link sliceChunkData}'s, in the same
+   * frame of the plane drawn. `plane` is the label level's plane along
+   * `sliceAxis` they were cut at. `datasetId` is stamped on
    * the pool so dataset removal can free it — the pool is keyed by the label
    * image id, which removal never sees.
    */
@@ -132,6 +133,7 @@ export interface UploadClient {
     chunkY: number,
     plane: number,
     epochs: SceneEpochs,
+    sliceAxis?: SpatialAxis,
   ): void;
 
   volumeChunkData(

@@ -1,7 +1,13 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import { planeAxes, tczyx, xyz, type SlicePlane } from "./renderer/slicePlane.ts";
+import { planeAxes, tczyx, xyz, type SliceCut, type SlicePlane } from "./renderer/slicePlane.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
-import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
+import {
+  labelChunkAt,
+  labelCutAt,
+  resolveVisibleLabels,
+  type LabelViewSetting,
+  type ResolvedLabel,
+} from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { keepsCut, placementInPlane, readPlacement, rectToQuad, type PlaneMap } from "./placement.ts";
@@ -9,7 +15,7 @@ import { transposePlaneToWorld } from "./renderer/sliceCut.ts";
 import { axisAlignedQuad, quadEdgeLengths, transposeQuad, type SliceQuad } from "./renderer/sliceQuad.ts";
 import type { FrameScale, TickContext, TickView } from "./renderLoopTypes.ts";
 import { compositeKey } from "./tickCommon.ts";
-import { outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
+import { layerCut, outsideCut, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { MemberRosterEntry, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
 import { datasetViewKey } from "./renderer/poolKeys.ts";
 import { traceRecorder } from "./trace/recorder.ts";
@@ -272,23 +278,24 @@ function pushTiltedLayers(
   }
 }
 
-/** The plane of a label that slice mode draws at source `t` and `z`, as its fetch names it. */
-function labelPlaneAt(
+/** The plane of a label that slice mode draws at source `t` and `cut`, as its fetch names it. */
+export function labelPlaneAt(
   resolved: ResolvedLabel,
-  at: { t: number; z: number },
-): { level: number; t: number; z: number; plane: number } {
-  const chunk = labelChunkAt(resolved, at.t, at.z);
-  return { level: chunk.level, t: chunk.t, z: chunk.z ?? 0, plane: chunk.plane ?? 0 };
+  at: { t: number; cut: SliceCut },
+): NonNullable<SliceLayerParams["labelChunk"]> {
+  const { level, t } = labelChunkAt(resolved, at.t);
+  const { axis, plane, chunk } = labelCutAt(resolved, at.cut);
+  return { level, t, z: chunk, plane, ...(axis !== "z" ? { axis } : {}) };
 }
 
 /**
  * Append an overlay layer for each visible label, over the intensity layers.
  *
  * The drawn set must match what {@link computeLabelChunkRequests} fetches, so
- * both go through {@link resolveVisibleLabels}. Each overlay is sized to the
- * source image's full-resolution footprint, so a coarser label stays aligned
- * rather than shrinking, and placed as its dataset is. Labels never change the
- * camera or bounds.
+ * both go through {@link resolveVisibleLabels} under the same cut. Each
+ * overlay is sized to the source image's full-resolution footprint across and
+ * down the plane cut, so a coarser label stays aligned rather than shrinking,
+ * and placed as its dataset is. Labels never change the camera or bounds.
  */
 export function pushLabelLayers(
   layers: SliceLayerParams[],
@@ -297,17 +304,18 @@ export function pushLabelLayers(
   placement: PlaneMap,
   labelSettings?: LabelViewSetting[],
   memberPositions?: Record<string, [number, number]>,
-  at?: { t: number; z: number },
+  at?: { t: number; cut: SliceCut },
 ): void {
-  for (const resolved of resolveVisibleLabels(manifest, labelSettings)) {
+  const cutAxis = at?.cut.axis ?? "z";
+  for (const resolved of resolveVisibleLabels(manifest, labelSettings, { cutAxis })) {
     const { label, source, opacity } = resolved;
     const sourceLevel0 = source.multiscale.levels[0];
     const labelLevel0 = label.image.multiscale.levels[0];
-    const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
+    const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0, cutAxis);
     // The source tile is often absent from the roster (off-view tiles aren't
-    // active), so fall back to the scene's per-member layout position, keyed
-    // by source entity id. Falling back to the origin would stack every
-    // off-roster label on the first group.
+    // active), so fall back to where the scene places the member in this
+    // plane, keyed by source entity id. Falling back to the origin would stack
+    // every off-roster label on the first group.
     const sourceMember = members.find((m) => m.imageId === label.source_image_id);
     const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
     layers.push({
@@ -444,14 +452,12 @@ export function renderSliceView(
       });
     }
     clipSliceLayers(layers, firstLayer, clip);
-    // A label overlay is drawn on an XY cut only, and its planner fetches
-    // nothing in a side view.
-    if (plane !== "xy") continue;
-    // Placement fallback for label sources missing from the roster.
+    // Placement fallback for label sources missing from the roster, across
+    // and down the plane as the roster places members.
     let labelMemberPositions: Record<string, [number, number]> | undefined;
     if (ds.manifest.labels && ds.manifest.labels.length > 0) {
       try {
-        labelMemberPositions = JSON.parse(scene.member_positions(dsId)) as Record<string, [number, number]>;
+        labelMemberPositions = JSON.parse(scene.plane_positions(view.id, dsId)) as Record<string, [number, number]>;
       } catch {
         labelMemberPositions = undefined;
       }
@@ -459,7 +465,7 @@ export function renderSliceView(
     const firstLabel = layers.length;
     pushLabelLayers(layers, ds.manifest, members, placement, dsSettings.label_settings, labelMemberPositions, {
       t: resolved.t,
-      z: resolved.z_range.start,
+      cut: layerCut(resolved, plane),
     });
     clipSliceLayers(layers, firstLabel, clip);
   }

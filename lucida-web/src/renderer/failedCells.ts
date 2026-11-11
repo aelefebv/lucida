@@ -7,6 +7,7 @@
 
 import { parseChunkKey } from "./chunkKeys.ts";
 import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
+import { toPlaneFrame, type SpatialAxis } from "./slicePlane.ts";
 import type { RendererState } from "./worker/state.ts";
 
 /** Chunk cells per axis. A plane has `z: 1`. */
@@ -36,12 +37,14 @@ export function failedKeysForImage(
 /**
  * The cells of `grid` whose chunk failed, keyed by cell index, with the chunk
  * key that failed there. Only keys at `at`'s level, T and C count. With
- * `at.z` the grid is that one plane, so every cell sits at z 0.
+ * `at.z` the grid is that one plane, the chunk `at.z` along `axis`, so
+ * every cell sits at z 0 and a chunk's place is read in that plane's frame.
  */
 export function failedCellsAt(
   failed: ReadonlySet<string> | undefined,
   grid: CellGrid,
   at: { level: number; t: number; c: number; z?: number },
+  axis: SpatialAxis = "z",
 ): Map<number, string> {
   const out = new Map<number, string>();
   if (!failed) return out;
@@ -49,10 +52,11 @@ export function failedCellsAt(
   for (const key of failed) {
     const k = parseChunkKey(key);
     if (!k || k.level !== at.level || k.t !== at.t || k.c !== at.c) continue;
-    if (plane !== undefined && k.z !== plane) continue;
-    const z = plane !== undefined ? 0 : k.z;
-    if (!(k.x >= 0 && k.x < grid.x && k.y >= 0 && k.y < grid.y && z >= 0 && z < grid.z)) continue;
-    out.set(cellIndex(grid, k.x, k.y, z), key);
+    const [x, y, along] = toPlaneFrame([k.x, k.y, k.z], axis);
+    if (plane !== undefined && along !== plane) continue;
+    const z = plane !== undefined ? 0 : along;
+    if (!(x >= 0 && x < grid.x && y >= 0 && y < grid.y && z >= 0 && z < grid.z)) continue;
+    out.set(cellIndex(grid, x, y, z), key);
   }
   return out;
 }

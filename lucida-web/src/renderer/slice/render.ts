@@ -138,7 +138,7 @@ function renderLabelLayer(
 ): CompositeLayer | null {
   const memberId = layer.datasetId;
   const chunk = layer.labelChunk;
-  const pool = chunk && ctx.state.labelSlicePools.get(labelSlicePoolKey(memberId, chunk.t, chunk.plane));
+  const pool = chunk && ctx.state.labelSlicePools.get(labelSlicePoolKey(memberId, chunk.t, chunk.plane, chunk.axis));
   if (!pool || !chunk) return null;
   const target = targetFor();
   markLabelSliceFailed(ctx, memberId, pool, chunk);

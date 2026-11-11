@@ -40,17 +40,18 @@ import { drawsPlane, viewDrawsPlane } from "./zRetarget.ts";
 
 /**
  * Write pre-sliced uint32 label planes into the r32uint pool of the label's
- * form they were cut for, its plane at its chunk-T. The delivery path already
- * extracted the plane, so each `chunk.data` is `chunkY*chunkX` ids. Ids are
- * categorical, so they keep full 32-bit width. Each cell records the plane it
- * holds, which it keeps drawing when the pool moves to another plane.
+ * form they were cut for, its plane along its axis at its chunk-T. The
+ * delivery path already extracted the plane, so each `chunk.data` is
+ * `chunkY*chunkX` ids, in the frame of the plane drawn. Ids are categorical,
+ * so they keep full 32-bit width. Each cell records the plane it holds, which
+ * it keeps drawing when the pool moves to another plane.
  */
 export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
   msg: LabelSliceChunkDataMessage,
 ): void {
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
-  const cut: PoolCut = { axis: "z", plane: msg.plane };
+  const cut: PoolCut = { axis: msg.sliceAxis ?? "z", plane: msg.plane };
   const refuseAll = (reason: ChunkFeedbackReason): void =>
     postChunkResidency(ctx, memberId, "slice", LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason, cut);
 
@@ -60,7 +61,9 @@ export function handleLabelSliceChunkData(
     return;
   }
 
-  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, msg.t, msg.plane, levelWidth, levelHeight, chunkX, chunkY);
+  const pool = getOrCreateLabelSlicePool(
+    ctx, memberId, datasetId, msg.t, msg.plane, levelWidth, levelHeight, chunkX, chunkY, cut.axis,
+  );
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.
     refuseAll("atlas-policy");
