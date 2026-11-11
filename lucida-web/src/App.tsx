@@ -971,7 +971,7 @@ function Viewer({
       layout={viewLayoutName}
       layouts={phone ? PHONE_LAYOUTS : VIEW_LAYOUTS}
       onLayoutChange={viewLayout.setLayout}
-      links={viewLinks ? { links: viewLinks, onChange: viewLayout.link } : undefined}
+      links={viewLinks ? { links: viewLinks, onChange: viewLayout.link, onChangeAll: viewLayout.linkAll } : undefined}
       slicePlane={dims.slicePlane}
       onSlicePlaneChange={dims.handleSlicePlaneChange}
       dimZ={dims.dimZ}

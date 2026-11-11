@@ -10,7 +10,7 @@ import { applyViewportCommand } from "./applyAndSend.ts";
 import type { LinkMode, LinkProperty, ViewLayoutName } from "./commands.ts";
 import type { InvalidationSink } from "./invalidation.ts";
 import type { WasmScene } from "lucida-core";
-import { readViewLinks, type ViewLinks } from "./viewLinks.ts";
+import { everyLinkChanges, readViewLinks, type EveryLinkMode, type ViewLinks } from "./viewLinks.ts";
 
 /** Every layout, in the order the layout menu offers them. */
 export const VIEW_LAYOUTS: readonly ViewLayoutName[] = ["single", "columns", "rows", "grid", "four_up"];
@@ -53,6 +53,8 @@ export interface ViewLayoutActions {
   links(): ViewLinks | null;
   /** Link `property` between the two views in `mode`. */
   link(property: LinkProperty, mode: LinkMode): void;
+  /** Link every property the views can link, or turn every one off, in one write. */
+  linkAll(mode: EveryLinkMode): void;
 }
 
 /**
@@ -98,6 +100,13 @@ export function viewLayoutActions(
       return current ? readViewLinks(current) : null;
     },
     link: (property, mode) => write((s) => applyViewportCommand(s, { type: "set_view_link", property, mode })),
+    linkAll: (mode) => write((s) => {
+      const links = readViewLinks(s);
+      if (!links) return;
+      for (const property of everyLinkChanges(links, mode)) {
+        applyViewportCommand(s, { type: "set_view_link", property, mode });
+      }
+    }),
   };
 }
 
