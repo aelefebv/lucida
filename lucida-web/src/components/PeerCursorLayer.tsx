@@ -9,6 +9,7 @@ import { memo, useEffect, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { useEngine } from "../engine.ts";
 import { requestRender } from "../invalidation.ts";
+import type { PresenceState } from "../bridge.ts";
 import { usePeerState, type PeerStore } from "../peerStore.ts";
 import type { ViewMode } from "../types.ts";
 import { PeerCursors, type CursorLabel } from "./PeerCursors.tsx";
@@ -17,7 +18,8 @@ import type { ViewSurface } from "./cameraProjection.ts";
 interface Props {
   peerStore: PeerStore;
   viewMode: ViewMode;
-  z: number;
+  /** The place along Z this view cuts, in the scene frame. */
+  zPlace: number;
   t: number;
   wasmSceneRef: RefObject<WasmScene | null>;
   /** The client and scene become readable when these turn true. */
@@ -32,7 +34,7 @@ interface Props {
 function PeerCursorLayerBody({
   peerStore,
   viewMode,
-  z,
+  zPlace,
   t,
   wasmSceneRef,
   clientReady,
@@ -68,9 +70,9 @@ function PeerCursorLayerBody({
           const center = mode === "slice"
             ? (p.camera as { center?: [number, number] })?.center ?? [0, 0]
             : [0.5, 0.5];
-          return { id: p.client_id, cursor: center, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: true };
+          return { id: p.client_id, cursor: center, mode, camera: p.camera, view_z: peerZPlace(p), label_only: true };
         }
-        return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
+        return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: peerZPlace(p), label_only: false };
       });
     const dpr = window.devicePixelRatio || 1;
     const screenW = Math.round(surface.element.clientWidth * dpr);
@@ -103,7 +105,7 @@ function PeerCursorLayerBody({
       wasmSceneRef={wasmSceneRef}
       surface={surface}
       viewMode={viewMode}
-      z={z}
+      zPlace={zPlace}
       t={t}
       cursorLabels={cursorLabels}
     />
@@ -111,3 +113,10 @@ function PeerCursorLayerBody({
 }
 
 export const PeerCursorLayer = memo(PeerCursorLayerBody);
+
+/** The place along Z a peer's view cuts: the middle of its slab, or none
+ *  before the peer placed one. */
+function peerZPlace(peer: PresenceState): number | undefined {
+  const z = peer.view?.z;
+  return z ? (z.start + z.end) / 2 : undefined;
+}

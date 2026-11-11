@@ -156,7 +156,7 @@ def test_the_extension_writes_the_payload_the_viewer_writes_for_a_view():
 
     assert extension.encode_view_payload(json.dumps(golden["view"])) == golden["payload"]
     assert json.loads(extension.decode_view_payload(golden["payload"])) == golden["view"]
-    for name in ("recorded_v1", "recorded_v2"):
+    for name in ("recorded_v1", "recorded_v2", "recorded_v2_gray"):
         recorded = wire_fixture("saved-view", name)
         assert json.loads(extension.decode_view_payload(recorded["payload"])) == recorded["view"]
 

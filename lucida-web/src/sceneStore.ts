@@ -55,7 +55,10 @@ export interface ViewPane {
 }
 
 export interface SceneView {
+  /** The active view's position on its Z grid, from 0. */
   readonly z: number;
+  /** The place along Z it cuts, in the scene frame. */
+  readonly zPlace: number;
   readonly t: number;
   /** The plane the slice view cuts. */
   readonly slicePlane: SlicePlane;
@@ -91,6 +94,7 @@ export interface ViewEpochs {
 /** A scene before its first write, and the page before it has a scene. */
 const NO_SCENE_VIEW: SceneView = {
   z: 0,
+  zPlace: 0.5,
   t: 0,
   slicePlane: "xy",
   cutIndex: 0,
@@ -218,6 +222,7 @@ function readView(scene: WasmScene, knownLayersJson: string | null, previous: Sc
     : parseResolvedLayers(layersJson);
   const view: SceneView = {
     z: scene.z(),
+    zPlace: scene.z_place(),
     t: scene.t(),
     slicePlane: scene.slice_plane(scene.active_view()) as SlicePlane,
     cutIndex: scene.cut_index(scene.active_view()),
@@ -273,6 +278,7 @@ function readComparisons(scene: WasmScene, views: readonly ViewPane[]): Readonly
 function sameView(a: SceneView, b: SceneView): boolean {
   return (
     a.z === b.z &&
+    a.zPlace === b.zPlace &&
     a.t === b.t &&
     a.slicePlane === b.slicePlane &&
     a.cutIndex === b.cutIndex &&

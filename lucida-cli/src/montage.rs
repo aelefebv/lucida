@@ -14,7 +14,7 @@ use image::{ImageFormat, Rgba, RgbaImage};
 use lucida_content::{ChannelInfo, DatasetId};
 use lucida_core::camera::Camera;
 use lucida_core::saved_view::SavedView;
-use lucida_core::scene::{ChannelSettings, Colormap, DatasetDisplaySettings};
+use lucida_core::scene::{ChannelSettings, Colormap, CutGrid, DatasetDisplaySettings};
 use lucida_core::view::AxisPositions;
 
 /// Which dataset axis the montage sweeps. Picked from the dataset's shape: a
@@ -170,6 +170,7 @@ pub fn plan_montage(
 pub fn build_cell_view(
     ds_id: &str,
     cell: &MontageCell,
+    z_planes: CutGrid,
     viewport: [u32; 2],
     contrast: Option<[f64; 2]>,
     channel_count: u64,
@@ -178,7 +179,7 @@ pub fn build_cell_view(
     let mut view = SavedView::empty(viewport);
     view.camera = Camera::new_2d(viewport);
     view.view = AxisPositions {
-        z_range: cell.z..cell.z + 1,
+        z: Some(z_planes.cell(cell.z)),
         t: cell.t,
         ..AxisPositions::new()
     };
@@ -343,6 +344,14 @@ fn with_query_param(url: &str, key: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One unit a plane from the origin: a dataset that fixes its frame
+    /// with Z samples as long as X ones.
+    const UNIT_PLANES: CutGrid = CutGrid {
+        min: 0.0,
+        step: 1.0,
+        count: 64,
+    };
     use image::GenericImageView;
     use lucida_core::camera::Framing;
 
@@ -393,11 +402,11 @@ mod tests {
             tile: 0,
             label: "Z 43".into(),
         };
-        let view = build_cell_view("wds-abc", &cell, [256, 256], None, 3, &[]);
+        let view = build_cell_view("wds-abc", &cell, UNIT_PLANES, [256, 256], None, 3, &[]);
         // The page fits the camera, so the cell asks for a slice and no pose.
         assert!(matches!(view.camera, Camera::Slice(_)));
         assert_eq!(view.camera.framing(), Framing::Unframed);
-        assert_eq!(view.view.z_range, 42..43);
+        assert_eq!(view.view.z, Some(42.0..43.0));
         assert_eq!(view.view.t, 3);
         let id = DatasetId("wds-abc".into());
         assert_eq!(view.dataset_order, vec![id.clone()]);
@@ -420,7 +429,15 @@ mod tests {
             tile: 0,
             label: "Z 11".into(),
         };
-        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]), 2, &[]);
+        let view = build_cell_view(
+            "wds-x",
+            &cell,
+            UNIT_PLANES,
+            [256, 256],
+            Some([60.0, 196.0]),
+            2,
+            &[],
+        );
         let id = DatasetId("wds-x".into());
         // Auto OFF so the window is shared across all cells, not per-slice.
         assert_eq!(view.auto_contrast.get(&id), Some(&false));
@@ -438,7 +455,15 @@ mod tests {
         assert_eq!(settings.channel_settings[1].contrast_max, 196.0);
 
         // A one-channel image keeps the gray it opens with.
-        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]), 1, &[]);
+        let view = build_cell_view(
+            "wds-x",
+            &cell,
+            UNIT_PLANES,
+            [256, 256],
+            Some([60.0, 196.0]),
+            1,
+            &[],
+        );
         let settings = view.dataset_settings.get(&id).expect("settings");
         assert_eq!(settings.channel_settings[0].colormap, Colormap::Gray);
     }

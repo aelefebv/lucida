@@ -1,6 +1,6 @@
 {
   "view": {
-    "v": 2,
+    "v": 3,
     "datasets": [
       "gs://lucida-fixtures/sample-plane.zarr",
       "gs://lucida-fixtures/sample-volume.zarr"
@@ -19,11 +19,12 @@
       ]
     },
     "view": {
-      "z_range": {
-        "start": 10,
-        "end": 14
+      "z": {
+        "start": 10.0,
+        "end": 14.0
       },
-      "t": 2
+      "t": 2,
+      "y": -6.5
     },
     "display": {
       "contrast_min": 0.0,
@@ -104,5 +105,5 @@
       "wds-0f3a": false
     }
   },
-  "payload": "H4sIAAAAAAAA_31R227DIAz9lcnPSUrSRut43CfstaoiN3EzJAIRkF7Fv89kl7bStgcksA_nYl8Bp2Cb1prg0AeQVzh2Phf7JYLco_YUM2hxIIep15IJ5EBuSlGtijrL67IqqnqbwWA7Agleq5Ygg4Oi42hdSNCXSmSlWAtGXawdQJZFzawdBvQUGuu6mfImnM3X57YqYXvD8QnK9P7RI3t6R2NI3_U3XLTaugFHttQ7PDPld8RmwBPIlRAiMrnGHX81HDD9A0e9siZH-Gk9sNoRWxXOIEWxrFNIr3aaYwc3UdzGO99_-IrZFZIY23qbpZ5egWvxNzmu3emtM_CciYcXb7ObPfdeLhZ6alWH-V6dwuTILzwOo6Z81GiouKBzPIH_gAerp-ELycIHkNXnElOSML8ujUPTUyqQ6djIii0FTDsuRYzxA0GqVTRLAgAA"
+  "payload": "H4sIAAAAAAAA_32RSW7DMAxFr1JwLTuyE3fQskfoNggCxmZSAbJkSHJG6O6l3CEJ0HZhwCCp_98nL4BjdOvW2egxRFAXOHShkNs5gtqiCZQEtNiTx9xryUbyoJaVrBdlI4qmqsu6WQnoXUegIBjdEgjYazoMzsc8-lJLUclnyVNn53pQVdmwaocRA8W1890keTUW0-9TW1ewus7xF7XdhXtGZnpHa8nc9JdcdMb5HgdG2nk8seR3xHWPR1ALKWVicYMbfmo5YH4Hnnba2QLhp3Wn6gZsdTyBkuW8ySGD3hiOHf1IaZVuuP_gSuIC2Yyx3iarh1fgWvrNjms3fs8CAmfi5aXr7ibmXVCzmRlb3WGx1cc4egqzgP1gqBgMWirP6D1v4L_BvTNj_zXJxntQ888j5iR8xVoAYxSPfHM45xrZjlkWTBUxn7mSKaUPRwZHMU4CAAA"
 }

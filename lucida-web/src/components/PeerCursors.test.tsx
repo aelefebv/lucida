@@ -24,7 +24,7 @@ function makePeer(
   return {
     client_id: clientId,
     camera: null,
-    view: { z_range: { start: 0, end: 1 }, t: 0 },
+    view: { z: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
     following: null,
     cursor: [10, 20],
@@ -48,7 +48,7 @@ function peersElement(peers: Map<ClientId, PresenceState>) {
       wasmSceneRef={{ current: null }}
       surface={{ view: 0, element: document.createElement("canvas") }}
       viewMode="2d"
-      z={0}
+      zPlace={0.5}
       t={0}
       cursorLabels={cursorLabels}
     />

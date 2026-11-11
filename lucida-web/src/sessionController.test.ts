@@ -207,7 +207,7 @@ function makePresence(clientId: number): PresenceState {
   return {
     client_id: clientId,
     camera: { position: [0, 0, 1] },
-    view: { z_range: { start: 0, end: 1 }, t: 0 },
+    view: { z: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
     following: null,
     cursor: null,

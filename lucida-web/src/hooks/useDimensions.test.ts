@@ -46,6 +46,7 @@ function dataset(id: string, channels: number): DatasetState {
 
 function renderDimensions(datasets: DatasetState[] = []) {
   const state = { z: 0, t: 0, y: 0, plane: "xy", selection: 0, layers: [] as unknown[] };
+  const depth = Math.max(1, ...datasets.map((d) => d.manifest.images[0].multiscale.levels[0].shape[2]));
   const commands: Array<Record<string, unknown>> = [];
   const scene = {
     apply_command: vi.fn((json: string) => {
@@ -73,6 +74,10 @@ function renderDimensions(datasets: DatasetState[] = []) {
     resolved_layers: () => JSON.stringify(state.layers),
     comparison: () => "null",
     z: () => state.z,
+    z_place: () => state.z + 0.5,
+    // One position a plane, as one dataset at the origin steps.
+    grid_count: (axis: string) => (axis === "z" ? depth : 1),
+    cut_extent: () => (state.plane === "xy" ? depth : 1),
     t: () => state.t,
     slice_plane: () => state.plane,
     cut_index: () => (state.plane === "xy" ? state.z : state.y),

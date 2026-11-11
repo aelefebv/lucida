@@ -65,17 +65,17 @@ pub struct ResolvedLayer {
     pub solo: Option<u32>,
     /// Ascending by channel, never empty.
     pub channels: Vec<ShownChannel>,
-    /// The view's z slab, clamped into this layer's depth.
+    /// The planes of this layer the view's places along Z read, clamped
+    /// into its depth.
     pub z_range: Range<u32>,
     /// The view's timepoint, clamped into this layer's timepoints.
     pub t: u32,
     /// The plane of this layer an XZ view cuts along Y, and the one a YZ
-    /// view cuts along X: the view's axis position, a place in the scene
-    /// frame or, in a collection, from each tile's own edge, in the layer's
-    /// own samples.
+    /// view cuts along X: the view's place read in the layer's own samples,
+    /// in a collection from each tile's own edge.
     pub y: u32,
     pub x: u32,
-    /// Whether the view's z slab reaches past this layer's last plane.
+    /// Whether the view's places along Z reach past this layer's planes.
     pub z_clamped: bool,
     /// Whether the view's timepoint is past this layer's last.
     pub t_clamped: bool,
@@ -155,19 +155,57 @@ impl LayerExtent {
         }
     }
 
-    fn clamp_z(&self, range: &Range<u32>) -> Range<u32> {
-        let start = range.start.min(self.z - 1);
-        start..range.end.clamp(start + 1, self.z)
-    }
-
     fn clamp_t(&self, t: u32) -> u32 {
         t.min(self.t - 1)
     }
 
-    /// How a Z slab meets this layer, in a scene whose cut along Z steps
-    /// through `depth` positions. Z is each layer's own plane index, so the
-    /// slab misses a layer it starts past.
-    fn reach_z(&self, range: &Range<u32>, depth: u32) -> CutReach {
+    /// `plane` clamped into this layer along `axis`.
+    fn clamp(&self, axis: SpatialAxis, plane: i64) -> u32 {
+        plane.clamp(0, i64::from(self.along(axis)) - 1) as u32
+    }
+
+    /// The planes of this layer a cut along Z across the places `z` reads,
+    /// through `to_scene`: those whose middles lie in the range, or with
+    /// none, the plane holding its middle, so a layer coarser than one
+    /// position still shows a plane. Unclamped, so a range past the layer
+    /// names planes it lacks.
+    fn z_planes(&self, z: &Range<f64>, to_scene: &Affine) -> Range<i64> {
+        let at = |place: f64| to_scene.inverse().apply([0.0, 0.0, place])[2];
+        let (start, end) = (at(z.start), at(z.end));
+        let (start, end) = (start.min(end), start.max(end));
+        let first = (start - 0.5).ceil();
+        let past = (end - 0.5).ceil();
+        if past > first {
+            first as i64..past as i64
+        } else {
+            let middle = at((z.start + z.end) / 2.0).floor() as i64;
+            middle..middle + 1
+        }
+    }
+
+    /// The plane of this layer a place along `axis` reads through
+    /// `to_scene`. Unclamped, so a place past the layer names a plane it
+    /// lacks.
+    fn plane_at(&self, place: f64, axis: SpatialAxis, to_scene: &Affine) -> i64 {
+        let a = axis.xyz();
+        let mut at = [0.0; 3];
+        at[a] = place;
+        to_scene.inverse().apply(at)[a].floor() as i64
+    }
+
+    /// How a cut naming `planes` along `axis` meets this layer.
+    fn reach(&self, axis: SpatialAxis, planes: &Range<i64>) -> CutReach {
+        let count = i64::from(self.along(axis));
+        if planes.start < count && planes.end > 0 {
+            CutReach::Through
+        } else {
+            CutReach::Outside
+        }
+    }
+
+    /// How a cut along Z naming `planes` meets this layer, in a view whose
+    /// Z grid has `depth` positions.
+    fn reach_z(&self, planes: &Range<i64>, depth: u32) -> CutReach {
         if self.z == 1 {
             // Alone, a flat layer has no Z to step through, so it says nothing.
             return if depth > 1 {
@@ -176,76 +214,31 @@ impl LayerExtent {
                 CutReach::Through
             };
         }
-        if range.start >= self.z {
-            CutReach::Outside
-        } else {
-            CutReach::Through
-        }
-    }
-
-    /// The plane of this layer an X or Y axis position cuts. The position is
-    /// a place, absent its plane 0, read back through `to_scene`, the
-    /// layer's cut placement ([`Scene::cut_placement`]), so layers over one
-    /// region cut the same plane, and a collection cuts each tile alike.
-    /// Past the layer it takes the nearest plane, which the layer does not
-    /// draw ([`reach_across`]), as a shallow layer's Z does.
-    fn cut_plane(&self, position: Option<u32>, axis: SpatialAxis, to_scene: &Affine) -> u32 {
-        let a = axis.xyz();
-        let mut at = [0.0; 3];
-        at[a] = position.unwrap_or(0) as f64 + 0.5;
-        let plane = to_scene.inverse().apply(at)[a].floor();
-        plane.clamp(0.0, (self.along(axis) - 1) as f64) as u32
-    }
-
-    /// The planes a slice view of `plane` cuts here under `view`.
-    fn clamp_cut(&self, view: &AxisPositions, plane: SlicePlane, to_scene: &Affine) -> Range<u32> {
-        let single = |index: u32| index..index + 1;
-        match plane.cut() {
-            SpatialAxis::Z => self.clamp_z(&view.z_range),
-            SpatialAxis::Y => single(self.cut_plane(view.y, SpatialAxis::Y, to_scene)),
-            SpatialAxis::X => single(self.cut_plane(view.x, SpatialAxis::X, to_scene)),
-        }
+        self.reach(SpatialAxis::Z, planes)
     }
 }
 
-/// Where the scene puts one layer, as the cuts through it read it.
-struct LayerPlace {
-    /// The map a side view's axis position reads back through into the
-    /// layer's planes ([`Scene::cut_placement`]).
-    cut_placement: Affine,
-    /// The places along Y and along X where a side view's axis position
-    /// cuts the layer ([`Scene::cut_span`]). `None` without an image.
-    extent_y: Option<(f64, f64)>,
-    extent_x: Option<(f64, f64)>,
-    /// How many positions the scene's cut along Z steps through.
-    depth: u32,
+/// Where a view cuts each axis, as places in the scene frame, worked out
+/// once from its positions and its grids.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ViewCuts {
+    pub z: Range<f64>,
+    pub y: f64,
+    pub x: f64,
+    /// How many positions the view's Z grid has, so a layer one plane deep
+    /// knows whether it stands in at every Z.
+    pub depth: u32,
 }
 
-/// How an X or Y axis position, a place in the scene frame that reads as 0
-/// when absent, meets a layer spanning `extent` of the frame along its axis:
-/// through it when the middle of the unit it names lies inside, the point
-/// [`LayerExtent::cut_plane`] reads a plane at.
-fn reach_across(position: Option<u32>, extent: Option<(f64, f64)>) -> CutReach {
-    // A layer without an image draws nothing to hide.
-    let Some((min, max)) = extent else {
-        return CutReach::Through;
-    };
-    let at = position.unwrap_or(0) as f64 + 0.5;
-    if (min..max).contains(&at) {
-        CutReach::Through
-    } else {
-        CutReach::Outside
-    }
-}
-
-/// What one layer shows with `settings` at the selectors in `view`, set
-/// aside or not by the view's comparison.
+/// What one layer shows with `settings` where `cuts` cut it and at
+/// timepoint `t`, set aside or not by the view's comparison. `to_scene` is
+/// the layer's placement, which each place reads its planes back through.
 fn resolve(
     dataset_id: &DatasetId,
     manifest: &DatasetManifest,
     settings: &DatasetDisplaySettings,
-    view: &AxisPositions,
-    place: &LayerPlace,
+    (cuts, t): (&ViewCuts, u32),
+    to_scene: &Affine,
     outside_comparison: bool,
 ) -> ResolvedLayer {
     let extent = LayerExtent::of(manifest);
@@ -271,8 +264,11 @@ fn resolve(
             }
         })
         .collect();
-    let z_range = extent.clamp_z(&view.z_range);
-    let t = extent.clamp_t(view.t);
+    let z_planes = extent.z_planes(&cuts.z, to_scene);
+    let z_range = extent.clamp(SpatialAxis::Z, z_planes.start)
+        ..extent.clamp(SpatialAxis::Z, z_planes.end - 1) + 1;
+    let [y, x] = [(cuts.y, SpatialAxis::Y), (cuts.x, SpatialAxis::X)]
+        .map(|(place, axis)| extent.plane_at(place, axis, to_scene));
     let set_aside = settings.visible && outside_comparison;
     ResolvedLayer {
         dataset_id: dataset_id.clone(),
@@ -283,15 +279,15 @@ fn resolve(
         channel_count: extent.c,
         solo: settings.solo.filter(|&solo| solo < extent.c),
         channels,
-        z_clamped: z_range != view.z_range,
+        z_clamped: (i64::from(z_range.start)..i64::from(z_range.end)) != z_planes,
         z_range,
-        t_clamped: t != view.t,
-        t,
-        y: extent.cut_plane(view.y, SpatialAxis::Y, &place.cut_placement),
-        x: extent.cut_plane(view.x, SpatialAxis::X, &place.cut_placement),
-        z_reach: extent.reach_z(&view.z_range, place.depth),
-        y_reach: reach_across(view.y, place.extent_y),
-        x_reach: reach_across(view.x, place.extent_x),
+        t_clamped: extent.clamp_t(t) != t,
+        t: extent.clamp_t(t),
+        y: extent.clamp(SpatialAxis::Y, y),
+        x: extent.clamp(SpatialAxis::X, x),
+        z_reach: extent.reach_z(&z_planes, cuts.depth),
+        y_reach: extent.reach(SpatialAxis::Y, &(y..y + 1)),
+        x_reach: extent.reach(SpatialAxis::X, &(x..x + 1)),
     }
 }
 
@@ -299,15 +295,31 @@ impl Scene {
     /// Every layer `view` draws, as it shows it, in panel order, then any
     /// dataset the order does not list. Empty for an unknown view.
     pub fn resolved_layers(&self, view: ViewId) -> Vec<ResolvedLayer> {
+        let Some(shown) = self.view(view) else {
+            return Vec::new();
+        };
+        // Where the view cuts is one answer for every layer.
+        let cuts = self.view_cuts(view, &shown.axes);
         self.layer_ids()
             .filter(|id| self.draws(view, id))
-            .filter_map(|id| self.resolved_layer(view, id))
+            .filter_map(|id| self.resolve_at(view, id, &cuts))
             .collect()
     }
 
     /// What `dataset_id` shows in `view`, or `None` for a dataset the
     /// document lacks or an unknown view.
     pub fn resolved_layer(&self, view: ViewId, dataset_id: &DatasetId) -> Option<ResolvedLayer> {
+        let cuts = self.view_cuts(view, &self.view(view)?.axes);
+        self.resolve_at(view, dataset_id, &cuts)
+    }
+
+    /// [`Self::resolved_layer`] where `view` cuts at `cuts`.
+    fn resolve_at(
+        &self,
+        view: ViewId,
+        dataset_id: &DatasetId,
+        cuts: &ViewCuts,
+    ) -> Option<ResolvedLayer> {
         let shown = self.view(view)?;
         let manifest = self.document.manifests.get(dataset_id)?;
         let seeded;
@@ -322,8 +334,8 @@ impl Scene {
             dataset_id,
             manifest,
             settings,
-            &shown.axes,
-            &self.layer_place(view, dataset_id),
+            (cuts, shown.axes.t),
+            &self.placement(dataset_id).unwrap_or(Affine::IDENTITY),
             shown.sets_aside(dataset_id),
         ))
     }
@@ -338,12 +350,15 @@ impl Scene {
         Some(self.resolved_layer(view, dataset_id)?.reach(slice.plane))
     }
 
-    fn layer_place(&self, view: ViewId, dataset_id: &DatasetId) -> LayerPlace {
-        LayerPlace {
-            cut_placement: self.cut_placement(dataset_id).unwrap_or(Affine::IDENTITY),
-            extent_y: self.cut_span(dataset_id, SpatialAxis::Y),
-            extent_x: self.cut_span(dataset_id, SpatialAxis::X),
-            depth: self.cut_extent(view, SpatialAxis::Z),
+    /// Where `view` standing at `axes` cuts each axis: its places, or the
+    /// first position of each grid it has none on.
+    pub(crate) fn view_cuts(&self, view: ViewId, axes: &AxisPositions) -> ViewCuts {
+        let grid = |axis| self.cut_grid(view, axis);
+        ViewCuts {
+            z: self.z_cut(view, axes),
+            y: axes.y.unwrap_or_else(|| grid(SpatialAxis::Y).center(0)),
+            x: axes.x.unwrap_or_else(|| grid(SpatialAxis::X).center(0)),
+            depth: grid(SpatialAxis::Z).count,
         }
     }
 
@@ -352,6 +367,9 @@ impl Scene {
     /// settings, except that channels the view lists no entry for keep this
     /// scene's styling.
     pub fn resolved_view_layers(&self, view: &SavedView) -> Vec<ResolvedLayer> {
+        let mut axes = view.view_in(self);
+        self.place_legacy_axes(&mut axes);
+        let cuts = self.view_cuts(self.active_view().id(), &axes);
         self.layer_ids()
             .filter_map(|id| {
                 let manifest = self.document.manifests.get(id)?;
@@ -378,8 +396,8 @@ impl Scene {
                     id,
                     manifest,
                     &settings,
-                    &view.view,
-                    &self.layer_place(self.active_view().id(), id),
+                    (&cuts, axes.t),
+                    &self.placement(id).unwrap_or(Affine::IDENTITY),
                     false,
                 ))
             })
@@ -395,32 +413,40 @@ impl Scene {
         self.dataset_order.iter().chain(unlisted)
     }
 
-    /// The z slab of `axes` clamped into `dataset_id`, or the slab itself
-    /// for a dataset the document lacks.
-    pub(crate) fn layer_z_range(&self, axes: &AxisPositions, dataset_id: &DatasetId) -> Range<u32> {
-        match self.document.manifests.get(dataset_id) {
-            Some(manifest) => LayerExtent::of(manifest).clamp_z(&axes.z_range),
-            None => axes.z_range.clone(),
-        }
-    }
-
-    /// The planes a slice view of `plane` standing at `axes` cuts in
-    /// `dataset_id`, clamped into it, or its own for a dataset the document
-    /// lacks.
+    /// The planes of `dataset_id` a slice view of `plane` cuts where `view`
+    /// stands, clamped into it. A dataset the document lacks has none to
+    /// read and reads its first.
     pub(crate) fn layer_cut(
         &self,
-        axes: &AxisPositions,
+        view: ViewId,
         dataset_id: &DatasetId,
         plane: SlicePlane,
     ) -> Range<u32> {
-        match (
+        let (Some(shown), Some(manifest), Some(to_scene)) = (
+            self.view(view),
             self.document.manifests.get(dataset_id),
-            self.cut_placement(dataset_id),
-        ) {
-            (Some(manifest), Some(to_scene)) => {
-                LayerExtent::of(manifest).clamp_cut(axes, plane, &to_scene)
+            self.placement(dataset_id),
+        ) else {
+            return 0..1;
+        };
+        let extent = LayerExtent::of(manifest);
+        let cuts = self.view_cuts(view, &shown.axes);
+        let single = |axis| {
+            let place = if axis == SpatialAxis::Y {
+                cuts.y
+            } else {
+                cuts.x
+            };
+            let plane = extent.clamp(axis, extent.plane_at(place, axis, &to_scene));
+            plane..plane + 1
+        };
+        match plane.cut() {
+            SpatialAxis::Z => {
+                let planes = extent.z_planes(&cuts.z, &to_scene);
+                extent.clamp(SpatialAxis::Z, planes.start)
+                    ..extent.clamp(SpatialAxis::Z, planes.end - 1) + 1
             }
-            _ => axes.cut(plane),
+            axis => single(axis),
         }
     }
 

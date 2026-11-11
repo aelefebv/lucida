@@ -2,8 +2,9 @@
 // is the contract, so keep this in step with `lucida-core/src/saved_view.rs`.
 import type { SlicePlane } from "../renderer/slicePlane.ts";
 
-/** Version 2 moved solo onto each layer; see `SAVED_VIEW_VERSION` in Rust. */
-export const SAVED_VIEW_VERSION = 2;
+/** Version 2 moved solo onto each layer, and version 3 made axis positions
+ *  places; see `SAVED_VIEW_VERSION` in Rust. */
+export const SAVED_VIEW_VERSION = 3;
 
 /** What chose a camera's pose: a fit of everything visible, which a new
  *  canvas fits again, or a stand-in nothing chose, which is never persisted. */
@@ -94,13 +95,23 @@ export interface ZRange {
   end: number;
 }
 
+/**
+ * Where a view stands: places in the scene frame along Z, Y and X, which every
+ * layer reads its own plane at, and a timepoint. An absent place reads as the
+ * first position of the view's grid.
+ */
 export interface ViewState {
-  z_range: ZRange;
+  /** The places along Z an XY view cuts: one grid position, or a slab. */
+  z?: ZRange;
   t: number;
-  /** The plane an XZ view cuts along Y, absent until one first opened. */
+  /** The place an XZ view cuts along Y, absent until one first opened. */
   y?: number;
-  /** The plane a YZ view cuts along X, absent until one first opened. */
+  /** The place a YZ view cuts along X, absent until one first opened. */
   x?: number;
+  /** The Z slab of a view recorded before positions were places, as plane
+   *  numbers. Present only on such a view; the scene places it when the view
+   *  is imported. */
+  z_range?: ZRange;
   /** The scene-wide channel of a view recorded before solo was per layer.
    *  Present only on such a view; the scene decodes it into each layer's
    *  `solo` when the view is imported. */

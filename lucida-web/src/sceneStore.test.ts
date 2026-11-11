@@ -19,6 +19,7 @@ function fakeScene() {
   };
   const scene = {
     z: () => state.z,
+    z_place: () => state.z + 0.5,
     t: () => state.t,
     active_view: () => state.active,
     view_ids: () => state.views,

@@ -47,13 +47,17 @@ interface Props {
   /** The view the labels sit over, and the element over its rectangle. */
   surface: ViewSurface;
   viewMode: "2d" | "3d";
-  z: number;
+  /** The place along Z this view cuts, in the scene frame. */
+  zPlace: number;
   t: number;
   cursorLabels: CursorLabel[];
 }
 
+/** Whether `peer` stands elsewhere along Z or T than this view, and which way.
+ *  Z compares places in the scene frame: a peer one grid position over cuts
+ *  another place. */
 function dimBadge(peer: PresenceState, localZ: number, localT: number, localIs3d: boolean): { dim: boolean; badge: string } {
-  const view = peer.view as { z_range?: { start: number }; t?: number } | null;
+  const view = peer.view;
   if (!view) return { dim: false, badge: "" };
 
   const parts: string[] = [];
@@ -61,7 +65,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localIs3d
 
   // Z is a spatial axis in 3D, so skip the Z badge and dimming there.
   if (!localIs3d) {
-    const peerZ = view.z_range?.start;
+    const peerZ = view.z ? (view.z.start + view.z.end) / 2 : undefined;
     if (peerZ !== undefined && peerZ !== localZ) {
       dim = true;
       parts.push(peerZ > localZ ? "▲" : "▼");
@@ -79,7 +83,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localIs3d
 
 const EDGE_MARGIN = 16;
 
-export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, surface, viewMode, z, t, cursorLabels }: Props) {
+export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, surface, viewMode, zPlace, t, cursorLabels }: Props) {
   const labelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
@@ -229,7 +233,7 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, surface, 
   return (
     <div className="lc-peer-cursors">
       {peerEntries.map(([clientId, peer]) => {
-        const { dim, badge } = dimBadge(peer, z, t, viewMode === "3d");
+        const { dim, badge } = dimBadge(peer, zPlace, t, viewMode === "3d");
         return (
           <div
             key={clientId}

@@ -62,6 +62,7 @@ function baseProps(canEdit: boolean): WorkspaceSavedViewsSidebarProps {
     currentUserEmail: "alice@example.com",
     canEdit,
     getCurrentSavedView: () => emptyView(),
+    position: { z: 0, t: 0 },
     onOpenSavedView: () => {},
     loadedDatasetNames: ["dataset.zarr"],
     defaultSavedViewId: null,

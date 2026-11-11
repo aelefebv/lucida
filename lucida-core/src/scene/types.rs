@@ -1206,7 +1206,7 @@ mod annotation_view_tests {
     fn workspace_view() -> SavedView {
         let mut v = SavedView::empty([1024, 768]);
         v.view.t = 7;
-        v.view.set_z_range(10..15);
+        v.view.z = Some(10.0..15.0);
         v.display.contrast_min = 100.0;
         v.display.contrast_max = 5000.0;
         v

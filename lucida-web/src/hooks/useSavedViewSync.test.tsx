@@ -41,6 +41,7 @@ interface MockScene {
   epochCounts: { view: number; selection: number };
   epochs: () => string;
   z: () => number;
+  z_place: () => number;
   t: () => number;
   active_view: () => number;
   view_ids: () => number[];
@@ -85,6 +86,7 @@ function makeMockScene(): MockScene {
     epochCounts: { view: 0, selection: 0 },
     epochs: () => JSON.stringify({ content: 0, layout: 0, ...m.epochCounts }),
     z: () => m.zVal,
+    z_place: () => m.zVal + 0.5,
     t: () => m.tVal,
     active_view: () => 0,
     view_ids: () => [0],
@@ -123,6 +125,11 @@ function makeMockScene(): MockScene {
     import_presence: (json: string) => {
       const obj = JSON.parse(json);
       m.importedViews.push(obj.view);
+      // Positions arrive with the camera, as places or older plane numbers:
+      // one position a unit from the origin.
+      const z = obj.view?.z ?? obj.view?.z_range;
+      if (z) m.zVal = z.start;
+      if (typeof obj.view?.t === "number") m.tVal = obj.view.t;
       Object.assign(presence, obj);
       m.epochCounts.view++;
       m.epochCounts.selection++;

@@ -471,8 +471,8 @@ impl Scene {
             return Err(FrameError::NothingVisible);
         }
         let depth = self
-            .visible_bounds(self.active_view().id())
-            .map_or(0, |bounds| bounds.plane.max[2] as u32);
+            .cut_grid(self.active_view().id(), lucida_content::SpatialAxis::Z)
+            .count;
         self.apply(Command::Viewport(ViewportCommand::SetZ {
             z: depth.saturating_sub(1) / 2,
         }));
@@ -532,9 +532,10 @@ struct IndexBounds {
     z: u32,
 }
 
-/// The deepest T and Z counts among the visible datasets. Each layer clamps
-/// the scene's index into its own extent and says so, so only an index no
-/// layer reaches is refused. `None` when nothing visible has image data.
+/// The longest T count among the visible datasets, and the positions of the
+/// active view's Z grid. Each layer clamps the scene's timepoint into its own
+/// extent and says so, so only an index no layer reaches is refused. `None`
+/// when nothing visible has image data.
 fn visible_index_bounds(scene: &Scene) -> Option<IndexBounds> {
     let mut bounds: Option<IndexBounds> = None;
     for id in &scene.dataset_order {
@@ -563,7 +564,10 @@ fn visible_index_bounds(scene: &Scene) -> Option<IndexBounds> {
             None => current,
         });
     }
-    bounds
+    let z = scene
+        .cut_grid(scene.active_view().id(), lucida_content::SpatialAxis::Z)
+        .count;
+    bounds.map(|bounds| IndexBounds { z, ..bounds })
 }
 
 fn saturating_count(value: u64) -> u32 {
@@ -611,7 +615,13 @@ mod tests {
         assert_eq!(slice.center, [128.0, 256.0]);
         let limiting = FITTED_VIEWPORT[1] as f64 / 512.0;
         assert!((slice.zoom - limiting / crate::framing::FIT_MARGIN_2D).abs() < 1e-12);
-        assert_eq!(profile.scene.active_view().axes.z_range, 19..20);
+        let view = profile.scene.active_view().id();
+        assert_eq!(
+            profile
+                .scene
+                .axis_index(view, lucida_content::SpatialAxis::Z),
+            19
+        );
     }
 
     #[test]

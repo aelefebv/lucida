@@ -22,7 +22,7 @@ function emptySliceView(viewport: [number, number] = [800, 600]): SavedView {
     datasets: [],
     active_layouts: {},
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport },
-    view: { z_range: { start: 0, end: 1 }, t: 0 },
+    view: { t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
     dataset_order: [],
     dataset_settings: {},

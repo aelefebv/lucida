@@ -1,5 +1,6 @@
 // The light, in-session restore of an annotation's captured view: camera
-// (including 2D/3D mode), z-slab/t, and display, scoped to the pin's dataset.
+// (including 2D/3D mode), axis positions, and display, scoped to the pin's
+// dataset.
 //
 // This is separate from `SavedViewApplier.apply` on purpose. The heavy applier
 // opens, hides, and reorders datasets and broadcasts layout changes, which suits
@@ -10,7 +11,7 @@
 import type { WasmScene } from "lucida-core";
 import type { ViewportCommand } from "../commands.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
-import { clampViewIndices, clampNotice, datasetDisplayCommands } from "./applier.ts";
+import { clampViewTime, clampNotice, datasetDisplayCommands } from "./applier.ts";
 import type { DimensionExtentsResolver, LabelNamesResolver } from "./applier.ts";
 import type { Camera, CameraSpace, DatasetId, SavedView } from "./types.ts";
 
@@ -63,7 +64,7 @@ export function switchCameraMode(
   return { changed: true, viewMode };
 }
 
-/** The captured view narrowed to `datasetId`, so `clampViewIndices` scans only
+/** The captured view narrowed to `datasetId`, so `clampViewTime` scans only
  * the pin's dataset. The original view may address the author's other datasets,
  * and an empty view makes the clamp fall back to every loaded dataset. */
 function singleDatasetView(view: SavedView, datasetId: DatasetId): SavedView {
@@ -82,10 +83,10 @@ export interface RestoreResult {
   /** The caller mirrors this into React `viewMode` and uses it to pick which
    *  overlay to focus. */
   viewMode: "2d" | "3d";
-  /** The z-slab/t actually applied, after clamping. */
-  applied: { zStart: number; zEnd: number; t: number };
-  /** A non-blocking notice when the captured z/t had to be clamped to fit the
-   *  pin's dataset, naming the moved axes; null when nothing was adjusted. */
+  /** The timepoint actually applied, after clamping. */
+  applied: { t: number };
+  /** A non-blocking notice when the captured t had to be clamped to fit the
+   *  pin's dataset; null when nothing was adjusted. */
   notice: string | null;
 }
 
@@ -107,8 +108,8 @@ export interface RestoreAnnotationViewParams {
 }
 
 /**
- * Restore `view` against the live scene: camera mode, display, clamped z/t,
- * then camera shape. This mirrors the heavy applier's tail minus every document
+ * Restore `view` against the live scene: camera mode, display, then camera
+ * shape with the axis positions and clamped t. This mirrors the heavy applier's tail minus every document
  * step. Mode goes first so an arcball camera is never imported while the scene
  * is in slice mode. The caller focuses the pin afterward, since the author's
  * framing alone doesn't guarantee the pin is on screen.
@@ -132,34 +133,17 @@ export function restoreAnnotationView({
   // Each layer's solo rides its display settings.
   restoreDatasetDisplay(scene, view, datasetId, labelNamesFor);
 
-  // Without a resolved dataset the captured z/t pass through (see `datasetId`).
+  // Without a resolved dataset the captured t passes through (see `datasetId`).
   const clamped = datasetId
-    ? clampViewIndices(
-        scene,
-        [{ url: "", id: datasetId }],
-        singleDatasetView(view, datasetId),
-        dimensionExtentsFor,
-      )
-    : {
-        t: view.view.t,
-        zStart: view.view.z_range.start,
-        zEnd: view.view.z_range.end,
-        clamped: false,
-        adjustedAxes: [] as readonly string[],
-      };
-  applyLocal(scene, { type: "set_t", t: clamped.t });
-  applyLocal(scene, {
-    type: "set_z_range",
-    start: clamped.zStart,
-    end: clamped.zEnd,
-  });
+    ? clampViewTime([{ url: "", id: datasetId }], singleDatasetView(view, datasetId), dimensionExtentsFor)
+    : { t: view.view.t, clamped: false, adjustedAxes: [] as readonly string[] };
 
-  importCameraOnly(scene, view);
+  importCameraAndPositions(scene, view, clamped.t);
 
   return {
     cameraModeChanged: mode.changed,
     viewMode: mode.viewMode,
-    applied: { zStart: clamped.zStart, zEnd: clamped.zEnd, t: clamped.t },
+    applied: { t: clamped.t },
     notice: clamped.clamped ? clampNotice(clamped.adjustedAxes) : null,
   };
 }
@@ -201,16 +185,23 @@ function restoreDatasetDisplay(
   }
 }
 
-/** Import only the camera shape, with the spaces it was saved in, keeping the
- * live view and display in presence. Mirrors `importCameraView` in
- * `applier.ts` without needing an applier instance. A camera the WASM importer
- * rejects is skipped so the rest of the restore stands, instead of throwing out
- * of the navigate handler. */
-function importCameraOnly(
+/** Import the camera shape and the axis positions at timepoint `t`, with the
+ * spaces and version they were saved in, keeping the live display in presence.
+ * Mirrors `importCameraView` in `applier.ts` without needing an applier
+ * instance. A camera the WASM importer rejects is skipped so the rest of the
+ * restore stands, instead of throwing out of the navigate handler. */
+function importCameraAndPositions(
   scene: WasmScene,
-  { camera, camera_space }: Pick<SavedView, "camera" | "camera_space">,
+  { v, camera, camera_space, view }: Pick<SavedView, "v" | "camera" | "camera_space" | "view">,
+  t: number,
 ): void {
-  let presence: { camera: Camera; view: unknown; display: unknown; camera_space?: CameraSpace };
+  let presence: {
+    camera: Camera;
+    view: unknown;
+    display: unknown;
+    camera_space?: CameraSpace;
+    v?: number;
+  };
   try {
     presence = JSON.parse(scene.export_presence()) as {
       camera: Camera;
@@ -223,6 +214,8 @@ function importCameraOnly(
   }
   presence.camera = camera;
   presence.camera_space = camera_space;
+  presence.v = v;
+  presence.view = { ...view, t };
   try {
     guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
   } catch (e) {

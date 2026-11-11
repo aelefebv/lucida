@@ -389,30 +389,20 @@ export class SavedViewApplier {
         gamma: view.display.gamma,
       });
 
-      // `clampViewIndices` narrows to the datasets the view names and keeps
+      // `clampViewTime` narrows to the datasets the view names and keeps
       // visible, so an unreferenced or hidden neighbor can't crush the
-      // restored Z/T.
+      // restored T.
       const clampedDatasets = Array.from(loadedAfter, (id) => ({ url: "", id }));
-      const clamped = clampViewIndices(
-        sceneAfter,
-        clampedDatasets,
-        view,
-        this.dimensionExtentsFor,
-      );
+      const clamped = clampViewTime(clampedDatasets, view, this.dimensionExtentsFor);
       if (clamped.clamped) {
         // LoadingViewBanner renders warnings; name the axes that moved.
         this.addWarning(clampNotice(clamped.adjustedAxes));
       }
-      this.applyViewport(sceneAfter, { type: "set_t", t: clamped.t });
-      this.applyViewport(sceneAfter, {
-        type: "set_z_range",
-        start: clamped.zStart,
-        end: clamped.zEnd,
-      });
 
-      // Camera last, with an older view's scene-wide channel mode, which the
-      // scene decodes into each layer's solo over the settings set above.
-      importCameraView(sceneAfter, view, legacyChannelMode(view));
+      // Camera and axis positions last, with an older view's scene-wide
+      // channel mode, which the scene decodes into each layer's solo over the
+      // settings set above.
+      importCameraView(sceneAfter, view, clamped.t, legacyChannelMode(view));
 
       this.emitApplyResult(sceneAfter, view);
 
@@ -605,16 +595,18 @@ export function legacyChannelMode(view: SavedView): LegacyChannelMode | null {
 }
 
 /**
- * Import the view's camera through `import_presence`, which sets camera,
- * view, and display atomically and keeps the local viewport. The camera goes
- * with the spaces it was saved in, which the scene carries it out of. View
- * and display were already applied, so the live ones go back through
- * unchanged, plus an older view's channel mode: the scene owns decoding it
- * into each layer's solo.
+ * Import the view's camera and axis positions through `import_presence`,
+ * which sets camera, view, and display atomically and keeps the local
+ * viewport. Both go with the spaces they were saved in, which the scene
+ * carries them out of, and with the view's version, so the scene reads an
+ * older view's positions as it meant them. The display was already applied,
+ * so the live one goes back through unchanged, as does an older view's
+ * channel mode: the scene owns decoding it into each layer's solo.
  */
 export function importCameraView(
   scene: WasmScene,
-  { camera, camera_space }: Pick<SavedView, "camera" | "camera_space">,
+  { v, camera, camera_space, view }: Pick<SavedView, "v" | "camera" | "camera_space" | "view">,
+  t: number,
   legacy: LegacyChannelMode | null,
 ): void {
   const presence = JSON.parse(scene.export_presence()) as {
@@ -622,10 +614,12 @@ export function importCameraView(
     view: ViewState;
     display: unknown;
     camera_space?: CameraSpace;
+    v?: number;
   };
   presence.camera = camera;
   presence.camera_space = camera_space;
-  if (legacy) presence.view = { ...presence.view, ...legacy };
+  presence.v = v;
+  presence.view = { ...view, t, ...(legacy ?? {}) };
   guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
 }
 
@@ -741,17 +735,16 @@ export function datasetDisplayCommands(
 
 export interface ClampedView {
   t: number;
-  zStart: number;
-  zEnd: number;
-  /** True iff the clamp moved z or t. Drives the "adjusted to fit" notice. */
+  /** True iff the clamp moved t. Drives the "adjusted to fit" notice. */
   clamped: boolean;
-  /** Axes that moved, a subset of `["Z", "T"]` in that order. */
+  /** Axes that moved: `["T"]`, or none. Z, Y and X are places, which a layer
+   *  past them says it is outside of rather than being clamped. */
   adjustedAxes: readonly string[];
 }
 
 /**
  * Per-dataset extents (counts) for clamping. An axis reported `undefined`
- * stays unclamped. `N` means valid indices `0..N-1` and a valid z slab `0..N`.
+ * stays unclamped. `N` means valid indices `0..N-1`.
  */
 export type DimensionExtentsResolver = (
   datasetId: string,
@@ -785,15 +778,15 @@ function visibleAddressedDatasetIds(view: SavedView): Set<string> | undefined {
 }
 
 /**
- * Clamp a saved view's z slab and t to the recipient's loaded datasets.
+ * Clamp a saved view's timepoint to the recipient's loaded datasets.
  *
- * Z extents come from `dataset_volume_shape`; T extents come only from
- * `extentsFor`. An axis with no known extent passes through. Each axis clamps
- * to the largest extent among the datasets the view names and keeps visible,
- * or among every id in `requestedIds` when the view names none.
+ * T extents come only from `extentsFor`. With none known, T passes through.
+ * It clamps to the largest extent among the datasets the view names and
+ * keeps visible, or among every id in `requestedIds` when the view names
+ * none: each dataset clamps its own rendering, so the saved index only needs
+ * to fit the longest relevant series.
  */
-export function clampViewIndices(
-  scene: WasmScene,
+export function clampViewTime(
   requestedIds: { url: string; id: string }[],
   view: SavedView,
   extentsFor?: DimensionExtentsResolver,
@@ -803,64 +796,27 @@ export function clampViewIndices(
     ? requestedIds
     : requestedIds.filter((r) => addressedVisible.has(r.id));
 
-  // Largest extent per axis: the bound the global sliders navigate. Each
-  // dataset clamps its own rendering, so the saved index only needs to fit the
-  // deepest relevant volume. The smallest would collapse a valid Z to 0 when a
-  // 2D image shares the view with a deep volume. `undefined` leaves the axis
-  // alone.
-  let maxZ: number | undefined;
   let maxT: number | undefined;
-  const considerMax = (cur: number | undefined, next: number | undefined) => {
-    if (next === undefined || !Number.isFinite(next) || next <= 0) return cur;
-    return cur === undefined ? next : Math.max(cur, next);
-  };
-
   for (const r of idsToClamp) {
-    // The volume shape is [Z, Y, X]; Z is the only extent it carries.
+    if (!extentsFor) break;
     try {
-      const shape = scene.dataset_volume_shape(r.id);
-      if (shape.length >= 1) maxZ = considerMax(maxZ, shape[0]);
-    } catch {
-      // Dataset not yet loaded or no shape; its extent is unknown.
-    }
-    // T extents: only available via the injected resolver (manifest union on
-    // the recipient). Resolver failures are non-fatal.
-    if (extentsFor) {
-      try {
-        const ext = extentsFor(r.id);
-        maxT = considerMax(maxT, ext.t);
-      } catch {
-        // Resolver couldn't determine extents for this dataset; skip.
+      const next = extentsFor(r.id).t;
+      if (next !== undefined && Number.isFinite(next) && next > 0) {
+        maxT = maxT === undefined ? next : Math.max(maxT, next);
       }
+    } catch {
+      // Resolver couldn't determine extents for this dataset; skip.
     }
   }
 
-  const requested = view.view;
-
-  // Keep a slab of thickness >= 1 inside [0, maxZ].
-  let zStart = requested.z_range.start;
-  let zEnd = requested.z_range.end;
-  if (maxZ !== undefined) {
-    zStart = Math.max(0, Math.min(zStart, maxZ - 1));
-    zEnd = Math.max(zStart + 1, Math.min(zEnd, maxZ));
-  }
-
-  let t = requested.t;
-  if (maxT !== undefined) {
-    t = Math.max(0, Math.min(t, maxT - 1));
-  }
-
-  const adjustedAxes: string[] = [];
-  if (zStart !== requested.z_range.start || zEnd !== requested.z_range.end) {
-    adjustedAxes.push("Z");
-  }
-  if (t !== requested.t) adjustedAxes.push("T");
-
-  return { t, zStart, zEnd, clamped: adjustedAxes.length > 0, adjustedAxes };
+  const requested = view.view.t;
+  const t = maxT === undefined ? requested : Math.max(0, Math.min(requested, maxT - 1));
+  const adjustedAxes = t === requested ? [] : ["T"];
+  return { t, clamped: adjustedAxes.length > 0, adjustedAxes };
 }
 
 /**
- * Build the non-blocking notice shown when `clampViewIndices` adjusted one
+ * Build the non-blocking notice shown when `clampViewTime` adjusted one
  * or more axes, naming exactly which ones moved. Examples:
  *   ["Z"]           -> "Z adjusted to fit this dataset"
  *   ["Z", "T"]      -> "Z and T adjusted to fit this dataset"

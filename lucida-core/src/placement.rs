@@ -141,6 +141,19 @@ impl DeclaredFrame {
         self.meters.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        spacing: [f64; 3],
+        origin: [f64; 3],
+        meters: Option<[f64; 3]>,
+    ) -> Self {
+        DeclaredFrame {
+            spacing,
+            origin,
+            meters,
+        }
+    }
+
     /// One sample's length in meters along `[x, y, z]`, when the frame
     /// measures physical lengths.
     pub fn sample_meters(&self) -> Option<[f64; 3]> {
@@ -292,6 +305,11 @@ impl SceneFrame {
                     / unit
             }),
         }
+    }
+
+    /// The map from the frame of the dataset that fixed this one into it.
+    pub fn place_reference(&self) -> Affine {
+        self.place(&self.reference)
     }
 
     /// The map from this scene frame into `to`. A point keeps its place on
@@ -460,16 +478,6 @@ impl TileCells {
             SlicePlane::Xy => position,
             SlicePlane::Xz => [x, y * self.down],
             SlicePlane::Yz => [x * self.across_yz, y * self.down],
-        }
-    }
-
-    /// The map a side view's axis position reads back through into a tile's
-    /// own planes, for a dataset `to_scene` places: its scale alone, since
-    /// the position is measured from the tile's first plane.
-    pub fn cut_placement(to_scene: &Affine) -> Affine {
-        Affine {
-            scale: to_scene.scale,
-            offset: [0.0; 3],
         }
     }
 }
@@ -720,16 +728,6 @@ mod tests {
         assert_eq!(cells.position(SlicePlane::Xz, [0.0, 10.0]), [0.0, 10.0]);
         assert_eq!(cells.position(SlicePlane::Yz, [10.0, 0.0]), [20.0, 0.0]);
         assert_eq!(TileCells::new([]), TileCells::new([[1, 1, 1, 1, 1]]));
-    }
-
-    #[test]
-    fn a_tile_cut_reads_the_position_from_the_tiles_own_edge() {
-        let to_scene = Affine {
-            scale: [0.5, 2.0, 1.0],
-            offset: [100.0, 200.0, 0.0],
-        };
-        let cut = TileCells::cut_placement(&to_scene).inverse();
-        assert!(close(cut.apply([3.0, 9.0, 0.0]), [6.0, 4.5, 0.0]));
     }
 
     #[test]

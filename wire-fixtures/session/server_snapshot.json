@@ -350,7 +350,7 @@
           ],
           "anchor": "img-0",
           "view": {
-            "v": 2,
+            "v": 3,
             "datasets": [],
             "active_layouts": {
               "wds-0f3a": "layout-grid"
@@ -376,11 +376,12 @@
               "clip_mode": "sphere"
             },
             "view": {
-              "z_range": {
-                "start": 10,
-                "end": 14
+              "z": {
+                "start": 10.0,
+                "end": 14.0
               },
-              "t": 2
+              "t": 2,
+              "y": -6.5
             },
             "display": {
               "contrast_min": 120.0,
@@ -487,11 +488,12 @@
         ]
       },
       "view": {
-        "z_range": {
-          "start": 10,
-          "end": 14
+        "z": {
+          "start": 10.0,
+          "end": 14.0
         },
-        "t": 2
+        "t": 2,
+        "y": -6.5
       },
       "display": {
         "contrast_min": 120.0,
@@ -580,9 +582,9 @@
         "clip_mode": "sphere"
       },
       "view": {
-        "z_range": {
-          "start": 0,
-          "end": 50
+        "z": {
+          "start": 0.0,
+          "end": 50.0
         },
         "t": 0
       },

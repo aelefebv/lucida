@@ -2542,6 +2542,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // dataset. A per-tile collection montage is not built yet, so
                 // plan as a single image here.
                 let plan = montage::plan_montage(dims, 1, *cells, *cols);
+                // Each cell stands on one of the dataset's own planes.
+                let z_planes = scene
+                    .plane_grid(
+                        &lucida_core::DatasetId(ds_id.clone()),
+                        lucida_content::SpatialAxis::Z,
+                    )
+                    .unwrap_or(lucida_core::scene::CutGrid::EMPTY);
 
                 // Pre-pass: read the dataset's auto-contrast window from a
                 // representative (middle) cell, then pin ONE shared,
@@ -2556,6 +2563,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let probe_saved = montage::build_cell_view(
                     &ds_id,
                     &plan.cells[mid],
+                    z_planes,
                     viewport,
                     None,
                     dims[1],
@@ -2585,6 +2593,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     let saved = montage::build_cell_view(
                         &ds_id,
                         cell,
+                        z_planes,
                         viewport,
                         shared_contrast,
                         dims[1],
@@ -5766,7 +5775,8 @@ mod tests {
         let cells = output_value["cells"].as_array().unwrap();
         assert_eq!(cells.len(), sidecar.cells.len());
         for (cell, src) in cells.iter().zip(sidecar.cells.iter()) {
-            assert_eq!(cell["z"], serde_json::json!(src.view.view.z_range.start));
+            let z = src.view.view.z.as_ref().unwrap();
+            assert_eq!(cell["z"].as_f64(), Some(z.start));
             assert_eq!(cell["t"], serde_json::json!(src.view.view.t));
             let solo = src.view.dataset_settings.values().find_map(|s| s.solo);
             assert_eq!(cell.get("c").and_then(|c| c.as_u64()), solo.map(u64::from));

@@ -3,7 +3,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::placement::Affine;
+use crate::placement::{Affine, SceneFrame};
 use crate::scene::Comparison;
 use crate::slice_plane::SlicePlane;
 use lucida_content::{DatasetId, SpatialAxis};
@@ -176,12 +176,6 @@ impl View {
         }
     }
 
-    /// The axis position along the slice plane's cut axis, before any layer
-    /// clamps it.
-    pub fn cut_index(&self) -> u32 {
-        self.axes.cut(self.slice_plane()).start
-    }
-
     /// Both cameras, the active one first, so what every camera follows
     /// reaches the parked one too.
     pub(crate) fn cameras_mut(&mut self) -> impl Iterator<Item = &mut Camera> {
@@ -294,23 +288,36 @@ impl View {
     }
 }
 
-/// Where a view stands on the axes it does not draw: its Z slab, its
-/// timepoint, and the Y or X place a side view cuts. Which channels show is
-/// per layer, in [`crate::scene::DatasetDisplaySettings::solo`] and each
-/// channel's `visible` flag.
+/// Where a view stands on the axes it does not draw: the places along Z, Y
+/// and X its slice planes cut, and its timepoint. Each place is in the scene
+/// frame, so one position cuts the same physical place in every layer, and
+/// each layer reads its own plane there ([`crate::scene::Scene::cut_grid`]).
+/// Which channels show is per layer, in
+/// [`crate::scene::DatasetDisplaySettings::solo`] and each channel's
+/// `visible` flag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AxisPositions {
-    /// Z slab range. A single slice is a range of length 1 (e.g. 42..43).
-    pub z_range: Range<u32>,
+    /// The Z slab of a view recorded before positions were places: plane
+    /// numbers, which each layer read as its own. Decoding only, see
+    /// [`Self::place_legacy_z`]; nothing writes it now. First, so a
+    /// view read with one writes it back where it was.
+    #[serde(rename = "z_range", default, skip_serializing_if = "Option::is_none")]
+    pub legacy_z_range: Option<Range<u32>>,
+    /// The places along Z an XY view cuts, in the scene frame's units: one
+    /// position of the view's grid for a single cut, several for a slab.
+    /// Absent until something places it, which reads as the grid's first
+    /// position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<Range<f64>>,
     pub t: u32,
-    /// The place in the scene frame an XZ view cuts along Y, and the one a YZ
-    /// view cuts along X, in the frame's units. Absent until a view of that
-    /// plane first opens, which picks the middle of the data; absent reads
-    /// as 0.
+    /// The place an XZ view cuts along Y, and the one a YZ view cuts along
+    /// X, in the scene frame's units. Absent until a view of that plane
+    /// first opens, which picks the middle of the data; absent reads as the
+    /// grid's first position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub y: Option<u32>,
+    pub y: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub x: Option<u32>,
+    pub x: Option<f64>,
     /// The scene-wide channel of a view recorded before solo was per layer.
     /// Decoding only, see [`Self::legacy_channels`]; nothing writes it now.
     #[serde(rename = "c", default, skip_serializing_if = "Option::is_none")]
@@ -337,64 +344,65 @@ pub enum LegacyChannels {
 impl AxisPositions {
     pub fn new() -> Self {
         Self {
-            z_range: 0..1,
+            z: None,
             t: 0,
             y: None,
             x: None,
+            legacy_z_range: None,
             legacy_c: None,
             legacy_multi_channel: None,
         }
     }
 
-    /// Set a single z slice (slab of thickness 1).
-    pub fn set_z(&mut self, index: u32) {
-        self.z_range = index..index + 1;
-    }
-
-    /// Set a z slab range.
-    pub fn set_z_range(&mut self, range: Range<u32>) {
-        self.z_range = range;
-    }
-
-    /// The plane a slice view of `plane` cuts, before any layer clamps it.
-    pub fn cut(&self, plane: SlicePlane) -> Range<u32> {
-        let single = |index: Option<u32>| {
-            let index = index.unwrap_or(0);
-            index..index.saturating_add(1)
-        };
-        match plane.cut() {
-            SpatialAxis::Z => self.z_range.clone(),
-            SpatialAxis::Y => single(self.y),
-            SpatialAxis::X => single(self.x),
-        }
-    }
-
-    /// Move the X and Y axis positions, places in one scene frame, by `map`
-    /// into another, keeping the plane each names.
-    pub fn map_cut_positions(&mut self, map: &Affine) {
-        for (a, position) in [(1, &mut self.y), (0, &mut self.x)] {
-            if let Some(index) = position {
-                let mut at = [0.0; 3];
-                at[a] = *index as f64 + 0.5;
-                *index = map.apply(at)[a].floor().clamp(0.0, u32::MAX as f64) as u32;
-            }
-        }
-    }
-
-    pub fn set_slice(&mut self, axis: &str, index: u32) -> Result<(), String> {
+    /// The place `axis` is cut at, if anything placed it: the middle of the
+    /// Z range, or the Y or X place.
+    pub fn place(&self, axis: SpatialAxis) -> Option<f64> {
         match axis {
-            "z" => self.set_z(index),
-            "y" => self.y = Some(index),
-            "x" => self.x = Some(index),
-            "t" => self.t = index,
-            "c" => {
-                return Err(
-                    "channels are shown per layer; solo a channel on a layer instead".to_string(),
-                );
-            }
-            _ => return Err(format!("unknown axis: {axis}")),
+            SpatialAxis::Z => self.z.as_ref().map(|z| (z.start + z.end) / 2.0),
+            SpatialAxis::Y => self.y,
+            SpatialAxis::X => self.x,
         }
-        Ok(())
+    }
+
+    /// Move the places, in one scene frame, by `map` into another, keeping
+    /// the planes each cuts.
+    pub fn map_cut_positions(&mut self, map: &Affine) {
+        let along = |a: usize, place: f64| {
+            let mut at = [0.0; 3];
+            at[a] = place;
+            map.apply(at)[a]
+        };
+        if let Some(z) = &mut self.z {
+            let (start, end) = (along(2, z.start), along(2, z.end));
+            *z = start.min(end)..start.max(end);
+        }
+        for (a, place) in [(1, &mut self.y), (0, &mut self.x)] {
+            if let Some(place) = place {
+                *place = along(a, *place);
+            }
+        }
+    }
+
+    /// Turn a Z slab recorded before positions were places into the places
+    /// it named in `frame`: the planes of the dataset that fixed the frame,
+    /// which every layer of a scene of one dataset, or of datasets on that
+    /// dataset's Z grid, cut there.
+    pub fn place_legacy_z(&mut self, frame: &SceneFrame) {
+        if let Some(planes) = self.legacy_z_range.take() {
+            let to_scene = frame.place_reference();
+            let at = |plane: u32| to_scene.apply([0.0, 0.0, f64::from(plane)])[2];
+            let end = planes.end.max(planes.start.saturating_add(1));
+            let (start, end) = (at(planes.start), at(end));
+            self.z = Some(start.min(end)..start.max(end));
+        }
+    }
+
+    /// The Y and X places of a view recorded before positions were places:
+    /// each named a whole unit of the scene frame, cut through its middle.
+    pub fn place_legacy_units(&mut self) {
+        for place in [&mut self.y, &mut self.x].into_iter().flatten() {
+            *place += 0.5;
+        }
     }
 
     /// The channel mode of a view recorded before solo was per layer, or
@@ -429,56 +437,67 @@ impl Default for AxisPositions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::placement::DeclaredFrame;
 
     #[test]
-    fn default_view_starts_at_zero() {
+    fn default_view_starts_unplaced() {
         let v = AxisPositions::new();
-        assert_eq!(v.z_range, 0..1);
+        assert_eq!((v.z.clone(), v.y, v.x), (None, None, None));
         assert_eq!(v.t, 0);
         assert_eq!(v.legacy_channels(), None);
     }
 
     #[test]
-    fn set_slice_updates_z_as_single_plane() {
+    fn each_axis_is_cut_at_its_own_place() {
         let mut v = AxisPositions::new();
-        v.set_slice("z", 42).unwrap();
-        assert_eq!(v.z_range, 42..43);
-        assert_eq!(v.t, 0);
-    }
-
-    #[test]
-    fn each_plane_cuts_at_its_own_axis_position() {
-        let mut v = AxisPositions::new();
-        v.set_z_range(4..6);
-        assert_eq!(v.cut(SlicePlane::Xy), 4..6);
-        assert_eq!(v.cut(SlicePlane::Xz), 0..1);
-        v.set_slice("y", 9).unwrap();
-        v.set_slice("x", 3).unwrap();
-        assert_eq!(v.cut(SlicePlane::Xz), 9..10);
-        assert_eq!(v.cut(SlicePlane::Yz), 3..4);
+        v.z = Some(4.0..6.0);
+        v.y = Some(9.5);
+        v.x = Some(-3.5);
+        assert_eq!(v.place(SpatialAxis::Z), Some(5.0));
+        assert_eq!(v.place(SpatialAxis::Y), Some(9.5));
+        assert_eq!(v.place(SpatialAxis::X), Some(-3.5));
         let json = serde_json::to_string(&v).unwrap();
-        assert_eq!(json, r#"{"z_range":{"start":4,"end":6},"t":0,"y":9,"x":3}"#);
+        assert_eq!(
+            json,
+            r#"{"z":{"start":4.0,"end":6.0},"t":0,"y":9.5,"x":-3.5}"#
+        );
         assert_eq!(serde_json::from_str::<AxisPositions>(&json).unwrap(), v);
     }
 
     #[test]
-    fn set_z_range_for_slab() {
+    fn places_move_with_the_scene_frame() {
         let mut v = AxisPositions::new();
-        v.set_z_range(10..20);
-        assert_eq!(v.z_range, 10..20);
+        v.z = Some(4.0..6.0);
+        v.y = Some(9.5);
+        v.map_cut_positions(&Affine {
+            scale: [1.0, 2.0, -0.5],
+            offset: [0.0, 1.0, 10.0],
+        });
+        assert_eq!(v.z, Some(7.0..8.0));
+        assert_eq!(v.y, Some(20.0));
+        assert_eq!(v.x, None);
     }
 
     #[test]
-    fn set_slice_rejects_unknown_axis_and_the_channel() {
-        let mut v = AxisPositions::new();
-        assert!(v.set_slice("q", 1).is_err());
-        assert!(v.set_slice("c", 1).is_err());
+    fn a_legacy_slab_names_the_planes_of_the_frames_dataset() {
+        let mut v: AxisPositions =
+            serde_json::from_str(r#"{"z_range":{"start":3,"end":5},"t":0,"y":7}"#).unwrap();
+        assert_eq!(v.legacy_z_range, Some(3..5));
+        // Z samples twice as long as X ones, which measure one unit.
+        let frame = SceneFrame::new(DeclaredFrame::from_parts([1.0, 1.0, 2.0], [0.0; 3], None));
+        v.place_legacy_z(&frame);
+        v.place_legacy_units();
+        assert_eq!(v.z, Some(6.0..10.0));
+        assert_eq!(v.y, Some(7.5));
+        assert_eq!(v.legacy_z_range, None);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(!json.contains("z_range"), "{json}");
     }
 
     #[test]
     fn a_current_view_serializes_no_channel_selector() {
         let json = serde_json::to_string(&AxisPositions::new()).unwrap();
-        assert_eq!(json, r#"{"z_range":{"start":0,"end":1},"t":0}"#);
+        assert_eq!(json, r#"{"t":0}"#);
         let back: AxisPositions = serde_json::from_str(&json).unwrap();
         assert_eq!(back.legacy_channels(), None);
     }
@@ -504,6 +523,7 @@ mod tests {
             composite.take_legacy_channels(),
             Some(LegacyChannels::Composite)
         );
+        composite.legacy_z_range = None;
         assert_eq!(composite, AxisPositions::new());
     }
 }

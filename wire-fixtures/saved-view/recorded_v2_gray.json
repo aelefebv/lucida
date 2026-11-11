@@ -1,0 +1,108 @@
+{
+  "payload": "H4sIAAAAAAAA_31R227DIAz9lcnPSUrSRut43CfstaoiN3EzJAIRkF7Fv89kl7bStgcksA_nYl8Bp2Cb1prg0AeQVzh2Phf7JYLco_YUM2hxIIep15IJ5EBuSlGtijrL67IqqnqbwWA7Agleq5Ygg4Oi42hdSNCXSmSlWAtGXawdQJZFzawdBvQUGuu6mfImnM3X57YqYXvD8QnK9P7RI3t6R2NI3_U3XLTaugFHttQ7PDPld8RmwBPIlRAiMrnGHX81HDD9A0e9siZH-Gk9sNoRWxXOIEWxrFNIr3aaYwc3UdzGO99_-IrZFZIY23qbpZ5egWvxNzmu3emtM_CciYcXb7ObPfdeLhZ6alWH-V6dwuTILzwOo6Z81GiouKBzPIH_gAerp-ELycIHkNXnElOSML8ujUPTUyqQ6djIii0FTDsuRYzxA0GqVTRLAgAA",
+  "view": {
+    "active_layouts": {},
+    "auto_contrast": {
+      "wds-0f3a": false
+    },
+    "camera": {
+      "center": [
+        1024.5,
+        -512.25
+      ],
+      "mode": "slice",
+      "viewport": [
+        1920,
+        1080
+      ],
+      "zoom": 1.5
+    },
+    "dataset_order": [
+      "wds-0f3a",
+      "wds-7c21"
+    ],
+    "dataset_settings": {
+      "wds-0f3a": {
+        "blend_mode": "alpha",
+        "channel_blend_mode": "additive",
+        "channel_settings": [
+          {
+            "colormap": "gray",
+            "contrast_max": 4000,
+            "contrast_min": 0,
+            "gamma": 1,
+            "visible": true
+          }
+        ],
+        "contrast_max": 65535,
+        "contrast_min": 0,
+        "gamma": 1,
+        "label_names": [
+          "region-a"
+        ],
+        "label_settings": [
+          {
+            "opacity": 0.35,
+            "visible": true
+          }
+        ],
+        "opacity": 1,
+        "render_mode": "translucent",
+        "visible": true
+      },
+      "wds-7c21": {
+        "blend_mode": "alpha",
+        "channel_blend_mode": "additive",
+        "channel_settings": [
+          {
+            "colormap": "magenta",
+            "contrast_max": 65535,
+            "contrast_min": 0,
+            "gamma": 1,
+            "visible": true
+          },
+          {
+            "colormap": "green",
+            "contrast_max": 65535,
+            "contrast_min": 0,
+            "gamma": 1,
+            "name": "Region B",
+            "visible": true
+          },
+          {
+            "colormap": "cyan",
+            "contrast_max": 65535,
+            "contrast_min": 0,
+            "gamma": 1,
+            "visible": true
+          }
+        ],
+        "contrast_max": 65535,
+        "contrast_min": 0,
+        "gamma": 1,
+        "label_settings": [],
+        "opacity": 0.8,
+        "render_mode": "translucent",
+        "solo": 1,
+        "visible": true
+      }
+    },
+    "datasets": [
+      "gs://lucida-fixtures/sample-plane.zarr",
+      "gs://lucida-fixtures/sample-volume.zarr"
+    ],
+    "display": {
+      "contrast_max": 65535,
+      "contrast_min": 0,
+      "gamma": 1
+    },
+    "v": 2,
+    "view": {
+      "t": 2,
+      "z_range": {
+        "end": 14,
+        "start": 10
+      }
+    }
+  }
+}

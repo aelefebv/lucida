@@ -97,7 +97,7 @@ def test_explore_sidecar_carries_extent_and_cell_ztc():
     # Each cell carries z/t matching its own child view's destination indices,
     # and `c` only when the child solos a channel.
     for cell in sidecar["cells"]:
-        assert cell["z"] == cell["view"]["view"]["z_range"]["start"]
+        assert cell["z"] == cell["view"]["view"]["z"]["start"]
         assert cell["t"] == cell["view"]["view"]["t"]
         solos = [s.get("solo") for s in cell["view"]["dataset_settings"].values()]
         solo = next((s for s in solos if s is not None), None)

@@ -2211,10 +2211,13 @@ fn format_camera(camera: &Camera) -> String {
 }
 
 fn format_view(view: &AxisPositions) -> String {
-    let mut text = format!("T{} Z{}..{}", view.t, view.z_range.start, view.z_range.end);
-    for (axis, index) in [("Y", view.y), ("X", view.x)] {
-        if let Some(index) = index {
-            text.push_str(&format!(" {axis}{index}"));
+    let mut text = format!("T{}", view.t);
+    if let Some(z) = &view.z {
+        text.push_str(&format!(" Z@{}..{}", z.start, z.end));
+    }
+    for (axis, place) in [("Y", view.y), ("X", view.x)] {
+        if let Some(place) = place {
+            text.push_str(&format!(" {axis}@{place}"));
         }
     }
     text
@@ -2619,8 +2622,9 @@ mod tests {
 
         assert_eq!(value["type"], "presence");
         assert!(value.get("command").is_none());
-        assert_eq!(value["view"]["z_range"]["start"], 4);
-        assert_eq!(value["view"]["z_range"]["end"], 5);
+        // With nothing to place it by, a position is one unit from the origin.
+        assert_eq!(value["view"]["z"]["start"], 4.0);
+        assert_eq!(value["view"]["z"]["end"], 5.0);
     }
 
     #[test]
@@ -3022,8 +3026,8 @@ mod tests {
             }
             _ => panic!("expected slice camera"),
         }
-        assert_eq!(scene.active_view().axes.z_range.start, 2);
-        assert_eq!(scene.active_view().axes.z_range.end, 3);
+        let view = scene.active_view().id();
+        assert_eq!(scene.axis_index(view, lucida_content::SpatialAxis::Z), 2);
     }
 
     #[test]

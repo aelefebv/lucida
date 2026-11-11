@@ -99,7 +99,7 @@ export function CanvasLayers({
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
-  const { viewMode, z, t, layers, views, maximized } = useSceneView(engine.store);
+  const { viewMode, zPlace, t, layers, views, maximized } = useSceneView(engine.store);
   // Each view's settle and coverage, with several views.
   const settles = useSyncExternalStore(viewSettleSignal.subscribe, viewSettleSignal.get);
   const scaleBars = useScaleBarShown();
@@ -138,12 +138,14 @@ export function CanvasLayers({
   const overlays = hasDatasets && selectedDatasetId && wasmScene && canvas
     ? { datasetId: selectedDatasetId }
     : null;
-  // The overlays draw the selected layer's pins, so its shown channels decide
-  // which pins are in context.
+  // The overlays draw the selected layer's pins, which sit on its own planes,
+  // so its plane under the cut and its shown channels decide which pins are in
+  // context.
+  const selectedLayer = selectedDatasetId ? layers.get(selectedDatasetId) : undefined;
   const viewContext = {
-    z,
+    z: selectedLayer?.z_range.start ?? 0,
     t,
-    channels: shownChannels(selectedDatasetId ? layers.get(selectedDatasetId) : undefined),
+    channels: shownChannels(selectedLayer),
   };
   const nameOf = (datasetId: string) => datasets.get(datasetId)?.name ?? datasetId;
 
@@ -249,7 +251,7 @@ export function CanvasLayers({
           <PeerCursorLayer
             peerStore={peerStore}
             viewMode={slice ? "2d" : "3d"}
-            z={z}
+            zPlace={zPlace}
             t={t}
             wasmSceneRef={scene.wasmSceneRef}
             clientReady={render.clientReady}

@@ -539,8 +539,9 @@ const expectedFlyCamera: FlyCamera = {
 };
 
 const expectedView: WireViewState = {
-  z_range: { start: 10, end: 14 },
+  z: { start: 10, end: 14 },
   t: 2,
+  y: -6.5,
 };
 const expectedDisplay: WireDisplayState = {
   contrast_min: 120,
@@ -551,7 +552,7 @@ const expectedDisplay: WireDisplayState = {
 /** The pin-embedded author view in workspace-dataset-id form. `datasets` is
  *  empty by invariant, since no source URLs ride the document wire. */
 const expectedPinView: SavedView = {
-  v: 2,
+  v: 3,
   datasets: [],
   active_layouts: { "wds-0f3a": "layout-grid" },
   camera: expectedArcballCamera,
@@ -586,7 +587,7 @@ void presenceMirror;
 const expectedFlyPeerPresence = {
   client_id: 11,
   camera: expectedFlyCamera,
-  view: { z_range: { start: 0, end: 50 }, t: 0 },
+  view: { z: { start: 0, end: 50 }, t: 0 },
   display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   following: null,
   cursor: null,
@@ -601,7 +602,7 @@ void flyPeerMirror;
 const expectedJoiningPresenceWire = {
   client_id: 11,
   camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] },
-  view: { z_range: { start: 0, end: 1 }, t: 0 },
+  view: { t: 0 },
   display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   camera_reported: false,
   following: null,
@@ -2313,14 +2314,18 @@ describe("wire goldens: saved-view payloads", () => {
 
   const recordedV1 = claimFixture("saved-view/recorded_v1.json");
   const recordedV2 = claimFixture("saved-view/recorded_v2.json");
-  it("a payload recorded before one-channel images opened gray restores as it did", () => {
-    for (const golden of [recordedV1, recordedV2]) {
+  const recordedV2Gray = claimFixture("saved-view/recorded_v2_gray.json");
+  it("a payload recorded before one-channel images opened gray, or before positions were places, restores as it did", () => {
+    for (const golden of [recordedV1, recordedV2, recordedV2Gray]) {
       const recorded = golden.json() as PayloadGolden;
       expect(decode(recorded.payload)).toEqual(recorded.view);
     }
     const v2 = (recordedV2.json() as PayloadGolden).view;
     const one = v2.dataset_settings["ds-one"].channel_settings!;
     expect(one.map((c) => c.colormap)).toEqual(["magenta"]);
+    // Its plane numbers stay as they were, for the scene to place.
+    const planes = (recordedV2Gray.json() as PayloadGolden).view.view as { z_range?: unknown };
+    expect(planes.z_range).toEqual({ start: 10, end: 14 });
   });
 });
 

@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmScene } from "lucida-core";
-import { SavedViewApplier, type ApplierBridge, clampViewIndices } from "./applier.ts";
+import { SavedViewApplier, type ApplierBridge, clampViewTime } from "./applier.ts";
 import { buildCapture } from "./captureBuilder.ts";
 import { SAVED_VIEW_VERSION, type SavedView, type UserTransform } from "./types.ts";
 import { IDENTITY_USER_TRANSFORM } from "../userTransform.ts";
@@ -96,7 +96,7 @@ function emptyView(): SavedView {
     datasets: [],
     active_layouts: {},
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
-    view: { z_range: { start: 0, end: 1 }, t: 0 },
+    view: { t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
     dataset_order: [],
     dataset_settings: {},
@@ -131,8 +131,7 @@ describe("SavedViewApplier", () => {
 
     // No dataset opens needed.
     expect(openCalls).toEqual([]);
-    // SetT, SetZRange, SetContrast, SetGamma called.
-    expect(calls.some((c) => c.includes('"type":"set_t"'))).toBe(true);
+    // The display by command; t with the camera and the axis positions.
     expect(calls.some((c) => c.includes('"type":"set_gamma"'))).toBe(true);
     expect([scene.t(), scene.gamma()]).toEqual([5, 1.5]);
     expect(applier.isInProgress()).toBe(false);
@@ -181,20 +180,20 @@ describe("SavedViewApplier", () => {
     expect(state.openStatuses.find((s) => s.url === "gs://good.zarr")?.state).toBe("ok");
   });
 
-  it("clamps out-of-range z silently", async () => {
-    const { scene, calls } = createScene(["ds-x"]); // 128 planes
+  it("keeps a place past the data, which the data says it misses", async () => {
+    const url = "gs://x.zarr";
+    const { scene, calls } = createScene([fakeIdForUrl(url)]); // 128 planes, already open
     const applier = new SavedViewApplier(bridge, () => scene, fakeIdForUrl);
     const v = emptyView();
-    v.datasets = []; // already loaded
-    v.view.z_range = { start: 500, end: 600 }; // out of range
+    v.datasets = [url];
+    v.view.z_range = { start: 500, end: 600 }; // past the last plane
     await applier.apply(v);
 
-    const setZRangeCall = calls.find((c) => c.includes('"type":"set_z_range"'));
-    expect(setZRangeCall).toBeDefined();
-    const parsed = JSON.parse(setZRangeCall!);
-    expect(parsed.start).toBeLessThan(128);
-    expect(parsed.end).toBeLessThanOrEqual(128);
-    expect(scene.z()).toBeLessThan(128);
+    expect(calls.find((c) => c.includes('"type":"set_z_range"'))).toBeUndefined();
+    // The scrubber stands at the nearest end, and the layer draws nothing.
+    expect(scene.z()).toBe(127);
+    const [layer] = JSON.parse(scene.resolved_layers(scene.active_view())) as { z_reach: string }[];
+    expect(layer.z_reach).toBe("outside");
   });
 
   it("missing-layout fallback: warns and skips", async () => {
@@ -735,13 +734,15 @@ describe("SavedViewApplier", () => {
   it("subscribeApplyComplete fires AFTER the WASM mutations (post-apply state visible)", async () => {
     // Subscribers read post-apply state from the live scene, so t/z must be
     // written before the callback fires.
-    const { scene } = createScene();
+    const url = "gs://x.zarr";
+    const { scene } = createScene([fakeIdForUrl(url)]);
     const applier = new SavedViewApplier(bridge, () => scene, fakeIdForUrl);
     let seen: number[] = [];
     applier.subscribeApplyComplete(() => {
       seen = [scene.t(), scene.z()];
     });
     const v = emptyView();
+    v.datasets = [url];
     v.view.t = 5;
     v.view.z_range = { start: 3, end: 4 };
     await applier.apply(v);
@@ -888,38 +889,27 @@ describe("SavedViewApplier restores a view at the size it was saved", () => {
   });
 });
 
-describe("clampViewIndices", () => {
-  it("clamps z when out of range", () => {
-    const { scene } = createScene(["ds-x"]); // 128 planes
+describe("clampViewTime", () => {
+  const extents = (t: number) => () => ({ t });
+
+  it("clamps t past the longest series the view names", () => {
     const v = emptyView();
-    v.view.z_range = { start: 500, end: 600 };
-    const out = clampViewIndices(scene, [{ url: "u", id: "ds-x" }], v);
-    expect(out.zStart).toBeLessThan(128);
-    expect(out.zEnd).toBeLessThanOrEqual(128);
+    v.view.t = 9;
+    expect(clampViewTime([{ url: "u", id: "ds-x" }], v, extents(4))).toEqual({
+      t: 3,
+      clamped: true,
+      adjustedAxes: ["T"],
+    });
   });
 
-  it("does not clamp when in range", () => {
-    const { scene } = createScene(["ds-x"]);
+  it("leaves t in range, and every place, alone", () => {
     const v = emptyView();
-    v.view.z_range = { start: 5, end: 10 };
-    const out = clampViewIndices(scene, [{ url: "u", id: "ds-x" }], v);
-    expect(out.zStart).toBe(5);
-    expect(out.zEnd).toBe(10);
-  });
-
-  it("does not crush a deep Z when a shallow 2D dataset is co-loaded", () => {
-    // A 128-plane volume co-loaded with a 2D image (Z=1). The bound is the
-    // deepest visible volume, so the 2D dataset can't collapse a valid Z to 0.
-    const scene = joinedScene(PAGE, 1, [dataset("ds-vol"), renamed(fixture("image"), "ds-2d")]);
-    const v = emptyView();
-    v.view.z_range = { start: 119, end: 120 };
-    const out = clampViewIndices(
-      scene,
-      [{ url: "", id: "ds-vol" }, { url: "", id: "ds-2d" }],
-      v,
-    );
-    expect(out.zStart).toBe(119);
-    expect(out.zEnd).toBe(120);
-    expect(out.clamped).toBe(false);
+    v.view.t = 2;
+    v.view.z = { start: 500, end: 501 };
+    expect(clampViewTime([{ url: "u", id: "ds-x" }], v, extents(4))).toEqual({
+      t: 2,
+      clamped: false,
+      adjustedAxes: [],
+    });
   });
 });

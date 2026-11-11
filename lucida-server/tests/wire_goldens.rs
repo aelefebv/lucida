@@ -861,8 +861,9 @@ fn slice_camera() -> Camera {
 
 fn shared_view_state() -> AxisPositions {
     AxisPositions {
-        z_range: 10..14,
+        z: Some(10.0..14.0),
         t: 2,
+        y: Some(-6.5),
         ..AxisPositions::new()
     }
 }
@@ -939,7 +940,7 @@ fn fly_peer_presence() -> PresenceState {
             framing: lucida_core::camera::Framing::Placed,
         })),
         view: Some(AxisPositions {
-            z_range: 0..50,
+            z: Some(0.0..50.0),
             t: 0,
             ..AxisPositions::new()
         }),
@@ -1288,10 +1289,7 @@ fn presence_required() -> Vec<String> {
             "/camera/center",
             "/camera/zoom",
             "/camera/viewport",
-            "/view/z_range",
             "/view/t",
-            "/view/z_range/start",
-            "/view/z_range/end",
             "/display/contrast_min",
             "/display/contrast_max",
             "/display/gamma",
@@ -2690,11 +2688,15 @@ fn enum_vocabulary_matches_golden() {
 
 const SAVED_VIEW_PAYLOAD_FILES: &[&str] = &["saved-view/payload.json"];
 
-/// Payloads the web viewer wrote before one-channel images opened gray, each
-/// with the view its decoder then returned. Hand-frozen, never regenerated:
-/// they prove an old link still restores as it did, magenta included.
-const RECORDED_PAYLOAD_FILES: &[&str] =
-    &["saved-view/recorded_v1.json", "saved-view/recorded_v2.json"];
+/// Payloads the web viewer wrote before one-channel images opened gray, and
+/// before axis positions were places, each with the view its decoder then
+/// returned. Hand-frozen, never regenerated: they prove an old link still
+/// restores as it did, magenta and plane numbers included.
+const RECORDED_PAYLOAD_FILES: &[&str] = &[
+    "saved-view/recorded_v1.json",
+    "saved-view/recorded_v2.json",
+    "saved-view/recorded_v2_gray.json",
+];
 
 /// A view and the `#view=` payload the codec writes for it. The web and the
 /// Python client must write the same payload for the same view.

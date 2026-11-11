@@ -78,7 +78,10 @@ struct WireDefaults {
     /// `view.c` and `view.multi_channel` as a payload left them out, for a
     /// version whose views chose their channels scene-wide.
     legacy_channels: Option<(u32, bool)>,
-    z_range: (u32, u32),
+    /// `view.z_range` as a payload left it out, for a version whose Z
+    /// positions were plane numbers. A later view that leaves out `view.z`
+    /// stands at its grid's first position.
+    z_range: Option<(u32, u32)>,
     t: u32,
     display: Fields,
     layer: Fields,
@@ -95,7 +98,7 @@ const WINDOW: Fields = &[
 
 const V1: WireDefaults = WireDefaults {
     legacy_channels: Some((0, false)),
-    z_range: (0, 1),
+    z_range: Some((0, 1)),
     t: 0,
     display: WINDOW,
     layer: &[
@@ -124,9 +127,22 @@ const V2: WireDefaults = WireDefaults {
     ..V1
 };
 
+/// Version 3 made axis positions places, so a view has no plane numbers to
+/// leave out.
+const V3: WireDefaults = WireDefaults {
+    z_range: None,
+    ..V2
+};
+
 fn wire_defaults(version: f64) -> &'static WireDefaults {
     // A newer sender's payload is read best-effort with the newest table.
-    if version < 2.0 { &V1 } else { &V2 }
+    if version < 2.0 {
+        &V1
+    } else if version < 3.0 {
+        &V2
+    } else {
+        &V3
+    }
 }
 
 /// Encode `view`, a [`SavedView`] as JSON, into a `#view=` payload.
@@ -139,7 +155,11 @@ pub fn encode_payload(view: &Value) -> Result<String, PayloadError> {
     let object = view
         .as_object_mut()
         .ok_or_else(|| PayloadError("a saved view must be an object".into()))?;
-    restore(object, wire_defaults(version(object)?));
+    let written = version(object)?;
+    restore(object, wire_defaults(written));
+    if written < 3.0 {
+        place_units(object);
+    }
     strip(object, wire_defaults(SAVED_VIEW_VERSION as f64));
     object.insert("v".into(), SAVED_VIEW_VERSION.into());
     canonicalize_numbers(&mut view);
@@ -197,6 +217,21 @@ impl SavedView {
     }
 }
 
+/// A view written before version 3 named the whole units of the scene frame
+/// its side views cut at, which are the places in their middles now. Its Z
+/// planes need the frame to place them and stay as they are, for the scene
+/// to read ([`crate::view::AxisPositions::place_legacy_z`]).
+fn place_units(view: &mut Map<String, Value>) {
+    let Some(Value::Object(selectors)) = view.get_mut("view") else {
+        return;
+    };
+    for key in ["y", "x"] {
+        if let Some(unit) = selectors.get(key).and_then(Value::as_f64) {
+            selectors.insert(key.into(), (unit + 0.5).into());
+        }
+    }
+}
+
 /// The view's `v`, which must be a positive number.
 fn version(object: &Map<String, Value>) -> Result<f64, PayloadError> {
     match object.get("v").and_then(Value::as_f64) {
@@ -231,12 +266,13 @@ fn restore(view: &mut Map<String, Value>, defaults: &WireDefaults) {
     fill(view, "active_layouts", Value::Object(Map::new()));
 
     let selectors = object_at(view, "view");
-    let (start, end) = defaults.z_range;
-    fill(
-        selectors,
-        "z_range",
-        serde_json::json!({ "start": start, "end": end }),
-    );
+    if let Some((start, end)) = defaults.z_range {
+        fill(
+            selectors,
+            "z_range",
+            serde_json::json!({ "start": start, "end": end }),
+        );
+    }
     fill(selectors, "t", defaults.t.into());
     if let Some((c, multi_channel)) = defaults.legacy_channels {
         fill(selectors, "c", c.into());
@@ -281,10 +317,11 @@ fn strip(view: &mut Map<String, Value>, defaults: &WireDefaults) {
     }
 
     if let Some(Value::Object(selectors)) = view.get_mut("view") {
-        let (start, end) = defaults.z_range;
-        let default_range = selectors.get("z_range").is_some_and(|range| {
-            range.get("start").and_then(Value::as_f64) == Some(start as f64)
-                && range.get("end").and_then(Value::as_f64) == Some(end as f64)
+        let default_range = defaults.z_range.is_some_and(|(start, end)| {
+            selectors.get("z_range").is_some_and(|range| {
+                range.get("start").and_then(Value::as_f64) == Some(start as f64)
+                    && range.get("end").and_then(Value::as_f64) == Some(end as f64)
+            })
         });
         if default_range {
             selectors.remove("z_range");
@@ -487,7 +524,7 @@ mod tests {
                 ]),
             ),
         ]);
-        view.view.set_z_range(3..9);
+        view.view.z = Some(3.0..9.0);
         view.view.t = 2;
         view.display.gamma = 0.8;
         view.dataset_settings[0].opacity = 0.3;
@@ -581,7 +618,11 @@ mod tests {
         let again = encode_payload(&view).unwrap();
         let wire = inflate(&again);
         assert_eq!(wire["v"], json!(SAVED_VIEW_VERSION));
-        assert_eq!(wire["view"], json!({"c": 0, "multi_channel": false}));
+        // Its plane numbers stay as they were, for the scene to place.
+        assert_eq!(
+            wire["view"],
+            json!({"z_range": {"start": 0, "end": 1}, "c": 0, "multi_channel": false})
+        );
         assert_eq!(decode_payload(&again).unwrap()["view"], view["view"]);
     }
 
@@ -616,11 +657,11 @@ mod tests {
     fn a_browser_and_rust_serialization_make_one_payload() {
         let view = view_with(&[("one", layer(vec![channel(Colormap::Gray)]))]);
         let from_browser = json!({
-            "v": 2,
+            "v": 3,
             "datasets": [],
             "active_layouts": {},
             "camera": {"mode": "slice", "center": [0, 0], "zoom": 1, "viewport": [800, 600], "framing": "unframed"},
-            "view": {"z_range": {"start": 0, "end": 1}, "t": 0},
+            "view": {"t": 0},
             "display": {"contrast_min": 0, "contrast_max": 65535, "gamma": 1},
             "dataset_order": ["one"],
             "dataset_settings": {"one": {
@@ -712,7 +753,7 @@ mod tests {
                 )
             );
             // The rest of the view reads as it always did.
-            assert_eq!(view.view.z_range, 64..65);
+            assert_eq!(view.view.legacy_z_range, Some(64..65));
         }
     }
 
