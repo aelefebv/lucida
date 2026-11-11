@@ -80,6 +80,7 @@ function emitLanes(
     emitDetailLane(chunks, input, stats, lanes, config);
     emitPrefetchLane(chunks, input, stats, lanes, config, cutStep);
     emitCoarseLane(chunks, input, stats, lanes, config);
+    if (view.view === snapshot.leadingView) lanes.lead(from);
     byView?.set(view.view, lanes.since(from).filter((req) => req.lane !== "prefetch"));
   }
 
@@ -95,7 +96,40 @@ function emitLanes(
   );
 
   const requests = lanes.finish();
-  return byView ? { requests: distinctRequests(requests), byView } : { requests };
+  if (!byView) return { requests };
+  fetchContestedChunksWhole(requests);
+  return { requests: distinctRequests(requests), byView };
+}
+
+/**
+ * Fetch whole each chunk two views ask for different planes of, keeping the
+ * plane each draws. The CPU cache holds a chunk once, whole or as some of its
+ * planes, so planes of it along two axes, as two slice views crossing in it
+ * ask for, would each replace the other as they land and neither view would
+ * settle. Bands along one axis widen to one band holding both.
+ */
+function fetchContestedChunksWhole(requests: readonly ChunkRequest[]): void {
+  const byChunk = new Map<string, ChunkRequest[]>();
+  for (const req of requests) {
+    if (!req.planes) continue;
+    const key = `${req.entityId}|${req.tier}|${req.chunkKey}`;
+    const held = byChunk.get(key);
+    if (held) held.push(req);
+    else byChunk.set(key, [req]);
+  }
+  for (const contested of byChunk.values()) {
+    if (contested.length < 2) continue;
+    const axis = contested[0].planeAxis ?? "z";
+    if (contested.some((req) => (req.planeAxis ?? "z") !== axis)) {
+      for (const req of contested) delete req.planes;
+      continue;
+    }
+    const band: [number, number] = [
+      Math.min(...contested.map((req) => req.planes![0])),
+      Math.max(...contested.map((req) => req.planes![1])),
+    ];
+    for (const req of contested) req.planes = band;
+  }
 }
 
 /**
