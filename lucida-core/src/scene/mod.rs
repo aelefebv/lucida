@@ -111,6 +111,51 @@ impl DatasetDerivedState {
             (SlicePlane::Yz, None) => [y, 0.0],
         }
     }
+
+    /// How far a view drawing `plane` draws `member`'s samples from where
+    /// the dataset's frame puts them, `[x, y, z]` in its samples: into the
+    /// tile's cell in a side view of a collection ([`TileCells::shift`]),
+    /// and nowhere otherwise, since every other view draws the frame in
+    /// place.
+    pub fn plane_shift(&self, plane: SlicePlane, member: &MemberState) -> [f64; 3] {
+        match &self.tile_cells {
+            Some(cells) => cells.shift(plane, member.position),
+            None => [0.0; 3],
+        }
+    }
+
+    /// The first member whose box holds the frame point `point` across X
+    /// and Y, or else the one nearest it there.
+    pub fn member_holding(&self, point: [f64; 3]) -> Option<&MemberState> {
+        // Below zero for a box that holds it, so any such beats every other.
+        let gap = |member: &MemberState| {
+            let (lo, hi) = placement::frame_box(member)?;
+            let [dx, dy] = [0, 1].map(|a| (lo[a] - point[a]).max(point[a] - hi[a]).max(0.0));
+            let holds = (0..2).all(|a| lo[a] <= point[a] && point[a] < hi[a]);
+            Some(if holds { -1.0 } else { dx.hypot(dy) })
+        };
+        self.members
+            .iter()
+            .filter_map(|member| Some((member, gap(member)?)))
+            .reduce(|best, next| if next.1 < best.1 { next } else { best })
+            .map(|(member, _)| member)
+    }
+
+    /// The member a view drawing `plane` draws at `drawn`, a point of the
+    /// frame as the view places it: the first whose box, moved by its
+    /// [`Self::plane_shift`], holds it on the two axes the plane draws.
+    pub fn member_drawn_at(&self, plane: SlicePlane, drawn: [f64; 3]) -> Option<&MemberState> {
+        let [across, down, _] = plane.axes().map(SpatialAxis::xyz);
+        self.members.iter().find(|member| {
+            let Some((lo, hi)) = placement::frame_box(member) else {
+                return false;
+            };
+            let shift = self.plane_shift(plane, member);
+            [across, down]
+                .into_iter()
+                .all(|a| lo[a] + shift[a] <= drawn[a] && drawn[a] <= hi[a] + shift[a])
+        })
+    }
 }
 
 /// Precomputed per image-bearing entity.
@@ -1143,38 +1188,20 @@ impl Scene {
     // `i..i + 1`. The helpers below place it with the dataset's own
     // placement and reuse each camera's own mapping, so a marker tracks the
     // data exactly in every view and a pick is the exact inverse of the
-    // projection that draws it.
-
-    /// Whether `view` draws the marks of `dataset_id`, which it does
-    /// wherever it draws the dataset's frame where its placement puts it.
-    pub fn draws_annotations(&self, view: ViewId, dataset_id: &DatasetId) -> bool {
-        self.view(view)
-            .is_some_and(|shown| self.draws_frame_in_place(shown, dataset_id))
-    }
-
-    /// Whether `view` draws `dataset_id`'s frame where its placement puts
-    /// it, so a mark in that frame lands where it is drawn: every view but a
-    /// side view of a collection, which lays each tile out in a cell of its
-    /// own.
-    fn draws_frame_in_place(&self, view: &View, dataset_id: &DatasetId) -> bool {
-        match &view.camera {
-            Camera::Slice(slice) if !slice.plane.is_xy() => self
-                .derived
-                .get(dataset_id)
-                .is_some_and(|derived| derived.tile_cells.is_none()),
-            _ => true,
-        }
-    }
+    // projection that draws it. A side view of a collection draws each tile
+    // in a cell of its own, so one shift (`annotation_shift`) moves a mark
+    // into its tile's cell and a pick back out of it.
 
     /// Project a mark's frame point `(x, y, z)` to screen-space pixels
     /// through `view`'s camera, placed as its dataset is.
     ///
     /// A slice view draws the point where it falls on its plane, whichever
-    /// plane that is, its place along the cut ignored. In a volume view the
-    /// marker tracks the volume as the camera orbits. Returns `None` when the
-    /// point is behind the camera, in a side view of a collection, or the
-    /// scene doesn't hold the view or the dataset; the caller then hides the
-    /// marker.
+    /// plane that is, its place along the cut ignored, and in a side view of
+    /// a collection in the cell of the tile it lies on
+    /// ([`Self::annotation_shift`]). In a volume view the marker tracks the
+    /// volume as the camera orbits. Returns `None` when the point is behind
+    /// the camera, or the scene doesn't hold the view or the dataset; the
+    /// caller then hides the marker.
     pub fn project_annotation(
         &self,
         view: ViewId,
@@ -1183,18 +1210,16 @@ impl Scene {
         y: f64,
         z: f64,
     ) -> Option<[f64; 2]> {
-        let view = self.view(view)?;
-        if !self.draws_frame_in_place(view, dataset_id) {
-            return None;
-        }
+        let shown = self.view(view)?;
         let placed = self.placed(dataset_id)?;
-        match &view.camera {
+        match &shown.camera {
             Camera::Slice(slice) => {
-                let point = placed.to_scene.apply([x, y, z]);
+                let [dx, dy, dz] = self.annotation_shift(view, dataset_id, [x, y, z]);
+                let point = placed.to_scene.apply([x + dx, y + dy, z + dz]);
                 let [across, down, _] = slice.plane.axes().map(SpatialAxis::xyz);
                 Some(slice.to_screen([point[across], point[down]]))
             }
-            Camera::Arcball(_) | Camera::Fly(_) => view
+            Camera::Arcball(_) | Camera::Fly(_) => shown
                 .camera
                 .project_to_screen(placed.to_world.apply([x, y, z])),
         }
@@ -1222,22 +1247,22 @@ impl Scene {
     /// A slice view gives the point on the plane it cuts, wherever the data
     /// is, since a shape may run past it. Along the cut it stands in the
     /// middle of the dataset's plane there, clamped into the dataset, so the
-    /// mark belongs to the plane it was drawn on in every other view. A
-    /// volume view gives where the ray first meets the dataset, inside the
-    /// member it meets, or `None` where it misses, so a mark never floats in
-    /// empty space. `None` too in a side view of a collection, whose tiles it
-    /// lays out in cells of their own.
+    /// mark belongs to the plane it was drawn on in every other view. In a
+    /// side view of a collection it lands on one tile's samples
+    /// ([`Self::annotation_shift`]): the tile a mark whose first vertex is
+    /// `on` starts on, or for a new mark, with no `on`, the tile whose cell
+    /// is under the pointer, and `None` between cells. A volume view gives
+    /// where the ray first meets the dataset, inside the member it meets, or
+    /// `None` where it misses, so a mark never floats in empty space.
     pub fn pick_annotation_voxel(
         &self,
         view: ViewId,
         dataset_id: &DatasetId,
         screen_x: f64,
         screen_y: f64,
+        on: Option<[f64; 3]>,
     ) -> Option<[f64; 3]> {
         let shown = self.view(view)?;
-        if !self.draws_frame_in_place(shown, dataset_id) {
-            return None;
-        }
         let placed = self.placed(dataset_id)?;
         match &shown.camera {
             Camera::Slice(slice) => {
@@ -1247,16 +1272,20 @@ impl Scene {
                 at[across.xyz()] = on_plane[0];
                 at[down.xyz()] = on_plane[1];
                 at[cut.xyz()] = self.cut_place(view, cut);
-                let mut point = placed.to_scene.inverse().apply(at);
+                let mut drawn = placed.to_scene.inverse().apply(at);
+                let shift = match on {
+                    Some(start) => self.annotation_shift(view, dataset_id, start),
+                    None => self.shift_drawn_at(view, dataset_id, drawn)?,
+                };
                 // A placement that tilts the cut has no plane of the dataset
                 // under it to stand in.
                 if placed.to_scene.keeps_axis(cut.xyz()) {
                     let manifest = self.document.manifests.get(dataset_id)?;
                     let last = f64::from(LayerExtent::of(manifest).along(cut) - 1);
                     let c = cut.xyz();
-                    point[c] = point[c].floor().clamp(0.0, last) + 0.5;
+                    drawn[c] = drawn[c].floor().clamp(0.0, last) + 0.5;
                 }
-                Some(point)
+                Some(std::array::from_fn(|i| drawn[i] - shift[i]))
             }
             Camera::Arcball(_) | Camera::Fly(_) => {
                 let hit = self.ray_pick(view, dataset_id, screen_x, screen_y)?;
@@ -1278,8 +1307,9 @@ impl Scene {
 
     /// Where `view` stands to cut the plane of `dataset_id` that holds the
     /// frame point `point`: the axis it steps along, the one its slice plane
-    /// cuts or Z in a volume view, and its position there. `None` for an
-    /// unknown view or dataset.
+    /// cuts or Z in a volume view, and its position there, which a side view
+    /// of a collection reads from the edge of the tile the point lies on.
+    /// `None` for an unknown view or dataset.
     pub fn annotation_cut(
         &self,
         view: ViewId,
@@ -1292,7 +1322,8 @@ impl Scene {
         };
         let to_scene = self.placement(dataset_id)?;
         let a = axis.xyz();
-        let mut middle = point;
+        let shift = self.annotation_shift(view, dataset_id, point);
+        let mut middle: [f64; 3] = std::array::from_fn(|i| point[i] + shift[i]);
         // The middle of the plane holding the point, so a point on a plane's
         // edge reads that plane and not, by a rounding error, the one before.
         if to_scene.keeps_axis(a) {
@@ -3866,7 +3897,9 @@ mod tests {
             let (scene, id) = uneven_volume(plane);
             let view = scene.active_view().id();
             let (sx, sy) = (390.0, 310.0);
-            let point = scene.pick_annotation_voxel(view, &id, sx, sy).unwrap();
+            let point = scene
+                .pick_annotation_voxel(view, &id, sx, sy, None)
+                .unwrap();
             let screen = scene
                 .project_annotation(view, &id, point[0], point[1], point[2])
                 .unwrap();
@@ -3895,7 +3928,7 @@ mod tests {
         // the screen, so a rounding of the depth would show.
         let (xz, id) = uneven_volume(SlicePlane::Xz);
         let placed = xz
-            .pick_annotation_voxel(xz.active_view().id(), &id, 370.0, 330.0)
+            .pick_annotation_voxel(xz.active_view().id(), &id, 370.0, 330.0, None)
             .unwrap();
         for plane in [SlicePlane::Xy, SlicePlane::Yz] {
             let (mut scene, id) = uneven_volume(plane);
@@ -3916,7 +3949,9 @@ mod tests {
             let [sx, sy] = scene
                 .project_annotation(view, &id, placed[0], placed[1], placed[2])
                 .unwrap();
-            let again = scene.pick_annotation_voxel(view, &id, sx, sy).unwrap();
+            let again = scene
+                .pick_annotation_voxel(view, &id, sx, sy, None)
+                .unwrap();
             let mut expected = placed;
             let c = plane.cut().xyz();
             expected[c] = expected[c].floor() + 0.5;
@@ -3936,7 +3971,7 @@ mod tests {
         for sx in (0..800).step_by(40) {
             for sy in (0..600).step_by(40) {
                 let Some(point) =
-                    scene.pick_annotation_voxel(view, &id, f64::from(sx), f64::from(sy))
+                    scene.pick_annotation_voxel(view, &id, f64::from(sx), f64::from(sy), None)
                 else {
                     continue;
                 };
@@ -3947,39 +3982,6 @@ mod tests {
             }
         }
         assert!(picked > 10, "the volume fills much of the view");
-    }
-
-    #[test]
-    fn a_side_view_of_a_collection_neither_places_nor_draws_a_mark() {
-        use crate::slice_plane::SlicePlane;
-        let mut scene = Scene::new([800, 600]);
-        let opened = test_helpers::make_collection_dataset_opened(
-            "c",
-            "c",
-            vec![("m1", [0.0, 0.0]), ("m2", [80.0, 0.0])],
-            [1, 1, 8, 64, 64],
-            [1, 1, 8, 64, 64],
-        );
-        scene.apply(DocumentCommand::DatasetOpened(opened).into());
-        let view = scene.active_view().id();
-        let id = DatasetId::from("c");
-        assert!(
-            scene
-                .pick_annotation_voxel(view, &id, 400.0, 300.0)
-                .is_some()
-        );
-        let plane = SlicePlane::Xz;
-        scene.apply(crate::command::ViewportCommand::SetSlicePlane { plane }.into());
-        assert!(
-            scene
-                .pick_annotation_voxel(view, &id, 400.0, 300.0)
-                .is_none()
-        );
-        assert!(
-            scene
-                .project_annotation(view, &id, 10.0, 10.0, 2.0)
-                .is_none()
-        );
     }
 
     #[test]
@@ -4029,7 +4031,7 @@ mod tests {
         let id = DatasetId::from("ds1");
         let (sx, sy) = (400.0, 300.0); // viewport center → hits the cube
         let voxel = scene
-            .pick_annotation_voxel(scene.active_view().id(), &id, sx, sy)
+            .pick_annotation_voxel(scene.active_view().id(), &id, sx, sy, None)
             .expect("center ray should hit the volume");
         let screen = scene
             .project_annotation(scene.active_view().id(), &id, voxel[0], voxel[1], voxel[2])
@@ -4090,7 +4092,7 @@ mod tests {
         let id = DatasetId::from("ds1");
         assert!(
             scene
-                .pick_annotation_voxel(scene.active_view().id(), &id, -10_000.0, -10_000.0)
+                .pick_annotation_voxel(scene.active_view().id(), &id, -10_000.0, -10_000.0, None)
                 .is_none()
         );
     }

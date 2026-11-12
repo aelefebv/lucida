@@ -15,10 +15,13 @@ const MY_ID = "7";
  * A slice view of `plane`, 800 by 600 at one device pixel per sample with the
  * scene's origin in its middle, over a dataset at its declared place whose
  * planes along Z lie 2 samples apart in the scene. A pick lands on the plane
- * at its cut, in the middle of plane `cut`.
+ * at its cut, in the middle of plane `cut`. The view draws every mark moved
+ * by `shift`, as a side view of a collection draws one in its tile's cell,
+ * and a pick of a mark's point takes the shift away again.
  */
-function makeScene(plane: SlicePlane, pins: Annotation[], cut: number) {
+function makeScene(plane: SlicePlane, pins: Annotation[], cut: number, shift: [number, number, number] = [0, 0, 0]) {
   const sent: Array<Record<string, unknown>> = [];
+  const picks: Array<Float64Array | undefined> = [];
   const scene = {
     annotations: () => JSON.stringify(pins),
     active_view: () => 0,
@@ -26,18 +29,18 @@ function makeScene(plane: SlicePlane, pins: Annotation[], cut: number) {
     center: () => new Float64Array([0, 0]),
     transposed: () => false,
     slice_plane: () => plane,
-    draws_annotations: () => true,
+    annotation_shift: () => new Float64Array(shift),
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2]),
-    pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => {
+    pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number, on?: Float64Array) => {
+      picks.push(on);
       const [across, down] = [x - 400, y - 300];
       const middle = cut + 0.5;
-      if (plane === "xz") return new Float64Array([across, middle, down / 2]);
-      if (plane === "yz") return new Float64Array([middle, across, down / 2]);
-      return new Float64Array([across, down, middle]);
+      const drawn = plane === "xz" ? [across, middle, down / 2] : plane === "yz" ? [middle, across, down / 2] : [across, down, middle];
+      return new Float64Array(drawn.map((v, i) => v - (on ? shift[i] : 0)));
     },
     apply_command: (json: string) => sent.push(JSON.parse(json) as Record<string, unknown>),
   } as unknown as WasmScene;
-  return { scene, sent };
+  return { scene, sent, picks };
 }
 
 function makeCanvas(): HTMLCanvasElement {
@@ -49,8 +52,8 @@ function makeCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-function renderIn(plane: SlicePlane, pins: Annotation[], cut: ViewContext["cut"]) {
-  const { scene, sent } = makeScene(plane, pins, cut?.start ?? 0);
+function renderIn(plane: SlicePlane, pins: Annotation[], cut: ViewContext["cut"], shift?: [number, number, number]) {
+  const { scene, sent, picks } = makeScene(plane, pins, cut?.start ?? 0, shift);
   const sceneRef = createRef<WasmScene | null>();
   sceneRef.current = scene;
   render(
@@ -67,7 +70,7 @@ function renderIn(plane: SlicePlane, pins: Annotation[], cut: ViewContext["cut"]
       onDocumentChanged={() => {}}
     />,
   );
-  return { sent };
+  return { sent, picks };
 }
 
 // Capture scheduled frames so a test runs the overlay's tick on demand.
@@ -162,5 +165,37 @@ describe("AnnotationOverlay in each plane", () => {
     expect(sent.filter((c) => c.type === "move_annotation")).toMatchObject([
       { position: [10, 40.5], z: 2, end: [50, 40.5], end_z: 10 },
     ]);
+  });
+});
+
+describe("AnnotationOverlay in a side view that draws a mark moved into its tile's cell", () => {
+  /** A point 12 rows into a tile laid out at Y 40, whose cell in an XZ view
+   * starts 20 planes down. */
+  const onTile: Annotation = { id: "t", kind: "point", position: [30, 52.5], z: 9.5, author: MY_ID, comments: [] };
+  const shift: [number, number, number] = [0, -40, 20];
+
+  it("draws it in the cell, in context where the view cuts the tile's own row", () => {
+    renderIn("xz", [onTile], { axis: "y", start: 12, end: 13 }, shift);
+    runFrame();
+    // X 30 across; Z 9.5 plus the cell's 20, 2 scene units a plane, down.
+    expect(transformOf("annot-pin-wrapper-t")).toBe("translate(430px, 359px)");
+    expect(screen.getByTestId("annot-pin-t").dataset.offContext).toBeUndefined();
+  });
+
+  it("names the tile's own row when the cut misses it", () => {
+    renderIn("xz", [onTile], { axis: "y", start: 3, end: 4 }, shift);
+    expect(screen.getByTestId("annot-offcontext-t").textContent).toBe("Y 13 · T 1 · Channel 1");
+  });
+
+  it("moves it on its own tile, picking through the mark's first vertex", () => {
+    const { sent, picks } = renderIn("xz", [onTile], { axis: "y", start: 12, end: 13 }, shift);
+    const marker = screen.getByTestId("annot-pin-t");
+    fireEvent.pointerDown(marker, { pointerId: 1, button: 0, shiftKey: true, clientX: 430, clientY: 359 });
+    fireEvent.pointerMove(marker, { pointerId: 1, shiftKey: true, clientX: 470, clientY: 370 });
+    fireEvent.pointerUp(marker, { pointerId: 1, shiftKey: true, clientX: 450, clientY: 360 });
+    expect(picks.length).toBeGreaterThan(0);
+    for (const on of picks) expect([...(on ?? [])]).toEqual([30, 52.5, 9.5]);
+    // X 50 across and Z 30 down the cell, 10 into the tile; it keeps its row.
+    expect(sent.filter((c) => c.type === "move_annotation")).toMatchObject([{ position: [50, 52.5], z: 10 }]);
   });
 });

@@ -55,6 +55,21 @@ export function annotationVertices(pin: Annotation): FramePoint[] {
   return [start];
 }
 
+/** `pin` with every vertex moved by `shift`, as a view that draws it moved,
+ * into its tile's cell in a side view of a collection, reads its planes. */
+export function shiftPin(pin: Annotation, shift: FramePoint): Annotation {
+  const [dx, dy, dz] = shift;
+  if (dx === 0 && dy === 0 && dz === 0) return pin;
+  const [x, y, z] = pinStart(pin);
+  const end = pinEnd(pin);
+  return {
+    ...pin,
+    position: [x + dx, y + dy],
+    z: z + dz,
+    ...(end && { end: [end[0] + dx, end[1] + dy], end_z: end[2] + dz }),
+  };
+}
+
 /** Whether the drawn shape is a closed ring (a box with an `end`). */
 export function isClosedShape(pin: Annotation): boolean {
   return pin.kind === "box" && (pin.end ?? null) !== null;
