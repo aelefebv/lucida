@@ -2620,7 +2620,7 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::FlipComparison => "view compare flip",
         ViewportCommand::SetBlinkRate { .. } => "view compare --blink",
         ViewportCommand::Pan { .. } => "view pan",
-        ViewportCommand::ZoomBy { .. } => "view zoom",
+        ViewportCommand::ZoomBy { .. } | ViewportCommand::ZoomAt { .. } => "view zoom",
         ViewportCommand::SetCenter { .. } => "view center",
         ViewportCommand::CenterOnVoxel3D { .. } => "view center-3d",
         ViewportCommand::SetZoom { .. } => "view set-zoom",

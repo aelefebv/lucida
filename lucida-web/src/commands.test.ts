@@ -220,6 +220,7 @@ const viewportCases: {
   set_mode_fly: { type: "set_mode_fly" },
   pan: { type: "pan", dx: 12.5, dy: -4 },
   zoom_by: { type: "zoom_by", factor: 1.25 },
+  zoom_at: { type: "zoom_at", factor: 1.1, at: [0.75, 0.2] },
   set_center: { type: "set_center", x: 128, y: 256 },
   set_zoom: { type: "set_zoom", value: 2 },
   arcball_rotate: { type: "arcball_rotate", d_theta: 0.1, d_phi: -0.2 },

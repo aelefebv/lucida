@@ -160,6 +160,14 @@ export interface ZoomByCommand {
   factor: number;
 }
 
+/** A zoom holding what is under `at`, fractions of the view's width and
+ *  height from its top left, where it is: a zoom at the pointer. */
+export interface ZoomAtCommand {
+  type: "zoom_at";
+  factor: number;
+  at: [number, number];
+}
+
 export interface SetCenterCommand {
   type: "set_center";
   x: number;
@@ -434,6 +442,7 @@ export type ViewportCommand =
   | SetModeFlyCommand
   | PanCommand
   | ZoomByCommand
+  | ZoomAtCommand
   | SetCenterCommand
   | SetZoomCommand
   | ArcballRotateCommand

@@ -40,6 +40,14 @@ export function eventToScreenPx(element: HTMLElement, e: ClientPoint): [number, 
   return [(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr];
 }
 
+/** A pointer event as fractions of `element`'s width and height from its
+ * corner, the form the core takes a point on a view in, whatever the pixel
+ * ratio. */
+export function eventToViewFraction(element: HTMLElement, e: ClientPoint): [number, number] {
+  const rect = element.getBoundingClientRect();
+  return [(e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height];
+}
+
 /** A pointer event in 2D world coords: `(screenPhysPx - half) / zoom + center`,
  * across and down the plane, which a transposed view turns on the screen.
  * Every cursor-anchored producer uses it so all land in the same world frame. */

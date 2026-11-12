@@ -12,7 +12,7 @@
 // still run, so the planner-visible effect is observable too.
 
 import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // Boundary doubles. The WASM scene is a small stateful fake: it stores the
@@ -1202,14 +1202,23 @@ describe("App wiring: the wheel", () => {
     });
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
     const pane = () => document.querySelector<HTMLElement>(".lc-view-pane")!;
-    const zooms = () => scene.commands.filter((cmd) => cmd.type === "zoom_by" || cmd.type === "arcball_zoom");
+    const zooms = () => scene.commands.filter((cmd) => cmd.type === "zoom_at" || cmd.type === "arcball_zoom");
+    const rect = { left: 100, top: 50, width: 400, height: 200, right: 500, bottom: 250, x: 100, y: 50 };
+    vi.spyOn(pane(), "getBoundingClientRect").mockReturnValue({ ...rect, toJSON: () => rect } as DOMRect);
 
+    // happy-dom's WheelEvent carries no pointer position of its own.
+    const notch = createEvent.wheel(pane(), { deltaY: -100, deltaMode: 0 });
+    Object.defineProperties(notch, { clientX: { value: 400 }, clientY: { value: 90 } });
     await act(async () => {
-      fireEvent.wheel(pane(), { deltaY: -100, deltaMode: 0 });
+      fireEvent(pane(), notch);
     });
     const slice = zooms().at(-1)!;
-    expect(slice.type).toBe("zoom_by");
+    expect(slice.type).toBe("zoom_at");
     expect(Number(slice.factor)).toBeCloseTo(1.1, 12);
+    // The core holds what is under the pointer, named as a share of the
+    // view, so the page moves no center of its own.
+    expect(slice.at).toEqual([0.75, 0.2]);
+    expect(scene.commands.some((cmd) => cmd.type === "set_center")).toBe(false);
     // A sideways scroll zooms nothing.
     await act(async () => {
       fireEvent.wheel(pane(), { deltaX: 40, deltaY: 0, deltaMode: 0 });
