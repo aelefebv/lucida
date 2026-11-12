@@ -36,10 +36,7 @@ import {
   wantedChunksFromPlan,
   type WantedChunksByMember,
 } from "./coldState/wanted.ts";
-import {
-  buildViewHotState,
-  buildViewHotStateFromMembers,
-} from "./coldState/hotState.ts";
+import { buildViewHotState } from "./coldState/hotState.ts";
 import { WorkerFeedback } from "./delivery/feedback.ts";
 import { ResendGuard, type HeldChunk } from "./delivery/resendGuard.ts";
 import {
@@ -272,64 +269,24 @@ export class Uploader {
   }
 
   /**
-   * Build and send a viewEpoch hot-state message, from the ray `view` casts.
+   * Build and send a viewEpoch hot-state message, from the ray `view` casts,
+   * for the members of the view's draw (the keys of its member index map).
    * Must be posted before subsequent render messages so the view's ray hits
-   * are current when chunk-data eviction fires. Returns
-   * `false` (and emits nothing) if the viewEpoch is unchanged for this
-   * dataset.
+   * are current when chunk-data eviction fires. Returns `false` (and emits
+   * nothing) if the viewEpoch is unchanged for this dataset.
    */
   sendViewHotStateIfAdvanced(args: {
-    ctx: TickContext;
-    datasetId: string;
-    view: number;
-    coldMsg: ColdStateMessage;
-    epochs: SceneEpochs;
-  }): boolean {
-    return this.emitViewHotState(args.ctx, args.datasetId, args.view, args.epochs, (rayHit) =>
-      buildViewHotState({
-        coldMsg: args.coldMsg,
-        rayHit,
-        epochs: args.epochs,
-        datasetId: args.datasetId,
-      }),
-    );
-  }
-
-  /**
-   * Like {@link sendViewHotStateIfAdvanced} but sourced from a member-id
-   * iterable (the view-move delta path, which has no built cold-state message).
-   * Same viewEpoch guard, same per-member ray-hit payload.
-   */
-  sendViewHotStateFromMembersIfAdvanced(args: {
     ctx: TickContext;
     datasetId: string;
     view: number;
     memberIds: Iterable<string>;
     epochs: SceneEpochs;
   }): boolean {
-    return this.emitViewHotState(args.ctx, args.datasetId, args.view, args.epochs, (rayHit) =>
-      buildViewHotStateFromMembers({
-        memberIds: args.memberIds,
-        rayHit,
-        epochs: args.epochs,
-        datasetId: args.datasetId,
-        view: args.view,
-      }),
-    );
-  }
-
-  /** Shared viewEpoch guard + ray-pick read for both hot-state senders. */
-  private emitViewHotState(
-    ctx: TickContext,
-    datasetId: string,
-    view: number,
-    epochs: SceneEpochs,
-    build: (rayHit: [number, number, number]) => ReturnType<typeof buildViewHotState>,
-  ): boolean {
+    const { ctx, datasetId, view, epochs } = args;
     let byView = this.lastViewEpochByDataset.get(datasetId);
     if (byView?.get(view) === epochs.view) return false;
-    const hit = Array.from(ctx.scene.ray_hit_local_image(view, datasetId)) as [number, number, number];
-    ctx.client.viewHotState(build(hit));
+    const rayHit = Array.from(ctx.scene.ray_hit_local_image(view, datasetId)) as [number, number, number];
+    ctx.client.viewHotState(buildViewHotState({ memberIds: args.memberIds, rayHit, epochs, datasetId, view }));
     if (!byView) {
       byView = new Map();
       this.lastViewEpochByDataset.set(datasetId, byView);
