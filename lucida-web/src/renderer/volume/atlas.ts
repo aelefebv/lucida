@@ -28,6 +28,7 @@ import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { applyFailedMarks, failedCellsAt, failedKeysForImage } from "../failedCells.ts";
 import { INDIRECTION_MISS } from "../remap.ts";
 import { labelVolumePoolKey } from "../labelPools.ts";
+import { EvictionOrder } from "../evictionOrder.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
@@ -65,6 +66,8 @@ export interface AtlasState {
    * views draw, each in slots of its own.
    */
   slots: Map<string, number>;
+  /** The held slots in the order eviction takes them, kept in step with {@link slots}. */
+  order: EvictionOrder;
   /** view id → the view's indirection over the pool, mapping the bricks of its own T. */
   views: Map<number, ViewIndirection>;
   freeSlots: number[];            // available slot indices (stack)
@@ -674,7 +677,7 @@ function createVolumeAtlas(
   return {
     datasetId,
     texture, format,
-    slots: new Map(), views: new Map(), freeSlots, totalSlots,
+    slots: new Map(), order: new EvictionOrder(), views: new Map(), freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
     slotsX, slotsY, slotsZ, rowsY,
     maxSlotsZ,

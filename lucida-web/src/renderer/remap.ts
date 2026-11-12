@@ -39,7 +39,7 @@ export interface RemapParams {
   /** Flat indirection buffer. Cleared to {@link INDIRECTION_MISS} then repopulated. */
   indirectionData: Uint32Array;
   /** Per-entity LOD section metas. */
-  entityMetas: Map<string, LodIndirectionMeta[]>;
+  entityMetas: ReadonlyMap<string, readonly LodIndirectionMeta[]>;
   currentT: number;
   currentC: number;
   /** Optional render-radius filter; omit to skip it. */

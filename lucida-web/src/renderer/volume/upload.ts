@@ -17,9 +17,9 @@ import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint32, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import { makeCompositeKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
-import { findEvictionSlot, incomingDistSq, mayEvict } from "../eviction.ts";
+import { incomingDistSq, mayEvict } from "../eviction.ts";
 import { anyViewWants } from "../worker/draws.ts";
-import { anySection, anyViewHolds, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
+import { anySection, anyViewHolds, dropSlot, holdSlot, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
 import { volumeEvictionParams } from "./eviction.ts";
 import {
   acquireLabelSlot,
@@ -185,7 +185,7 @@ export function handleVolumeChunkData(
         slotIndex = atlas.freeSlots.pop()!;
       } else {
         const params = volumeEvictionParams(ctx.state, atlas, tier);
-        const victim = findEvictionSlot(params);
+        const victim = atlas.order.next(params);
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
           growVolumePoolWithin(ctx, poolKey, atlas, true)
@@ -197,8 +197,7 @@ export function handleVolumeChunkData(
             batch.refuse(chunk.key, "atlas-policy");
             continue;
           }
-          slotIndex = atlas.slots.get(victim.key)!;
-          atlas.slots.delete(victim.key);
+          slotIndex = dropSlot(atlas, victim.key)!;
           batch.evicted.push(victim.key);
           unmapSlot(atlas, slotIndex);
         }
@@ -230,7 +229,7 @@ export function handleVolumeChunkData(
         const [, gridY, gridX] = meta.gridDims;
         mapSlot(view, meta.offset + chunk.z * gridY * gridX + chunk.y * gridX + chunk.x, slotIndex);
       }
-      atlas.slots.set(compositeKey, slotIndex);
+      holdSlot(atlas, compositeKey, slotIndex);
       claimed = -1;
       batch.held.push(chunk.key);
       landed = true;
