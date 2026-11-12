@@ -33,6 +33,7 @@ import {
   DESCRIPTOR_MAX_LEVEL_SOURCES,
   DESCRIPTOR_TIER_SOURCE_SIZE,
   OFFSET_COARSE_SOURCE,
+  OFFSET_CONTRAST_MAX,
   OFFSET_LEVEL_SOURCE_COUNT,
   OFFSET_SAMPLE_FORMAT,
   SOURCE_OFFSET_CHUNK_DIMS,
@@ -314,6 +315,48 @@ describe("computeMemberIndexMap", () => {
     const a = computeMemberIndexMap(cold);
     const b = computeMemberIndexMap(cold);
     expect(Array.from(a.entries())).toEqual(Array.from(b.entries()));
+  });
+});
+
+describe("buildDescriptorBuffer over a previous build", () => {
+  it("writes what a fresh build writes, copying the members a view move left alone", () => {
+    const entries = Array.from({ length: 6 }, (_, i) =>
+      makeEntry({ entityId: `e${i}`, imageId: `img-${i}`, detailLevels: [0], coarseLevel: null }));
+    const sources = new Map(entries.map((e) => [`${e.imageId}:ch0`, sourcesFromEntry(e)]));
+    const { device, lastWrite } = makeMockDevice();
+    const before = buildDescriptorBuffer(device, makeCold(entries), sources);
+
+    // The order changes, one member is replaced, and another's section moves.
+    const replaced = makeEntry({ entityId: "e2", imageId: "img-2", modelMatrix: new Float32Array(16).fill(3) });
+    const moved = sourcesFromEntry(entries[4]).map((source) => ({ ...source, meta: { ...source.meta, offset: 40 } }));
+    const next = [entries[5], entries[0], replaced, entries[3], entries[4], entries[1]];
+    const nextSources = new Map(sources);
+    nextSources.set("img-2:ch0", sourcesFromEntry(replaced));
+    nextSources.set("img-4:ch0", moved);
+    const cold = makeCold(next);
+
+    const reused = buildDescriptorBuffer(device, cold, nextSources, before);
+    const written = new Uint8Array(lastWrite()!);
+    const fresh = buildDescriptorBuffer(makeMockDevice().device, cold, nextSources);
+    expect(written).toEqual(new Uint8Array(fresh.bytes));
+    expect(reused.buffer).toBe(before.buffer);
+    expect([...reused.indexByMember]).toEqual([...fresh.indexByMember]);
+    expect([...reused.sourceBindingByMember]).toEqual([...fresh.sourceBindingByMember]);
+  });
+
+  it("writes a display edit to every member", () => {
+    const entries = [0, 1].map((i) => makeEntry({ entityId: `e${i}`, imageId: `img-${i}` }));
+    const sources = new Map(entries.map((e) => [`${e.imageId}:ch0`, sourcesFromEntry(e)]));
+    const { device } = makeMockDevice();
+    const cold = makeCold(entries);
+    const before = buildDescriptorBuffer(device, cold, sources);
+    const display = { 0: { ...defaultDisplayState(), contrastMax: 1234 } };
+    for (const entry of cold.activeSet) entry.displayStateByChannel = display;
+    const after = buildDescriptorBuffer(device, cold, sources, before);
+    for (const index of [0, 1]) {
+      expect(new Float32Array(after.bytes, index * DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_ENTRY_SIZE / 4)[OFFSET_CONTRAST_MAX / 4])
+        .toBe(1234);
+    }
   });
 });
 
