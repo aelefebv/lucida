@@ -38,7 +38,10 @@
 /* A comment thread is a popover pinned to a point on the canvas, and the
    debug overlay's inspector a tooltip that follows the pointer, so both live
    in the layers. While one shows the layers rise above the slots, since
-   floating controls belong below popovers and tooltips. */
+   floating controls belong below popovers and tooltips. The views' panes
+   rise with them and cover the controls, so a card that shows whenever the
+   pointer rests on a view, as the pixel readout does, rises alone through
+   `AboveControls`. */
 .lc-canvas-stage-layers:has([role="dialog"], [role="tooltip"]) {
   z-index: var(--lc-z-popover);
 }
@@ -56,6 +59,15 @@
 
 .lc-canvas-stage-empty > * {
   pointer-events: auto;
+}
+
+/* Over the slots, for what the layers draw over the floating controls. It
+   takes no pointer, so the controls under it still take every press. */
+.lc-canvas-stage-above {
+  position: absolute;
+  inset: 0;
+  z-index: var(--lc-z-popover);
+  pointer-events: none;
 }
 
 /* Two rows of three slots. The side slots share what the middle one leaves,
