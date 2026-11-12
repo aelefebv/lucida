@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.3](https://github.com/aelefebv/lucida/compare/v0.39.2...v0.39.3) (2026-11-12)
+
+
+### Bug Fixes
+
+* **trace:** set the chunk path's ceilings where a person would notice the delay ([#1632](https://github.com/aelefebv/lucida/issues/1632)) ([7012ecd](https://github.com/aelefebv/lucida/commit/7012ecdb4a0b578e6cf810319787a84fb9d22e2e))
+
 ## [0.39.2](https://github.com/aelefebv/lucida/compare/v0.39.1...v0.39.2) (2026-11-12)
 
 
