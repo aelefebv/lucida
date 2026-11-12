@@ -6,6 +6,7 @@ import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
+import { annotationTarget, sayNoLayerToAnnotate } from "./annotationTarget.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToWorld as sceneEventToWorld, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
@@ -41,8 +42,11 @@ interface Props {
   breakFollow: () => void;
   sendCursor: (position: [number, number] | null) => void;
   loopRef: RefObject<RenderLoop | null>;
-  /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
-  annotationDatasetId: string | null;
+  /** The layer panel's selected layer, which a mark lands on where this view
+   * draws it under the pointer ({@link annotationTarget}). */
+  selectedDatasetId: string | null;
+  /** Select the layer a mark landed on, so the panel's list and edit controls follow it. */
+  selectDataset: (datasetId: string) => void;
   /** The canvas tool: pan, or the annotation shape a press draws. */
   tool: Tool;
   /** Stable, browser-persisted annotation-author identity, recorded as a pin's
@@ -61,7 +65,7 @@ interface Props {
   onLongPress?: (at: ClientPoint) => void;
 }
 
-function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, sendCursor, loopRef, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, sendCursor, loopRef, selectedDatasetId, selectDataset, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   // The view's own element: its pixels, its pointer events, its cursor.
   const { element } = surface;
   const [dragging, setDragging] = useState(false);
@@ -82,7 +86,8 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
   // Mirror placement props into refs so the pointer handlers, which depend on
   // the element only, read the latest values without re-binding on every doc
   // change.
-  const annotationDatasetIdRef = useRef(annotationDatasetId);
+  const selectedDatasetIdRef = useRef(selectedDatasetId);
+  const selectDatasetRef = useRef(selectDataset);
   const toolRef = useRef(tool);
   const myIdRef = useRef(myId);
   const sendCommandRef = useRef(sendCommand);
@@ -91,7 +96,8 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
   // Refreshed after every commit, not during render: these refs are read only in
   // pointer events and RAF ticks, so render stays free of ref writes.
   useEffect(() => {
-    annotationDatasetIdRef.current = annotationDatasetId;
+    selectedDatasetIdRef.current = selectedDatasetId;
+    selectDatasetRef.current = selectDataset;
     toolRef.current = tool;
     myIdRef.current = myId;
     sendCommandRef.current = sendCommand;
@@ -201,13 +207,20 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
       annotationDraftRef.current = null;
 
       if (!press || press.kind === null || press.panning) return;
-      const datasetId = annotationDatasetIdRef.current;
-      if (!datasetId) return;
 
       // A line/box that never left the slop drops a point instead, so a stray
       // click never leaves an invisible zero-size shape.
       const kind = press.kind;
       const drawShape = isShapeKind(kind) && exceedsClickSlop(press.x, press.y, e.clientX, e.clientY);
+      // A shape belongs to the layer under its first vertex, a point to the
+      // one under the release.
+      const anchor = drawShape ? { clientX: press.x, clientY: press.y } : e;
+      const datasetId = annotationTarget(scene, surface, anchor, selectedDatasetIdRef.current);
+      if (!datasetId) {
+        sayNoLayerToAnnotate();
+        return;
+      }
+      const layer = readResolvedLayers(scene, surface.view).get(datasetId);
 
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
@@ -223,8 +236,9 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
       // without the local apply the author would never see their shape. The
       // client-supplied id makes the local and peer copies converge.
       //
-      // Both vertices share the current slice depth `z`, which anchors the
-      // shape in 3D. A pin stored without z/end loads as a point at z = 0.0.
+      // Both vertices share the plane of the layer the view cuts, which
+      // anchors the shape in 3D. A pin stored without z/end loads as a point
+      // at z = 0.0.
       applyDocumentCommand(
         scene,
         {
@@ -235,11 +249,11 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
           // at the release.
           position: drawShape ? start : end,
           end: drawShape ? end : null,
-          z: scene.z(),
+          z: layer?.z_range.start ?? scene.z(),
           // The overlay shows the pin off-context when the view's T differs or
           // none of the channels its layer shows now did then.
           t: scene.t(),
-          c: shownChannels(readResolvedLayers(scene, scene.active_view()).get(datasetId))[0],
+          c: shownChannels(layer)[0],
           author: String(myIdRef.current),
           kind: drawShape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),
@@ -248,8 +262,9 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
         loopRef.current,
       );
       onDocumentChangedRef.current();
+      selectDatasetRef.current(datasetId);
     },
-    [loopRef, eventToWorld, scene, annotationDraftRef],
+    [loopRef, eventToWorld, scene, surface, annotationDraftRef],
   );
 
   const onPointerUp = useCallback(

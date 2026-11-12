@@ -15,6 +15,7 @@ import { useShortcutScope } from "../ui/shortcuts.ts";
 import { FlyCameraHint } from "./FlyCameraHint.tsx";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
+import { annotationTarget, sayNoLayerToAnnotate } from "./annotationTarget.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToScreenPx, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
@@ -40,8 +41,11 @@ interface Props {
    *  view can switch it too. */
   cameraMode: CameraMode;
   loopRef: RefObject<RenderLoop | null>;
-  /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
-  annotationDatasetId: string | null;
+  /** The layer panel's selected layer, which a mark lands on where this view
+   * draws it under the pointer ({@link annotationTarget}). */
+  selectedDatasetId: string | null;
+  /** Select the layer a mark landed on, so the panel's list and edit controls follow it. */
+  selectDataset: (datasetId: string) => void;
   /** The canvas tool: pan, or the annotation shape a press draws. */
   tool: Tool;
   /** Stable, browser-persisted annotation-author identity, recorded as a 3D pin's
@@ -62,16 +66,19 @@ interface Props {
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
 
-function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakFollow, sendCursor, cameraMode, loopRef, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakFollow, sendCursor, cameraMode, loopRef, selectedDatasetId, selectDataset, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   // The view's own element: its pixels, its pointer events, its cursor.
   const { element } = surface;
   const [showHint, setShowHint] = useState(false);
 
   // Mirror pin-drop props into refs so the element-bound pointer handlers read the
   // latest values without re-binding on every doc change.
-  const annotationDatasetIdRef = useRef(annotationDatasetId);
+  const selectedDatasetIdRef = useRef(selectedDatasetId);
   // eslint-disable-next-line react-hooks/refs
-  annotationDatasetIdRef.current = annotationDatasetId;
+  selectedDatasetIdRef.current = selectedDatasetId;
+  const selectDatasetRef = useRef(selectDataset);
+  // eslint-disable-next-line react-hooks/refs
+  selectDatasetRef.current = selectDataset;
   const toolRef = useRef(tool);
   // eslint-disable-next-line react-hooks/refs
   toolRef.current = tool;
@@ -225,12 +232,10 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
     setDragging(false);
   }, [annotationDraftRef]);
 
-  /** Ray-cast a client point into the volume: `[x, y, z]` as in-plane voxel
-   * position plus voxel depth, or `null` if the ray missed. */
+  /** Ray-cast a client point into `datasetId`'s volume: `[x, y, z]` as in-plane
+   * voxel position plus voxel depth, or `null` if the ray missed. */
   const pickVoxel = useCallback(
-    (clientX: number, clientY: number): [number, number, number] | null => {
-      const datasetId = annotationDatasetIdRef.current;
-      if (!datasetId) return null;
+    (datasetId: string, clientX: number, clientY: number): [number, number, number] | null => {
       // pick_annotation_voxel takes physical-pixel screen coords (the same space
       // the WASM viewport uses), matching project_to_screen.
       const [screenX, screenY] = eventToScreenPx(element, { clientX, clientY });
@@ -241,16 +246,21 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
   );
 
   /** Draw an annotation from a shift gesture. A line/box depth-picks both
-   * endpoints and stores the second as `end`. Declines when no dataset is
-   * selected or a ray misses, so an annotation always anchors to data. Picks use
-   * the same frame as a 2D draw, so the shape renders in both views. The shared
-   * `z` is the anchor vertex's depth. */
+   * endpoints and stores the second as `end`. It lands on the layer whose
+   * volume the anchor's ray meets ({@link annotationTarget}), and declines when
+   * a ray misses, so an annotation always anchors to data. Picks use the same
+   * frame as a 2D draw, so the shape renders in both views. The shared `z` is
+   * the anchor vertex's depth. */
   const drawAnnotation = useCallback(
     (startX: number, startY: number, endX: number, endY: number, kind: "point" | "line" | "box") => {
-      const datasetId = annotationDatasetIdRef.current;
-      if (!datasetId) return;
       const shape = kind === "line" || kind === "box";
-      const anchor = pickVoxel(shape ? startX : endX, shape ? startY : endY);
+      const [anchorX, anchorY] = shape ? [startX, startY] : [endX, endY];
+      const datasetId = annotationTarget(scene, surface, { clientX: anchorX, clientY: anchorY }, selectedDatasetIdRef.current);
+      if (!datasetId) {
+        sayNoLayerToAnnotate();
+        return;
+      }
+      const anchor = pickVoxel(datasetId, anchorX, anchorY);
       if (!anchor) return; // anchor ray missed → don't draw
       // The pick can return the far-face depth (339.999 for a 340-deep volume),
       // which rounds outside [0, depth-1], so the pin would never match a 2D
@@ -259,7 +269,7 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
       const z = depth > 0 ? Math.max(0, Math.min(anchor[2], depth - 1)) : anchor[2];
       let end: [number, number] | null = null;
       if (shape) {
-        const far = pickVoxel(endX, endY);
+        const far = pickVoxel(datasetId, endX, endY);
         if (!far) return; // far ray missed → decline rather than draw a half shape
         end = [far[0], far[1]];
       }
@@ -283,7 +293,7 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
           z,
           // In 3D `z` is the picked depth, while T is the view's selector.
           t: scene.t(),
-          c: shownChannels(readResolvedLayers(scene, scene.active_view()).get(datasetId))[0],
+          c: shownChannels(readResolvedLayers(scene, surface.view).get(datasetId))[0],
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),
@@ -292,8 +302,9 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
         loopRef.current,
       );
       onDocumentChangedRef.current();
+      selectDatasetRef.current(datasetId);
     },
-    [loopRef, scene, pickVoxel],
+    [loopRef, scene, surface, pickVoxel],
   );
 
   // A press, from a mouse, a pen, or a finger drawing with a tool. Touch
