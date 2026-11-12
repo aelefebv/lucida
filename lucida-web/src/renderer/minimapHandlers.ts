@@ -17,6 +17,7 @@ import {
   createOverviewAtlases,
   dropAllOverviews,
   dropDatasetOverviews,
+  dropMemberOverviews,
   dropOverview,
   openOverview,
   overviewHolds,
@@ -147,7 +148,11 @@ export function handleMinimapInit(ctx: WorkerCtx, msg: MinimapInitMessage): void
 }
 
 export function handleMinimapLayers(ctx: WorkerCtx, msg: MinimapLayersMessage): void {
-  ctx.state.minimap.layers = msg.layers;
+  const m = ctx.state.minimap;
+  m.layers = msg.layers;
+  // A render still waiting on the compile names the old layers' displays,
+  // which index other groups. The page renders the new layers itself.
+  m.deferredRender = null;
 }
 
 /** Whether every pipeline an overview draw takes has compiled. */
@@ -296,11 +301,11 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
     // sent.
     const selection = overviewSelection(spec);
     const refused = ctx.state.overviewsRefused;
-    if (refused.get(msg.overviewKey) === selection) return;
+    if (refused.get(msg.overviewKey)?.selection === selection) return;
     refused.delete(msg.overviewKey);
     const opened = openOverview(ctx, atlases, msg.overviewKey, spec);
     if (!opened) {
-      refused.set(msg.overviewKey, selection);
+      refused.set(msg.overviewKey, { selection, datasetId: spec.datasetId, imageId: spec.imageId });
       return;
     }
     overview = opened;
@@ -348,12 +353,17 @@ export function rebindMinimapCanvas(ctx: WorkerCtx): void {
   m.context?.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
 }
 
-/** Free a removed dataset's overview atlases, or one overview when `id` is an overview key. */
+/**
+ * Free a removed dataset's overview atlases, or a removed member's overviews,
+ * and forget their refusals: a dataset reopened under its id is new.
+ */
 export function removeMinimapResources(ctx: WorkerCtx, id: string): void {
   const { atlases } = ctx.state.minimap;
   dropDatasetOverviews(atlases, id);
-  dropOverview(atlases, id);
-  ctx.state.overviewsRefused.delete(id);
+  dropMemberOverviews(atlases, id);
+  for (const [key, refused] of ctx.state.overviewsRefused) {
+    if (refused.datasetId === id || refused.imageId === id) ctx.state.overviewsRefused.delete(key);
+  }
 }
 
 export function destroyAllMinimapResources(m: MinimapRendererState): void {

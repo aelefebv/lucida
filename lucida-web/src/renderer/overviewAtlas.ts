@@ -75,18 +75,34 @@ export interface OverviewAtlas {
   datasetId: string;
   format: SampleFormat;
   /**
-   * One slot's texels, `[X, Y, Z]`: the level's chunk, cut to the level along
-   * an axis one chunk covers. The descriptor names it as the chunk, which
-   * samples the same texels, and a level smaller than its chunk takes no more
-   * room than it did in a texture of its own.
+   * One slot's texels, `[X, Y, Z]`: the level's chunk, or along an axis one
+   * chunk covers, the power of two at or above the level ({@link slotSpan}).
+   * The descriptor names it as the chunk, which samples the same texels.
    */
   slotDims: Dims;
   texture: GPUTexture;
-  /** Slot `i` lies at column `i % slotsX`, row `floor(i / slotsX) % slotsY`, layer `floor(i / (slotsX * slotsY))`. */
+  /**
+   * Every texture the atlas's texels have passed through, the current one
+   * last. A growth copies from a texture whose out-of-memory report may not
+   * have arrived yet, and if any of them failed the texels never were.
+   */
+  lineage: Set<GPUTexture>;
+  /**
+   * Slot `i` lies at column `i % slotsX`, row `floor(i / slotsX) % slotsY`,
+   * layer `floor(i / (slotsX * slotsY))`, as the shader reads it. Fixed for
+   * the atlas's life, so a slot never moves.
+   */
   slotsX: number;
   slotsY: number;
-  slotsZ: number;
-  maxSlotsZ: number;
+  /**
+   * The slots the texture holds, the first `capacity` in slot order: part of
+   * a row, then rows of the first layer, then whole layers. So a new atlas
+   * takes only what its first overviews need, and a growth copies the old
+   * texture into the new one's front.
+   */
+  capacity: number;
+  /** The most slots the layout holds within the device's texture limits and the overviews' share. */
+  maxCapacity: number;
   /** Free slots, a stack. */
   freeSlots: number[];
   indirection: Uint32Array<ArrayBuffer>;
@@ -114,17 +130,42 @@ function atlasKey(spec: OverviewSpec, slotDims: Dims): string {
   return `${spec.datasetId}\n${spec.format}\n${slotDims.join("x")}`;
 }
 
-function slotsPerLayer(atlas: Pick<OverviewAtlas, "slotsX" | "slotsY">): number {
+/**
+ * A slot's extent along an axis: the chunk's, or where the level is under
+ * one chunk, the power of two at or above the level. Members of a collection
+ * whose levels differ in size then share a few atlases, and so a few runs of
+ * a batch, at no more than twice the level's extent.
+ */
+function slotSpan(level: number, chunk: number): number {
+  return level >= chunk ? chunk : Math.min(chunk, 2 ** Math.ceil(Math.log2(Math.max(1, level))));
+}
+
+type Layout = Pick<OverviewAtlas, "slotsX" | "slotsY">;
+
+function slotsPerLayer(atlas: Layout): number {
   return atlas.slotsX * atlas.slotsY;
 }
 
-function layerBytes(atlas: Pick<OverviewAtlas, "slotsX" | "slotsY" | "slotDims" | "format">): number {
+/** The texture's extent in slots, `[X, Y, Z]`, when it holds the first `capacity` slots of `atlas`'s layout. */
+function slotExtent(atlas: Layout, capacity: number): Dims {
+  if (capacity <= atlas.slotsX) return [Math.max(1, capacity), 1, 1];
+  if (capacity <= slotsPerLayer(atlas)) return [atlas.slotsX, Math.ceil(capacity / atlas.slotsX), 1];
+  return [atlas.slotsX, atlas.slotsY, Math.ceil(capacity / slotsPerLayer(atlas))];
+}
+
+/** `capacity` rounded up to the slots of the extent that holds it. */
+function fullCapacity(atlas: Layout, capacity: number): number {
+  const [x, y, z] = slotExtent(atlas, capacity);
+  return x * y * z;
+}
+
+function slotBytes(atlas: Pick<OverviewAtlas, "slotDims" | "format">): number {
   const [x, y, z] = atlas.slotDims;
-  return slotsPerLayer(atlas) * x * y * z * bytesPerTexel(atlas.format);
+  return x * y * z * bytesPerTexel(atlas.format);
 }
 
 function atlasBytes(atlas: OverviewAtlas): number {
-  return layerBytes(atlas) * atlas.slotsZ + atlas.indirection.byteLength;
+  return atlas.capacity * slotBytes(atlas) + atlas.indirection.byteLength;
 }
 
 function noteBytes(atlases: OverviewAtlases): void {
@@ -141,7 +182,7 @@ export function overviewBinding(atlas: OverviewAtlas): VolumePoolBinding {
     indirectionBuf: atlas.indirectionBuf,
     slotsX: atlas.slotsX,
     slotsY: atlas.slotsY,
-    slotsZ: atlas.slotsZ,
+    slotsZ: slotExtent(atlas, atlas.capacity)[2],
   };
 }
 
@@ -165,7 +206,7 @@ export function overviewHolds(overview: Overview, spec: OverviewSpec): boolean {
 export function openOverview(ctx: WorkerCtx, atlases: OverviewAtlases, key: string, spec: OverviewSpec): Overview | null {
   const [levelX, levelY, levelZ] = spec.levelDims;
   const [chunkX, chunkY, chunkZ] = spec.chunkDims;
-  const slotDims: Dims = [Math.min(chunkX, levelX), Math.min(chunkY, levelY), Math.min(chunkZ, levelZ)];
+  const slotDims: Dims = [slotSpan(levelX, chunkX), slotSpan(levelY, chunkY), slotSpan(levelZ, chunkZ)];
   const grid: CellGrid = { x: Math.ceil(levelX / chunkX), y: Math.ceil(levelY / chunkY), z: Math.ceil(levelZ / chunkZ) };
   const cells = Math.max(1, grid.x * grid.y * grid.z);
   const atlasId = atlasKey(spec, slotDims);
@@ -242,6 +283,13 @@ export function dropOverview(atlases: OverviewAtlases, key: string): void {
   atlas.freeRuns.set(overview.slots.length, runs);
 }
 
+/** Drop every overview of the member `imageId`. */
+export function dropMemberOverviews(atlases: OverviewAtlases, imageId: string): void {
+  for (const overview of [...atlases.overviews.values()]) {
+    if (overview.imageId === imageId) dropOverview(atlases, overview.key);
+  }
+}
+
 /** Free every atlas of `datasetId`. */
 export function dropDatasetOverviews(atlases: OverviewAtlases, datasetId: string): void {
   for (const atlas of [...atlases.byKey.values()]) {
@@ -300,29 +348,33 @@ function createAtlas(
   slotDims: Dims,
   cells: number,
 ): OverviewAtlas | null {
-  const bpt = bytesPerTexel(spec.format);
+  // The layout is the one the whole share would take, so the atlas can grow
+  // to it without moving a slot; the texture starts at what `cells` need.
   const geometry = computeAtlasGeometry(
-    getDeviceLimits(ctx.device), slotDims, ctx.state.gpuTotalBytes * MINIMAP_OVERVIEW_SHARE, "3d", bpt,
+    getDeviceLimits(ctx.device), slotDims, ctx.state.gpuTotalBytes * MINIMAP_OVERVIEW_SHARE, "3d", bytesPerTexel(spec.format),
   );
   const shape = { slotsX: geometry.slotsX, slotsY: geometry.slotsY, slotDims, format: spec.format };
-  const slotsZ = Math.ceil(cells / slotsPerLayer(shape));
-  if (slotsZ > geometry.slotsZ! || !roomFor(ctx, atlases, layerBytes(shape) * slotsZ + cells * 4)) return null;
+  const maxCapacity = slotsPerLayer(shape) * geometry.slotsZ!;
+  const capacity = fullCapacity(shape, cells);
+  if (capacity > maxCapacity || !roomFor(ctx, atlases, capacity * slotBytes(shape) + cells * 4)) return null;
 
   const indirection = new Uint32Array(cells).fill(INDIRECTION_MISS);
   const indirectionBuf = ctx.device.createBuffer({
     size: indirection.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+  const texture = watchedTexture(ctx, atlases, shape, capacity, () => atlas);
   const atlas: OverviewAtlas = {
     key,
     datasetId: spec.datasetId,
     format: spec.format,
     slotDims,
-    texture: watchedTexture(ctx, atlases, shape, slotsZ, () => atlas),
+    texture,
+    lineage: new Set([texture]),
     slotsX: geometry.slotsX,
     slotsY: geometry.slotsY,
-    slotsZ: 0,
-    maxSlotsZ: geometry.slotsZ!,
+    capacity: 0,
+    maxCapacity,
     freeSlots: [],
     indirection,
     indirectionBuf,
@@ -330,7 +382,7 @@ function createAtlas(
     freeRuns: new Map(),
     overviews: new Set(),
   };
-  addSlots(atlas, slotsZ);
+  addSlots(atlas, capacity);
   atlases.byKey.set(key, atlas);
   noteBytes(atlases);
   return atlas;
@@ -338,19 +390,20 @@ function createAtlas(
 
 /** Grow `atlas` to hold `cells` more slots and cells. False, with the atlas as it was, when there is no room. */
 function growAtlas(ctx: WorkerCtx, atlases: OverviewAtlases, atlas: OverviewAtlas, cells: number): boolean {
-  const missingSlots = cells - atlas.freeSlots.length;
-  const needZ = atlas.slotsZ + Math.max(0, Math.ceil(missingSlots / slotsPerLayer(atlas)));
+  const need = atlas.capacity + Math.max(0, cells - atlas.freeSlots.length);
   const needCells = atlas.freeRuns.get(cells)?.length ? 0 : Math.max(0, atlas.cellsUsed + cells - atlas.indirection.length);
-  if (needZ === atlas.slotsZ && needCells === 0) return true;
-  if (needZ > atlas.maxSlotsZ) return false;
+  if (need === atlas.capacity && needCells === 0) return true;
+  if (need > atlas.maxCapacity) return false;
 
-  const cost = (z: number, moreCells: number) => (z - atlas.slotsZ) * layerBytes(atlas) + moreCells * 4;
-  let toZ = needZ === atlas.slotsZ ? needZ : Math.min(atlas.maxSlotsZ, Math.max(needZ, Math.ceil(atlas.slotsZ * GROWTH)));
+  const cost = (capacity: number, moreCells: number) => (capacity - atlas.capacity) * slotBytes(atlas) + moreCells * 4;
+  let toCapacity = need === atlas.capacity
+    ? need
+    : fullCapacity(atlas, Math.min(atlas.maxCapacity, Math.max(need, Math.ceil(atlas.capacity * GROWTH))));
   let toCells = needCells === 0 ? 0 : Math.max(needCells, Math.ceil(atlas.indirection.length * (GROWTH - 1)));
-  if (!roomFor(ctx, atlases, cost(toZ, toCells))) {
-    toZ = needZ;
+  if (!roomFor(ctx, atlases, cost(toCapacity, toCells))) {
+    toCapacity = need === atlas.capacity ? need : fullCapacity(atlas, need);
     toCells = needCells;
-    if (!roomFor(ctx, atlases, cost(toZ, toCells))) return false;
+    if (!roomFor(ctx, atlases, cost(toCapacity, toCells))) return false;
   }
 
   if (toCells > 0) {
@@ -364,66 +417,76 @@ function growAtlas(ctx: WorkerCtx, atlases: OverviewAtlases, atlas: OverviewAtla
     });
     ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, indirection);
   }
-  if (toZ > atlas.slotsZ) {
+  if (toCapacity > atlas.capacity) {
     // A slot's place depends on `slotsX` and `slotsY` alone, which never
-    // change, so the old texture copies into the new one's front and every
-    // cell keeps its slot.
+    // change, and the slots held come first, so the old texture copies into
+    // the new one's front and every cell keeps its slot.
     const old = atlas.texture;
-    const texture = watchedTexture(ctx, atlases, atlas, toZ, () => atlas);
-    const [x, y, z] = atlas.slotDims;
+    const texture = watchedTexture(ctx, atlases, atlas, toCapacity, () => atlas);
     const encoder = ctx.device.createCommandEncoder();
-    encoder.copyTextureToTexture({ texture: old }, { texture }, [atlas.slotsX * x, atlas.slotsY * y, atlas.slotsZ * z]);
+    encoder.copyTextureToTexture({ texture: old }, { texture }, texelExtent(atlas, atlas.capacity));
     ctx.device.queue.submit([encoder.finish()]);
     // Destruction waits for the copy just submitted.
     old.destroy();
     atlas.texture = texture;
-    addSlots(atlas, toZ);
+    atlas.lineage.add(texture);
+    addSlots(atlas, toCapacity);
   }
   noteBytes(atlases);
   return true;
 }
 
-/** Add the slots of layers up to `toZ`, lowest on top of the free stack. */
-function addSlots(atlas: OverviewAtlas, toZ: number): void {
-  const layer = slotsPerLayer(atlas);
+/** Add the slots up to `toCapacity`, lowest on top of the free stack. */
+function addSlots(atlas: OverviewAtlas, toCapacity: number): void {
   const added: number[] = [];
-  for (let slot = toZ * layer - 1; slot >= atlas.slotsZ * layer; slot--) added.push(slot);
+  for (let slot = toCapacity - 1; slot >= atlas.capacity; slot--) added.push(slot);
   atlas.freeSlots = [...added, ...atlas.freeSlots];
-  atlas.slotsZ = toZ;
+  atlas.capacity = toCapacity;
+}
+
+/** The texture's extent in texels when it holds the first `capacity` slots of `shape`'s layout. */
+function texelExtent(shape: Layout & Pick<OverviewAtlas, "slotDims">, capacity: number): Dims {
+  const [sx, sy, sz] = slotExtent(shape, capacity);
+  const [x, y, z] = shape.slotDims;
+  return [sx * x, sy * y, sz * z];
 }
 
 /**
- * A texture of `slotsZ` layers of `shape`'s slots for the atlas `owner`
- * names. If the device cannot allocate it, the atlas goes with every
- * overview it holds. Under a halved total the page sends them again; at the
- * floor they would only fail again, so they are refused.
+ * A texture holding the first `capacity` of `shape`'s slots, for the atlas
+ * `owner` names. If the device cannot allocate it, or any texture the atlas's
+ * texels passed through, the atlas goes with every overview it holds. Under a
+ * halved total the page sends them again; at the floor they would only fail
+ * again, so they are refused.
  */
 function watchedTexture(
   ctx: WorkerCtx,
   atlases: OverviewAtlases,
-  shape: Pick<OverviewAtlas, "slotsX" | "slotsY" | "slotDims" | "format">,
-  slotsZ: number,
+  shape: Layout & Pick<OverviewAtlas, "slotDims" | "format">,
+  capacity: number,
   owner: () => OverviewAtlas,
 ): GPUTexture {
-  const [x, y, z] = shape.slotDims;
   return allocateWatched(
     ctx,
     () => ctx.device.createTexture({
-      size: [shape.slotsX * x, shape.slotsY * y, slotsZ * z],
+      size: texelExtent(shape, capacity),
       format: atlasTextureFormat(shape.format),
       dimension: "3d",
       usage: chunkPoolUsage(),
     }),
     (lost) => {
       const atlas = owner();
-      if (atlas.texture !== lost || atlases.byKey.get(atlas.key) !== atlas) return;
+      if (!atlas.lineage.has(lost) || atlases.byKey.get(atlas.key) !== atlas) return;
       const lostOverviews = [...atlas.overviews];
       removeAtlas(atlases, atlas);
       if (handleGpuOutOfMemory(ctx)) {
         ctx.post({ type: "minimapOverviewsLost", memberIds: lostOverviews.map((overview) => overview.key) });
       } else {
         for (const overview of lostOverviews) {
-          ctx.state.overviewsRefused.set(overview.key, overviewSelection({ ...overview, format: atlas.format }));
+          ctx.state.overviewsRefused.set(overview.key, {
+            selection: overviewSelection({ ...overview, format: atlas.format }),
+            datasetId: atlas.datasetId,
+            imageId: overview.imageId,
+          });
         }
       }
     },

@@ -38,6 +38,13 @@ export const MEMBER_INSTANCE_OFFSETS = {
 } as const;
 export const MEMBER_INSTANCE_SIZE = 32;
 
+/** A prepared draw of one entity. A member batch's draw marches only in {@link VolumeRenderer.renderMemberBatch}. */
+function entityDraw(set: MemberDrawSet, index: number): PreparedDraw {
+  const draw = set.draws[index];
+  if (draw.memberBatch) throw new Error("a member batch's draw goes through renderMemberBatch");
+  return draw;
+}
+
 /** The format of a member batch's id target: one instance index a texel. */
 export const MEMBER_ID_FORMAT: GPUTextureFormat = "r32uint";
 export const MEMBER_ID_BYTES_PER_TEXEL = 4;
@@ -107,10 +114,13 @@ export interface VolumeMemberDraw {
    */
   cut?: Float32Array;
   /**
-   * Makes this a draw {@link VolumeRenderer.renderMemberBatch} makes of many
-   * members: the display each of them takes in place of its descriptor's.
+   * Makes this a member batch's draw: it marches whichever member the batch's
+   * id pass put under each pixel, each through `display` in place of its
+   * descriptor's. Only {@link VolumeRenderer.renderMemberBatch} draws one, and
+   * only it draws one: elsewhere the shader would read an id target that holds
+   * no member.
    */
-  display?: MemberDisplay;
+  memberBatch?: { display: MemberDisplay };
 }
 
 /** The window, gamma and opacity every member of a member batch draw takes. */
@@ -135,10 +145,12 @@ export interface MemberBatch {
   /** The batch's instances, `count` of them from `first`, as {@link VolumeRenderer.setMemberInstances} wrote them. */
   first: number;
   count: number;
-  /** The prepared draws its members take, each drawn once. */
-  draws: readonly number[];
-  /** The rect around every member's, which bounds both passes. */
-  bounds: PixelRect;
+  /**
+   * The prepared draws its members take, each drawn once, and the rect around
+   * that draw's own members. A draw marches every pixel of its scissor, so it
+   * costs its members' corner of the batch, not the whole batch.
+   */
+  draws: ReadonlyArray<{ draw: number; bounds: PixelRect }>;
 }
 
 /** One draw as {@link VolumeRenderer.prepareMembers} left it ready. */
@@ -148,6 +160,7 @@ interface PreparedDraw {
   entity: GPUBindGroup;
   refOffset: number;
   scissor: PixelRect | undefined;
+  memberBatch: boolean;
 }
 
 /**
@@ -701,12 +714,13 @@ export class VolumeRenderer {
       ref.fill(0);
       ref[0] = draw.entityIndex >>> 0;
       ref[2] = i;
-      if (draw.display) {
+      if (draw.memberBatch) {
+        const { display } = draw.memberBatch;
         ref[3] = 1;
-        refDisplay[0] = draw.display.contrastMin;
-        refDisplay[1] = draw.display.contrastMax;
-        refDisplay[2] = draw.display.gamma;
-        refDisplay[3] = draw.display.opacity;
+        refDisplay[0] = display.contrastMin;
+        refDisplay[1] = display.contrastMax;
+        refDisplay[2] = display.gamma;
+        refDisplay[3] = display.opacity;
       }
       const base = i * (DRAW_REF_STRIDE / 4);
       let changed = false;
@@ -749,6 +763,7 @@ export class VolumeRenderer {
         entity,
         refOffset: i * DRAW_REF_STRIDE,
         scissor: draw.scissor,
+        memberBatch: draw.memberBatch !== undefined,
       };
     });
     // A group this frame left out names pools or a descriptor buffer that
@@ -800,7 +815,7 @@ export class VolumeRenderer {
     pass.setPipeline(pipeline);
     pass.setBindGroup(2, this.noMembersGroup);
     for (const index of indices) {
-      const draw = set.draws[index];
+      const draw = entityDraw(set, index);
       const rect = clipToBand(draw.scissor ?? [0, 0, targetWidth, targetHeight], band);
       if (!rect) continue;
       const [x, y, w, h] = rect;
@@ -856,7 +871,7 @@ export class VolumeRenderer {
     });
     pass.setPipeline(pipeline);
     for (const index of indices) {
-      const draw = set.draws[index];
+      const draw = entityDraw(set, index);
       const [x, y, w, h] = draw.scissor ?? [0, 0, targetWidth, targetHeight];
       pass.setScissorRect(x, y, w, h);
       pass.setBindGroup(0, draw.pools, [draw.uniformOffset]);
@@ -907,10 +922,10 @@ export class VolumeRenderer {
    * one draw per prepared draw its members take, however many members it
    * holds. An id pass marks each pixel with the member whose rect holds it,
    * in `memberIds`, a {@link createMemberIdTarget} the size of `target`. Then
-   * each prepared draw marches the full-screen triangle and keeps the pixels
-   * of its own members, so every pixel's ray is the one a draw of its member
-   * alone, through a scissor of its rect, marches. The depth is cleared or
-   * kept.
+   * each prepared draw marches the full-screen triangle, through a scissor of
+   * its own members' bounds, and keeps the pixels of its own members, so
+   * every pixel's ray is the one a draw of its member alone, through a
+   * scissor of its rect, marches. The depth is cleared or kept.
    */
   renderMemberBatch(
     setName: string,
@@ -924,7 +939,7 @@ export class VolumeRenderer {
     const set = this.memberDrawSet(setName);
     const idPipeline = requireCompiled(this.idPipeline, "member batch");
     const pipeline = requireCompiled(this.pipeline, "volume renderer");
-    const [x, y, w, h] = batch.bounds;
+    const draws = batch.draws.filter(({ bounds: [, , w, h] }) => w > 0 && h > 0);
 
     const ids = encoder.beginRenderPass({
       colorAttachments: [{
@@ -947,12 +962,13 @@ export class VolumeRenderer {
         depthClearValue: 1.0,
       },
     });
-    if (batch.count > 0 && w > 0 && h > 0) {
+    if (batch.count > 0 && draws.length > 0) {
       pass.setPipeline(pipeline);
-      pass.setScissorRect(x, y, w, h);
       pass.setBindGroup(2, this.memberIdGroupOf(set, memberIds));
-      for (const index of batch.draws) {
+      for (const { draw: index, bounds: [x, y, w, h] } of draws) {
         const draw = set.draws[index];
+        if (!draw.memberBatch) throw new Error("renderMemberBatch drew a draw that marches one entity");
+        pass.setScissorRect(x, y, w, h);
         pass.setBindGroup(0, draw.pools, [draw.uniformOffset]);
         pass.setBindGroup(1, draw.entity, [draw.refOffset]);
         pass.draw(3); // full-screen triangle

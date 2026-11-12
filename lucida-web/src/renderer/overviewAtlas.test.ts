@@ -12,6 +12,7 @@ import {
   dropDatasetOverviews,
   dropOverview,
   openOverview,
+  overviewBinding,
   writeOverviewChunks,
   type OverviewSpec,
 } from "./overviewAtlas.ts";
@@ -20,8 +21,10 @@ import { measureGpuMemory } from "./worker/gpuBudget.ts";
 
 const MIB = 1024 * 1024;
 
-function makeCtx() {
+/** `holdScopes`: every allocation's out-of-memory check waits for the test to settle it, in `scopes`. */
+function makeCtx({ holdScopes = false } = {}) {
   const textures: Array<{ size: number[]; destroy: ReturnType<typeof vi.fn> }> = [];
+  const scopes: Array<(error: GPUError | null) => void> = [];
   const copies: Array<{ from: unknown; to: unknown; size: number[] }> = [];
   const device = {
     // Four slots of 64x64 a layer under the overviews' share of 256 MiB.
@@ -38,15 +41,16 @@ function makeCtx() {
       finish: () => ({}),
     }),
     pushErrorScope: vi.fn(),
-    popErrorScope: () => Promise.resolve(null),
+    popErrorScope: () => holdScopes ? new Promise<GPUError | null>((settle) => scopes.push(settle)) : Promise.resolve(null),
     queue: { writeBuffer: vi.fn(), writeTexture: vi.fn(), submit: vi.fn() },
   };
+  const posts: WorkerToMainMessage[] = [];
   const ctx = {
     device,
     state: createInitialState(256 * MIB),
-    post: (_msg: WorkerToMainMessage) => {},
+    post: (msg: WorkerToMainMessage) => posts.push(msg),
   } as unknown as WorkerCtx;
-  return { ctx, device, textures, copies };
+  return { ctx, device, textures, copies, scopes, posts };
 }
 
 /** A member's overview: a 64x64 level in one chunk of 128x128, as a small collection tile's coarsest level is. */
@@ -90,7 +94,7 @@ describe("an overview atlas", () => {
     expect(b.atlas.indirection[b.offset]).toBe(slot);
   });
 
-  it("grows by copying into a deeper texture, so every overview keeps its slots", () => {
+  it("grows by copying the slots it holds into a larger texture's front, so every overview keeps its slots", () => {
     const { ctx, textures, copies } = makeCtx();
     const atlases = createOverviewAtlases();
     const first = Array.from({ length: 4 }, (_, i) => openOverview(ctx, atlases, `m${i}:ch0`, tile(`m${i}`))!);
@@ -99,11 +103,50 @@ describe("an overview atlas", () => {
 
     const fifth = openOverview(ctx, atlases, "m4:ch0", tile("m4"))!;
 
+    // Along a row, down the layer, then a layer more.
+    expect(textures.map(({ size }) => size)).toEqual([[64, 64, 1], [128, 64, 1], [128, 128, 1], [128, 128, 2]]);
     expect(before.destroy).toHaveBeenCalled();
-    expect(copies).toEqual([{ from: before, to: fifth.atlas.texture, size: [128, 128, 1] }]);
-    expect(fifth.atlas.slotsZ).toBe(2);
+    expect(copies.at(-1)).toEqual({ from: before, to: fifth.atlas.texture, size: [128, 128, 1] });
+    expect(overviewBinding(fifth.atlas).slotsZ).toBe(2);
     expect(first.map((overview) => overview.slots[0])).toEqual(slots);
     expect(slots).not.toContain(fifth.slots[0]);
+  });
+
+  it("starts at the slots its first overview needs, so a volume's one-cell overview takes its own size", () => {
+    const { ctx, textures } = makeCtx();
+    const atlases = createOverviewAtlases();
+
+    openOverview(ctx, atlases, "v:ch0", tile("v", { levelDims: [64, 64, 64], chunkDims: [64, 64, 64] }));
+
+    expect(textures.map(({ size }) => size)).toEqual([[64, 64, 64]]);
+    expect(measureGpuMemory(ctx.state).minimapBytes).toBe(64 ** 3 * 2 + 4);
+  });
+
+  it("puts levels under a chunk in an atlas per power of two, so mixed sizes share a few", () => {
+    const { ctx } = makeCtx();
+    const atlases = createOverviewAtlases();
+    const sized = (id: string, x: number, y: number) =>
+      openOverview(ctx, atlases, `${id}:ch0`, tile(id, { levelDims: [x, y, 1] }))!.atlas;
+
+    const atlasOf = [sized("a", 64, 64), sized("b", 40, 50), sized("c", 33, 60), sized("d", 64, 20), sized("e", 100, 300)];
+
+    expect(atlasOf.map(({ slotDims }) => slotDims)).toEqual([[64, 64, 1], [64, 64, 1], [64, 64, 1], [64, 32, 1], [128, 128, 1]]);
+    expect(new Set(atlasOf).size).toBe(3);
+  });
+
+  it("goes with its overviews when a texture its texels passed through runs out of memory, after a later growth", async () => {
+    const { ctx, scopes, posts } = makeCtx({ holdScopes: true });
+    const atlases = createOverviewAtlases();
+    for (const id of ["a", "b", "c"]) openOverview(ctx, atlases, `${id}:ch0`, tile(id));
+    expect(scopes).toHaveLength(3);
+
+    // The second texture failed; the third was copied from it.
+    scopes[1]({ message: "out of memory" } as GPUError);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(atlases.byKey.size).toBe(0);
+    expect(posts).toContainEqual({ type: "minimapOverviewsLost", memberIds: ["a:ch0", "b:ch0", "c:ch0"] });
   });
 
   it("gives a dropped overview's slots and cells to the next one, and its texture back once it holds none", () => {
@@ -136,6 +179,6 @@ describe("an overview atlas", () => {
 
     expect([...atlases.overviews.keys()]).toEqual(["x:ch0"]);
     expect([...atlases.byKey.values()]).toEqual([other.atlas]);
-    expect(measureGpuMemory(ctx.state).minimapBytes).toBe(4 * 64 * 64 * 2 + 4);
+    expect(measureGpuMemory(ctx.state).minimapBytes).toBe(64 * 64 * 2 + 4);
   });
 });

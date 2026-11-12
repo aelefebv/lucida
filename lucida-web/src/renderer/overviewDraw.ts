@@ -2,8 +2,9 @@
  * The overview draw the minimap and the explore thumbnails share: their
  * overviews, from the overview atlases, as member batches. Overviews whose
  * places on the target do not meet share a batch (`layerBatches.ts`), and a
- * batch costs one draw per atlas and display it holds, so a collection's
- * channel is one draw however many members it has.
+ * batch costs one draw per atlas and display it holds, each over the rect
+ * around its own members, so a collection's channel is one draw however many
+ * members it has.
  *
  * A render keeps what its inputs decide. Which overviews it can draw, and
  * their descriptors, hold while its layers and the overviews held do; their
@@ -126,7 +127,7 @@ export function drawOverviews(
       descriptorBuffer: cache.descriptors!,
       entityIndex: 0,
       // Opacity is 1: the minimap shows every layer at full strength.
-      display: { contrastMin: shown.contrastMin, contrastMax: shown.contrastMax, gamma: shown.gamma, opacity: 1 },
+      memberBatch: { display: { contrastMin: shown.contrastMin, contrastMax: shown.contrastMax, gamma: shown.gamma, opacity: 1 } },
     };
   }));
 
@@ -206,25 +207,41 @@ function place(
   const instances: MemberInstance[] = [];
   cache.batches = batches.map(({ layers: members, blendMode }) => {
     const first = instances.length;
-    const draws: number[] = [];
-    let left = width;
-    let top = height;
-    let right = 0;
-    let bottom = 0;
+    const boundsOf = new Map<number, Bounds>();
     for (const at of members) {
       const { entity, run } = cache.drawn[at];
       const rect = rects[at];
       instances.push({ entityIndex: entity, draw: run, rect });
-      if (!draws.includes(run)) draws.push(run);
-      const [x, y, w, h] = rect;
-      if (w <= 0 || h <= 0) continue;
-      left = Math.min(left, x);
-      top = Math.min(top, y);
-      right = Math.max(right, x + w);
-      bottom = Math.max(bottom, y + h);
+      let bounds = boundsOf.get(run);
+      if (!bounds) boundsOf.set(run, (bounds = emptyBounds(width, height)));
+      grow(bounds, rect);
     }
-    const bounds: PixelRect = right > left && bottom > top ? [left, top, right - left, bottom - top] : [0, 0, 0, 0];
-    return { first, count: members.length, draws, bounds, blendMode };
+    const draws = [...boundsOf].map(([draw, bounds]) => ({ draw, bounds: rectOf(bounds) }));
+    return { first, count: members.length, draws, blendMode };
   });
   renderer.setMemberInstances(setName, instances, width, height);
+}
+
+/** The edges of the rect around some rects, as they are added. */
+interface Bounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function emptyBounds(width: number, height: number): Bounds {
+  return { left: width, top: height, right: 0, bottom: 0 };
+}
+
+function grow(bounds: Bounds, [x, y, w, h]: PixelRect): void {
+  if (w <= 0 || h <= 0) return;
+  bounds.left = Math.min(bounds.left, x);
+  bounds.top = Math.min(bounds.top, y);
+  bounds.right = Math.max(bounds.right, x + w);
+  bounds.bottom = Math.max(bounds.bottom, y + h);
+}
+
+function rectOf({ left, top, right, bottom }: Bounds): PixelRect {
+  return right > left && bottom > top ? [left, top, right - left, bottom - top] : [0, 0, 0, 0];
 }

@@ -27,6 +27,7 @@ import {
   handleMinimapRender,
   handleMinimapUploadOverviewChunks,
   handleThumbnailRender,
+  removeMinimapResources,
 } from "./minimapHandlers.ts";
 import { markOverviewsFailed } from "./overviewAtlas.ts";
 import { createInitialState } from "./worker/state.ts";
@@ -221,6 +222,23 @@ describe("the minimap's overview render", () => {
     expect(renderer.renderMemberBatch).not.toHaveBeenCalled();
   });
 
+  it("drops a render deferred for the layers before when new ones arrive, as its displays index their groups", async () => {
+    const { renderer, compile } = makeVolumeRenderer();
+    const { ctx } = makeCtx(renderer);
+    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
+    for (const c of [0, 1]) handleMinimapUploadOverviewChunks(ctx, overviewUpload("m0", c));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["m0:ch0", "m0:ch1"], () => IDENTITY, (i) => i) });
+    handleMinimapRender(ctx, renderMsg(100, [display({ colormap: "green" }), display({ colormap: "magenta" })]));
+
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["m0:ch1"]) });
+    compile();
+    await flush();
+    expect(renderer.renderMemberBatch).not.toHaveBeenCalled();
+
+    handleMinimapRender(ctx, renderMsg(100, [display({ colormap: "magenta" })]));
+    expect(renderer.renderMemberBatch).toHaveBeenCalledOnce();
+  });
+
   it("reports a compile that failed, since no frame on a slice page awaits it", async () => {
     const { renderer, fail } = makeVolumeRenderer();
     const { ctx, posts } = makeCtx(renderer);
@@ -256,16 +274,69 @@ describe("the minimap's overview render", () => {
 
       // One atlas holds every overview: one draw per channel.
       expect(renderer.writeDescriptorTable.mock.calls[0][1]).toHaveLength(2 * count);
-      expect(renderer.prepareMembers.mock.calls[0][1].map((draw) => draw.display?.contrastMax)).toEqual([1, 1]);
+      expect(renderer.prepareMembers.mock.calls[0][1].map((draw) => draw.memberBatch?.display.contrastMax)).toEqual([1, 1]);
       expect(new Set(renderer.prepareMembers.mock.calls[0][1].map((draw) => draw.levels[0]!.texture)).size).toBe(1);
       const batches = renderer.renderMemberBatch.mock.calls.map((call) => call[1]);
-      expect(batches.map(({ count: n, draws }) => [n, draws])).toEqual([[count, [0]], [count, [1]]]);
+      expect(batches.map(({ count: n, draws }) => [n, draws.map(({ draw }) => draw)])).toEqual([[count, [0]], [count, [1]]]);
       const instances = renderer.setMemberInstances.mock.calls[0][1];
       expect(instances.map(({ entityIndex, draw }) => [entityIndex, draw])).toEqual(
         Array.from({ length: count }, (_, i) => [2 * i, 0]).concat(Array.from({ length: count }, (_, i) => [2 * i + 1, 1])),
       );
       expect(composite.mock.calls.map((call) => [call[1][0].blendMode, call[3]])).toEqual([["alpha", true], ["additive", false]]);
     }
+  });
+
+  it("draws each atlas of a batch over the rect around its own members, and puts mixed sizes in a few atlases", () => {
+    const { renderer, ctx } = ready();
+    // Levels of 2, 2, 3, 4 and 5 samples in 8-sample chunks: slots of 2, 4 and 8.
+    const sizes = [2, 2, 3, 4, 5];
+    sizes.forEach((n, i) => handleMinimapUploadOverviewChunks(ctx, overviewUpload(`m${i}`, 0, {
+      levelWidth: n, levelHeight: n, chunkX: 8, chunkY: 8,
+      chunks: [{ key: "3/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array(64).buffer }],
+    })));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(sizes.map((_, i) => `m${i}:ch0`), sideBySide) });
+
+    handleMinimapRender(ctx, renderMsg(100));
+
+    expect(ctx.state.minimap.atlases.byKey.size).toBe(3);
+    const [batch] = renderer.renderMemberBatch.mock.calls.map((call) => call[1]);
+    expect(renderer.renderMemberBatch).toHaveBeenCalledOnce();
+    const instances = renderer.setMemberInstances.mock.calls[0][1];
+    expect(batch.draws.map(({ draw }) => instances.filter((instance) => instance.draw === draw).map(({ entityIndex }) => entityIndex)))
+      .toEqual([[0, 1], [2, 3], [4]]);
+    // Each draw marches its own members' corner of the batch, and no two meet.
+    for (const { draw, bounds } of batch.draws) {
+      const rects = instances.filter((instance) => instance.draw === draw).map(({ rect }) => rect);
+      const left = Math.min(...rects.map(([x]) => x));
+      const right = Math.max(...rects.map(([x, , w]) => x + w));
+      expect(bounds[0]).toBe(left);
+      expect(bounds[2]).toBe(right - left);
+    }
+    const spans = batch.draws.map(({ bounds: [x, , w] }) => [x, x + w]);
+    for (let i = 1; i < spans.length; i++) expect(spans[i][0]).toBeGreaterThanOrEqual(spans[i - 1][1]);
+  });
+
+  it("forgets a refused overview with its dataset or member, as one reopened under the id is new", () => {
+    const { ctx } = ready();
+    const total = ctx.state.gpuTotalBytes;
+    ctx.state.gpuTotalBytes = 1;
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m0"));
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m1", 0, { datasetId: "other" }));
+    expect([...ctx.state.overviewsRefused.keys()]).toEqual(["m0:ch0", "m1:ch0"]);
+
+    removeMinimapResources(ctx, "ds");
+    removeMinimapResources(ctx, "m1");
+    expect(ctx.state.overviewsRefused.size).toBe(0);
+
+    ctx.state.gpuTotalBytes = total;
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m0"));
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m1", 0, { datasetId: "other" }));
+    expect([...ctx.state.minimap.atlases.overviews.keys()]).toEqual(["m0:ch0", "m1:ch0"]);
+
+    // A removed member's overviews go, and its dataset's other members stay.
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m2"));
+    removeMinimapResources(ctx, "m0");
+    expect([...ctx.state.minimap.atlases.overviews.keys()]).toEqual(["m1:ch0", "m2:ch0"]);
   });
 
   it("composites members that overlap one at a time, in their order", () => {
@@ -290,7 +361,7 @@ describe("the minimap's overview render", () => {
 
     expect(renderer.writeDescriptorTable).toHaveBeenCalledOnce();
     expect(renderer.setMemberInstances).toHaveBeenCalledOnce();
-    expect(renderer.prepareMembers.mock.calls.map((call) => call[1].map((draw) => draw.display?.contrastMax))).toEqual([[10], [20]]);
+    expect(renderer.prepareMembers.mock.calls.map((call) => call[1].map((draw) => draw.memberBatch?.display.contrastMax))).toEqual([[10], [20]]);
     expect(renderer.renderMemberBatch).toHaveBeenCalledTimes(2);
 
     // A camera move places them again, and an overview that opens lays them out again.

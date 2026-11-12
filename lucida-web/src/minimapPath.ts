@@ -372,7 +372,8 @@ function awaitedChunkArrived(ctx: TickContext, state: MinimapState): boolean {
 
 /**
  * Upload explicit coarse-level overview chunks for the minimap: one overview
- * texture per member and channel its layer shows, at the layer's timepoint.
+ * per member and channel its layer shows, at the layer's timepoint, which the
+ * worker keeps in its dataset's overview atlas.
  * Returns true if the next frame has overview work to do (caller should schedule it).
  */
 export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: number): boolean {
