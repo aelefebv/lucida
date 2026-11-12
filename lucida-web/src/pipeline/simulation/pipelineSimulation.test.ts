@@ -764,6 +764,32 @@ describe("auto-contrast limits", () => {
   }
 
   for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`fits a collection's limits once a zoom across it is over, not as it goes, at device pixel ratio ${dpr}`, async () => {
+      // The zoom leaves tiles out of the view as it goes, so its replans
+      // change the chunks a fit reads.
+      const run = await runScenario(
+        describeScenario({
+          name: "zoom across a two-channel collection",
+          dataset: collection({
+            id: "grid",
+            rows: 3,
+            columns: 4,
+            pyramid: { shape: [1, 2, 1, 256, 256], chunk: [1, 64, 64], levels: 2 },
+          }),
+          steps: [{ gesture: { zoom: 1.04 }, moves: 45 }],
+        }),
+        { dpr },
+      );
+      expectSettled(run);
+      const [open, zoom] = run.phases;
+      expect(lastFits(open).size).toBe(2);
+      expect(zoom.fitsDuringInput, run.report).toBe(0);
+      expect(fitCounts(zoom)).toEqual([1, 1]);
+      for (const fit of lastFits(zoom).values()) expect(fit.provisional).toBe(false);
+    });
+  }
+
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
     it(`fits every channel of a slice view from its histogram once the server completes it at device pixel ratio ${dpr}`, async () => {
       // A slice view wants one slab of the generated level per channel, so
       // the server finishes each shown timepoint and channel after the view

@@ -179,6 +179,7 @@ export class RenderLoop implements TraceEnvironment {
   private trailingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private uploadResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
+  private fitResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly framePacer = new FramePacer();
   /** The last tick left decoded chunks undelivered for want of upload budget. */
   private deliveryBacklogged = false;
@@ -355,6 +356,10 @@ export class RenderLoop implements TraceEnvironment {
       clearTimeout(this.minimapDisplayTimer);
       this.minimapDisplayTimer = null;
     }
+    if (this.fitResumeTimer !== null) {
+      clearTimeout(this.fitResumeTimer);
+      this.fitResumeTimer = null;
+    }
     this.client.onChunkResidency = null;
     this.client.onWantedSetDelta = null;
     this.client.onMinimapOverviewsLost = null;
@@ -504,7 +509,9 @@ export class RenderLoop implements TraceEnvironment {
     // and chunks held while the view moved have not reached the GPU.
     state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild() ||
       this.uploadResumeTimer !== null;
-    state.residencyDirty = this.residencyDirty;
+    // Limits held while the view moved may yet change what it draws, though
+    // it has everything it wants.
+    state.residencyDirty = this.residencyDirty || this.fitResumeTimer !== null;
     // A frame the worker is still drawing counts: until it lands, the canvas
     // does not show what the view settled on, and a capture would catch it.
     state.frameInFlight = this.rafId !== null || this.client.framesAwaitingDone() > 0;
@@ -735,6 +742,38 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
+   * Fit auto-contrast once the gesture that held it is over. While a gesture
+   * lasts, each replan changes what a fit reads, and each fit costs a read of
+   * every visible tile's samples, a render of the panels and a redraw of the
+   * descriptors and the minimap, for limits the next replan replaces. The
+   * fit needs no frame of its own: limits that change dirty the loop.
+   */
+  private scheduleFitResume(): void {
+    if (this.fitResumeTimer !== null) return;
+    const wait = Math.max(0, this.lastGestureAt + GESTURE_HOLD_MS - performance.now());
+    this.fitResumeTimer = setTimeout(() => {
+      this.fitResumeTimer = null;
+      if (performance.now() - this.lastGestureAt < GESTURE_HOLD_MS) {
+        this.scheduleFitResume();
+        return;
+      }
+      this.fitAutoContrast();
+      this.republishSettle();
+    }, wait);
+  }
+
+  private fitAutoContrast(): void {
+    if (!this.autoContrastListener) return;
+    const fits = this.autoContrast.update(
+      this.tickCoordinator.getLastPlans(),
+      this.datasets,
+      this.session.cpuCache,
+      this.session.generatedAvailability,
+    );
+    if (fits.length > 0) this.autoContrastListener(fits);
+  }
+
+  /**
    * Draw a minimap display edit the camera held once it has been still long
    * enough. It redraws only the minimap, so it neither waits for a tick nor
    * dirties the view, which may have settled by then.
@@ -758,8 +797,9 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Hand each channel's auto-contrast fit to `listener` as the view's chunks
-   * become resident. A new listener gets the current fits on the next tick:
+   * Hand the channels' auto-contrast fits to `listener` as the view's chunks
+   * become resident, a tick's together, and none while a gesture lasts. A
+   * new listener gets the current fits on the next tick:
    * a loop that starts on a warm cache fits on its first tick, before its
    * owner can attach.
    */
@@ -1036,13 +1076,8 @@ export class RenderLoop implements TraceEnvironment {
     // Before quiescence is published: limits the listener sets dirty the
     // loop, so a settled frame is never one drawn with the limits before.
     if (this.autoContrastListener) {
-      this.autoContrast.update(
-        this.tickCoordinator.getLastPlans(),
-        this.datasets,
-        this.session.cpuCache,
-        this.session.generatedAvailability,
-        this.autoContrastListener,
-      );
+      if (ctx.gesture) this.scheduleFitResume();
+      else this.fitAutoContrast();
     }
 
     // If work remains (budget exhausted or chunks pending), schedule another frame
