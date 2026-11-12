@@ -82,7 +82,7 @@ export function applyColdStateDelta(
   ctx.state.currentColdState = cold;
   ctx.state.currentEpochs = msg.epochs;
   if (laidOutAsBefore) {
-    patchWantedIndex(draw.wanted, msg.wantedChunks);
+    draw.wanted = patchWantedIndex(draw.wanted, msg.wantedChunks);
     syncLabelPools(ctx, msg.datasetId);
     return;
   }

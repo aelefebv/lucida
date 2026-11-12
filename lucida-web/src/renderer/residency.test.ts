@@ -8,6 +8,7 @@ import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
 import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
 import { attachView, fakeDraw, viewOf } from "./viewIndirectionFixtures.ts";
+import { EvictionOrder } from "./evictionOrder.ts";
 
 /** Build a minimal ctx whose only populated tile is `state`. The
  * applyViewHotState handler only touches `ctx.state.rayHits`. */
@@ -35,6 +36,7 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     texture: null as unknown as GPUTexture,
     format: "u16",
     slots: new Map(),
+    order: new EvictionOrder(),
     views: new Map(),
     freeSlots: [],
     totalSlots,
@@ -70,6 +72,7 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     texture: null as unknown as GPUTexture,
     format: "u16",
     slots: new Map(),
+    order: new EvictionOrder(),
     planesByChunk: new Map(),
     views: new Map(),
     freeSlots: [],
