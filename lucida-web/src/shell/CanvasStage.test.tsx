@@ -5,9 +5,10 @@
  * presses.
  */
 import { createRef } from "react";
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { AboveControls, CanvasStage } from "./CanvasStage.tsx";
+import { frameClock } from "../frameClock.ts";
 
 afterEach(cleanup);
 
@@ -50,5 +51,45 @@ describe("AboveControls", () => {
       </div>,
     );
     expect(container.querySelector(".host")?.textContent).toBe("Card");
+  });
+});
+
+describe("CanvasStage's size", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("follows a ratio that changes with no event to say so, either way", () => {
+    // Neither the device-pixel box nor a resolution query fires, as under
+    // device emulation; only the ratio itself changes.
+    class SilentObserver {
+      observe() {}
+      disconnect() {}
+    }
+    const silentQuery = { addEventListener() {}, removeEventListener() {} };
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("ResizeObserver", SilentObserver);
+    vi.stubGlobal("matchMedia", () => silentQuery);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    vi.stubGlobal("devicePixelRatio", 2);
+    const onResize = vi.fn();
+    render(<CanvasStage canvasRef={createRef()} canvasKey={0} pixelated={false} label="View" onResize={onResize} />);
+    const frame = () =>
+      act(() => {
+        frameClock.wake();
+        for (const run of frames.splice(0)) run(performance.now());
+      });
+
+    frame();
+    expect(onResize).not.toHaveBeenCalled();
+    vi.stubGlobal("devicePixelRatio", 1);
+    frame();
+    expect(onResize).toHaveBeenCalledTimes(1);
+    frame();
+    expect(onResize).toHaveBeenCalledTimes(1);
+    vi.stubGlobal("devicePixelRatio", 2);
+    frame();
+    expect(onResize).toHaveBeenCalledTimes(2);
   });
 });
