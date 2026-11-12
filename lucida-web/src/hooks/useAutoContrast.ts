@@ -3,7 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { Session } from "../session.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { RenderLoop } from "../renderLoop.ts";
-import type { ChannelFit } from "../pipeline/autoContrast.ts";
+import type { ChannelFit, ChannelFitUpdate } from "../pipeline/autoContrast.ts";
 import { invalidateResidency } from "../invalidation.ts";
 import type { PeerStore } from "../peerStore.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
@@ -21,33 +21,35 @@ export interface AutoContrastTarget {
   scene: WasmScene | null;
   loop: RenderLoop | null;
   session: Session | null;
-  /** Whether the layer fits its limits automatically. */
-  auto: boolean;
+  /** Whether the dataset's layer fits its limits automatically. */
+  auto: (datasetId: string) => boolean;
   /** Whether this client follows a peer. */
   following: boolean;
 }
 
 /**
- * Set a channel's fitted limits, when its layer fits automatically. A
- * follower shows its leader's limits, which arrive with the leader's dataset
- * presence, so it sets none of its own. Returns whether it set them.
+ * Set each channel's fitted limits, where its layer fits automatically, and
+ * tell the loop and peers once for all of them. A follower shows its
+ * leader's limits, which arrive with the leader's dataset presence, so it
+ * sets none of its own. Returns whether it set any.
  */
-export function applyAutoContrastFit(
-  target: AutoContrastTarget,
-  datasetId: string,
-  channel: number,
-  fit: ChannelFit,
-): boolean {
+export function applyAutoContrastFits(target: AutoContrastTarget, fits: readonly ChannelFitUpdate[]): boolean {
   const { scene } = target;
-  if (!scene || !target.auto || target.following) return false;
-  const cmd: ViewportCommand = {
-    type: "set_channel_contrast",
-    dataset_id: datasetId,
-    channel,
-    min: fit.limits.min,
-    max: fit.limits.max,
-  };
-  guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
+  if (!scene || target.following) return false;
+  let applied = false;
+  for (const { datasetId, channel, fit } of fits) {
+    if (!target.auto(datasetId)) continue;
+    const cmd: ViewportCommand = {
+      type: "set_channel_contrast",
+      dataset_id: datasetId,
+      channel,
+      min: fit.limits.min,
+      max: fit.limits.max,
+    };
+    guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
+    applied = true;
+  }
+  if (!applied) return false;
   invalidateResidency(target.loop, "auto_contrast");
   target.session?.bridge.sendDatasetPresence(scene.export_dataset_presence());
   return true;
@@ -78,21 +80,23 @@ export function useAutoContrast({
 }: Params) {
   useEffect(() => {
     if (!activeLoop) return;
-    activeLoop.setAutoContrastListener((datasetId, channel, fit) => {
+    activeLoop.setAutoContrastListener((fits) => {
       // A montage view shows a single dataset, so the latest limits are its own.
-      window.__lucidaAutoContrast = { ...fit.limits };
-      setContrastFitMap((prev) => new Map(prev).set(channelRangeKey(datasetId, channel), fit));
-      applyAutoContrastFit(
+      window.__lucidaAutoContrast = { ...fits[fits.length - 1].fit.limits };
+      setContrastFitMap((prev) => {
+        const next = new Map(prev);
+        for (const { datasetId, channel, fit } of fits) next.set(channelRangeKey(datasetId, channel), fit);
+        return next;
+      });
+      applyAutoContrastFits(
         {
           scene: wasmSceneRef.current,
           loop: loopRef.current,
           session: sessionRef.current,
-          auto: autoContrastMapRef.current.get(datasetId) ?? true,
+          auto: (datasetId) => autoContrastMapRef.current.get(datasetId) ?? true,
           following: peerStore.getState().followTarget !== null,
         },
-        datasetId,
-        channel,
-        fit,
+        fits,
       );
     });
     return () => activeLoop.setAutoContrastListener(null);
@@ -106,22 +110,21 @@ export function useAutoContrast({
       const wasFollowing = following;
       following = peerStore.getState().followTarget !== null;
       if (!wasFollowing || following) return;
+      const fits: ChannelFitUpdate[] = [];
       for (const [key, fit] of contrastFitMapRef.current) {
         const parsed = parseChannelRangeKey(key);
-        if (!parsed) continue;
-        applyAutoContrastFit(
-          {
-            scene: wasmSceneRef.current,
-            loop: loopRef.current,
-            session: sessionRef.current,
-            auto: autoContrastMapRef.current.get(parsed.datasetId) ?? true,
-            following: false,
-          },
-          parsed.datasetId,
-          parsed.channel,
-          fit,
-        );
+        if (parsed) fits.push({ ...parsed, fit });
       }
+      applyAutoContrastFits(
+        {
+          scene: wasmSceneRef.current,
+          loop: loopRef.current,
+          session: sessionRef.current,
+          auto: (datasetId) => autoContrastMapRef.current.get(datasetId) ?? true,
+          following: false,
+        },
+        fits,
+      );
     });
   }, [peerStore, contrastFitMapRef, autoContrastMapRef, wasmSceneRef, loopRef, sessionRef]);
 }

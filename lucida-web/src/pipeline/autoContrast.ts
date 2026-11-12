@@ -69,7 +69,15 @@ export interface ChannelFit {
   provisional: boolean;
 }
 
-export type AutoContrastListener = (datasetId: string, channel: number, fit: ChannelFit) => void;
+/** One channel's new fit. */
+export interface ChannelFitUpdate {
+  datasetId: string;
+  channel: number;
+  fit: ChannelFit;
+}
+
+/** Takes every fit one update handed out, together. */
+export type AutoContrastListener = (fits: readonly ChannelFitUpdate[]) => void;
 
 /** What the fitter reads of the server's generated levels. */
 export interface FitHistograms {
@@ -354,13 +362,14 @@ export class AutoContrastFitter {
   private readonly lattices = new WeakMap<ArrayBuffer, Lattice>();
   private readonly outstanding = emptyLaneOutstanding();
 
+  /** The fits whose limits or range changed since the last update. */
   update(
     plans: ReadonlyMap<string, RequestPlan>,
     datasets: ReadonlyMap<string, { manifest: DatasetManifest }>,
     cache: FitCache,
     histograms: FitHistograms,
-    emit: AutoContrastListener,
-  ): void {
+  ): ChannelFitUpdate[] {
+    const out: ChannelFitUpdate[] = [];
     let fetching: boolean | null = null;
     for (const [datasetId, plan] of plans) {
       const manifest = datasets.get(datasetId)?.manifest;
@@ -397,9 +406,10 @@ export class AutoContrastFitter {
           continue;
         }
         state.last = fit;
-        emit(datasetId, channel, fit);
+        out.push({ datasetId, channel, fit });
       }
     }
+    return out;
   }
 
   /** Forget every fit handed out, so the next update hands out the current ones again. */
