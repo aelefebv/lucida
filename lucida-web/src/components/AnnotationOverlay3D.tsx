@@ -487,11 +487,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
               display: "none",
               transform: "translate(0px, 0px)",
               // The tick writes only display and transform, so this persists.
-              // An open thread is never dimmed.
+              // A pin whose thread is open is never dimmed.
               opacity: offCtx && !isOpen ? 0.5 : 1,
-              // Wrappers share one layer, so a later pin's dot would paint over
-              // an open popover. Lift only the open pin.
-              zIndex: isOpen ? 2 : 1,
             }}
           >
             {/* Every marker takes the pointer so any pin's thread can open; a

@@ -6,8 +6,9 @@
  * Every mutation applies locally and sends (`applyDocumentCommand`), because the
  * server leaves the sender out of its rebroadcast; client-supplied ids make both
  * paths converge. State here is per-thread only: hosts key the popover by pin id,
- * so switching pins remounts it and clears drafts. Hosts move it with its pin,
- * and it keeps itself on screen beside it.
+ * so switching pins remounts it and clears drafts. Hosts render it in the anchor
+ * they move with its pin. It draws over the floating controls and keeps itself
+ * on screen beside the pin.
  */
 import {
   CheckIcon,
@@ -20,6 +21,7 @@ import {
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
+import { AboveControls } from "../shell/CanvasStage.tsx";
 import { useThreadPlacement } from "./threadPlacement.ts";
 import type { Annotation, Comment } from "./annotationDocument.ts";
 import {
@@ -102,8 +104,9 @@ export function ThreadPopover({
   // Nothing is emitted until Confirm, so one click can never destroy a pin and
   // its thread.
   const [confirmingDelete, setConfirmingDelete] = useState(armDelete && mine);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useThreadPlacement(rootRef);
+  const [root, setRoot] = useState<HTMLDivElement | null>(null);
+  const [mark, setMark] = useState<HTMLSpanElement | null>(null);
+  useThreadPlacement(root, mark);
 
   // A frame late, once the menu that asked for it has let go of focus;
   // autoFocus would lose to the closing menu's focus containment.
@@ -266,9 +269,9 @@ export function ThreadPopover({
 
   const commentCount = `${comments.length} comment${comments.length === 1 ? "" : "s"}`;
 
-  return (
+  const thread = (
     <div
-      ref={rootRef}
+      ref={setRoot}
       className="lc-thread"
       data-testid={`annot-thread-${pin.id}`}
       role="dialog"
@@ -493,6 +496,16 @@ export function ThreadPopover({
         </Button>
       </div>
     </div>
+  );
+
+  return (
+    <>
+      {/* Placement finds the pin's anchor through this, as the thread draws elsewhere. */}
+      <span ref={setMark} hidden />
+      {/* The views' panes would cover the floating controls if the canvas
+          layers rose for the thread, so it alone draws over them. */}
+      <AboveControls>{thread}</AboveControls>
+    </>
   );
 }
 

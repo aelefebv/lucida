@@ -1,9 +1,11 @@
 /**
  * Four-up's planes over one view, each in its axis's color: lines across a
  * slice view, which a drag moves, and outlines over the volume. A drag sets
- * the plane's place at the pointer, and every view crosses there.
+ * the plane's place at the pointer, and every view crosses there. A line's
+ * grip takes the pointer from the view under it, so a wheel over the grip is
+ * handed on, to zoom the view as it would anywhere else in it.
  */
-import { useSyncExternalStore, type PointerEvent } from "react";
+import { useCallback, useSyncExternalStore, type PointerEvent } from "react";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import { isUpright, type FourUpPlanes, type PlaneLine } from "./planeLines.ts";
 import "./PlaneLines.css";
@@ -12,18 +14,28 @@ interface Props {
   lines: readonly PlaneLine[];
   /** Move `axis`'s plane to `fraction` of the way across the view; absent where no line moves. */
   onDrag?: (axis: SpatialAxis, fraction: number) => void;
+  /** A wheel over a line's grip, which the view under it never sees. */
+  onWheel?: (e: WheelEvent) => void;
 }
 
 /** `view`'s planes as `planes` reads them, following the scene and the tile. */
-export function ViewPlaneLines({ planes, view, onDrag }: Omit<Props, "lines"> & { planes: FourUpPlanes; view: number }) {
+export function ViewPlaneLines({ planes, view, onDrag, onWheel }: Omit<Props, "lines"> & { planes: FourUpPlanes; view: number }) {
   const lines = useSyncExternalStore(planes.subscribe, () => planes.linesOf(view));
-  return <PlaneLines lines={lines} onDrag={onDrag} />;
+  return <PlaneLines lines={lines} onDrag={onDrag} onWheel={onWheel} />;
 }
 
-export function PlaneLines({ lines, onDrag }: Props) {
+export function PlaneLines({ lines, onDrag, onWheel }: Props) {
+  // Listened for on the element rather than through React, whose wheel
+  // listener is passive and so could not keep a Ctrl wheel, a trackpad's
+  // pinch, from zooming the page.
+  const listen = useCallback((svg: SVGSVGElement | null) => {
+    if (!svg || !onWheel) return;
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [onWheel]);
   if (lines.length === 0) return null;
   return (
-    <svg className="lc-plane-lines" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
+    <svg ref={listen} className="lc-plane-lines" viewBox="0 0 1 1" preserveAspectRatio="none" aria-hidden="true">
       {lines.map((line, index) => (
         <g key={index} data-axis={line.axis}>
           <line className="lc-plane-line" x1={line.from[0]} y1={line.from[1]} x2={line.to[0]} y2={line.to[1]} />

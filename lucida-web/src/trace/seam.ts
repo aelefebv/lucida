@@ -279,11 +279,11 @@ export interface LucidaTraceSeam {
    */
   view(): SavedView | null;
   /**
-   * The part of {@link view} a scripted step is judged by: camera without
-   * its viewport, selectors, and what is shown. The driver compares the
-   * signature before and after a step to say whether the view changed, so
-   * the page and not the driver decides what counts, and a contrast refit
-   * during a hold is not a change of view.
+   * The part of {@link view} a scripted step is judged by: each view's
+   * camera without its viewport, selectors, and what is shown. The driver
+   * compares the signature before and after a step to say whether the view
+   * changed, so the page and not the driver decides what counts, and a
+   * contrast refit during a hold is not a change of view.
    */
   viewSignature(): ViewSignature | null;
   /**
@@ -352,8 +352,9 @@ export interface LucidaTraceSeam {
   blink(withUrl?: string | null): Promise<StepOutcome>;
   /**
    * A scripted layout: divide the canvas as `layout` does, `"single"`,
-   * `"columns"` or `"rows"`, and move into each view, in order, the datasets
-   * opened from the source URLs `show` lists for it.
+   * `"columns"`, `"rows"`, `"grid"` or `"four_up"`, and move into each view,
+   * in order, the datasets opened from the source URLs `show` lists for it.
+   * Four-up shows every dataset the lists name in all four views.
    */
   views(layout: string, show?: string[][], keep?: boolean): Promise<StepOutcome>;
   /**

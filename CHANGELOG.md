@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.39.0](https://github.com/aelefebv/lucida/compare/v0.38.1...v0.39.0) (2026-11-12)
+
+
+### Features
+
+* place and draw marks in side views of a collection ([#1598](https://github.com/aelefebv/lucida/issues/1598)) ([9d37da0](https://github.com/aelefebv/lucida/commit/9d37da00bb98d8e8d6c8f0e52bbba1992169e9df))
+
+
+### Bug Fixes
+
+* **trace:** judge four-up steps by each view's camera and show their datasets in every view ([#1604](https://github.com/aelefebv/lucida/issues/1604)) ([5db86d4](https://github.com/aelefebv/lucida/commit/5db86d40a429ff2bde20e0a710616edd972321a4))
+* **web:** a wheel over a four-up plane line zooms the view under it ([#1610](https://github.com/aelefebv/lucida/issues/1610)) ([b5bc6b4](https://github.com/aelefebv/lucida/commit/b5bc6b4f2bfd8302b8a3a475961e81e228b937b8))
+* **web:** floating controls take presses while a comment thread is open ([#1600](https://github.com/aelefebv/lucida/issues/1600)) ([17d2966](https://github.com/aelefebv/lucida/commit/17d296618d8b3ee478ab39a00dc4fdead7f088aa))
+* **web:** the layer panel's label rows follow the active view's plane ([#1607](https://github.com/aelefebv/lucida/issues/1607)) ([64eb592](https://github.com/aelefebv/lucida/commit/64eb592aea911d9d58020872dfaefc69617ccf44))
+
+
+### Performance
+
+* **web:** a full pool finds room for a chunk without classifying every slot ([#1609](https://github.com/aelefebv/lucida/issues/1609)) ([bcef7d2](https://github.com/aelefebv/lucida/commit/bcef7d247cd7d7d68005d45925c252d5c51cdd52))
+
 ## [0.38.1](https://github.com/aelefebv/lucida/compare/v0.38.0...v0.38.1) (2026-11-12)
 
 

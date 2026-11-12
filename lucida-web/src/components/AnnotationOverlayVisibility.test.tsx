@@ -27,7 +27,7 @@ function make2DScene(initial: Annotation[]): WasmScene {
     transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
     slice_plane: () => "xy",
-    draws_annotations: () => true,
+    annotation_shift: () => new Float64Array(3),
     // The inverse of the camera above on the 800 by 600 view, cutting Z
     // through the middle of plane 3.
     pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => new Float64Array([x - 400, y - 300, 3.5]),
