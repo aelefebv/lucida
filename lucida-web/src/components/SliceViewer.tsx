@@ -221,7 +221,7 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
       // a shape from the press to the release, a point at the release. A
       // shape's release goes on the tile its press landed on.
       const start = pickFramePoint(scene, surface, datasetId, anchor);
-      const end = drawShape && start ? pickFramePoint(scene, surface, datasetId, e, start) : null;
+      const end = drawShape && start ? pickFramePoint(scene, surface, datasetId, e, { start }) : null;
       if (!start || (drawShape && !end)) return;
       const layer = readResolvedLayers(scene, surface.view).get(datasetId);
 

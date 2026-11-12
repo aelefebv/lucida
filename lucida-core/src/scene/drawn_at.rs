@@ -4,14 +4,47 @@
 //! different views. A side view of a collection draws each tile in a cell of
 //! its own, so it draws a mark moved into its tile's cell.
 
-use lucida_content::DatasetId;
+use lucida_content::{DatasetId, EntityId};
 
 use crate::camera::Camera;
 use crate::slice_plane::SlicePlane;
 use crate::view::ViewId;
 
 use super::placement::placing_plane;
-use super::{CutReach, DatasetDerivedState, Scene};
+use super::{CutReach, DatasetDerivedState, MemberState, Scene};
+
+/// A mark, as what says which tile it is drawn on: the tile it is glued to,
+/// or for one with no anchor, such as a shape still being drawn, the tile its
+/// first vertex lies on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MarkOn<'a> {
+    /// The mark's first vertex, a point of its dataset's frame.
+    pub start: [f64; 3],
+    /// The tile it is glued to, its [`super::Annotation::anchor`].
+    pub anchor: Option<&'a EntityId>,
+}
+
+impl MarkOn<'_> {
+    /// A mark with no anchor yet, whose first vertex is `start`.
+    pub fn at(start: [f64; 3]) -> MarkOn<'static> {
+        MarkOn {
+            start,
+            anchor: None,
+        }
+    }
+}
+
+impl DatasetDerivedState {
+    /// The member `mark` is drawn on: the tile it is glued to, found by id,
+    /// or else the one its first vertex lies on ([`Self::member_holding`]).
+    /// A mark drawn every frame is glued to its tile, so finding it costs
+    /// the same however many tiles the collection has.
+    fn member_of(&self, mark: MarkOn) -> Option<&MemberState> {
+        mark.anchor
+            .and_then(|anchor| self.member_by_id(&anchor.0))
+            .or_else(|| self.member_holding(mark.start))
+    }
+}
 
 impl Scene {
     /// The layers `view` draws under `at`, fractions of its width and height
@@ -48,24 +81,15 @@ impl Scene {
             .collect()
     }
 
-    /// How far `view` draws a mark of `dataset_id` whose first vertex is the
-    /// frame point `start` from where the dataset's placement puts it,
-    /// `[x, y, z]` in its samples. A side view of a collection draws the
-    /// mark in the cell of the tile `start` lies on, or of the nearest tile,
-    /// and every vertex by the same shift, so a shape stays whole. Every
-    /// other view draws the frame in place, and an unknown view or dataset
-    /// moves nothing.
-    pub fn annotation_shift(
-        &self,
-        view: ViewId,
-        dataset_id: &DatasetId,
-        start: [f64; 3],
-    ) -> [f64; 3] {
+    /// How far `view` draws `mark`, of `dataset_id`, from where the
+    /// dataset's placement puts it, `[x, y, z]` in its samples. A side view
+    /// of a collection draws the mark in the cell of its tile
+    /// ([`MarkOn`]), and every vertex by the same shift, so a shape stays
+    /// whole. Every other view draws the frame in place, and an unknown view
+    /// or dataset moves nothing.
+    pub fn annotation_shift(&self, view: ViewId, dataset_id: &DatasetId, mark: MarkOn) -> [f64; 3] {
         self.cell_plane(view, dataset_id)
-            .and_then(|(derived, plane)| {
-                let member = derived.member_holding(start)?;
-                Some(derived.plane_shift(plane, member))
-            })
+            .and_then(|(derived, plane)| Some(derived.plane_shift(plane, derived.member_of(mark)?)))
             .unwrap_or([0.0; 3])
     }
 
@@ -307,7 +331,7 @@ mod tests {
                 .project_annotation(view, &id, point[0], point[1], point[2])
                 .unwrap();
             assert!(close(&back, &at), "{plane}: {back:?} against {at:?}");
-            let cut = scene.annotation_cut(view, &id, point).unwrap();
+            let cut = scene.annotation_cut(view, &id, MarkOn::at(point)).unwrap();
             assert_eq!(cut.position, scene.axis_index(view, plane.cut()), "{plane}");
 
             // XY draws it over the same tile, as does the volume.
@@ -356,13 +380,13 @@ mod tests {
             .pick_annotation_voxel(view, &id, from[0], from[1], None)
             .unwrap();
         let end = scene
-            .pick_annotation_voxel(view, &id, to[0], to[1], Some(start))
+            .pick_annotation_voxel(view, &id, to[0], to[1], Some(MarkOn::at(start)))
             .unwrap();
         assert!(close(&start, &[82.5, 10.5, 3.5]), "{start:?}");
         assert!(close(&end, &[112.5, 10.5, 25.5]), "{end:?}");
         // Both draw by the first vertex's shift, so the shape stays whole.
-        let shift = scene.annotation_shift(view, &id, start);
-        assert_eq!(shift, scene.annotation_shift(view, &id, end));
+        let shift = scene.annotation_shift(view, &id, MarkOn::at(start));
+        assert_eq!(shift, scene.annotation_shift(view, &id, MarkOn::at(end)));
         for (vertex, pointer) in [(start, from), (end, to)] {
             let back = scene
                 .project_annotation(view, &id, vertex[0], vertex[1], vertex[2])
@@ -388,7 +412,7 @@ mod tests {
         for plane in [SlicePlane::Xz, SlicePlane::Yz] {
             apply(&mut scene, ViewportCommand::SetSlicePlane { plane });
             // Going to it stands the view on the tile's plane it lies on.
-            let cut = scene.annotation_cut(view, &id, placed).unwrap();
+            let cut = scene.annotation_cut(view, &id, MarkOn::at(placed)).unwrap();
             let position = cut.position;
             apply(
                 &mut scene,
@@ -435,9 +459,43 @@ mod tests {
         );
         let start = [10.5, 10.5, 2.5];
         let end = scene
-            .pick_annotation_voxel(view, &id, gap[0], gap[1], Some(start))
+            .pick_annotation_voxel(view, &id, gap[0], gap[1], Some(MarkOn::at(start)))
             .unwrap();
         assert!(close(&end, &[68.0, 10.5, 4.0]), "{end:?}");
+    }
+
+    #[test]
+    fn a_mark_draws_on_the_tile_it_is_glued_to() {
+        let scene = tiles(SlicePlane::Xz);
+        let (view, id) = (scene.active_view().id(), tiles_id());
+        // A first vertex on the second tile, of a mark glued to the middle
+        // tile of the second row, as a mark in a gap can be after a layout
+        // switch.
+        let start = [82.5, 10.5, 3.5];
+        let t4 = lucida_content::EntityId("t4".into());
+        let glued = MarkOn {
+            start,
+            anchor: Some(&t4),
+        };
+        let on_t4 = scene.annotation_shift(view, &id, MarkOn::at([92.5, 50.5, 0.5]));
+        assert_eq!(scene.annotation_shift(view, &id, glued), on_t4);
+        assert_ne!(scene.annotation_shift(view, &id, MarkOn::at(start)), on_t4);
+        // A pick for it lands through the same tile.
+        let at = drawn(&scene, "t4", [40.5, 0.0, 9.5]);
+        let point = scene
+            .pick_annotation_voxel(view, &id, at[0], at[1], Some(glued))
+            .unwrap();
+        assert!(close(&point, &[112.5, 50.5, 9.5]), "{point:?}");
+        // An anchor that names no tile falls back to the tile under the start.
+        let gone = lucida_content::EntityId("gone".into());
+        let lost = MarkOn {
+            start,
+            anchor: Some(&gone),
+        };
+        assert_eq!(
+            scene.annotation_shift(view, &id, lost),
+            scene.annotation_shift(view, &id, MarkOn::at(start))
+        );
     }
 
     #[test]
@@ -445,18 +503,27 @@ mod tests {
         let point = [102.5, 52.5, 3.5];
         let mut scene = tiles(SlicePlane::Xy);
         let (view, id) = (scene.active_view().id(), tiles_id());
-        assert_eq!(scene.annotation_shift(view, &id, point), [0.0; 3]);
+        assert_eq!(
+            scene.annotation_shift(view, &id, MarkOn::at(point)),
+            [0.0; 3]
+        );
         scene.set_mode_3d();
-        assert_eq!(scene.annotation_shift(view, &id, point), [0.0; 3]);
+        assert_eq!(
+            scene.annotation_shift(view, &id, MarkOn::at(point)),
+            [0.0; 3]
+        );
         let mut single = Scene::new([800, 600]);
         open(&mut single, "a", [16, 64, 64]);
         let plane = SlicePlane::Xz;
         apply(&mut single, ViewportCommand::SetSlicePlane { plane });
         let view = single.active_view().id();
         assert_eq!(
-            single.annotation_shift(view, &DatasetId::from("a"), point),
+            single.annotation_shift(view, &DatasetId::from("a"), MarkOn::at(point)),
             [0.0; 3]
         );
-        assert_eq!(single.annotation_shift(ViewId(99), &id, point), [0.0; 3]);
+        assert_eq!(
+            single.annotation_shift(ViewId(99), &id, MarkOn::at(point)),
+            [0.0; 3]
+        );
     }
 }

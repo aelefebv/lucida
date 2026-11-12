@@ -26,7 +26,7 @@ import {
   viewFrameTarget,
   viewLayerTargets,
 } from "./viewResources.ts";
-import { grantGrowth, handleGpuOutOfMemory, measureGpuCapacity, measureGpuMemory } from "./gpuBudget.ts";
+import { GpuRoom, grantGrowth, handleGpuOutOfMemory, measureGpuCapacity, measureGpuMemory } from "./gpuBudget.ts";
 import { wantNothingOf } from "../coldState/apply.ts";
 
 const MIB = 1024 * 1024;
@@ -332,6 +332,25 @@ describe("a full pool", () => {
     expect(growVolumePoolWithin(ctx, "ds1:ch0:32x32x32:detail", atlas, false)).toBe(true);
 
     expect(atlas.slotsZ).toBe(4);
+  });
+
+  it("reads one delivery's room again after each growth or reclaim", () => {
+    const { ctx } = makeCtx();
+    const a = heldPool(ctx, "ds1:ch0:32x32x32:detail", "imgA", 1);
+    const b = heldPool(ctx, "ds1:ch1:32x32x32:detail", "imgB", 2);
+    want(ctx, "imgA", a.keys);
+    want(ctx, "imgB", b.keys.slice(0, 1));
+    ctx.state.gpuTotalBytes = measureGpuMemory(ctx.state).bytes + volumeLayerBytes(a.atlas);
+    const room = new GpuRoom(ctx.state);
+    const grow = (reclaim: boolean) => growVolumePoolWithin(ctx, "ds1:ch0:32x32x32:detail", a.atlas, reclaim, room);
+
+    expect(grow(false)).toBe(true);
+    expect(grow(false)).toBe(false);
+    expect(grow(true)).toBe(true);
+    expect(grow(false)).toBe(false);
+
+    expect([a.atlas.slotsZ, b.atlas.slotsZ]).toEqual([3, 1]);
+    expect(room.bytes).toBe(0);
   });
 });
 

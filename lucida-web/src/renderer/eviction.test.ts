@@ -1046,9 +1046,9 @@ describe("eviction kernel — findEvictionSlot", () => {
   });
 
   it("lets a wanted chunk take an unwanted slot at any distance, and a wanted slot only when strictly nearer", () => {
-    expect(mayEvict({ key: "k", class: "unsampled", dist: Infinity }, 10)).toBe(true);
-    expect(mayEvict({ key: "k", class: "unwanted", dist: 0.1 }, 10)).toBe(true);
-    expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, 0.4)).toBe(true);
-    expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, 0.5)).toBe(false);
+    expect(mayEvict({ key: "k", class: "unsampled", dist: Infinity }, () => 10)).toBe(true);
+    expect(mayEvict({ key: "k", class: "unwanted", dist: 0.1 }, () => 10)).toBe(true);
+    expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, () => 0.4)).toBe(true);
+    expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, () => 0.5)).toBe(false);
   });
 });
