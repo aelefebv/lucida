@@ -1,7 +1,10 @@
 /**
  * The threshold ruleset, shipped inside every diagnostic document so a
- * diagnostic read months later states which numbers judged it. Every ceiling
- * is provisional, derived from research runs on one machine over one link.
+ * diagnostic read months later states which numbers judged it. A ceiling sits
+ * where a person would notice the delay, not at a margin over a baseline.
+ * docs/perf.md lists the runs io.wire, compute.upload, server.dispatch and
+ * server.cache-lookup were checked against; the rest are provisional, from
+ * research runs on one machine over one link.
  *
  * Three families judge the run because one number cannot serve this pipeline:
  * absolute p95 ceilings for I/O and compute phases, a backlog ETA for queue
@@ -17,7 +20,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 15;
+export const RULESET_VERSION = 16;
 
 export interface AbsoluteRule {
   id: string;
@@ -314,8 +317,8 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
     id: "io.wire",
     phase: "browser.wire",
     stat: "p95",
-    ceilMs: 1_500,
-    why: "#899 §1: client-observed round trip p95 topped out at 1,230 ms across both remote runs. The ceiling sits above the worst healthy sample, not at it.",
+    ceilMs: 1_000,
+    why: "A region stays coarse until its chunks come off the wire. The round trip has a floor the link sets, past 100 ms across a continent, so the threshold is the next one a person has: past a second they stop watching the view fill in and wait for it. Healthy runs stay under 300 ms against a server on the same machine. The server's waits for a permit and for its source sit inside this bracket, so a breach whose server.permit-wait is most of it is waiting on the source's bandwidth.",
   },
   {
     id: "compute.plan",
@@ -336,7 +339,7 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
     phase: "browser.upload",
     stat: "p95",
     ceilMs: 100,
-    why: "#899 §7: upload dispatch was 91.6% under 100 µs. The ceiling clears the wait for a delivery tick and the per-frame upload budget with margin. Judged from when the view wanted the chunk; a chunk decoded before then waits in browser.unwanted, a queue.",
+    why: "A chunk decoded and wanted is data the view could draw now. After a scrub over planes in memory, or a switch of layout or mode, a region that reaches the GPU more than 100 ms later visibly trails the input, the same 100 ms the lag rule holds input to. The wait is about two frames, a delivery tick and the render that makes the chunk resident, so it lengthens with the frame time: healthy runs reach about 80 ms with four views at ratio 2 on a workstation GPU. Judged from when the view wanted the chunk; a chunk decoded before then waits in browser.unwanted, a queue.",
   },
   {
     id: "compute.present",
@@ -356,15 +359,15 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
     id: "server.dispatch",
     phase: "server.dispatch",
     stat: "p95",
-    ceilMs: 10,
-    why: "Binding in hand to the serve task doing work. Bookkeeping only; the waits it used to hide are their own phases now (#930).",
+    ceilMs: 100,
+    why: "Every chunk request waits here for the runtime before the server starts on it, so its p95 delays the detail of every region a move brings into view. Against a server on the same machine that wait is most of the round trip, and detail landing more than 100 ms after the move visibly trails it, the same 100 ms the lag rule holds input to. A machine that stalls holds every request in flight at once, which moves the p95 itself rather than its tail: healthy runs stay under 4 ms on a workstation, and reached 33 ms with other runs sharing it and 61 ms on CI's software rasterizer.",
   },
   {
     id: "server.cache-lookup",
     phase: "server.cache-lookup",
     stat: "p95",
-    ceilMs: 10,
-    why: "An LRU probe and a single-flight election. #902 measured a fully warm repeat open at 0.02 s across every read it made.",
+    ceilMs: 100,
+    why: "The cache probe and the single-flight election sit on every chunk's path as dispatch does, and the read's waits for a permit, the source and another reader are phases of their own, so what lands here delays a region's detail directly. Past 100 ms that delay visibly trails the move. Healthy runs stay under 5 ms. Reads that insert into a source cache that is evicting, as a deep volume's scrub does, reach 16 ms, and 51 ms with other runs sharing the machine.",
   },
   {
     id: "server.backend-read",
@@ -413,7 +416,7 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
 export const RULESET: Ruleset = {
   version: RULESET_VERSION,
   note:
-    "Three threshold families over the run, and a fourth over the interval after it closed. One number cannot serve a pipeline whose p50 network first byte is 98 ms and whose p50 scheduler queue wait is 4,600 ms (#899 §1, §3). Every ceiling is provisional, derived from throwaway-instrumented research runs on one machine and one link; the first real traces should re-derive them.",
+    "Three threshold families over the run, and a fourth over the interval after it closed. One number cannot serve a pipeline whose p50 network first byte is 98 ms and whose p50 scheduler queue wait is 4,600 ms (#899 §1, §3). A ceiling sits where a person would notice the delay. io.wire, compute.upload, server.dispatch and server.cache-lookup were checked against current runs on a workstation GPU and on CI's software rasterizer; the rest are provisional, derived from throwaway-instrumented research runs on one machine and one link.",
   absolute: ABSOLUTE,
   queuePhases: Object.entries(PHASE_CLASSES)
     .filter(([, cls]) => cls === "queue")

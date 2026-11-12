@@ -177,4 +177,33 @@ LUCIDA_GATE_CLI=target/release/lucida LUCIDA_GATE_SERVER=http://127.0.0.1:9876 s
 ```
 
 In a GitHub Actions job the runner also groups each run's text in the log, annotates each
-failed run, and writes the table to the job summary.
+failed run, and writes the table to the job summary. Each job keeps its run files as an
+artifact for 14 days, and its bundles too when it fails.
+
+## Ceilings
+
+A ceiling in `lucida-web/src/trace/diagnose/ruleset.ts` is the p95 at which a person would
+notice the delay a phase makes, not a margin over an old baseline. These four were set that
+way and checked against the runs listed below the table; the rest are still provisional.
+
+| rule | p95 ceiling | the delay a person would see | worst healthy p95 measured |
+| --- | --- | --- | --- |
+| `io.wire` | 1,000 ms, was 1,500 | A region stays coarse until its chunks land, and past a second the person stops watching it fill in and waits. | idle 316 ms local, 984 ms for a 2D image over `remote`; shared 633 ms; SwiftShader 264 ms |
+| `compute.upload` | 100 ms | A chunk already decoded trails a scrub or a switch of layout or mode, and past 100 ms the region visibly lags the input. | idle 82 ms, four views at ratio 2; the gate never judges it, since a cold open's upload is first paint |
+| `server.dispatch` | 100 ms, was 10 | Every chunk's detail trails the move that brought it into view by this much, and past 100 ms that shows. | idle 3.9 ms; shared 33 ms; SwiftShader 61 ms |
+| `server.cache-lookup` | 100 ms, was 10 | The same as dispatch. | idle 16 ms for a deep volume's scrub, under 5 ms otherwise; shared 51 ms; SwiftShader 0.2 ms |
+
+A busy machine stalls every request in flight at the same moment, so it moves a run's p95,
+not just its tail. No other percentile or minimum row count separates that from a slow
+phase. A ceiling at a person's scale stays clear of it, where the old 10 ms server ceilings
+failed gate runs on it.
+
+- **idle**: an RTX A6000 on Windows with nothing else running, 2026-11-12, `main` at
+  5e0b6c98 and 7b7d69f5. 120 run files, 240 runs counting script steps, from the `gate`,
+  `quick`, `four-up` and `hover` suites, `volume` gestures and `deep-volume` scrubs. Plus 34
+  run files over the `remote` and `deployed` networks.
+- **shared**: the same machine while other perf jobs ran on it, 2026-11-11 to 11-12, builds
+  of `main` and branches off it. 2,414 run files, 4,536 runs.
+- **SwiftShader**: CI's trace gate. 72 run files kept by failed jobs, 2026-11-08 to 11-09,
+  builds 0.24.0 to 0.27.1. Then 610 runs in 61 workflow runs, 2026-11-11 to 11-12, whose
+  logs show none of the four over its old ceiling.
