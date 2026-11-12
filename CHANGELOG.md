@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.38.1](https://github.com/aelefebv/lucida/compare/v0.38.0...v0.38.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **annotations:** each view dims marks by its own timepoint ([#1587](https://github.com/aelefebv/lucida/issues/1587)) ([b4e2dd9](https://github.com/aelefebv/lucida/commit/b4e2dd98493fd5ee7965d131e107ee7f5bd86e87))
+* **web:** floating controls take presses while the pixel readout shows ([#1586](https://github.com/aelefebv/lucida/issues/1586)) ([18e9670](https://github.com/aelefebv/lucida/commit/18e9670d527e6492b5aeb92338f6105b77348f33))
+
 ## [0.38.0](https://github.com/aelefebv/lucida/compare/v0.37.1...v0.38.0) (2026-11-12)
 
 
