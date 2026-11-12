@@ -22,7 +22,7 @@ import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint32Slice, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import { makeSliceSlotKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
-import { findEvictionSlot, incomingDistSq, mayEvict } from "../eviction.ts";
+import { incomingDistSq, mayEvict } from "../eviction.ts";
 import type { PoolCut } from "../slicePlane.ts";
 import { anyViewWants } from "../worker/draws.ts";
 import { anySection, anyViewHolds, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
@@ -208,7 +208,7 @@ export function handleSliceChunkData(
         slotIndex = atlas.freeSlots.pop()!;
       } else {
         const params = sliceEvictionParams(ctx.state, atlas, tier);
-        const victim = findEvictionSlot(params);
+        const victim = atlas.order.next(params);
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
           growSlicePoolWithin(ctx, poolKey, atlas, true)

@@ -27,6 +27,7 @@ import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import { createMinimapRendererState, type MinimapRendererState } from "../minimapHandlers.ts";
 import type { ViewResources } from "./viewResources.ts";
 import type { ViewIndirection } from "../viewIndirection.ts";
+import { CameraRefs } from "../cameraRefs.ts";
 
 /** GPU errors of one kind folded into the next report while the last one's spacing runs. */
 export interface GpuErrorReport {
@@ -52,7 +53,10 @@ export interface ViewDraw {
    * again for those.
    */
   cold: ColdStateMessage;
-  /** The index of {@link cold}'s wanted chunks. */
+  /**
+   * The index of {@link cold}'s wanted chunks. Replaced, never changed in
+   * place: eviction's order compares it by identity.
+   */
   wanted: WantedChunkIndex;
   /**
    * memberId → (`sourceKey(tier, level)` → pool key): the pool each section
@@ -64,9 +68,10 @@ export interface ViewDraw {
   /**
    * memberId → the target level of the view's cold state. Eviction takes a
    * resident chunk finer than every view's target first. Absent for a member
-   * with no chunk levels.
+   * with no chunk levels. Replaced, never changed in place, like
+   * {@link wanted}.
    */
-  targetLevels: Map<string, number>;
+  targetLevels: ReadonlyMap<string, number>;
   /** The sections {@link cold} laid out, by member. */
   sources: Map<string, EntitySource[]>;
   /** The view's entity descriptor buffer and index maps, rebuilt on each cold state. */
@@ -114,9 +119,9 @@ export interface RendererState {
   unplannedDatasets: Set<string>;
 
   /** Per view, memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
-  rayHits: Map<number, Map<string, [number, number, number]>>;
+  rayHits: CameraRefs<[number, number, number]>;
   /** Per view, memberId → last known viewport center in entity-local [0,1]^2 (slice mode). */
-  cameraUVs: Map<number, Map<string, [number, number]>>;
+  cameraUVs: CameraRefs<[number, number]>;
 
   /** Current scene epochs (replaced on every cold state). */
   currentEpochs: SceneEpochs | null;
@@ -198,8 +203,8 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     labelSlicePools: new Map(),
     labelVolumePools: new Map(),
     unplannedDatasets: new Set(),
-    rayHits: new Map(),
-    cameraUVs: new Map(),
+    rayHits: new CameraRefs(),
+    cameraUVs: new CameraRefs(),
     currentEpochs: null,
     currentColdState: null,
     lastFrames: new Map(),

@@ -8,14 +8,14 @@ import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { WantedMemberChunks } from "./workerProtocol.ts";
 
 /** `${tier}|${memberId}` → the chunk keys the planner wants for that member in that tier. */
-export type WantedChunkIndex = Map<string, ReadonlySet<string>>;
+export type WantedChunkIndex = ReadonlyMap<string, ReadonlySet<string>>;
 
 export function wantedEntryKey(tier: ResidencyTier, memberId: string): string {
   return `${tier}|${memberId}`;
 }
 
 export function indexWantedChunks(entries: readonly WantedMemberChunks[]): WantedChunkIndex {
-  const index: WantedChunkIndex = new Map();
+  const index = new Map<string, ReadonlySet<string>>();
   for (const entry of entries) {
     if (entry.chunkKeys.length === 0) continue;
     index.set(wantedEntryKey(entry.tier, entry.memberId), new Set(entry.chunkKeys));
@@ -41,11 +41,17 @@ export function patchWantedChunks(
   return [...byKey.values()];
 }
 
-/** Apply a delta's replacements to an index in place, as {@link patchWantedChunks} does to the list. */
-export function patchWantedIndex(index: WantedChunkIndex, replacements: readonly WantedMemberChunks[]): void {
+/**
+ * A delta's replacements applied to an index, as {@link patchWantedChunks}
+ * applies them to the list. The index comes back new, since eviction's order
+ * tells a changed one by identity.
+ */
+export function patchWantedIndex(index: WantedChunkIndex, replacements: readonly WantedMemberChunks[]): WantedChunkIndex {
+  const next = new Map(index);
   for (const entry of replacements) {
     const key = wantedEntryKey(entry.tier, entry.memberId);
-    if (entry.chunkKeys.length === 0) index.delete(key);
-    else index.set(key, new Set(entry.chunkKeys));
+    if (entry.chunkKeys.length === 0) next.delete(key);
+    else next.set(key, new Set(entry.chunkKeys));
   }
+  return next;
 }
