@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.38.0](https://github.com/aelefebv/lucida/compare/v0.37.1...v0.38.0) (2026-11-12)
+
+
+### Features
+
+* **annotations:** one annotation overlay per view, over every dataset it draws ([#1584](https://github.com/aelefebv/lucida/issues/1584)) ([7fb7a9a](https://github.com/aelefebv/lucida/commit/7fb7a9a391cc2185bae86f472b43e82a55692f70))
+
+
+### Bug Fixes
+
+* **annotations:** store marks on all three axes and draw them in every plane ([#1581](https://github.com/aelefebv/lucida/issues/1581)) ([b6b51fa](https://github.com/aelefebv/lucida/commit/b6b51fadb4e5eb75b1c8ac6ab5c77b623dd99fde))
+
 ## [0.37.1](https://github.com/aelefebv/lucida/compare/v0.37.0...v0.37.1) (2026-11-12)
 
 
