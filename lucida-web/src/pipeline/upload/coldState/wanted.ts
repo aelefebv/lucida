@@ -52,6 +52,10 @@ export function diffWantedChunks(
 
 function sameKeys(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  if (i === a.length) return true;
+  // The plan lists a member's chunks by priority, which a move can reorder.
   const set = new Set(a);
   return b.every((key) => set.has(key));
 }

@@ -68,10 +68,7 @@ import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
 import { orchTelemetryActive } from "./upload/telemetry/active.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
 import { regionInWorkerFrame, workerCutAxis, workerCutIndex } from "./upload/coldState/build.ts";
-import {
-  computeActiveSetIndexMap,
-  iterateActiveSetMembers,
-} from "./upload/coldState/build.ts";
+import { computeActiveSetIndexMap } from "./upload/coldState/build.ts";
 import type { Uploader } from "./upload/uploader.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 
@@ -169,6 +166,24 @@ function viewShare(
     activeSet: result.nextState.views.get(view.view.id)?.activeSet ?? [],
     requests: admitted.filter((req) => own.has(requestIdentity(req))),
   };
+}
+
+/** What the worker's cold state for one view of a dataset holds, as the last full send or delta left it. */
+interface HeldActiveSet {
+  mode: PoolMode;
+  activeSet: ActiveSetEntry[];
+  visibleChannels: readonly number[];
+  /** memberId → descriptor index, as the worker numbers the active set's members. */
+  indexByMember: Map<string, number>;
+}
+
+/** Whether `activeSet` over `visibleChannels` names the members `held` does, in the same order. */
+function sameMembers(held: HeldActiveSet, activeSet: readonly ActiveSetEntry[], visibleChannels: readonly number[]): boolean {
+  if (!numberArraysEqual(held.visibleChannels, visibleChannels) || held.activeSet.length !== activeSet.length) return false;
+  for (let i = 0; i < activeSet.length; i++) {
+    if (held.activeSet[i].imageId !== activeSet[i].imageId) return false;
+  }
+  return true;
 }
 
 const VIEWER_INTEREST_TTL_MS = 2_000;
@@ -697,7 +712,7 @@ export class TickCoordinator {
    * re-syncs with a full send, as does a view now drawing it in the other
    * mode. Its keys are the datasets the worker holds a plan for.
    */
-  private readonly heldActiveSets = new Map<string, Map<number, { mode: PoolMode; activeSet: ActiveSetEntry[] }>>();
+  private readonly heldActiveSets = new Map<string, Map<number, HeldActiveSet>>();
   private requestEpoch = 0;
   /** Per-dataset snapshot of the most recent visible region. Consumed by `orchDebug`. */
   private _lastVisibleRegion = new Map<string, VisibleRegion>();
@@ -1136,20 +1151,16 @@ export class TickCoordinator {
         // exactly the active set last sent for this view, so ship only the
         // active-set delta instead of the whole descriptor array.
         const heldForView = held.get(view.id);
-        const previousActiveSet = heldForView?.mode === mode ? heldForView.activeSet : undefined;
-        if (viewOnly && previousActiveSet !== undefined && previousActiveSet.length > 0) {
-          this.uploader.sendColdStateDelta({ ...coldArgs, previousActiveSet });
+        const visibleChannels = snapshot.selection.visibleChannels;
+        let indexByMember: Map<string, number>;
+        if (viewOnly && heldForView?.mode === mode && heldForView.activeSet.length > 0) {
+          this.uploader.sendColdStateDelta({ ...coldArgs, previousActiveSet: heldForView.activeSet });
           // The worker rebuilds its descriptor buffer from the reordered active
           // set in the same canonical order this walks, so the indices agree.
-          const visibleChannels = snapshot.selection.visibleChannels;
-          entityIndexByDatasetView.set(key, computeActiveSetIndexMap(share.activeSet, visibleChannels));
-          this.uploader.sendViewHotStateFromMembersIfAdvanced({
-            ctx,
-            datasetId: dsId,
-            view: view.id,
-            memberIds: iterateActiveSetMembers(share.activeSet, visibleChannels),
-            epochs: result.epochs,
-          });
+          // A move that leaves every member where it was keeps them.
+          indexByMember = sameMembers(heldForView, share.activeSet, visibleChannels)
+            ? heldForView.indexByMember
+            : computeActiveSetIndexMap(share.activeSet, visibleChannels);
         } else {
           // Full send. Drives atlas creation/remap + wanted-set + descriptor
           // buffer build; the resolved layer bakes per-channel display state
@@ -1157,20 +1168,20 @@ export class TickCoordinator {
           const coldMsg = this.uploader.sendColdState(coldArgs);
           // Same memberId → entityIndex map the worker builds from cold
           // state — both sides converge because they walk the same iteration order.
-          entityIndexByDatasetView.set(key, computeMemberIndexMap(coldMsg));
-
-          // Emit before render messages so the view's ray hits are current
-          // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
-          this.uploader.sendViewHotStateIfAdvanced({
-            ctx,
-            datasetId: dsId,
-            view: view.id,
-            coldMsg,
-            epochs: result.epochs,
-          });
+          indexByMember = computeMemberIndexMap(coldMsg);
         }
+        entityIndexByDatasetView.set(key, indexByMember);
+        // Emit before render messages so the view's ray hits are current
+        // when chunk-data eviction fires. Short-circuits on unchanged viewEpoch.
+        this.uploader.sendViewHotStateIfAdvanced({
+          ctx,
+          datasetId: dsId,
+          view: view.id,
+          memberIds: indexByMember.keys(),
+          epochs: result.epochs,
+        });
         // A later pure view move can take the delta path against this.
-        held.set(view.id, { mode, activeSet: share.activeSet });
+        held.set(view.id, { mode, activeSet: share.activeSet, visibleChannels, indexByMember });
       }
 
       // Categorical label overlays are invisible to the WASM planner
