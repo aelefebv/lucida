@@ -1,4 +1,4 @@
-import { useLayoutEffect, type RefObject } from "react";
+import { useLayoutEffect } from "react";
 import { frameClock } from "../frameClock.ts";
 import { readSafeAreaInsets } from "../theme/viewport.ts";
 
@@ -48,23 +48,35 @@ function intersect(a: Box, b: Box, inset: number): Box {
 }
 
 /**
- * Keeps an open thread on screen: inside the box that clips it and clear of
- * the safe-area insets. Its pin moves as the view pans, so placement runs on
- * the frame clock, which wakes for everything that moves the pin and idles
- * on a still view. It writes only when the answer changes. The thread caps
- * its size at the room, so a short stage still holds it.
+ * Keeps an open thread beside its pin and on screen: inside the box that
+ * clips the pin and clear of the safe-area insets. `mark` sits in the pin's
+ * anchor, which the overlay moves as the view pans, while the thread may draw
+ * elsewhere, over the floating controls. So placement runs on the frame clock
+ * after the overlay's tick, and the clock wakes for everything that moves the
+ * pin and idles on a still view. It writes only when the answer changes. The
+ * thread caps its size at the room, so a short stage still holds it, and it
+ * hides while the anchor does.
  */
-export function useThreadPlacement(ref: RefObject<HTMLElement | null>): void {
+export function useThreadPlacement(thread: HTMLElement | null, mark: HTMLElement | null): void {
   useLayoutEffect(() => {
-    const thread = ref.current;
-    if (!thread) return;
+    if (!thread || !mark) return;
     let last = "";
     const place = () => {
       // Looked up each time: a pin that leaves the view hides its anchor,
       // which then has no offset parent until it shows again.
-      const anchor = thread.parentElement;
+      const anchor = mark.parentElement;
       const clip = anchor?.offsetParent;
-      if (!anchor || !clip) return;
+      if (!anchor || !clip) {
+        // The thread is a DOM node this hook places, held as an element so
+        // placement starts whenever the portal mounts it.
+        // eslint-disable-next-line react-hooks/immutability
+        thread.style.display = "none";
+        last = "";
+        return;
+      }
+      if (thread.style.display) thread.style.display = "";
+      const host = thread.offsetParent;
+      if (!host) return;
       const insets = readSafeAreaInsets();
       const screen: Box = {
         left: insets.left,
@@ -80,7 +92,10 @@ export function useThreadPlacement(ref: RefObject<HTMLElement | null>): void {
         width: Math.min(thread.offsetWidth, roomWidth),
         height: Math.min(thread.offsetHeight, roomHeight),
       };
-      const { left, top } = placeThread({ x: pin.left, y: pin.top }, size, bounds);
+      const offset = placeThread({ x: pin.left, y: pin.top }, size, bounds);
+      const origin = host.getBoundingClientRect();
+      const left = pin.left + offset.left - origin.left;
+      const top = pin.top + offset.top - origin.top;
       const key = `${left},${top},${roomWidth},${roomHeight}`;
       if (key === last) return;
       last = key;
@@ -93,10 +108,10 @@ export function useThreadPlacement(ref: RefObject<HTMLElement | null>): void {
     // Nothing else wakes the clock when the thread's own content changes its size.
     const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(frameClock.wake);
     resized?.observe(thread);
-    const unsubscribe = frameClock.subscribe(place);
+    const unsubscribe = frameClock.subscribe(place, "follow");
     return () => {
       unsubscribe();
       resized?.disconnect();
     };
-  }, [ref]);
+  }, [thread, mark]);
 }

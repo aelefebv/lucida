@@ -15,31 +15,39 @@ import { useEffect } from "react";
 /** Draws one frame. Returning true keeps the clock running, as a held key does. */
 export type FrameCallback = (time: number) => boolean | void;
 
+/**
+ * When in a frame a callback draws. A `follow` callback places its element
+ * by where another layer's callback put one, so it draws after every `move`
+ * callback of the frame, whichever subscribed first.
+ */
+export type FramePhase = "move" | "follow";
+
 /** Stillness after the last wake before the clock stops. */
 export const IDLE_AFTER_MS = 500;
 
 const WAKE_EVENTS = ["pointerdown", "pointermove", "pointerup", "wheel", "keydown", "keyup", "touchstart", "touchmove"] as const;
 
 export class FrameClock {
-  private readonly callbacks = new Set<FrameCallback>();
+  private readonly phases: Record<FramePhase, Set<FrameCallback>> = { move: new Set(), follow: new Set() };
   private rafId: number | null = null;
   private awakeUntil = 0;
   private listening = false;
 
   /** Draw `callback` on every frame the clock runs, starting now. Returns the unsubscribe. */
-  subscribe(callback: FrameCallback): () => void {
-    this.callbacks.add(callback);
+  subscribe(callback: FrameCallback, phase: FramePhase = "move"): () => void {
+    const callbacks = this.phases[phase];
+    callbacks.add(callback);
     this.listen();
     this.wake();
     return () => {
-      this.callbacks.delete(callback);
-      if (this.callbacks.size === 0) this.stop();
+      callbacks.delete(callback);
+      if (this.subscribers === 0) this.stop();
     };
   }
 
   /** Run for at least {@link IDLE_AFTER_MS} more. Cheap enough to call on every change. */
   wake = (): void => {
-    if (this.callbacks.size === 0 || isHidden()) return;
+    if (this.subscribers === 0 || isHidden()) return;
     this.awakeUntil = performance.now() + IDLE_AFTER_MS;
     if (this.rafId === null) this.rafId = requestAnimationFrame(this.tick);
   };
@@ -49,13 +57,17 @@ export class FrameClock {
     return this.rafId !== null;
   }
 
+  private get subscribers(): number {
+    return this.phases.move.size + this.phases.follow.size;
+  }
+
   private tick = (time: number): void => {
     this.rafId = null;
     let keepAwake = false;
-    for (const callback of [...this.callbacks]) {
+    for (const callback of [...this.phases.move, ...this.phases.follow]) {
       if (callback(time) === true) keepAwake = true;
     }
-    if (this.callbacks.size === 0 || isHidden()) return;
+    if (this.subscribers === 0 || isHidden()) return;
     if (keepAwake || performance.now() < this.awakeUntil) {
       this.rafId = requestAnimationFrame(this.tick);
     }

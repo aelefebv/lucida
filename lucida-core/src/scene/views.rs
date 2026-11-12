@@ -163,14 +163,19 @@ impl Scene {
     }
 
     /// Show `datasets` in `view`, which fits them when its pose is the fit or
-    /// a stand-in, as an opened dataset is fitted. An unknown view changes
-    /// nothing.
+    /// a stand-in, as an opened dataset is fitted. Four-up fits its slice
+    /// views at one zoom, which what every view shows sets, so there each
+    /// view so posed fits again. An unknown view changes nothing.
     pub(crate) fn set_view_datasets(&mut self, view: ViewId, datasets: ViewDatasets) {
         let Some(shown) = self.view_mut(view) else {
             return;
         };
         shown.datasets = datasets;
-        self.reframe(view);
+        if self.layout == ViewLayout::FourUp {
+            self.reframe_all();
+        } else {
+            self.reframe(view);
+        }
     }
 
     /// Whether `view` draws `dataset_id`: it shows the dataset. Views of one
