@@ -91,9 +91,13 @@ function keptSectionsHold(
   layout: SectionLayout,
   inputs: RemapInputs,
 ): boolean {
+  return !layout.repacked && remappedFor(state, view, inputs);
+}
+
+/** Whether the view was last remapped for `inputs`, with no render radius or failed marks either time. */
+export function remappedFor(state: WorkerCtx["state"], view: ViewIndirection, inputs: RemapInputs): boolean {
   const last = state.remappedFor.get(view);
-  return last !== undefined && !layout.repacked &&
-    !last.viewDependent && !inputs.viewDependent &&
+  return last !== undefined && !last.viewDependent && !inputs.viewDependent &&
     last.t === inputs.t && last.z === inputs.z;
 }
 
@@ -146,13 +150,14 @@ function takeLayout(
 ): SectionLayout["added"] | undefined | null {
   const incremental = keptSectionsHold(ctx.state, view, layout, inputs);
   view.entityMetas = layout.metas;
+  view.space = layout.space;
   if (!incremental) {
-    resizeViewIndirection(ctx.device, view, layout.total);
+    resizeViewIndirection(ctx.device, view, layout.space.end);
     ctx.state.remappedFor.set(view, inputs);
     return undefined;
   }
   clearSections(view, layout.removed, dimArity);
-  growViewIndirection(ctx.device, view, layout.total);
+  growViewIndirection(ctx.device, view, layout.space.end);
   return layout.added.size > 0 ? layout.added : null;
 }
 

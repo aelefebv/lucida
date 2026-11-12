@@ -30,6 +30,9 @@ import type {
 } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
 import { UNTIMED } from "../passTiming.ts";
+import { buildDescriptorBuffer } from "../descriptorBuffer.ts";
+import type { LodIndirectionMeta } from "../volume/atlas.ts";
+import { growViewSlots } from "../viewIndirection.ts";
 
 function makeMockDevice(): GPUDevice {
   const createTexture = vi.fn((desc: GPUTextureDescriptor) => ({
@@ -263,6 +266,95 @@ describe("applyColdStateDelta", () => {
     };
     applyColdState(ctxFull, full);
     expect(drawOf(ctx.state, "ds1", 0)!.wanted).toEqual(drawOf(ctxFull.state, "ds1", 0)!.wanted);
+  });
+
+  it("lays out again only the members a view move changed, when the order holds", () => {
+    // Three levels in one pool, so a change of target level adds and drops sections.
+    const pyramid = (entityId: string, target: number): ColdStateActiveEntry => ({
+      ...tile(entityId, `img-${entityId}`, target),
+      levels: [
+        { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
+        { level: 1, chunkShape: [32, 64, 64], gridShape: [1, 2, 2], levelDims: [32, 128, 128] },
+        { level: 2, chunkShape: [32, 64, 64], gridShape: [1, 1, 1], levelDims: [16, 64, 64] },
+      ],
+    });
+    const ids = ["a", "b", "c", "d"];
+    const ctx = makeCtx();
+    applyColdState(ctx, makeCold(ids.map((id) => pyramid(id, 2))));
+    const draw = drawOf(ctx.state, "ds1", 0)!;
+    const [atlas] = ctx.state.volumeAtlases.values();
+    const view = atlas.views.get(0)!;
+    // Chunk 0 of every member's every level, resident, then mapped by a whole remap.
+    const slotOf = (id: string, level: number) => ids.indexOf(id) * 3 + level;
+    for (const id of ids) for (const level of [0, 1, 2]) atlas.slots.set(`img-${id}:ch0|${level}/0/0/0/0/0`, slotOf(id, level));
+    growViewSlots(atlas, 12);
+    ctx.state.remappedFor.delete(view);
+    applyColdState(ctx, draw.cold);
+    const buffer = view.indirectionBuf;
+    const keptA = view.entityMetas.get("img-a:ch0")!;
+    const writtenA = draw.descriptor!.written.get("img-a:ch0");
+
+    const move = (targets: number[]): ColdStateDeltaMessage => {
+      const before = draw.cold.activeSet;
+      return {
+        type: "coldStateDelta",
+        labels: [],
+        view: 0,
+        drawnViews: [0],
+        datasetId: "ds1",
+        epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
+        currentT: 0,
+        currentZ: 0,
+        visibleRegion: draw.cold.visibleRegion,
+        wantedChunks: [],
+        removedEntityIds: [],
+        upserts: ids.flatMap((id, i) => (before[i].detailLevels[0] === targets[i] ? [] : [pyramid(id, targets[i])])),
+        activeSetOrder: ids,
+      };
+    };
+    for (const targets of [[2, 0, 2, 2], [2, 1, 0, 2], [2, 2, 1, 0], [2, 0, 0, 1]]) {
+      applyColdStateDelta(ctx, move(targets));
+      expect(drawOf(ctx.state, "ds1", 0)).toBe(draw);
+
+      // Every member holds the sections its target calls for, none overlapping another.
+      const cells = new Map<number, string>();
+      ids.forEach((id, i) => {
+        const metas = view.entityMetas.get(`img-${id}:ch0`)!;
+        expect(metas.map((m) => m.level).sort(), `${id} at ${targets}`).toEqual([0, 1, 2].filter((l) => l >= targets[i]));
+        for (const meta of metas) {
+          const [gz, gy, gx] = meta.gridDims;
+          for (let cell = meta.offset; cell < meta.offset + gz * gy * gx; cell++) {
+            expect(cells.get(cell), `cell ${cell} at ${targets}`).toBeUndefined();
+            cells.set(cell, id);
+          }
+        }
+      });
+      expect(view.indirectionData.length).toBeGreaterThanOrEqual(Math.max(...cells.keys()) + 1);
+
+      // Each resident chunk is mapped at its member's section for its level, and only there.
+      for (const id of ids) {
+        const metas = view.entityMetas.get(`img-${id}:ch0`)!;
+        for (const level of [0, 1, 2]) {
+          const meta = metas.find((m) => m.level === level);
+          expect(view.slotGridIdx[slotOf(id, level)], `${id} level ${level} at ${targets}`).toBe(meta ? meta.offset : -1);
+          if (meta) expect(view.indirectionData[meta.offset]).toBe(slotOf(id, level));
+        }
+      }
+
+      // The descriptor entries read the sections the view lays out, as a full build would write them.
+      const fresh = buildDescriptorBuffer(makeMockDevice(), draw.cold, draw.sources);
+      expect(new Uint8Array(draw.descriptor!.bytes)).toEqual(new Uint8Array(fresh.bytes));
+      const sources = draw.sources.get("img-b:ch0")!;
+      expect(sources.map((source) => source.meta)).toEqual(view.entityMetas.get("img-b:ch0") as LodIndirectionMeta[]);
+    }
+    // Member a kept its level throughout: its sections and descriptor entry were never touched.
+    expect(view.entityMetas.get("img-a:ch0")).toBe(keptA);
+    expect(draw.descriptor!.written.get("img-a:ch0")).toBe(writtenA);
+    // The buffer grows a few times at most and is never replaced on a move that frees cells.
+    const grown = view.indirectionBuf;
+    applyColdStateDelta(ctx, move([2, 2, 2, 2]));
+    expect(view.indirectionBuf).toBe(grown);
+    expect(buffer).toBeDefined();
   });
 
   it("re-ingests in full while failed chunks are marked, since the marks follow the wanted set", () => {

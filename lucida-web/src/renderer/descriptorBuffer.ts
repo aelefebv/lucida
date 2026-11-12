@@ -260,6 +260,36 @@ export function buildDescriptorBuffer(
   };
 }
 
+/**
+ * Write these members' entries again where `index` already places them,
+ * for a view move that changed their cold entries and sections and left
+ * the order and every display as they were. Each member must have an entry
+ * in `index` and a colormap it has a LUT slot for.
+ */
+export function rewriteDescriptorEntries(
+  device: GPUDevice,
+  index: EntityDescriptorIndex,
+  members: readonly { entry: ColdStateActiveEntry; channel: number; memberId: string }[],
+  sourcesByMember: ReadonlyMap<string, readonly EntitySource[]>,
+  sampleFormat: SampleFormat,
+): void {
+  for (const { entry, channel, memberId } of members) {
+    const at = index.indexByMember.get(memberId)!;
+    const display = displayStateForChannel(entry, channel);
+    const lutIndex = index.colormapLutIndices.get(display.colormapName)!;
+    const sources = sourcesByMember.get(memberId) ?? [];
+    const selection = selectEntitySources(entry, sources);
+    const offset = at * DESCRIPTOR_ENTRY_SIZE;
+    serializeEntityDescriptor(index.bytes, offset, entry, selection, display, index.colormapLutIndices, sampleFormat);
+    device.queue.writeBuffer(index.buffer, offset, index.bytes, offset, DESCRIPTOR_ENTRY_SIZE);
+    index.written.set(memberId, { entry, display, sources, lutIndex, sampleFormat, selection, index: at });
+    index.sourceBindingByMember.set(memberId, {
+      levelPoolKeys: selection.levelPoolKeys,
+      coarsePoolKey: selection.coarse?.poolKey ?? null,
+    });
+  }
+}
+
 /** A member's pools resolved against current residency, ready to bind. */
 export interface ResolvedMemberPools<A> {
   /** Level pools in binding-slot order; a slot is `null` when its pool holds no section for the member. */

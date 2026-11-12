@@ -6,6 +6,7 @@
  */
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
+import type { SectionSpace } from "./coldState/sectionLayout.ts";
 import type { ViewDraw } from "./worker/state.ts";
 import { INDIRECTION_MISS } from "./remap.ts";
 import { remapSlotEntries, type CompactionPlan } from "./poolCompaction.ts";
@@ -15,6 +16,8 @@ export interface ViewIndirection {
   draw: ViewDraw;
   /** Per-entity level sections, at absolute offsets into {@link indirectionData}. */
   entityMetas: Map<string, LodIndirectionMeta[]>;
+  /** The cells {@link entityMetas} leaves free, where the next sections go. */
+  space: SectionSpace;
   indirectionData: Uint32Array<ArrayBuffer>;
   indirectionBuf: GPUBuffer;
   /** slot index → the cell it fills here, or -1 where this view samples it nowhere. */
@@ -40,6 +43,7 @@ export function createViewIndirection(device: GPUDevice, draw: ViewDraw, totalSl
   return {
     draw,
     entityMetas: new Map(),
+    space: { free: [], end: 0, used: 0 },
     indirectionData,
     indirectionBuf,
     slotGridIdx: new Int32Array(totalSlots).fill(-1),
