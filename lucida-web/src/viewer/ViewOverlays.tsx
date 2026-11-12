@@ -13,7 +13,8 @@
  * and a press on a control would also pan the view. A press or focus in them
  * makes their view the active one first, as a press in the pane does, so the
  * comparison controls, which steer the active view, steer the comparison
- * they show.
+ * they show. A wheel over a plane line's grip goes on to the pane, so it
+ * zooms the view as it would anywhere else in it.
  */
 import { HouseIcon } from "@phosphor-icons/react";
 import { useSyncExternalStore } from "react";
@@ -28,6 +29,7 @@ import { ViewNotices } from "./ViewNotices.tsx";
 import { viewNotices } from "./viewNotices.ts";
 import { ViewPlaneLines } from "./PlaneLines.tsx";
 import type { FourUpPlanes } from "./planeLines.ts";
+import { forwardWheel, paneOf } from "./viewPane.ts";
 import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import { IconButton } from "../ui/Button.tsx";
 import type { KeyCombo } from "../ui/shortcuts.ts";
@@ -50,6 +52,8 @@ interface Props {
   planes?: FourUpPlanes | null;
   /** Move `axis`'s plane to `fraction` of the way across `view`, as dragging its line does. */
   dragPlane?: (view: number, axis: SpatialAxis, fraction: number) => void;
+  /** What holds the views' panes, where a wheel over a line's grip goes on to. */
+  panes?: ParentNode | null;
   /** The crosshairs the point under the pointer puts in the other views. */
   hover?: Pick<Hover, "subscribe" | "markOf">;
   /** Whether a running blink holds still, as a capture asks. */
@@ -59,7 +63,7 @@ interface Props {
 }
 
 export function ViewOverlays({
-  views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, planes, dragPlane, hover, still, home,
+  views, store, actions, nameOf, activate, coverageOf, byHand, linkNotices, planes, dragPlane, panes, hover, still, home,
 }: Props) {
   const comparisons = useSyncExternalStore(store.subscribe, store.getComparisons, store.getComparisons);
   return (
@@ -67,6 +71,10 @@ export function ViewOverlays({
       {views.map((pane) => {
         const comparison = comparisons.get(pane.id) ?? null;
         const [x, y, width, height] = pane.rect;
+        const wheel = (e: WheelEvent) => {
+          const target = panes && paneOf(panes, pane.id);
+          if (target) forwardWheel(e, target);
+        };
         const select = (event: { target: EventTarget | null }) => {
           // Reading a view's notices steers nothing, and making a view that
           // follows the other the active one would end the link notices it shows.
@@ -89,6 +97,7 @@ export function ViewOverlays({
                 planes={planes}
                 view={pane.id}
                 onDrag={dragPlane && pane.cameraMode === "slice" ? (axis, fraction) => dragPlane(pane.id, axis, fraction) : undefined}
+                onWheel={wheel}
               />
             )}
             {hover && <Crosshair hover={hover} view={pane.id} />}
