@@ -42,9 +42,8 @@ export function viewCut(layer: ResolvedLayer, plane: SlicePlane): ViewCut {
 
 /**
  * Each dataset whose marks `pane`'s view draws, in layer order, and its
- * context there. A view draws the marks of every dataset it draws in that
- * dataset's own frame, whichever layer is selected, which leaves out a side
- * view's collection. Each mark lies on its own dataset's planes, so where
+ * context there. A view draws the marks of every dataset it draws, whichever
+ * layer is selected. Each mark lies on its own dataset's planes, so where
  * the view cuts that dataset and the channels it shows there decide which
  * marks are in context. A volume view cuts none. The T is the view's own,
  * which another view's need not match while time is not linked.
@@ -57,7 +56,6 @@ export function viewContextsOf(
   const plane = pane.cameraMode === "slice" ? (scene.slice_plane(pane.id) as SlicePlane) : null;
   const contexts = new Map<string, ViewContext>();
   for (const datasetId of pane.draws) {
-    if (!scene.draws_annotations(pane.id, datasetId)) continue;
     const layer = layers.get(datasetId);
     contexts.set(datasetId, { cut: plane && layer ? viewCut(layer, plane) : null, t: pane.t, channels: shownChannels(layer) });
   }

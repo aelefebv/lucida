@@ -1278,32 +1278,48 @@ impl WasmScene {
     /// pixels `(screen_x, screen_y)` in `view` takes, exactly the triple to
     /// store as `position = [x, y]`, `z = z`
     /// ([`Scene::pick_annotation_voxel`]): on a slice view's plane, or where
-    /// a volume view's ray meets the volume. Returns an empty `Vec` (length
-    /// 0) where there is none, such as a ray that misses, so the caller can
-    /// decline to drop a mark into empty space. The point re-projects (via
-    /// `project_annotation`) back under the cursor that picked it.
+    /// a volume view's ray meets the volume. In a side view of a collection
+    /// it lands on the tile of the mark whose first vertex is `on`, `[x, y,
+    /// z]`, or without one on the tile under the pointer. Returns an empty
+    /// `Vec` (length 0) where there is none, such as a ray that misses, so
+    /// the caller can decline to drop a mark into empty space. The point
+    /// re-projects (via `project_annotation`) back under the cursor that
+    /// picked it.
     pub fn pick_annotation_voxel(
         &self,
         view: u32,
         dataset_id: &str,
         screen_x: f64,
         screen_y: f64,
+        on: Option<Vec<f64>>,
     ) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
+        let on = on.and_then(|v| Some([*v.first()?, *v.get(1)?, *v.get(2)?]));
         match self
             .inner
-            .pick_annotation_voxel(ViewId(view), &id, screen_x, screen_y)
+            .pick_annotation_voxel(ViewId(view), &id, screen_x, screen_y, on)
         {
             Some([x, y, z]) => vec![x, y, z],
             None => Vec::new(),
         }
     }
 
-    /// Whether `view` draws the marks of `dataset_id`
-    /// ([`Scene::draws_annotations`]).
-    pub fn draws_annotations(&self, view: u32, dataset_id: &str) -> bool {
+    /// How far `view` draws a mark of `dataset_id` whose first vertex is the
+    /// frame point `(x, y, z)` from where the dataset's placement puts it,
+    /// `[dx, dy, dz]`, the same for each of its vertices
+    /// ([`Scene::annotation_shift`]).
+    pub fn annotation_shift(
+        &self,
+        view: u32,
+        dataset_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> Vec<f64> {
+        let id = DatasetId(dataset_id.into());
         self.inner
-            .draws_annotations(ViewId(view), &DatasetId(dataset_id.into()))
+            .annotation_shift(ViewId(view), &id, [x, y, z])
+            .to_vec()
     }
 
     /// Where `view` stands to cut the plane of `dataset_id` holding the frame

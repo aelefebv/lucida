@@ -28,8 +28,7 @@ export function annotationTarget(
 
 /** Where a point placed at `at` in `surface`'s view goes: on the layer
  * {@link annotationTarget} picks, at the point of its frame there. Null where
- * the view draws no layer under it, or lays that layer out apart from its
- * frame. */
+ * the view draws no layer under it. */
 export function annotationPlacement(
   scene: Pick<WasmScene, "layers_at" | "pick_annotation_voxel">,
   surface: ViewSurface,
@@ -39,16 +38,6 @@ export function annotationPlacement(
   const datasetId = annotationTarget(scene, surface, at, selected);
   const point = datasetId === null ? null : pickFramePoint(scene, surface, datasetId, at);
   return datasetId !== null && point ? { datasetId, position: [point[0], point[1]], z: point[2] } : null;
-}
-
-/** Say that a press placed no mark, since this view lays the layer under it
- * out apart from its frame, as a side view of a collection does. */
-export function sayNoMarksInThisView(): void {
-  toast({
-    title: "Can't annotate this layer here",
-    description: "Marks on a collection go in an XY view.",
-    tone: "warning",
-  });
 }
 
 /** Say that a press placed no mark, since the view draws no layer under it. */
