@@ -708,6 +708,18 @@ impl TileCells {
             SlicePlane::Yz => [x * self.across_yz, y * self.down],
         }
     }
+
+    /// How far `plane` draws a sample of the tile at layout `position` from
+    /// where its dataset's frame puts it, `[x, y, z]` in the dataset's
+    /// samples. The tile's sample `p` draws at `p + shift` in the frame the
+    /// view places: at its own place in the tile's cell on the two axes the
+    /// plane draws, and along the cut at its place from the tile's own edge,
+    /// where the view reads every tile. Taking it away undoes the move, so
+    /// a point picked in a cell lands on the tile's own samples.
+    pub fn shift(&self, plane: SlicePlane, position: [f64; 2]) -> [f64; 3] {
+        let cell = plane.frame_point(self.position(plane, position));
+        [cell[0] - position[0], cell[1] - position[1], cell[2]]
+    }
 }
 
 #[cfg(test)]
@@ -1131,6 +1143,31 @@ mod tests {
         assert_eq!(cells.position(SlicePlane::Xz, [0.0, 10.0]), [0.0, 10.0]);
         assert_eq!(cells.position(SlicePlane::Yz, [10.0, 0.0]), [20.0, 0.0]);
         assert_eq!(TileCells::new([]), TileCells::new([[1, 1, 1, 1, 1]]));
+    }
+
+    #[test]
+    fn a_tiles_shift_puts_its_samples_in_its_cell_and_its_cut_at_its_own_edge() {
+        // Tiles 100 wide, 50 tall and 20 deep, laid out with a gap of 10.
+        let cells = TileCells::new([[1, 1, 20, 50, 100]; 4]);
+        let position = [110.0, 60.0];
+        // The tile's sample 30 across, 5 down and 7 deep.
+        let sample = [140.0, 65.0, 7.0];
+        let drawn = |plane| {
+            let shift = cells.shift(plane, position);
+            std::array::from_fn::<f64, 3, _>(|i| sample[i] + shift[i])
+        };
+        assert_eq!(cells.shift(SlicePlane::Xy, position), [0.0; 3]);
+        for plane in [SlicePlane::Xz, SlicePlane::Yz] {
+            let [across, down, cut] = plane.axes().map(|a| a.xyz());
+            let cell = cells.position(plane, position);
+            let local = [30.0, 5.0, 7.0];
+            let at = drawn(plane);
+            // On screen it is as far into its cell as into the tile.
+            assert_eq!(at[across] - cell[0], local[across], "{plane}");
+            assert_eq!(at[down] - cell[1], local[down], "{plane}");
+            // Along the cut it is where the view reads every tile.
+            assert_eq!(at[cut], local[cut], "{plane}");
+        }
     }
 
     #[test]
