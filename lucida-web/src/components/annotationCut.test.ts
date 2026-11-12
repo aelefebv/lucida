@@ -19,13 +19,13 @@ function scene(answer: unknown, { z = 0, cut = 0 } = {}) {
   return { stub, asked };
 }
 
-const pin: Annotation = { id: "p", kind: "point", position: [12.5, 40.5], z: 7.25, author: "a" };
+const pin: Annotation = { id: "p", kind: "point", position: [12.5, 40.5], z: 7.25, author: "a", anchor: "t4" };
 
 describe("annotationCutCommand", () => {
-  it("asks for the plane holding the mark's anchor in the active view", () => {
+  it("asks for the plane holding the mark's anchor in the active view, on its tile", () => {
     const { stub, asked } = scene({ axis: "z", position: 7 });
     expect(annotationCutCommand(stub, "ds", pin)).toEqual({ type: "set_z", z: 7 });
-    expect(asked).toEqual([[2, "ds", 12.5, 40.5, 7.25]]);
+    expect(asked).toEqual([[2, "ds", 12.5, 40.5, 7.25, "t4"]]);
   });
 
   it("steps a side view along the axis it cuts", () => {

@@ -43,6 +43,9 @@ export interface Annotation {
   kind: string;
   /** Flat, insertion-ordered thread; defaults to empty. */
   comments?: Comment[];
+  /** The tile of a collection the pin is glued to, which a side view draws
+   * it on; absent or null elsewhere. The scene derives it. */
+  anchor?: string | null;
   /** The author's view at creation, in workspace-dataset-id form (empty
    * `datasets`, no source URLs). Omitted on the wire when unset. */
   view?: SavedView | null;

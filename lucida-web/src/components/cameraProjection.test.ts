@@ -195,7 +195,7 @@ describe("pickFramePoint", () => {
     } as unknown as WasmScene;
     const surface = { view: 3, element: makeCanvas(100, 50) };
     expect(pickFramePoint(scene, surface, "ds", { clientX: 110, clientY: 70 })).toEqual([1, 2, 3.5]);
-    expect(calls).toEqual([[3, "ds", 20, 40, undefined]]);
+    expect(calls).toEqual([[3, "ds", 20, 40, undefined, undefined]]);
   });
 
   it("is null where the scene has no point", () => {
@@ -203,7 +203,7 @@ describe("pickFramePoint", () => {
     expect(pickFramePoint(scene, { view: 0, element: makeCanvas() }, "ds", { clientX: 1, clientY: 1 })).toBeNull();
   });
 
-  it("passes the first vertex of the mark the point belongs to", () => {
+  it("passes the mark the point belongs to: its first vertex and its tile", () => {
     const calls: unknown[][] = [];
     const scene = {
       pick_annotation_voxel: (...args: unknown[]) => {
@@ -211,13 +211,14 @@ describe("pickFramePoint", () => {
         return new Float64Array([1, 2, 3.5]);
       },
     } as unknown as WasmScene;
-    pickFramePoint(scene, { view: 0, element: makeCanvas() }, "ds", { clientX: 1, clientY: 1 }, [4, 5, 6.5]);
+    pickFramePoint(scene, { view: 0, element: makeCanvas() }, "ds", { clientX: 1, clientY: 1 }, { start: [4, 5, 6.5], anchor: "t4" });
     expect([...(calls[0][4] as Float64Array)]).toEqual([4, 5, 6.5]);
+    expect(calls[0][5]).toBe("t4");
   });
 });
 
 describe("makeMarkToScreen (a mark's vertices moved by its shift)", () => {
-  it("moves every vertex by the shift of the mark's first vertex", () => {
+  it("moves every vertex by the shift of the mark's tile", () => {
     const asked: unknown[][] = [];
     const scene = {
       zoom: () => 1,
@@ -232,12 +233,13 @@ describe("makeMarkToScreen (a mark's vertices moved by its shift)", () => {
     } as unknown as WasmScene;
     const surface = { view: 2, element: makeCanvas() };
     const start: FramePoint = [30, 52.5, 3.5];
-    const project = makeMarkToScreen(scene, surface)("ds", start);
+    const project = makeMarkToScreen(scene, surface)("ds", { start, anchor: "t4" });
     expect(project(start)).toEqual([430, 323.5]);
-    // A vertex past the tile still moves by the first vertex's shift.
+    // A vertex past the tile still moves by the mark's shift.
     expect(project([90, 52.5, 30])).toEqual([490, 350]);
-    expect(asked).toEqual([[2, "ds", 30, 52.5, 3.5]]);
-    expect(markShift({ annotation_shift: () => new Float64Array([]) } as unknown as WasmScene, surface, "ds", start)).toEqual([0, 0, 0]);
+    expect(asked).toEqual([[2, "ds", 30, 52.5, 3.5, "t4"]]);
+    const none = { annotation_shift: () => new Float64Array([]) } as unknown as WasmScene;
+    expect(markShift(none, surface, "ds", { start })).toEqual([0, 0, 0]);
   });
 });
 
@@ -288,13 +290,13 @@ describe("a mark on a tile of a collection, in a side view and in XY", () => {
       const at = drawnAt(scene, surface, id, tile, [40.5, 0, 5.5]);
       const point = pickFramePoint(scene, surface, id, at);
       [328.5, 388.5, 5.5].forEach((v, i) => expect(point?.[i]).toBeCloseTo(v, 6));
-      const back = makeMarkToScreen(scene, surface)(id, point!)(point!);
+      const back = makeMarkToScreen(scene, surface)(id, { start: point! })(point!);
       expect(back[0]).toBeCloseTo(at.clientX, 6);
       expect(back[1]).toBeCloseTo(at.clientY, 6);
 
       // XY draws it over the same tile, where the frame puts it.
       scene.apply_command(JSON.stringify({ type: "set_slice_plane", plane: "xy" }));
-      const [x, y] = makeMarkToScreen(scene, surface)(id, point!)(point!);
+      const [x, y] = makeMarkToScreen(scene, surface)(id, { start: point! })(point!);
       expect(makeFrameToScreen(scene, surface, id)(point!)).toEqual([x, y]);
       const under = JSON.parse(scene.tile_at(surface.view, x / 800, y / 600)) as { entity: string } | null;
       expect(under?.entity).toBe(tile);

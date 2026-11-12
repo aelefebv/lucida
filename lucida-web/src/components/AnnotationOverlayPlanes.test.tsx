@@ -22,6 +22,7 @@ const MY_ID = "7";
 function makeScene(plane: SlicePlane, pins: Annotation[], cut: number, shift: [number, number, number] = [0, 0, 0]) {
   const sent: Array<Record<string, unknown>> = [];
   const picks: Array<Float64Array | undefined> = [];
+  const shiftsAsked: unknown[][] = [];
   const scene = {
     annotations: () => JSON.stringify(pins),
     active_view: () => 0,
@@ -29,7 +30,10 @@ function makeScene(plane: SlicePlane, pins: Annotation[], cut: number, shift: [n
     center: () => new Float64Array([0, 0]),
     transposed: () => false,
     slice_plane: () => plane,
-    annotation_shift: () => new Float64Array(shift),
+    annotation_shift: (...args: unknown[]) => {
+      shiftsAsked.push(args);
+      return new Float64Array(shift);
+    },
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2]),
     pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number, on?: Float64Array) => {
       picks.push(on);
@@ -40,7 +44,7 @@ function makeScene(plane: SlicePlane, pins: Annotation[], cut: number, shift: [n
     },
     apply_command: (json: string) => sent.push(JSON.parse(json) as Record<string, unknown>),
   } as unknown as WasmScene;
-  return { scene, sent, picks };
+  return { scene, sent, picks, shiftsAsked };
 }
 
 function makeCanvas(): HTMLCanvasElement {
@@ -53,7 +57,7 @@ function makeCanvas(): HTMLCanvasElement {
 }
 
 function renderIn(plane: SlicePlane, pins: Annotation[], cut: ViewContext["cut"], shift?: [number, number, number]) {
-  const { scene, sent, picks } = makeScene(plane, pins, cut?.start ?? 0, shift);
+  const { scene, sent, picks, shiftsAsked } = makeScene(plane, pins, cut?.start ?? 0, shift);
   const sceneRef = createRef<WasmScene | null>();
   sceneRef.current = scene;
   render(
@@ -70,7 +74,7 @@ function renderIn(plane: SlicePlane, pins: Annotation[], cut: ViewContext["cut"]
       onDocumentChanged={() => {}}
     />,
   );
-  return { sent, picks };
+  return { sent, picks, shiftsAsked };
 }
 
 // Capture scheduled frames so a test runs the overlay's tick on demand.
@@ -169,17 +173,20 @@ describe("AnnotationOverlay in each plane", () => {
 });
 
 describe("AnnotationOverlay in a side view that draws a mark moved into its tile's cell", () => {
-  /** A point 12 rows into a tile laid out at Y 40, whose cell in an XZ view
-   * starts 20 planes down. */
-  const onTile: Annotation = { id: "t", kind: "point", position: [30, 52.5], z: 9.5, author: MY_ID, comments: [] };
+  /** A point 12 rows into a tile laid out at Y 40, glued to it, whose cell
+   * in an XZ view starts 20 planes down. */
+  const onTile: Annotation = { id: "t", kind: "point", position: [30, 52.5], z: 9.5, author: MY_ID, comments: [], anchor: "t4" };
   const shift: [number, number, number] = [0, -40, 20];
 
   it("draws it in the cell, in context where the view cuts the tile's own row", () => {
-    renderIn("xz", [onTile], { axis: "y", start: 12, end: 13 }, shift);
+    const { shiftsAsked } = renderIn("xz", [onTile], { axis: "y", start: 12, end: 13 }, shift);
     runFrame();
     // X 30 across; Z 9.5 plus the cell's 20, 2 scene units a plane, down.
     expect(transformOf("annot-pin-wrapper-t")).toBe("translate(430px, 359px)");
     expect(screen.getByTestId("annot-pin-t").dataset.offContext).toBeUndefined();
+    // The cell is the glued tile's.
+    expect(shiftsAsked.length).toBeGreaterThan(0);
+    for (const args of shiftsAsked) expect(args.slice(2)).toEqual([30, 52.5, 9.5, "t4"]);
   });
 
   it("names the tile's own row when the cut misses it", () => {

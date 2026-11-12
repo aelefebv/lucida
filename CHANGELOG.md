@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.39.1](https://github.com/aelefebv/lucida/compare/v0.39.0...v0.39.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **core:** anchor a mark to the tile it lies on ([#1608](https://github.com/aelefebv/lucida/issues/1608)) ([80cde47](https://github.com/aelefebv/lucida/commit/80cde47ffc038247b638f1200a5bf0f900554ae0))
+* glue old marks to their tiles once, then draw each by its anchor ([#1619](https://github.com/aelefebv/lucida/issues/1619)) ([e230dba](https://github.com/aelefebv/lucida/commit/e230dba59b77121fa10231c44204ed0200563281))
+* **web:** a wheel over any control floating over a view zooms the view ([#1615](https://github.com/aelefebv/lucida/issues/1615)) ([8ca79e6](https://github.com/aelefebv/lucida/commit/8ca79e604a7a45a46497072ca8d4fc1da92fb08a))
+* **web:** resize the canvas when the pixel ratio changes unannounced ([#1611](https://github.com/aelefebv/lucida/issues/1611)) ([de4e83a](https://github.com/aelefebv/lucida/commit/de4e83aca33c1682b9009dbc0199d1b3c1751242))
+
+
+### Performance
+
+* **web:** fit auto-contrast once a gesture is over, and apply a tick's fits together ([#1606](https://github.com/aelefebv/lucida/issues/1606)) ([4a7f018](https://github.com/aelefebv/lucida/commit/4a7f0183745cafead049bc222ef5e8e31f9f7731))
+* **web:** lay out again only the tiles a view move changed, in the render worker ([#1614](https://github.com/aelefebv/lucida/issues/1614)) ([4d409ac](https://github.com/aelefebv/lucida/commit/4d409aceece89f644043d049c312370a4b7f3372))
+
 ## [0.39.0](https://github.com/aelefebv/lucida/compare/v0.38.1...v0.39.0) (2026-11-12)
 
 
