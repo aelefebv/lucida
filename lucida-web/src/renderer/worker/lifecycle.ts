@@ -41,8 +41,8 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   for (const [memberId, dsId] of state.memberToDataset) {
     if (dsId === id) {
       state.memberToDataset.delete(memberId);
-      for (const byMember of state.cameraUVs.values()) byMember.delete(memberId);
-      for (const byMember of state.rayHits.values()) byMember.delete(memberId);
+      state.cameraUVs.forget(memberId);
+      state.rayHits.forget(memberId);
     }
   }
   if (state.currentColdState?.datasetId === id) {

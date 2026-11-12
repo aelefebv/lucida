@@ -43,7 +43,7 @@ export interface AtlasSnapshot {
    */
   planesByChunk?: ReadonlyMap<string, ReadonlyMap<number, number>>;
   /** Per-entity level sections. */
-  entityMetas?: Map<string, AtlasLevelMeta[]>;
+  entityMetas?: ReadonlyMap<string, readonly AtlasLevelMeta[]>;
 }
 
 export interface WantedSetResult {

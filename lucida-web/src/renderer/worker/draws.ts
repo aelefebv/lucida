@@ -8,6 +8,7 @@ import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import type { PoolMode } from "../workerProtocol.ts";
 import type { SpatialAxis } from "../slicePlane.ts";
 import type { SharedChunkPool } from "../viewIndirection.ts";
+import type { EvictionView } from "../eviction.ts";
 import { datasetViewKey, sourceKey } from "../poolKeys.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
 import type { RendererState, ViewDraw } from "./state.ts";
@@ -79,4 +80,33 @@ export function wantedCountIn(pool: SharedChunkPool, memberId: string, tier: Res
     for (const chunkKey of keys) union.add(chunkKey);
   }
   return union?.size ?? only?.size ?? 0;
+}
+
+/**
+ * What eviction reads of each view drawing from `pool` in `tier`, its camera
+ * references read through `cameraFor` at `cameraRevision`.
+ */
+export function evictionViewsOf(
+  pool: SharedChunkPool,
+  tier: ResidencyTier,
+  cameraFor: (view: number, memberId: string) => [number, number] | [number, number, number],
+  cameraRevision: number,
+): EvictionView[] {
+  return [...pool.views.values()].map((view) => {
+    const { wanted, targetLevels } = view.draw;
+    // Each member's keys are looked up once: a full pool asks about every slot.
+    const byMember = new Map<string, ReadonlySet<string> | undefined>();
+    const wantedOf = (memberId: string): ReadonlySet<string> | undefined => {
+      if (!byMember.has(memberId)) byMember.set(memberId, wanted.get(wantedEntryKey(tier, memberId)));
+      return byMember.get(memberId);
+    };
+    return {
+      slotGridIdx: view.slotGridIdx,
+      entityMetas: view.entityMetas,
+      cameraFor: (memberId) => cameraFor(view.draw.view, memberId),
+      targetLevelFor: (memberId) => targetLevels.get(memberId),
+      isWanted: (memberId, chunkKey) => wantedOf(memberId)?.has(chunkKey) ?? false,
+      sources: [wanted, targetLevels, cameraRevision],
+    };
+  });
 }

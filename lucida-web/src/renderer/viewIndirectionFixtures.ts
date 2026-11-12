@@ -40,7 +40,7 @@ export function fakeDraw(overrides: {
  */
 export function attachView(
   pool: SharedChunkPool,
-  entityMetas: Map<string, LodIndirectionMeta[]>,
+  entityMetas: ReadonlyMap<string, readonly LodIndirectionMeta[]>,
   options: { draw?: ViewDraw; entries?: number } = {},
 ): ViewIndirection {
   const draw = options.draw ?? fakeDraw({ datasetId: pool.datasetId });
@@ -70,4 +70,9 @@ export function viewOf(pool: SharedChunkPool, view = 0): ViewIndirection {
   const found = pool.views.get(view);
   if (!found) throw new Error(`no view ${view} over the pool`);
   return found;
+}
+
+/** Lay out `metas` for `memberId` in `view`, as a cold state would: a new map, never the old one changed. */
+export function layOut(view: ViewIndirection, memberId: string, metas: readonly LodIndirectionMeta[]): void {
+  view.entityMetas = new Map([...view.entityMetas, [memberId, metas]]);
 }
