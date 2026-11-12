@@ -186,6 +186,8 @@ export interface PhaseOutcome {
   distinctChunksSent: number;
   /** Chunks the page sent the worker from a gesture's first input to its last, before the phase. */
   chunksSentDuringInput: number;
+  /** Auto-contrast fits handed out from a gesture's first input to its last, before the phase. */
+  fitsDuringInput: number;
   /** The bytes of chunk data the page sent the worker in this phase. */
   bytesSent: number;
   quiescence: string;
@@ -315,6 +317,7 @@ class Simulation {
   private framesRun = 0;
   /** Chunks sent between the last gesture's first input and its last. */
   private sentDuringInput = 0;
+  private fitsDuringInput = 0;
   private readonly fits: ContrastFitRecord[] = [];
 
   constructor(scenario: Scenario, dpr: number) {
@@ -436,7 +439,7 @@ class Simulation {
     this.loop = loop;
     loop.start();
     loop.addDataset(dataset.datasetId, manifest);
-    loop.setAutoContrastListener((datasetId, channel, fit) => this.fits.push({ datasetId, channel, fit }));
+    loop.setAutoContrastListener((fits) => this.fits.push(...fits));
 
     scene.set_viewport(deviceW, deviceH, this.dpr);
     // The 3-D view's camera, as switching the dimension control sets it. The
@@ -489,13 +492,16 @@ class Simulation {
   /** Perform a step, a gesture one input a frame, and name it for the report. */
   async perform(step: ScenarioStep): Promise<string> {
     this.sentDuringInput = 0;
+    this.fitsDuringInput = 0;
     if (!("gesture" in step)) return this.apply(step);
     const sentBefore = this.chunksSentSoFar();
+    const fitsBefore = this.fits.length;
     for (let move = 1; move < step.moves; move++) {
       this.apply(step.gesture);
       await this.step();
     }
     this.sentDuringInput = this.chunksSentSoFar() - sentBefore;
+    this.fitsDuringInput = this.fits.length - fitsBefore;
     return `${this.apply(step.gesture)}, ${step.moves} times`;
   }
 
@@ -669,6 +675,7 @@ class Simulation {
       chunksSent,
       distinctChunksSent,
       chunksSentDuringInput: this.sentDuringInput,
+      fitsDuringInput: this.fitsDuringInput,
       bytesSent,
       quiescence: page.reason,
       coverage: page.coverage,
