@@ -19,6 +19,7 @@ import { makeCompositeKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
 import { incomingDistSq, mayEvict } from "../eviction.ts";
 import { anyViewWants } from "../worker/draws.ts";
+import { GpuRoom } from "../worker/gpuBudget.ts";
 import { anySection, anyViewHolds, dropSlot, holdSlot, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
 import { volumeEvictionParams } from "./eviction.ts";
 import {
@@ -159,6 +160,7 @@ export function handleVolumeChunkData(
   }
 
   const batch = new ResidencyBatch();
+  const room = new GpuRoom(ctx.state);
   let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
@@ -178,7 +180,7 @@ export function handleVolumeChunkData(
       // A pool grows only once every slot it has holds a chunk, and freely
       // only while the GPU total has room (`worker/gpuBudget.ts`).
       if (atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
-        growVolumePoolWithin(ctx, poolKey, atlas, false);
+        growVolumePoolWithin(ctx, poolKey, atlas, false, room);
       }
       let slotIndex: number;
       if (atlas.freeSlots.length > 0) {
@@ -188,7 +190,7 @@ export function handleVolumeChunkData(
         const victim = atlas.order.next(params);
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
-          growVolumePoolWithin(ctx, poolKey, atlas, true)
+          growVolumePoolWithin(ctx, poolKey, atlas, true, room)
         ) {
           slotIndex = atlas.freeSlots.pop()!;
         } else {

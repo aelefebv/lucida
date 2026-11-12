@@ -75,7 +75,7 @@ export function volumeEvictionParams(
 ): FindEvictionParams {
   return {
     slots: atlas.slots,
-    views: evictionViewsOf(atlas, tier, (view, memberId) => rayHitForMember(state, view, memberId), state.rayHits.revision),
+    views: evictionViewsOf(atlas, tier, (view, memberId) => rayHitForMember(state, view, memberId), state.rayHits),
     is3D: true,
   };
 }

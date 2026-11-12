@@ -25,6 +25,7 @@ import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFe
 import { incomingDistSq, mayEvict } from "../eviction.ts";
 import type { PoolCut } from "../slicePlane.ts";
 import { anyViewWants } from "../worker/draws.ts";
+import { GpuRoom } from "../worker/gpuBudget.ts";
 import { anySection, anyViewHolds, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
 import { sliceEvictionParams } from "./eviction.ts";
 import {
@@ -169,6 +170,7 @@ export function handleSliceChunkData(
   // Planes of the batch's chunks whose slots it took, by plane: no view draws
   // them, and the page counts them held until it hears they are gone.
   const replaced = new Map<number, string[]>();
+  const room = new GpuRoom(ctx.state);
   let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
@@ -199,7 +201,7 @@ export function handleSliceChunkData(
       // A pool grows only once every slot it has holds a chunk, and freely
       // only while the GPU total has room (`worker/gpuBudget.ts`).
       if (existingSlot === undefined && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
-        growSlicePoolWithin(ctx, poolKey, atlas, false);
+        growSlicePoolWithin(ctx, poolKey, atlas, false, room);
       }
       let slotIndex: number;
       if (existingSlot !== undefined) {
@@ -211,7 +213,7 @@ export function handleSliceChunkData(
         const victim = atlas.order.next(params);
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
-          growSlicePoolWithin(ctx, poolKey, atlas, true)
+          growSlicePoolWithin(ctx, poolKey, atlas, true, room)
         ) {
           slotIndex = atlas.freeSlots.pop()!;
         } else {

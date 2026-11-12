@@ -57,7 +57,7 @@ import { rankSlotsToKeep } from "../eviction.ts";
 import { postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier, datasetModeKey } from "../poolKeys.ts";
 import { viewIndirectionBytes } from "../viewIndirection.ts";
-import { wantedCountIn } from "./draws.ts";
+import { wantedCountOf } from "./draws.ts";
 import { gpuLedgerLine } from "./gpuLedger.ts";
 
 
@@ -82,12 +82,7 @@ export function chunkPoolUsage(): GPUTextureUsageFlags {
  * bounds like any growth.
  */
 export function wantedSlotsOf(poolKey: string, atlas: AtlasState | SliceAtlasState): number {
-  const tier = chunkPoolTier(poolKey);
-  const members = new Set<string>();
-  for (const view of atlas.views.values()) for (const memberId of view.entityMetas.keys()) members.add(memberId);
-  let slots = 0;
-  for (const memberId of members) slots += wantedCountIn(atlas, memberId, tier);
-  return slots;
+  return wantedCountOf(atlas, chunkPoolTier(poolKey));
 }
 
 /** What every holder has on the GPU now, against the total. */
@@ -206,6 +201,32 @@ export function gpuBytesFree(state: RendererState): number {
 }
 
 /**
+ * The bytes the total has left, measured once for a run of growth checks.
+ * Measuring walks every holder, and a full pool checks for room at each chunk
+ * it can't place, so a delivery measures once and again only after the
+ * budget grants bytes or takes some back. Nothing else changes what is held
+ * while a delivery runs: an allocation the device refuses is handled later.
+ */
+export class GpuRoom {
+  private readonly state: RendererState;
+  private free: number | undefined;
+
+  constructor(state: RendererState) {
+    this.state = state;
+  }
+
+  /** Bytes the total has left, negative when it is overspent. */
+  get bytes(): number {
+    return (this.free ??= gpuBytesFree(this.state));
+  }
+
+  /** What is held changed, or is about to: measure again at the next ask. */
+  changed(): void {
+    this.free = undefined;
+  }
+}
+
+/**
  * Whether `bytes` more fit the total, after taking back from the chunk pools
  * other than `requester` what they hold beyond the planner's wanted chunks.
  */
@@ -213,11 +234,12 @@ export function reserveGpuBytes(
   ctx: WorkerCtx,
   bytes: number,
   requester?: AtlasState | SliceAtlasState,
+  room = new GpuRoom(ctx.state),
 ): boolean {
-  const short = bytes - gpuBytesFree(ctx.state);
+  const short = bytes - room.bytes;
   if (short <= 0) return true;
-  reclaimGpuBytes(ctx, short, requester);
-  return bytes <= gpuBytesFree(ctx.state);
+  if (reclaimGpuBytes(ctx, short, requester)) room.changed();
+  return bytes <= room.bytes;
 }
 
 /**
@@ -231,11 +253,14 @@ export function grantGrowth(
   stepBytes: number,
   maxSteps: number,
   reclaim: boolean,
+  room = new GpuRoom(ctx.state),
 ): number {
   if (maxSteps < 1 || stepBytes <= 0) return 0;
-  const steps = Math.min(maxSteps, Math.floor(gpuBytesFree(ctx.state) / stepBytes));
-  if (steps >= 1) return steps;
-  return reclaim && reserveGpuBytes(ctx, stepBytes, requester) ? 1 : 0;
+  let steps = Math.min(maxSteps, Math.floor(room.bytes / stepBytes));
+  if (steps < 1) steps = reclaim && reserveGpuBytes(ctx, stepBytes, requester, room) ? 1 : 0;
+  // The caller allocates what is granted.
+  if (steps >= 1) room.changed();
+  return steps;
 }
 
 /**
@@ -302,8 +327,9 @@ function* unplannedLabelPools(state: RendererState): Generator<LabelSpare> {
  * most to spare goes first. A chunk pool shrinks to the rows or layers its
  * wanted chunks need, and an unplanned dataset's label pool goes whole.
  * What a holder drops is reported evicted, since it went to make room.
+ * True when any holder gave bytes back.
  */
-function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | SliceAtlasState): void {
+function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | SliceAtlasState): boolean {
   const state = ctx.state;
   const spares: Spare[] = [...unplannedLabelPools(state)];
   for (const [poolKey, atlas] of state.volumeAtlases) {
@@ -320,12 +346,14 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
   spares.sort((a, b) => unplanned(b) - unplanned(a) || spareBytes(b) - spareBytes(a));
 
   const touched = new Map<string, { datasetId: string; mode: PoolMode }>();
+  let gave = false;
   for (const spare of spares) {
     if (needed <= 0) break;
     if (spare.kind === "label") {
       if (spare.mode === "slice") removeLabelSlicePool(ctx, spare.poolKey, "evicted");
       else removeLabelVolumePool(ctx, spare.poolKey, "evicted");
       needed -= spare.bytes;
+      gave = true;
       continue;
     }
     let freeSteps = Math.min(spare.steps - spare.minSteps, Math.ceil(needed / spare.stepBytes));
@@ -348,11 +376,13 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
     }
     postSlotsLost(ctx, spare.kind, tier, dropped, "evicted", "axis" in spare.atlas ? spare.atlas.axis : undefined);
     needed -= freeSteps * spare.stepBytes;
+    gave = true;
     const { datasetId } = spare.atlas;
     touched.set(datasetModeKey(datasetId, spare.kind), { datasetId, mode: spare.kind });
   }
   // A dropped fallback slot can change the level an entity displays.
   for (const { datasetId, mode } of touched.values()) ctx.postWantedSet(datasetId, mode);
+  return gave;
 }
 
 function spareOf(

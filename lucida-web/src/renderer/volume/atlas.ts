@@ -14,7 +14,14 @@ import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTyp
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
-import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
+import {
+  chunkPoolUsage,
+  GpuRoom,
+  grantGrowth,
+  handleGpuOutOfMemory,
+  reserveGpuBytes,
+  wantedSlotsOf,
+} from "../worker/gpuBudget.ts";
 import { planCompaction } from "../poolCompaction.ts";
 import {
   compactViewSlots,
@@ -887,6 +894,7 @@ export function growVolumePoolWithin(
   poolKey: string,
   atlas: AtlasState,
   reclaim: boolean,
+  room = new GpuRoom(ctx.state),
 ): boolean {
   const wantedRows = Math.ceil(wantedSlotsOf(poolKey, atlas) / atlas.slotsX);
   const rows = volumeRows(atlas);
@@ -898,7 +906,7 @@ export function growVolumePoolWithin(
   // takes whole layers, so rows granted past it round down to them.
   const stepRows = inFirstLayer ? 1 : atlas.slotsY;
   const maxSteps = Math.max(0, Math.floor((targetRows - rows) / stepRows));
-  const granted = rows + grantGrowth(ctx, atlas, volumeRowBytes(atlas) * stepRows, maxSteps, reclaim) * stepRows;
+  const granted = rows + grantGrowth(ctx, atlas, volumeRowBytes(atlas) * stepRows, maxSteps, reclaim, room) * stepRows;
   const toRows = granted <= atlas.slotsY ? granted : atlas.slotsY * Math.floor(granted / atlas.slotsY);
   return toRows > rows && growVolumeAtlasWatched(ctx, poolKey, atlas, toRows);
 }

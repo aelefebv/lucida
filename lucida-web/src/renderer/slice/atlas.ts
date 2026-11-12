@@ -22,7 +22,14 @@ import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTyp
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { LABEL_TIER, postChunkResidency, postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
-import { chunkPoolUsage, grantGrowth, handleGpuOutOfMemory, reserveGpuBytes, wantedSlotsOf } from "../worker/gpuBudget.ts";
+import {
+  chunkPoolUsage,
+  GpuRoom,
+  grantGrowth,
+  handleGpuOutOfMemory,
+  reserveGpuBytes,
+  wantedSlotsOf,
+} from "../worker/gpuBudget.ts";
 import { planCompaction } from "../poolCompaction.ts";
 import type { SpatialAxis } from "../slicePlane.ts";
 import { makeCompositeKey, makeSliceSlotKey, parseCompositeKey } from "../chunkKeys.ts";
@@ -518,10 +525,11 @@ export function growSlicePoolWithin(
   poolKey: string,
   atlas: SliceAtlasState,
   reclaim: boolean,
+  room = new GpuRoom(ctx.state),
 ): boolean {
   const wantedRows = Math.ceil(wantedSlotsOf(poolKey, atlas) / atlas.slotsX);
   const maxSteps = Math.min(atlas.maxSlotsY, Math.max(atlas.slotsY * 2, wantedRows)) - atlas.slotsY;
-  const steps = grantGrowth(ctx, atlas, sliceRowBytes(atlas), maxSteps, reclaim);
+  const steps = grantGrowth(ctx, atlas, sliceRowBytes(atlas), maxSteps, reclaim, room);
   return steps > 0 && growSliceAtlasWatched(ctx, poolKey, atlas, atlas.slotsY + steps);
 }
 
