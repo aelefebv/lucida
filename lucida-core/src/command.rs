@@ -244,6 +244,13 @@ pub enum ViewportCommand {
     ZoomBy {
         factor: f64,
     },
+    /// Zoom the slice camera by `factor`, holding what is under `at`,
+    /// fractions of the view's width and height from its top left, where it
+    /// is on the screen: a zoom at the pointer.
+    ZoomAt {
+        factor: f64,
+        at: [f64; 2],
+    },
     SetCenter {
         x: f64,
         y: f64,
@@ -506,6 +513,7 @@ impl ViewportCommand {
             | ViewportCommand::SetViewport { .. }
             | ViewportCommand::Pan { .. }
             | ViewportCommand::ZoomBy { .. }
+            | ViewportCommand::ZoomAt { .. }
             | ViewportCommand::SetCenter { .. }
             | ViewportCommand::SetZoom { .. }
             | ViewportCommand::SetSlicePlane { .. }
@@ -565,6 +573,7 @@ impl ViewportCommand {
             self,
             ViewportCommand::Pan { .. }
                 | ViewportCommand::ZoomBy { .. }
+                | ViewportCommand::ZoomAt { .. }
                 | ViewportCommand::SetCenter { .. }
                 | ViewportCommand::SetZoom { .. }
                 | ViewportCommand::Rotate3D { .. }
@@ -626,6 +635,9 @@ impl ViewportCommand {
             }
             ViewportCommand::ZoomBy { factor } | ViewportCommand::FlyAdjustSpeed { factor } => {
                 factor.is_finite()
+            }
+            ViewportCommand::ZoomAt { factor, at } => {
+                factor.is_finite() && at.iter().all(|v| v.is_finite())
             }
             ViewportCommand::SetCenter { x, y } => x.is_finite() && y.is_finite(),
             ViewportCommand::SetZoom { value } => value.is_finite(),
@@ -1057,6 +1069,12 @@ impl Scene {
             ViewportCommand::ZoomBy { factor } => {
                 if let Camera::Slice(ref mut v) = self.active_view_mut().camera {
                     v.zoom_by(factor);
+                }
+            }
+            ViewportCommand::ZoomAt { factor, at } => {
+                if let Camera::Slice(ref mut v) = self.active_view_mut().camera {
+                    let [width, height] = v.viewport.map(f64::from);
+                    v.zoom_at(factor, [at[0] * width, at[1] * height]);
                 }
             }
             ViewportCommand::SetCenter { x, y } => {
@@ -3406,6 +3424,108 @@ mod tests {
         match &scene.active_view().camera {
             Camera::Slice(v) => assert_eq!(v.zoom, SLICE_ZOOM_MAX),
             other => panic!("expected Slice camera, got {other:?}"),
+        }
+    }
+
+    /// A two by two collection of 64 x 64 x 16 tiles whose samples are
+    /// deeper than they are wide, moved by hand off where its frame puts it.
+    fn spaced_collection() -> Scene {
+        let members = ["t0", "t1", "t2", "t3"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, [(i % 2) as f64 * 72.0, (i / 2) as f64 * 72.0]))
+            .collect();
+        let mut opened = test_helpers::make_collection_dataset_opened(
+            "tiles",
+            "tiles",
+            members,
+            [1, 1, 16, 64, 64],
+            [1, 1, 8, 32, 32],
+        );
+        for image in opened.manifest.images_mut() {
+            for level in &mut image.multiscale.levels {
+                level.scale = [1.0, 1.0, 0.306, 0.1755, 0.1755];
+            }
+        }
+        let unit = Some("micrometer".to_string());
+        opened.manifest = opened.manifest.with_space(lucida_content::PhysicalSpace {
+            units: [unit.clone(), unit.clone(), unit],
+            origin: [0.0; 3],
+        });
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(DocumentCommand::DatasetOpened(opened).into());
+        scene.apply(
+            DocumentCommand::SetUserTransform {
+                dataset_id: DatasetId::from("tiles"),
+                transform: UserTransform {
+                    translation: [16.78, 8.62, 5.94],
+                    ..UserTransform::IDENTITY
+                },
+            }
+            .into(),
+        );
+        scene
+    }
+
+    #[test]
+    fn a_zoom_at_the_pointer_holds_what_is_under_it_in_every_plane() {
+        let id = DatasetId::from("tiles");
+        let slice = |scene: &Scene| match &scene.active_view().camera {
+            Camera::Slice(slice) => slice.clone(),
+            other => panic!("a slice camera, not {other:?}"),
+        };
+        let mut cases: Vec<(String, Scene)> = SlicePlane::ALL
+            .into_iter()
+            .map(|plane| {
+                let mut scene = spaced_collection();
+                scene.apply(ViewportCommand::SetSlicePlane { plane }.into());
+                (plane.to_string(), scene)
+            })
+            .collect();
+        // A side view of a square grid of square tiles spans as much along Y
+        // as along X, so YZ fits as XZ does.
+        assert_eq!(slice(&cases[1].1).zoom, slice(&cases[2].1).zoom);
+        let mut four_up = spaced_collection();
+        let layout = ViewLayout::FourUp;
+        four_up.apply(ViewportCommand::SetViewLayout { layout }.into());
+        let yz = four_up
+            .views()
+            .iter()
+            .find(|v| matches!(&v.camera, Camera::Slice(s) if s.transposed))
+            .map(|v| v.id())
+            .expect("four-up draws YZ transposed");
+        four_up.apply(ViewportCommand::SetActiveView { view: yz }.into());
+        cases.push(("transposed yz".into(), four_up));
+
+        for (name, mut scene) in cases {
+            let view = scene.active_view().id();
+            let [width, height] = scene.active_view().camera.viewport().map(f64::from);
+            let pick = |scene: &Scene, at: [f64; 2]| {
+                scene.ray_pick(view, &id, at[0] * width, at[1] * height)
+            };
+            // The point over data farthest from the view's middle, where a
+            // zoom about the wrong point strays furthest.
+            let off_middle = |at: &[f64; 2]| (at[0] - 0.5).hypot(at[1] - 0.5);
+            let (at, before) = (1..20)
+                .flat_map(|i| (1..20).map(move |j| [i as f64 / 20.0, j as f64 / 20.0]))
+                .filter_map(|at| Some((at, pick(&scene, at)?)))
+                .max_by(|a, b| off_middle(&a.0).total_cmp(&off_middle(&b.0)))
+                .unwrap_or_else(|| panic!("{name}: no data on screen"));
+            let zoom = slice(&scene).zoom;
+            scene.apply(ViewportCommand::ZoomAt { factor: 1.1, at }.into());
+            let after = pick(&scene, at).unwrap_or_else(|| panic!("{name}: data left the pointer"));
+            assert!(
+                (slice(&scene).zoom / zoom - 1.1).abs() < 1e-12,
+                "{name}: one notch zooms by its factor"
+            );
+            assert_eq!(after.entity_id, before.entity_id, "{name}");
+            let moved = (0..2)
+                .map(|i| (after.world_position[i] - before.world_position[i]).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                moved < 1e-9,
+                "{name}: the point under the pointer moved {moved}"
+            );
         }
     }
 

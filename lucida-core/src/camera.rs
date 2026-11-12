@@ -917,6 +917,21 @@ impl Slice {
         self.zoom = (self.zoom * factor).clamp(SLICE_ZOOM_MIN, SLICE_ZOOM_MAX);
     }
 
+    /// Zoom by `factor`, holding the point of the plane under `screen`, in
+    /// device pixels from the screen's top left, where it is. The point is
+    /// read and put back through [`Self::from_screen`], so a transposed view
+    /// holds it as well, and a zoom that saturates moves the center only as
+    /// far as the zoom moved.
+    pub fn zoom_at(&mut self, factor: f64, screen: [f64; 2]) {
+        let held = self.from_screen(screen);
+        self.zoom_by(factor);
+        let drifted = self.from_screen(screen);
+        self.set_center(
+            self.center[0] + held[0] - drifted[0],
+            self.center[1] + held[1] - drifted[1],
+        );
+    }
+
     /// Set the zoom directly, clamped into the interactive range. Zero,
     /// negative, and out-of-range values saturate — `zoom` must stay a
     /// positive finite divisor for [`Self::pan`].
@@ -2337,6 +2352,33 @@ mod tests {
         };
         slice.fit_to_bounds(bounds, 1.0);
         assert_eq!(slice.zoom, 2.0);
+    }
+
+    #[test]
+    fn a_zoom_at_a_point_holds_the_plane_under_it_however_the_plane_lies() {
+        for transposed in [false, true] {
+            let mut slice = Slice::new([400, 200]);
+            slice.plane = SlicePlane::Yz;
+            slice.transposed = transposed;
+            slice.center = [50.0, 10.0];
+            slice.zoom = 0.07;
+            // Off the center on both screen axes, by different amounts, so
+            // swapping them would move the point.
+            let screen = [330.0, 40.0];
+            let held = slice.from_screen(screen);
+            slice.zoom_at(1.1, screen);
+            assert!((slice.zoom - 0.077).abs() < 1e-12, "{}", slice.zoom);
+            let now = slice.from_screen(screen);
+            assert!(
+                (now[0] - held[0]).abs() < 1e-9 && (now[1] - held[1]).abs() < 1e-9,
+                "transposed {transposed}: {held:?} moved to {now:?}"
+            );
+        }
+        // A zoom pinned at its ceiling moves nothing.
+        let mut slice = Slice::new([400, 200]);
+        slice.zoom = SLICE_ZOOM_MAX;
+        slice.zoom_at(2.0, [10.0, 10.0]);
+        assert_eq!((slice.zoom, slice.center), (SLICE_ZOOM_MAX, [0.0, 0.0]));
     }
 
     #[test]
