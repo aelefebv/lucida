@@ -1,0 +1,4 @@
+overrides:
+  js-yaml: ^4.2.0
+  '@babel/core': ^7.29.6
+  esbuild: ^0.28.1

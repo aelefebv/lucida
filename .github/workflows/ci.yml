@@ -322,6 +322,7 @@ jobs:
               - 'lucida-web/index.html'
               - 'lucida-web/package.json'
               - 'lucida-web/pnpm-lock.yaml'
+              - 'lucida-web/pnpm-workspace.yaml'
               - 'lucida-web/tsconfig*.json'
               - 'lucida-web/vite.config.ts'
 
