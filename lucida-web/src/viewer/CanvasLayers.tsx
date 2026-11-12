@@ -25,7 +25,7 @@ import type { PeerStore } from "../peerStore.ts";
 import { useSceneView } from "../hooks/useSceneView.ts";
 import { viewContextsOf } from "../components/annotationContext.ts";
 import { requestRender } from "../invalidation.ts";
-import type { CanvasSize } from "../shell/CanvasStage.tsx";
+import { AboveControls, type CanvasSize } from "../shell/CanvasStage.tsx";
 import type { DatasetState } from "../types.ts";
 import { useEngineParts } from "./engineParts.ts";
 import { useViewerLoop } from "./useViewerLoop.ts";
@@ -280,17 +280,20 @@ export function CanvasLayers({
         />
       )}
       {viewers && panesRoot && (
-        <PixelReadout
-          ref={readoutRef}
-          canvas={viewers.canvas}
-          eventRoot={panesRoot}
-          client={viewers.client}
-          scene={viewers.scene}
-          datasets={datasets}
-          layers={layers}
-          hover={hover}
-          trace={engine.loop}
-        />
+        // Over the floating controls, which a card beside the pointer can reach.
+        <AboveControls>
+          <PixelReadout
+            ref={readoutRef}
+            canvas={viewers.canvas}
+            eventRoot={panesRoot}
+            client={viewers.client}
+            scene={viewers.scene}
+            datasets={datasets}
+            layers={layers}
+            hover={hover}
+            trace={engine.loop}
+          />
+        </AboveControls>
       )}
       {showDebugOverlays && (
         <Suspense fallback={null}>

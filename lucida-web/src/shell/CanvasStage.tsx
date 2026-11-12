@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import "./CanvasStage.css";
 
 /**
@@ -34,7 +35,11 @@ export interface CanvasStageProps {
    * the canvas's CSS size on each frame, so a resize only needs a new frame.
    */
   onResize?: (size: CanvasSize) => void;
-  /** Full-bleed layers that track the canvas: viewers, annotations, cursors. */
+  /**
+   * Full-bleed layers that track the canvas: viewers, annotations, cursors.
+   * They lie under the floating controls; what must cover the controls goes
+   * through {@link AboveControls}.
+   */
   children?: ReactNode;
   /** Floating controls, by slot. */
   slots?: Partial<Record<CanvasSlot, ReactNode>>;
@@ -109,6 +114,7 @@ export function CanvasStage({
 
   const bottomRowRef = useRef<HTMLDivElement>(null);
   useToastInsets(stageRef, bottomRowRef, !bare);
+  const [above, setAbove] = useState<HTMLDivElement | null>(null);
 
   return (
     // `viewer-canvas-wrap` is how the CLI's trace driver finds the canvas,
@@ -122,7 +128,9 @@ export function CanvasStage({
         aria-label={label}
         style={{ imageRendering: pixelated ? "pixelated" : "auto" }}
       />
-      <div className="lc-canvas-stage-layers">{children}</div>
+      <div className="lc-canvas-stage-layers">
+        <AboveControlsTier.Provider value={above}>{children}</AboveControlsTier.Provider>
+      </div>
       {emptyState && <div className="lc-canvas-stage-empty">{emptyState}</div>}
       <div className="lc-canvas-stage-slots">
         <div className="lc-canvas-stage-row" data-row="top">
@@ -136,8 +144,27 @@ export function CanvasStage({
           <Slot name="bottom-right">{slots["bottom-right"]}</Slot>
         </div>
       </div>
+      <div ref={setAbove} className="lc-canvas-stage-above" />
     </div>
   );
+}
+
+/**
+ * Where {@link AboveControls} draws inside a stage: the tier over the
+ * floating controls, null until it mounts. Undefined outside a stage.
+ */
+const AboveControlsTier = createContext<HTMLElement | null | undefined>(undefined);
+
+/**
+ * Draws `children` over the floating controls from inside the layers, which
+ * lie under them. Nothing in the tier takes the pointer, so a press on a
+ * control under it still reaches the control. Outside a stage, `children`
+ * draw in place.
+ */
+export function AboveControls({ children }: { children: ReactNode }) {
+  const tier = useContext(AboveControlsTier);
+  if (tier === undefined) return children;
+  return tier && createPortal(children, tier);
 }
 
 /**
