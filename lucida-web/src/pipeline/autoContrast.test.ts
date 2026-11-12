@@ -260,17 +260,14 @@ function run(
   coarse: Coarse = "generated",
   histograms = new Histograms(),
 ): Array<[number, ChannelFit]> {
-  const fits: Array<[number, ChannelFit]> = [];
-  fitter.update(
-    new Map([["ds", plan(requests, coarse)]]),
-    new Map([["ds", { manifest: manifest(coarse) }]]),
-    cache,
-    histograms,
-    (_, c, fit) => {
-      fits.push([c, fit]);
-    },
-  );
-  return fits;
+  return fitter
+    .update(
+      new Map([["ds", plan(requests, coarse)]]),
+      new Map([["ds", { manifest: manifest(coarse) }]]),
+      cache,
+      histograms,
+    )
+    .map(({ channel, fit }) => [channel, fit]);
 }
 
 describe("AutoContrastFitter", () => {
