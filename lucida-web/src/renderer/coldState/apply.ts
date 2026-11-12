@@ -20,7 +20,6 @@ import {
   getOrCreateVolumePool,
   remapIndirection,
   type AtlasState,
-  type LodIndirectionMeta,
 } from "../volume/index.ts";
 import {
   getOrCreateSlicePool,
@@ -31,15 +30,19 @@ import { destroyAtlas } from "../volume/atlas.ts";
 import { destroySliceAtlas } from "../slice/atlas.ts";
 import { groupEntriesByPool, type PoolGroup } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
+import { layoutSections, type SectionLayout, type SectionRequest } from "./sectionLayout.ts";
 import { chunkPoolTier, datasetViewKey, sourceKey } from "../poolKeys.ts";
 import { postSlotsLost } from "../chunkUploadFeedback.ts";
 import { indexWantedChunks, wantedEntryKey, type WantedChunkIndex } from "../wantedChunks.ts";
 import { renderRadiusEnabled } from "../../pipeline/renderRadius.ts";
 import type { RemapInputs, ViewDraw } from "../worker/state.ts";
 import { drawsOf } from "../worker/draws.ts";
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import {
+  clearSections,
   createViewIndirection,
   destroyViewIndirection,
+  growViewIndirection,
   resizeViewIndirection,
   type SharedChunkPool,
   type ViewIndirection,
@@ -73,50 +76,29 @@ function failedInGroup(
   return out;
 }
 
-/** Whether two layouts give every member the same sections at the same offsets. */
-function sameSections(
-  held: ReadonlyMap<string, readonly LodIndirectionMeta[]>,
-  next: ReadonlyMap<string, readonly LodIndirectionMeta[]>,
-): boolean {
-  if (held.size !== next.size) return false;
-  for (const [memberId, metas] of next) {
-    const was = held.get(memberId);
-    if (!was || was.length !== metas.length) return false;
-    for (let i = 0; i < metas.length; i++) {
-      const a = was[i];
-      const b = metas[i];
-      if (
-        a.level !== b.level || a.offset !== b.offset ||
-        a.gridDims[0] !== b.gridDims[0] || a.gridDims[1] !== b.gridDims[1] || a.gridDims[2] !== b.gridDims[2]
-      ) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 /**
- * Whether a view's indirection already says what a remap would write. A remap
- * walks every resident slot, and uploads and evictions keep each view's
- * indirection current between cold states, so one whose sections, T and plane
- * are the ones it was last remapped for, with no render radius or failed
- * marks either time, would only rebuild what it holds. On a view move that is
- * every pool whose members stayed put, such as a collection's coarse pools.
+ * Whether a view's cells outside the sections a layout just placed already
+ * say what a whole remap would write. A remap walks every resident slot, and
+ * uploads and evictions keep each view's indirection current between cold
+ * states, so a kept section whose T and plane are the ones the view was last
+ * remapped for, with no render radius or failed marks either time, holds
+ * what a remap would give it. On a view move that is every section but those
+ * of the members whose levels changed.
  */
-function remapHolds(
+function keptSectionsHold(
   state: WorkerCtx["state"],
   view: ViewIndirection,
-  metas: Map<string, LodIndirectionMeta[]>,
-  totalEntries: number,
+  layout: SectionLayout,
   inputs: RemapInputs,
 ): boolean {
+  return !layout.repacked && remappedFor(state, view, inputs);
+}
+
+/** Whether the view was last remapped for `inputs`, with no render radius or failed marks either time. */
+export function remappedFor(state: WorkerCtx["state"], view: ViewIndirection, inputs: RemapInputs): boolean {
   const last = state.remappedFor.get(view);
-  return last !== undefined &&
-    !last.viewDependent && !inputs.viewDependent &&
-    last.t === inputs.t && last.z === inputs.z &&
-    view.indirectionData.length === totalEntries &&
-    sameSections(view.entityMetas, metas);
+  return last !== undefined && !last.viewDependent && !inputs.viewDependent &&
+    last.t === inputs.t && last.z === inputs.z;
 }
 
 /** The view's draw of the cold state's dataset, created on its first cold state. */
@@ -154,6 +136,49 @@ function viewOver(ctx: WorkerCtx, pool: SharedChunkPool, draw: ViewDraw): ViewIn
   return view;
 }
 
+/**
+ * Give the view `layout`'s sections and say what to remap: the sections just
+ * placed, when the rest already hold what a remap would give them;
+ * `undefined` for every section; null for none.
+ */
+function takeLayout(
+  ctx: WorkerCtx,
+  pool: SharedChunkPool,
+  view: ViewIndirection,
+  layout: SectionLayout,
+  inputs: RemapInputs,
+  dimArity: 2 | 3,
+): SectionLayout["added"] | undefined | null {
+  const incremental = keptSectionsHold(ctx.state, view, layout, inputs);
+  view.entityMetas = layout.metas;
+  view.space = layout.space;
+  if (!incremental) {
+    resizeViewIndirection(ctx.device, view, layout.space.end);
+    ctx.state.remappedFor.set(view, inputs);
+    return undefined;
+  }
+  clearSections(pool, view, layout.removed, dimArity);
+  growViewIndirection(ctx.device, view, layout.space.end);
+  return layout.added.size > 0 ? layout.added : null;
+}
+
+/** Add each section of the pool to its member's sources, in request order. */
+function collectSources(
+  sources: Map<string, EntitySource[]>,
+  layout: SectionLayout,
+  requests: readonly SectionRequest[],
+  tiers: readonly ResidencyTier[],
+  poolKey: string,
+): void {
+  layout.placed.forEach((meta, i) => {
+    const { memberId } = requests[i];
+    const source: EntitySource = { tier: tiers[i], poolKey, meta };
+    const list = sources.get(memberId);
+    if (list) list.push(source);
+    else sources.set(memberId, [source]);
+  });
+}
+
 /** Apply a cold-state message. The caller posts the wanted-set afterward. */
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const state = ctx.state;
@@ -180,11 +205,12 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   const currentSources = new Map<string, EntitySource[]>();
 
-  // 3. Per group: get the pool, lay out one section per (member, level) at
-  // sequential offsets in the view's indirection over it, resize and remap.
+  // 3. Per group: get the pool, lay out one section per (member, level) in
+  // the view's indirection over it, and map what the sections hold.
   for (const group of groups.values()) {
     const [pcZ, pcY, pcX] = group.chunkDims;
-    const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
+    const requests: SectionRequest[] = [];
+    const tiers: ResidencyTier[] = [];
     const entryByMember = new Map<string, {
       layoutPositionVox?: [number, number];
       levels: Array<{
@@ -193,65 +219,51 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         levelDims: [number, number, number];
       }>;
     }>();
-    let offset = 0;
 
     for (const { entry, memberId, tier, level } of group.entries) {
       entryByMember.set(memberId, {
         layoutPositionVox: entry.layoutPositionVox,
         levels: entry.levels,
       });
-      const { meta, nextOffset } = computeEntityTierMeta(
-        entry,
-        level,
-        group.chunkDims,
-        offset,
-        dimArity,
-      );
-      if (meta) {
-        let pools = draw.routes.get(memberId);
-        if (!pools) {
-          pools = new Map();
-          draw.routes.set(memberId, pools);
-        }
-        pools.set(sourceKey(tier, level), group.poolKey);
-        const metas = newEntityMetas.get(memberId);
-        if (metas) metas.push(meta);
-        else newEntityMetas.set(memberId, [meta]);
-        const sources = currentSources.get(memberId);
-        const source: EntitySource = { tier, poolKey: group.poolKey, meta };
-        if (sources) sources.push(source);
-        else currentSources.set(memberId, [source]);
+      const { meta, nextOffset } = computeEntityTierMeta(entry, level, group.chunkDims, 0, dimArity);
+      if (!meta) continue;
+      requests.push({ memberId, meta, size: nextOffset });
+      tiers.push(tier);
+      let pools = draw.routes.get(memberId);
+      if (!pools) {
+        pools = new Map();
+        draw.routes.set(memberId, pools);
       }
-      offset = nextOffset;
+      pools.set(sourceKey(tier, level), group.poolKey);
     }
 
     const failed = failedInGroup(state, msg.datasetId, wanted, group);
     const radius = msg.renderRadiusView?.[group.tier];
     const viewDependent = (radius !== undefined && renderRadiusEnabled(radius)) || (failed?.size ?? 0) > 0;
-    const remapOptions = { visibleRegion: msg.visibleRegion, renderRadiusView: radius, entryByMember, failed };
+    const inputs: RemapInputs = { t: msg.currentT, z: mode === "volume" ? 0 : msg.currentZ, viewDependent };
     if (mode === "volume") {
       const atlas = getOrCreateVolumePool(ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, group.channel, msg.sampleFormat);
       const view = viewOver(ctx, atlas, draw);
-      const inputs: RemapInputs = { t: msg.currentT, z: 0, viewDependent };
-      const holds = remapHolds(state, view, newEntityMetas, offset, inputs);
-      view.entityMetas = newEntityMetas;
-      if (!holds) {
-        resizeViewIndirection(ctx.device, view, offset);
-        remapIndirection(atlas, view, msg.currentT, group.channel, remapOptions);
-        state.remappedFor.set(view, inputs);
+      const layout = layoutSections(view.entityMetas, requests);
+      const only = takeLayout(ctx, atlas, view, layout, inputs, dimArity);
+      if (only !== null) {
+        remapIndirection(atlas, view, msg.currentT, group.channel, {
+          visibleRegion: msg.visibleRegion, renderRadiusView: radius, entryByMember, failed, only,
+        });
       }
+      collectSources(currentSources, layout, requests, tiers, group.poolKey);
     } else {
       const atlas = getOrCreateSlicePool(ctx, group.poolKey, msg.datasetId, pcX, pcY, group.channel, msg.sampleFormat);
       atlas.axis = msg.sliceAxis ?? "z";
       const view = viewOver(ctx, atlas, draw);
-      const inputs: RemapInputs = { t: msg.currentT, z: msg.currentZ, viewDependent };
-      const holds = remapHolds(state, view, newEntityMetas, offset, inputs);
-      view.entityMetas = newEntityMetas;
-      if (!holds) {
-        resizeViewIndirection(ctx.device, view, offset);
-        remapSliceIndirection(atlas, view, msg.currentT, group.channel, msg.currentZ, remapOptions);
-        state.remappedFor.set(view, inputs);
+      const layout = layoutSections(view.entityMetas, requests);
+      const only = takeLayout(ctx, atlas, view, layout, inputs, dimArity);
+      if (only !== null) {
+        remapSliceIndirection(atlas, view, msg.currentT, group.channel, msg.currentZ, {
+          visibleRegion: msg.visibleRegion, renderRadiusView: radius, entryByMember, failed, only,
+        });
       }
+      collectSources(currentSources, layout, requests, tiers, group.poolKey);
     }
   }
 

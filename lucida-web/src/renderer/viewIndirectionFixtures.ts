@@ -56,6 +56,7 @@ export function attachView(
   const view: ViewIndirection = {
     draw,
     entityMetas,
+    space: { free: [], end: entries, used: entries },
     indirectionData: new Uint32Array(Math.max(entries, 1)).fill(INDIRECTION_MISS),
     indirectionBuf: { destroy: () => {} } as unknown as GPUBuffer,
     slotGridIdx: new Int32Array(pool.totalSlots).fill(-1),
