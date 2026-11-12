@@ -1,12 +1,12 @@
 /**
  * Failed-chunk marks for the pools that hold one level whole: label overlays
- * and minimap overviews. Their texture keeps every chunk at its place in the
- * level, so their indirection maps each chunk cell to itself, and a cell can
- * read as FAILED, which the shaders draw hatched, without moving a texel.
+ * and minimap overviews. Each holds a slot for every chunk cell of its level,
+ * so a cell can read as FAILED, which the shaders draw hatched, without
+ * moving a texel.
  */
 
 import { parseChunkKey } from "./chunkKeys.ts";
-import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
+import { INDIRECTION_FAILED } from "./remap.ts";
 import { toPlaneFrame, type SpatialAxis } from "./slicePlane.ts";
 import type { RendererState } from "./worker/state.ts";
 
@@ -102,9 +102,4 @@ export function identityIndirection(cells: number): Uint32Array<ArrayBuffer> {
   const out = new Uint32Array(Math.max(1, cells));
   for (let i = 0; i < out.length; i++) out[i] = i;
   return out;
-}
-
-/** An in-place pool's indirection with nothing in it yet. */
-export function emptyIndirection(cells: number): Uint32Array<ArrayBuffer> {
-  return new Uint32Array(Math.max(1, cells)).fill(INDIRECTION_MISS);
 }

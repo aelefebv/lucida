@@ -40,6 +40,7 @@ const DRAW_ONLY = new Set<MainToWorkerMessage["type"]>([
   "sliceRenderMultiPass",
   "volumeRenderMultiPass",
   "minimapInit",
+  "minimapLayers",
   "minimapRender",
   "minimapDestroy",
   "minimapUploadOverviewChunksForLayer",

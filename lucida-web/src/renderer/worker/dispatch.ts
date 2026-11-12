@@ -31,10 +31,12 @@ import {
 import {
   handleMinimapDestroy,
   handleMinimapInit,
+  handleMinimapLayers,
   handleMinimapRender,
   handleMinimapUploadOverviewChunks,
   handleThumbnailRender,
 } from "../minimapHandlers.ts";
+import { markOverviewsFailed } from "../overviewAtlas.ts";
 import { removeDatasetResources } from "./lifecycle.ts";
 import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
@@ -124,6 +126,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "minimapInit":
       handleMinimapInit(ctx, msg);
       return;
+    case "minimapLayers":
+      handleMinimapLayers(ctx, msg);
+      return;
     case "minimapRender":
       handleMinimapRender(ctx, msg);
       return;
@@ -208,6 +213,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       if (failed.size > 0) ctx.state.failedByDataset.set(msg.datasetId, failed);
       else ctx.state.failedByDataset.delete(msg.datasetId);
       for (const draw of drawsOf(ctx.state, msg.datasetId)) applyColdState(ctx, draw.cold);
+      markOverviewsFailed(ctx, ctx.state.minimap.atlases);
       return;
     }
 

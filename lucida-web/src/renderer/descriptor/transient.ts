@@ -58,6 +58,8 @@ export interface TransientDescriptorParams {
   chunkGrid?: {
     gridDims: [number, number, number];
     chunkDims: [number, number, number];
+    /** Where the level's cells start in the indirection buffer, when it shares one. */
+    indirectionOffset?: number;
   };
 }
 
@@ -92,7 +94,7 @@ export function serializeTransientDescriptor(
   const base = levelSourceOffset(0) / 4;
   u32[base + SOURCE_OFFSET_VALID / 4] = 1;
   u32[base + SOURCE_OFFSET_LEVEL / 4] = 0;
-  u32[base + SOURCE_OFFSET_INDIRECTION_OFFSET / 4] = 0;
+  u32[base + SOURCE_OFFSET_INDIRECTION_OFFSET / 4] = params.chunkGrid?.indirectionOffset ?? 0;
   u32[base + SOURCE_OFFSET_POOL_INDEX / 4] = 0;
   const gridBase = base + SOURCE_OFFSET_GRID_DIMS / 4;
   u32[gridBase + 0] = grid[0];

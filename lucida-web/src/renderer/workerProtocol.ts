@@ -422,20 +422,29 @@ export interface SliceRenderMultiPassMessage {
   frameSeq?: number;
 }
 
-export interface MinimapLayerParams {
-  /** The overview texture: a member's id with its channel. */
-  datasetId: string;
-  modelMatrix: Float32Array;
-  invModelMatrix: Float32Array;
+/** What one shown channel of a dataset draws with in the minimap and the thumbnails. */
+export interface OverviewDisplay {
   contrastMin: number;
   contrastMax: number;
   gamma: number;
-  /** The channel's colormap name (snake_case, e.g. "magenta"); the minimap
-   * binds its own LUT so 2D matches 3D instead of rendering gray. */
+  /** The channel's colormap name (snake_case, e.g. "magenta"). */
   colormap: string;
-  /** How this channel combines with the overviews drawn before it, as the
-   * main view combines it. */
+  /** How this channel combines with the overviews drawn before it, as the main view combines it. */
   blendMode: BlendMode;
+}
+
+/**
+ * The overviews a minimap or thumbnail render draws, in draw order: each
+ * one's key, placement, and the display it takes. Kept in a few flat arrays,
+ * since a collection lists thousands.
+ */
+export interface OverviewLayers {
+  /** Each overview: a member's id with its channel. */
+  keys: string[];
+  /** Each overview's model matrix then its inverse, 32 floats, column-major. */
+  matrices: Float32Array;
+  /** Each overview's index into its render's `displays`. */
+  displays: Uint32Array;
 }
 
 export interface MinimapInitMessage {
@@ -443,9 +452,20 @@ export interface MinimapInitMessage {
   canvas: OffscreenCanvas;
 }
 
+/**
+ * The overviews the minimap draws, held by the worker until the next of
+ * these, so a render whose overviews and placement held carries only the
+ * displays and the camera.
+ */
+export interface MinimapLayersMessage {
+  type: "minimapLayers";
+  layers: OverviewLayers;
+}
+
 export interface MinimapRenderMessage {
   type: "minimapRender";
-  layers: MinimapLayerParams[];
+  /** Per display the layers name, what it draws with; null where its channel is not shown. */
+  displays: Array<OverviewDisplay | null>;
   invViewProj: Float32Array;
   /** The inverse of `invViewProj`, which places each layer on the canvas. */
   viewProj: Float32Array;
@@ -462,6 +482,9 @@ export interface MinimapDestroyMessage {
 
 export interface MinimapUploadOverviewChunksForLayerMessage {
   type: "minimapUploadOverviewChunksForLayer";
+  /** The overview: a member's id with its channel. */
+  overviewKey: string;
+  /** The dataset the member belongs to, whose overviews share an atlas. */
   datasetId: string;
   chunks: Chunk[];
   /** The member image the overview draws, and the level its chunk keys name. */
@@ -475,23 +498,24 @@ export interface MinimapUploadOverviewChunksForLayerMessage {
   chunkX: number;
   chunkY: number;
   chunkZ: number;
-  /** How the overview texture holds samples: the dataset's format. */
+  /** How the overview's atlas holds samples: the dataset's format. */
   sampleFormat: SampleFormat;
 }
 
 /**
- * Off-screen render of one Explore-panel candidate thumbnail. Uses the
- * minimap's overview texture, transient descriptor, and layer params, drawn
- * to a {@link size}px target from the candidate view's camera, so a
- * thumbnail matches the minimap. Stale-tolerant: layers without a resident
- * overview are skipped (possibly all, giving a cleared tile) and the panel
- * re-requests.
+ * Off-screen render of one Explore-panel candidate thumbnail. Draws the
+ * minimap's overviews to a {@link size}px target from the candidate view's
+ * camera, so a thumbnail matches the minimap. Stale-tolerant: layers without
+ * a resident overview are skipped (possibly all, giving a cleared tile) and
+ * the panel re-requests.
  */
 export interface ThumbnailRenderMessage {
   type: "thumbnailRender";
   /** Correlates the {@link ThumbnailResultMessage} reply. */
   id: number;
-  layers: MinimapLayerParams[];
+  layers: OverviewLayers;
+  /** See {@link MinimapRenderMessage.displays}. */
+  displays: Array<OverviewDisplay | null>;
   invViewProj: Float32Array;
   /** See {@link MinimapRenderMessage.viewProj}. */
   viewProj: Float32Array;
@@ -853,6 +877,7 @@ export type MainToWorkerMessage =
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage
   | MinimapInitMessage
+  | MinimapLayersMessage
   | MinimapRenderMessage
   | MinimapDestroyMessage
   | MinimapUploadOverviewChunksForLayerMessage
@@ -1093,7 +1118,7 @@ export interface GpuMemoryReport {
   labelBytes: number;
   /** Viewport render targets and the depth texture. */
   targetBytes: number;
-  /** Minimap overview textures and the minimap's and thumbnails' render targets. */
+  /** Minimap overview atlases and the minimap's and thumbnails' render targets. */
   minimapBytes: number;
   /** Chunk and label atlases. */
   atlases: number;
@@ -1148,8 +1173,8 @@ export interface GpuCapacityMessage extends GpuCapacityReport {
 }
 
 /**
- * Minimap overview textures the device could not allocate. The page uploads
- * these members' overviews again, under the budget the failure halved.
+ * Minimap overviews whose atlas the device could not allocate, by overview
+ * key. The page uploads them again, under the budget the failure halved.
  */
 export interface MinimapOverviewsLostMessage {
   type: "minimapOverviewsLost";

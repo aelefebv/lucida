@@ -10,16 +10,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 (globalThis as Record<string, unknown>).GPUBufferUsage = { STORAGE: 0x80, COPY_DST: 0x08 };
 
 import type { TransientDescriptorParams } from "./descriptor/transient.ts";
-import type { VolumeMemberDraw } from "./volumeRenderer.ts";
+import type { MemberBatch, MemberInstance, VolumeMemberDraw } from "./volumeRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import type { MinimapRenderMessage, ThumbnailRenderMessage, WorkerToMainMessage } from "./workerProtocol.ts";
+import type {
+  MinimapRenderMessage,
+  MinimapUploadOverviewChunksForLayerMessage,
+  OverviewDisplay,
+  OverviewLayers,
+  ThumbnailRenderMessage,
+  WorkerToMainMessage,
+} from "./workerProtocol.ts";
 import {
   handleMinimapDestroy,
   handleMinimapInit,
+  handleMinimapLayers,
   handleMinimapRender,
   handleMinimapUploadOverviewChunks,
   handleThumbnailRender,
 } from "./minimapHandlers.ts";
+import { markOverviewsFailed } from "./overviewAtlas.ts";
 import { createInitialState } from "./worker/state.ts";
 
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -34,18 +43,22 @@ function makeVolumeRenderer() {
   });
   const renderer = {
     isCompiled: false,
+    memberBatchesCompiled: false,
     compiled,
+    compileMemberBatches: () => compiled,
     setPixelRatio: vi.fn(),
     setMatrices: vi.fn(),
     writeDescriptorTable: vi.fn((_set: string, _descriptors: TransientDescriptorParams[]) => ({})),
     prepareMembers: vi.fn((_set: string, _draws: VolumeMemberDraw[]) => {}),
-    renderMembers: vi.fn(),
+    setMemberInstances: vi.fn((_set: string, _instances: MemberInstance[], _w: number, _h: number) => {}),
+    renderMemberBatch: vi.fn((_set: string, _batch: MemberBatch) => {}),
     transientDepthView: vi.fn(() => ({})),
   };
   return {
     renderer,
     compile() {
       renderer.isCompiled = true;
+      renderer.memberBatchesCompiled = true;
       finish();
     },
     fail(message: string) {
@@ -57,12 +70,11 @@ function makeVolumeRenderer() {
 function makeCtx(renderer: ReturnType<typeof makeVolumeRenderer>["renderer"]) {
   const posts: WorkerToMainMessage[] = [];
   const composite = vi.fn();
-  const texture = { createView: () => ({}), destroy: vi.fn() };
   const ctx = {
     device: {
-      createTexture: vi.fn(() => texture),
+      createTexture: vi.fn(() => ({ createView: () => ({}), destroy: vi.fn() })),
       createBuffer: vi.fn(() => ({ destroy: vi.fn() })),
-      createCommandEncoder: () => ({ finish: () => ({}) }),
+      createCommandEncoder: () => ({ copyTextureToTexture: vi.fn(), finish: () => ({}) }),
       pushErrorScope: vi.fn(),
       popErrorScope: () => Promise.resolve(null),
       queue: { submit: vi.fn(), writeTexture: vi.fn(), writeBuffer: vi.fn() },
@@ -91,38 +103,46 @@ function minimapCanvas() {
   return { canvas, size: context.canvas };
 }
 
-function uploadOverview(ctx: WorkerCtx): void {
-  handleMinimapUploadOverviewChunks(ctx, {
+/** One member's channel `c`: a 2x2 level in one chunk, which arrives. */
+function overviewUpload(member: string, c = 0, over: Partial<MinimapUploadOverviewChunksForLayerMessage> = {}): MinimapUploadOverviewChunksForLayerMessage {
+  return {
     type: "minimapUploadOverviewChunksForLayer",
+    overviewKey: `${member}:ch${c}`,
     datasetId: "ds",
-    imageId: "ds",
+    imageId: member,
     level: 3,
     t: 0,
-    c: 0,
+    c,
     levelWidth: 2,
     levelHeight: 2,
     levelDepth: 1,
     chunkX: 2,
     chunkY: 2,
     chunkZ: 1,
-    chunks: [{ key: "3/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array([1, 2, 3, 4]).buffer }],
+    chunks: [{ key: `3/0/${c}/0/0/0`, x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array([1, 2, 3, 4]).buffer }],
     sampleFormat: "u16",
-  });
+    ...over,
+  };
 }
 
-function renderMsg(canvasW: number): MinimapRenderMessage {
+/** Overview layers placing each key by its model matrix, all taking display `display`. */
+function layersOf(keys: string[], model: (i: number) => Float32Array = () => IDENTITY, display = (_i: number) => 0): OverviewLayers {
+  const matrices = new Float32Array(keys.length * 32);
+  keys.forEach((_key, i) => {
+    matrices.set(model(i), i * 32);
+    matrices.set(IDENTITY, i * 32 + 16);
+  });
+  return { keys, matrices, displays: Uint32Array.from(keys, (_key, i) => display(i)) };
+}
+
+function display(over: Partial<OverviewDisplay> = {}): OverviewDisplay {
+  return { contrastMin: 0, contrastMax: 1, gamma: 1, colormap: "gray", blendMode: "alpha", ...over };
+}
+
+function renderMsg(canvasW: number, displays: Array<OverviewDisplay | null> = [display()]): MinimapRenderMessage {
   return {
     type: "minimapRender",
-    layers: [{
-      datasetId: "ds",
-      modelMatrix: IDENTITY,
-      invModelMatrix: IDENTITY,
-      contrastMin: 0,
-      contrastMax: 1,
-      gamma: 1,
-      colormap: "gray",
-      blendMode: "alpha",
-    }],
+    displays,
     invViewProj: IDENTITY,
     viewProj: IDENTITY,
     eye: new Float32Array(3),
@@ -130,6 +150,11 @@ function renderMsg(canvasW: number): MinimapRenderMessage {
     canvasH: canvasW,
     pixelRatio: 1,
   };
+}
+
+/** Members side by side across the canvas: each one's unit cube a fifth of the clip space wide. */
+function sideBySide(i: number): Float32Array {
+  return new Float32Array([0.3, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, -1 + 0.4 * i, -1, 0, 1]);
 }
 
 async function flush(): Promise<void> {
@@ -141,17 +166,22 @@ afterEach(() => {
 });
 
 describe("the minimap's overview render", () => {
-  it("draws at once when the volume renderer has compiled", () => {
+  function ready() {
     const { renderer, compile } = makeVolumeRenderer();
     compile();
-    const { ctx, composite } = makeCtx(renderer);
-    const { canvas } = minimapCanvas();
-    handleMinimapInit(ctx, { type: "minimapInit", canvas });
-    uploadOverview(ctx);
+    const made = makeCtx(renderer);
+    handleMinimapInit(made.ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
+    return { renderer, ...made };
+  }
+
+  it("draws at once when the volume renderer has compiled", () => {
+    const { renderer, ctx, composite } = ready();
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("ds"));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["ds:ch0"]) });
 
     handleMinimapRender(ctx, renderMsg(100));
 
-    expect(renderer.renderMembers).toHaveBeenCalledOnce();
+    expect(renderer.renderMemberBatch).toHaveBeenCalledOnce();
     expect(composite).toHaveBeenCalledOnce();
   });
 
@@ -161,164 +191,152 @@ describe("the minimap's overview render", () => {
     const { ctx, composite } = makeCtx(renderer);
     const { canvas, size } = minimapCanvas();
     handleMinimapInit(ctx, { type: "minimapInit", canvas });
-    uploadOverview(ctx);
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("ds"));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["ds:ch0"]) });
 
     handleMinimapRender(ctx, renderMsg(100));
     handleMinimapRender(ctx, renderMsg(200));
     await flush();
-    expect(renderer.renderMembers).not.toHaveBeenCalled();
+    expect(renderer.renderMemberBatch).not.toHaveBeenCalled();
 
     compile();
     await flush();
-    expect(renderer.renderMembers).toHaveBeenCalledOnce();
+    expect(renderer.renderMemberBatch).toHaveBeenCalledOnce();
     expect(composite).toHaveBeenCalledOnce();
     expect(size.width).toBe(200);
 
     handleMinimapRender(ctx, renderMsg(300));
-    expect(renderer.renderMembers).toHaveBeenCalledTimes(2);
+    expect(renderer.renderMemberBatch).toHaveBeenCalledTimes(2);
   });
 
   it("drops a deferred draw when the minimap was destroyed before the pipelines compiled", async () => {
     const { renderer, compile } = makeVolumeRenderer();
     const { ctx } = makeCtx(renderer);
-    const { canvas } = minimapCanvas();
-    handleMinimapInit(ctx, { type: "minimapInit", canvas });
-    uploadOverview(ctx);
+    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("ds"));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["ds:ch0"]) });
 
     handleMinimapRender(ctx, renderMsg(100));
     handleMinimapDestroy(ctx.state.minimap);
     compile();
     await flush();
 
-    expect(renderer.renderMembers).not.toHaveBeenCalled();
+    expect(renderer.renderMemberBatch).not.toHaveBeenCalled();
   });
 
   it("reports a compile that failed, since no frame on a slice page awaits it", async () => {
     const { renderer, fail } = makeVolumeRenderer();
     const { ctx, posts } = makeCtx(renderer);
-    const { canvas } = minimapCanvas();
-    handleMinimapInit(ctx, { type: "minimapInit", canvas });
-    uploadOverview(ctx);
+    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("ds"));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["ds:ch0"]) });
 
     handleMinimapRender(ctx, renderMsg(100));
     fail("volume shader refused");
     await flush();
 
-    expect(renderer.renderMembers).not.toHaveBeenCalled();
+    expect(renderer.renderMemberBatch).not.toHaveBeenCalled();
     expect(posts).toEqual([
       { type: "error", message: "volume shader refused" },
     ]);
   });
 
-  it("draws members whose places do not meet through one target, in one pass and one composite", () => {
-    const { renderer, compile } = makeVolumeRenderer();
-    compile();
-    const { ctx, composite } = makeCtx(renderer);
-    const createTexture = ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>;
-    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
-    const members = ["m0", "m1", "m2"];
-    for (const id of members) {
-      handleMinimapUploadOverviewChunks(ctx, {
-        type: "minimapUploadOverviewChunksForLayer",
-        datasetId: `${id}:ch0`,
-        imageId: id,
-        level: 0,
-        t: 0,
-        c: 0,
-        levelWidth: 2,
-        levelHeight: 2,
-        levelDepth: 1,
-        chunkX: 2,
-        chunkY: 2,
-        chunkZ: 1,
-        chunks: [{ key: "0/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array(4).buffer }],
-        sampleFormat: "u16",
-      });
+  it("draws a channel of members whose places do not meet as one batch with one draw, however many members", () => {
+    for (const count of [2, 5]) {
+      const { renderer, ctx, composite } = ready();
+      const members = Array.from({ length: count }, (_, i) => `m${i}`);
+      const keys: string[] = [];
+      for (const id of members) {
+        for (const c of [0, 1]) {
+          handleMinimapUploadOverviewChunks(ctx, overviewUpload(id, c));
+          keys.push(`${id}:ch${c}`);
+        }
+      }
+      // Each member's two channels, at its place, the second channel added over the first.
+      const layers = layersOf(keys, (i) => sideBySide(Math.floor(i / 2)), (i) => i % 2);
+      handleMinimapLayers(ctx, { type: "minimapLayers", layers });
+      handleMinimapRender(ctx, renderMsg(100, [display({ colormap: "green" }), display({ colormap: "magenta", blendMode: "additive" })]));
+
+      // One atlas holds every overview: one draw per channel.
+      expect(renderer.writeDescriptorTable.mock.calls[0][1]).toHaveLength(2 * count);
+      expect(renderer.prepareMembers.mock.calls[0][1].map((draw) => draw.display?.contrastMax)).toEqual([1, 1]);
+      expect(new Set(renderer.prepareMembers.mock.calls[0][1].map((draw) => draw.levels[0]!.texture)).size).toBe(1);
+      const batches = renderer.renderMemberBatch.mock.calls.map((call) => call[1]);
+      expect(batches.map(({ count: n, draws }) => [n, draws])).toEqual([[count, [0]], [count, [1]]]);
+      const instances = renderer.setMemberInstances.mock.calls[0][1];
+      expect(instances.map(({ entityIndex, draw }) => [entityIndex, draw])).toEqual(
+        Array.from({ length: count }, (_, i) => [2 * i, 0]).concat(Array.from({ length: count }, (_, i) => [2 * i + 1, 1])),
+      );
+      expect(composite.mock.calls.map((call) => [call[1][0].blendMode, call[3]])).toEqual([["alpha", true], ["additive", false]]);
     }
-    const texturesBefore = createTexture.mock.calls.length;
-
-    const msg = renderMsg(100);
-    // Side by side across the canvas: each member's unit cube a third of the clip space wide.
-    const placed = (i: number) => new Float32Array([0.6, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, -1 + 0.65 * i, -1, 0, 1]);
-    msg.layers = members.map((id, i) => ({ ...msg.layers[0], datasetId: `${id}:ch0`, modelMatrix: placed(i) }));
-    handleMinimapRender(ctx, msg);
-
-    expect(renderer.writeDescriptorTable.mock.calls[0][1]).toHaveLength(3);
-    expect(renderer.prepareMembers.mock.calls[0][1].map((d) => d.entityIndex)).toEqual([0, 1, 2]);
-    expect(renderer.renderMembers).toHaveBeenCalledOnce();
-    expect(renderer.renderMembers.mock.calls[0][1]).toEqual([0, 1, 2]);
-    expect(createTexture.mock.calls.length - texturesBefore).toBe(1);
-    expect(composite.mock.calls.map((call) => [call[1].length, call[3]])).toEqual([[1, true]]);
   });
 
   it("composites members that overlap one at a time, in their order", () => {
-    const { renderer, compile } = makeVolumeRenderer();
-    compile();
-    const { ctx, composite } = makeCtx(renderer);
-    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
-    for (const id of ["m0", "m1"]) {
-      handleMinimapUploadOverviewChunks(ctx, {
-        type: "minimapUploadOverviewChunksForLayer",
-        datasetId: `${id}:ch0`,
-        imageId: id,
-        level: 0,
-        t: 0,
-        c: 0,
-        levelWidth: 2,
-        levelHeight: 2,
-        levelDepth: 1,
-        chunkX: 2,
-        chunkY: 2,
-        chunkZ: 1,
-        chunks: [{ key: "0/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array(4).buffer }],
-        sampleFormat: "u16",
-      });
-    }
+    const { renderer, ctx, composite } = ready();
+    for (const id of ["m0", "m1"]) handleMinimapUploadOverviewChunks(ctx, overviewUpload(id));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["m0:ch0", "m1:ch0"]) });
 
-    const msg = renderMsg(100);
-    msg.layers = ["m0", "m1"].map((id) => ({ ...msg.layers[0], datasetId: `${id}:ch0` }));
-    handleMinimapRender(ctx, msg);
+    handleMinimapRender(ctx, renderMsg(100));
 
-    expect(renderer.renderMembers.mock.calls.map((call) => call[1])).toEqual([[0], [1]]);
+    expect(renderer.renderMemberBatch.mock.calls.map((call) => [call[1].first, call[1].count])).toEqual([[0, 1], [1, 1]]);
     expect(composite.mock.calls.map((call) => call[3])).toEqual([true, false]);
   });
 
-  it("draws each chunk at its place, a missing one as nothing and a failed one as failed", () => {
-    const { renderer, compile } = makeVolumeRenderer();
-    compile();
-    const { ctx } = makeCtx(renderer);
+  it("redraws a display edit with the camera still without writing anything per overview", () => {
+    const { renderer, ctx } = ready();
+    const keys = ["m0", "m1", "m2"].map((id) => `${id}:ch0`);
+    for (const id of ["m0", "m1", "m2"]) handleMinimapUploadOverviewChunks(ctx, overviewUpload(id));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(keys, sideBySide) });
+
+    handleMinimapRender(ctx, renderMsg(100, [display({ contrastMax: 10 })]));
+    handleMinimapRender(ctx, renderMsg(100, [display({ contrastMax: 20 })]));
+
+    expect(renderer.writeDescriptorTable).toHaveBeenCalledOnce();
+    expect(renderer.setMemberInstances).toHaveBeenCalledOnce();
+    expect(renderer.prepareMembers.mock.calls.map((call) => call[1].map((draw) => draw.display?.contrastMax))).toEqual([[10], [20]]);
+    expect(renderer.renderMemberBatch).toHaveBeenCalledTimes(2);
+
+    // A camera move places them again, and an overview that opens lays them out again.
+    handleMinimapRender(ctx, { ...renderMsg(100), viewProj: sideBySide(1) });
+    expect(renderer.setMemberInstances).toHaveBeenCalledTimes(2);
+    expect(renderer.writeDescriptorTable).toHaveBeenCalledOnce();
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m3"));
+    handleMinimapRender(ctx, renderMsg(100));
+    expect(renderer.writeDescriptorTable).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves out an overview not yet open, and a channel no longer shown", () => {
+    const { renderer, ctx } = ready();
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m0", 0));
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("m0", 1));
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["m0:ch0", "m0:ch1", "m1:ch0"], () => IDENTITY, (i) => i % 2) });
+
+    handleMinimapRender(ctx, renderMsg(100, [display(), null]));
+
+    expect(renderer.writeDescriptorTable.mock.calls[0][1]).toHaveLength(1);
+    expect(renderer.setMemberInstances.mock.calls[0][1]).toHaveLength(1);
+  });
+
+  it("draws each chunk at its slot, a missing one as nothing and a failed one as failed", () => {
+    const { renderer, ctx } = ready();
     const writeBuffer = (ctx.device.queue as unknown as { writeBuffer: ReturnType<typeof vi.fn> }).writeBuffer;
-    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
     // A 2x2 grid of 2x2 chunks, of which the first arrived.
-    handleMinimapUploadOverviewChunks(ctx, {
-      type: "minimapUploadOverviewChunksForLayer",
-      datasetId: "ds:ch0",
-      imageId: "ds",
-      level: 3,
-      t: 0,
-      c: 0,
-      levelWidth: 4,
-      levelHeight: 4,
-      levelDepth: 1,
-      chunkX: 2,
-      chunkY: 2,
-      chunkZ: 1,
-      chunks: [{ key: "3/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array(4).buffer }],
-      sampleFormat: "u16",
-    });
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("ds", 0, { levelWidth: 4, levelHeight: 4 }));
     // The last chunk failed for good, and a failed chunk of another level marks nothing.
     ctx.state.failedByDataset.set("ds", new Map([["ds", new Set(["3/0/0/0/1/1", "2/0/0/0/1/0"])]]));
+    markOverviewsFailed(ctx, ctx.state.minimap.atlases);
+    handleMinimapLayers(ctx, { type: "minimapLayers", layers: layersOf(["ds:ch0"]) });
 
-    const msg = renderMsg(100);
-    msg.layers[0].datasetId = "ds:ch0";
-    handleMinimapRender(ctx, msg);
+    handleMinimapRender(ctx, renderMsg(100));
 
-    const written = writeBuffer.mock.calls.at(-1)![2] as Uint32Array;
-    expect([...written]).toEqual([0, 0xffffffff, 0xffffffff, 0xfffffffe]);
-    expect(renderer.prepareMembers.mock.calls.at(-1)![1][0].levels[0]).toMatchObject({ slotsX: 2, slotsY: 2, slotsZ: 1 });
+    const [, offset, written, start, length] = writeBuffer.mock.calls.at(-1)!;
+    expect([offset, start, length]).toEqual([0, 0, 4]);
+    const slot = (written as Uint32Array)[0];
+    expect([...(written as Uint32Array)]).toEqual([slot, 0xffffffff, 0xffffffff, 0xfffffffe]);
     expect(renderer.writeDescriptorTable.mock.calls.at(-1)![1][0].chunkGrid).toEqual({
       gridDims: [2, 2, 1],
       chunkDims: [2, 2, 1],
+      indirectionOffset: 0,
     });
   });
 });
@@ -345,7 +363,8 @@ describe("a thumbnail render", () => {
     return {
       type: "thumbnailRender",
       id: 7,
-      layers: renderMsg(64).layers,
+      layers: layersOf(["ds:ch0"]),
+      displays: [display()],
       invViewProj: IDENTITY,
       viewProj: IDENTITY,
       eye: new Float32Array(3),
@@ -359,17 +378,17 @@ describe("a thumbnail render", () => {
     vi.stubGlobal("OffscreenCanvas", fakeOffscreenCanvas(bitmap));
     const { renderer, compile } = makeVolumeRenderer();
     const { ctx, posts } = makeCtx(renderer);
-    uploadOverview(ctx);
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("ds"));
     const replies = () => posts.filter((post) => post.type === "thumbnailResult");
 
     expect(handleThumbnailRender(ctx, thumbnailMsg())).toBeUndefined();
     await flush();
-    expect(renderer.renderMembers).not.toHaveBeenCalled();
+    expect(renderer.renderMemberBatch).not.toHaveBeenCalled();
     expect(replies()).toEqual([]);
 
     compile();
     await flush();
-    expect(renderer.renderMembers).toHaveBeenCalledOnce();
+    expect(renderer.renderMemberBatch).toHaveBeenCalledOnce();
     expect(replies()).toEqual([{ type: "thumbnailResult", id: 7, bitmap }]);
   });
 
@@ -377,13 +396,13 @@ describe("a thumbnail render", () => {
     vi.stubGlobal("OffscreenCanvas", fakeOffscreenCanvas({ close: vi.fn() }));
     const { renderer, fail } = makeVolumeRenderer();
     const { ctx, posts } = makeCtx(renderer);
-    uploadOverview(ctx);
+    handleMinimapUploadOverviewChunks(ctx, overviewUpload("ds"));
 
     handleThumbnailRender(ctx, thumbnailMsg());
     fail("volume shader refused");
     await flush();
 
-    expect(renderer.renderMembers).not.toHaveBeenCalled();
+    expect(renderer.renderMemberBatch).not.toHaveBeenCalled();
     expect(posts).toEqual([
       { type: "thumbnailResult", id: 7, bitmap: null },
       { type: "error", message: "volume shader refused" },

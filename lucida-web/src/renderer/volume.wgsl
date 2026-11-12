@@ -24,7 +24,30 @@ struct Uniforms {
   // total = 272 bytes
 };
 
-struct EntityRef { index: vec4u }; // x = entity index
+struct EntityRef {
+  // x = entity index, y = declared palette pair count, z = the draw's index
+  // in its member draw set, which a member batch's instances name.
+  index: vec4u,
+  // A member batch draw's window min and max, gamma and opacity. Its
+  // members share a colormap, so they share these too, in place of their
+  // descriptors' own.
+  display: vec4f,
+};
+
+// One member of a member batch: its rect in the target's NDC (left, top,
+// right, bottom), its entity, and the draw it takes its pools and display
+// from. Matches MEMBER_INSTANCE_OFFSETS in volumeRenderer.ts and the same
+// struct in memberIds.wgsl.
+struct MemberInstance {
+  ndcRect: vec4f,
+  entity: u32,
+  draw: u32,
+  _pad0: u32,
+  _pad1: u32,
+};
+
+// What memberIds.wgsl leaves where no member's rect lies.
+const NO_MEMBER: u32 = 0xFFFFFFFFu;
 
 // Layout matches descriptor/layout.ts.
 struct ChunkTierSource {
@@ -81,6 +104,10 @@ struct EntityDescriptor {
 // Declared label palette for categorical draws: flat [id, packedRgba]
 // pairs; `currentEntity.index.y` holds the pair count (0 for intensity).
 @group(1) @binding(2) var<storage, read> labelColors: array<u32>;
+
+// A member batch's member under each pixel, as an index into its instances.
+@group(2) @binding(0) var memberIds: texture_2d<u32>;
+@group(2) @binding(1) var<storage, read> memberInstances: array<MemberInstance>;
 
 // Active entity descriptor for the current fragment, populated once at
 // the top of fs() and read by sampleWithFallback per ray sample. Reading
@@ -433,6 +460,31 @@ fn fsCut(input: VSOut) -> @location(0) vec4f {
 @fragment
 fn fs(input: VSOut) -> FsOut {
   activeEntity = entityDescriptors[currentEntity.index.x];
+  return march(input);
+}
+
+// A member batch's draw: the full-screen triangle's ray at every pixel, as
+// `fs` marches it, for the member memberIds.wgsl put under the pixel when it
+// takes this draw's pools. One draw marches every such member, and each
+// pixel's ray and samples are the ones a draw of that member alone gives it.
+@fragment
+fn fsMembers(input: VSOut) -> FsOut {
+  let at = textureLoad(memberIds, vec2i(input.pos.xy), 0).r;
+  if (at == NO_MEMBER || memberInstances[at].draw != currentEntity.index.z) {
+    var none: FsOut;
+    discard;
+    return none;
+  }
+  activeEntity = entityDescriptors[memberInstances[at].entity];
+  activeEntity.contrastMin = currentEntity.display.x;
+  activeEntity.contrastMax = currentEntity.display.y;
+  activeEntity.gamma = currentEntity.display.z;
+  activeEntity.opacity = currentEntity.display.w;
+  return march(input);
+}
+
+// The ray through `input`'s pixel, marched through `activeEntity`.
+fn march(input: VSOut) -> FsOut {
   let entity = activeEntity;
 
   // Reconstruct ray in world space from NDC

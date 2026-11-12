@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
-import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, overviewKeyFor, overviewLayerParams, readMemberRenderMatrices, readMinimapOverviewEpochs, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
+import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, overviewDisplays, overviewKeyFor, packOverviewLayers, readMemberRenderMatrices, readMinimapOverviewEpochs, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
 import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
 import type { MinimapState } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
@@ -54,33 +54,42 @@ describe("minimapCoarseLevelIndex", () => {
   });
 });
 
-describe("overviewLayerParams", () => {
-  const geometry = (channel: number) => ({
-    memberId: `m0:ch${channel}`,
-    ownerDatasetId: "ds",
+describe("the overviews the minimap draws", () => {
+  const geometry = (member: string, channel: number, dataset = "ds") => ({
+    memberId: `${member}:ch${channel}`,
+    ownerDatasetId: dataset,
     channel,
-    modelMatrix: identityModelMatrix(),
-    invModelMatrix: identityModelMatrix(),
+    modelMatrix: new Float32Array(16).fill(channel + 1),
+    invModelMatrix: new Float32Array(16).fill(-(channel + 1)),
   });
 
-  it("draws every shown channel of a composite with the canvas's window, colormap and blend", () => {
+  it("pack each overview's key and matrices, and name the shown channel it takes its display from", () => {
+    const { layers, groups } = packOverviewLayers([geometry("m0", 0), geometry("m0", 1), geometry("m1", 0), geometry("x", 0, "other")]);
+    expect(layers.keys).toEqual(["m0:ch0", "m0:ch1", "m1:ch0", "x:ch0"]);
+    expect([...layers.displays]).toEqual([0, 1, 0, 2]);
+    expect(groups).toEqual([{ datasetId: "ds", channel: 0 }, { datasetId: "ds", channel: 1 }, { datasetId: "other", channel: 0 }]);
+    expect([layers.matrices[32], layers.matrices[48]]).toEqual([2, -2]);
+  });
+
+  it("draw every shown channel of a composite with the canvas's window, colormap and blend", () => {
     const layers = resolvedLayers(resolvedLayer("ds", [
       shownChannel(0, { colormap: "magenta", contrast_max: 148, gamma: 0.8 }),
       shownChannel(1, { colormap: "green", contrast_min: 10, contrast_max: 200, gamma: 1.2 }),
       shownChannel(2, { colormap: "cyan" }),
     ]));
-    const params = overviewLayerParams([geometry(0), geometry(1), geometry(2)], layers);
-    expect(params.map((p) => [p.datasetId, p.colormap, p.contrastMin, p.contrastMax, p.gamma, p.blendMode])).toEqual([
-      ["m0:ch0", "magenta", 0, 148, 0.8, "additive"],
-      ["m0:ch1", "green", 10, 200, 1.2, "additive"],
-      ["m0:ch2", "cyan", 0, 65535, 1, "additive"],
+    const { groups } = packOverviewLayers([geometry("m0", 0), geometry("m0", 1), geometry("m0", 2)]);
+    const displays = overviewDisplays(groups, layers);
+    expect(displays.map((d) => d && [d.colormap, d.contrastMin, d.contrastMax, d.gamma, d.blendMode])).toEqual([
+      ["magenta", 0, 148, 0.8, "additive"],
+      ["green", 10, 200, 1.2, "additive"],
+      ["cyan", 0, 65535, 1, "additive"],
     ]);
   });
 
-  it("skips a cached channel the layer no longer shows, as after a solo", () => {
+  it("leave out a cached channel the layer no longer shows, as after a solo", () => {
     const layers = resolvedLayers(resolvedLayer("ds", [shownChannel(1, { blend_mode: "alpha" })], { solo: 1, channel_count: 3 }));
-    const params = overviewLayerParams([geometry(0), geometry(1), geometry(2)], layers);
-    expect(params.map((p) => [p.datasetId, p.blendMode])).toEqual([["m0:ch1", "alpha"]]);
+    const { groups } = packOverviewLayers([geometry("m0", 0), geometry("m0", 1), geometry("m0", 2)]);
+    expect(overviewDisplays(groups, layers).map((d) => d?.blendMode ?? null)).toEqual([null, "alpha", null]);
   });
 });
 
@@ -328,6 +337,7 @@ describe("tickMinimap overview/overlay split", () => {
 
   function makeCtx(scene: FakeScene, mode: "slice" | "volume", renderCount: { n: number }): TickContext {
     const client = {
+      minimapLayers: () => {},
       minimapRender: () => {
         renderCount.n++;
       },
@@ -607,6 +617,7 @@ describe("tickMinimap overview/overlay split", () => {
     // Capture the backing size each overview render is issued at.
     const renderSizes: number[] = [];
     const client = {
+      minimapLayers: () => {},
       minimapRender: (_l: unknown, _iv: unknown, _vp: unknown, _e: unknown, w: number) => {
         renderSizes.push(w);
       },
@@ -969,7 +980,7 @@ describe("tickMinimapOverview on a collection", () => {
         getCachedChunk: (entityId: string, key: string) => cache.get(`${entityId}/${key}`) ?? null,
       },
       client: {
-        minimapUploadOverviewChunksForLayer: (overview: string, chunks: { key: string }[]) => {
+        minimapUploadOverviewChunksForLayer: (overview: string, _dataset: string, chunks: { key: string }[]) => {
           uploads.push({ overview, keys: chunks.map((chunk) => chunk.key) });
         },
       },
@@ -1020,7 +1031,7 @@ describe("tickMinimapOverview with a chunk that failed for good", () => {
         failedChunks: () => [{ datasetId: "ds", imageId: "ds", chunkKey: "1/0/0/0/0/0", failure: null }],
       },
       client: {
-        minimapUploadOverviewChunksForLayer: (overview: string, chunks: unknown[], imageId: string, level: number) => {
+        minimapUploadOverviewChunksForLayer: (overview: string, _dataset: string, chunks: unknown[], imageId: string, level: number) => {
           uploads.push({ overview, chunks: chunks.length, imageId, level });
         },
       },

@@ -15,8 +15,14 @@
 import { describe, it, expect } from "vitest";
 import sliceSrc from "../slice.wgsl?raw";
 import volumeSrc from "../volume.wgsl?raw";
+import memberIdsSrc from "../memberIds.wgsl?raw";
 import { SLICE_UNIFORM_OFFSETS, SLICE_UNIFORM_SIZE } from "../sliceRenderer.ts";
-import { VOLUME_UNIFORM_OFFSETS, VOLUME_UNIFORM_SIZE } from "../volumeRenderer.ts";
+import {
+  MEMBER_INSTANCE_OFFSETS,
+  MEMBER_INSTANCE_SIZE,
+  VOLUME_UNIFORM_OFFSETS,
+  VOLUME_UNIFORM_SIZE,
+} from "../volumeRenderer.ts";
 import {
   DESCRIPTOR_ENTRY_SIZE,
   DESCRIPTOR_LEVEL_SOURCES_OFFSET,
@@ -255,5 +261,15 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.chunkDims).toBe(SOURCE_OFFSET_CHUNK_DIMS);
     expect(offsets.levelDims).toBe(SOURCE_OFFSET_LEVEL_DIMS);
     expect(structSize(fields)).toBe(DESCRIPTOR_TIER_SOURCE_SIZE);
+  });
+});
+
+describe("MemberInstance WGSL ↔ TS layout agreement", () => {
+  it("volume.wgsl and memberIds.wgsl declare one MemberInstance, laid out as the instance writer writes it", () => {
+    const struct = (src: string) => extractStruct(src, "MemberInstance").replace(/\r\n/g, "\n");
+    expect(struct(memberIdsSrc)).toBe(struct(volumeSrc));
+    const fields = parseFields(extractStruct(volumeSrc, "MemberInstance"));
+    expect(computeOffsets(fields)).toMatchObject(MEMBER_INSTANCE_OFFSETS);
+    expect(structSize(fields)).toBe(MEMBER_INSTANCE_SIZE);
   });
 });

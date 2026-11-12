@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
 import type { RenderClient } from "./renderer/renderClient.ts";
-import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
+import type { OverviewDisplay, OverviewLayers } from "./renderer/workerProtocol.ts";
 import type { DatasetState } from "./types.ts";
 import type { SavedView } from "./savedView/types.ts";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
@@ -76,7 +76,7 @@ function soloView(channel: number): SavedView {
 describe("makeThumbnailRequester", () => {
   let config: SceneConfig;
   let sceneParts: ReturnType<typeof makeScene>;
-  let rendered: MinimapLayerParams[][];
+  let rendered: Array<{ layers: OverviewLayers; displays: Array<OverviewDisplay | null> }>;
   let requestThumbnail: (view: SavedView, size: number) => Promise<ImageBitmap | null>;
 
   beforeEach(() => {
@@ -87,8 +87,8 @@ describe("makeThumbnailRequester", () => {
     sceneParts = makeScene(config);
     rendered = [];
     const client = {
-      thumbnailRender: vi.fn((layers: MinimapLayerParams[]) => {
-        rendered.push(layers);
+      thumbnailRender: vi.fn((layers: OverviewLayers, displays: Array<OverviewDisplay | null>) => {
+        rendered.push({ layers, displays });
         return Promise.resolve({} as ImageBitmap);
       }),
     } as unknown as RenderClient;
@@ -100,9 +100,15 @@ describe("makeThumbnailRequester", () => {
     });
   });
 
+  /** Each overview the `at`th render draws, with the display it takes. */
+  function drawn(at: number): Array<[string, OverviewDisplay | null]> {
+    const { layers, displays } = rendered[at];
+    return layers.keys.map((key, i) => [key, displays[layers.displays[i]]]);
+  }
+
   it("previews the composite the view shows, every channel in its own colormap and window", async () => {
     await requestThumbnail(view, 128);
-    expect(rendered[0].map((l) => [l.datasetId, l.colormap, l.contrastMin, l.contrastMax, l.gamma, l.blendMode])).toEqual([
+    expect(drawn(0).map(([key, d]) => [key, d?.colormap, d?.contrastMin, d?.contrastMax, d?.gamma, d?.blendMode])).toEqual([
       ["img-0:ch0", "magenta", 0, 100, 1, "additive"],
       ["img-0:ch1", "green", 5, 50, 1, "additive"],
       ["img-0:ch2", "cyan", 0, 65535, 0.8, "additive"],
@@ -114,7 +120,7 @@ describe("makeThumbnailRequester", () => {
 
   it("previews a candidate that solos a channel with that channel alone", async () => {
     await requestThumbnail(soloView(1), 128);
-    expect(rendered[0].map((l) => [l.datasetId, l.colormap])).toEqual([
+    expect(drawn(0).map(([key, d]) => [key, d?.colormap])).toEqual([
       ["img-0:ch1", "green"],
       ["img-1:ch1", "green"],
     ]);
@@ -127,8 +133,8 @@ describe("makeThumbnailRequester", () => {
 
     expect(sceneParts.memberRenderIds).toHaveBeenCalledTimes(1);
     expect(rendered).toHaveLength(3);
-    expect(rendered[1]).toBe(rendered[0]);
-    expect(rendered[2]).toBe(rendered[0]);
+    expect(rendered[1].layers).toBe(rendered[0].layers);
+    expect(rendered[2].layers).toBe(rendered[0].layers);
   });
 
   it("rebuilds the list when the content epoch bumps", async () => {
@@ -137,7 +143,7 @@ describe("makeThumbnailRequester", () => {
     await requestThumbnail(view, 128);
 
     expect(sceneParts.memberRenderIds).toHaveBeenCalledTimes(2);
-    expect(rendered[1]).not.toBe(rendered[0]);
+    expect(rendered[1].layers).not.toBe(rendered[0].layers);
   });
 
   it("rebuilds the list when the display changes", async () => {
@@ -154,7 +160,7 @@ describe("makeThumbnailRequester", () => {
     await requestThumbnail(view, 128);
 
     expect(sceneParts.memberRenderIds).toHaveBeenCalledTimes(1);
-    expect(rendered[1]).toBe(rendered[0]);
+    expect(rendered[1].layers).toBe(rendered[0].layers);
   });
 
   it("returns null without rendering when the dataset is hidden", async () => {
