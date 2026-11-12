@@ -54,6 +54,8 @@ interface Props {
   /** Whether a dataset has ever registered; the viewers wait for one. */
   hasDatasets: boolean;
   selectedDatasetId: string | null;
+  /** Select a layer in the layer panel, as a mark placed on it does. */
+  onSelectDataset: (datasetId: string) => void;
   tool: Tool;
   annotationsVisible: boolean;
   /** The browser-persisted annotation author, not the connection's id. */
@@ -86,6 +88,7 @@ export function CanvasLayers({
   datasets,
   hasDatasets,
   selectedDatasetId,
+  onSelectDataset,
   tool,
   annotationsVisible,
   annotationAuthor,
@@ -182,7 +185,8 @@ export function CanvasLayers({
             breakFollow={breakFollow}
             sendCursor={sendCursor}
             loopRef={render.loopRef}
-            annotationDatasetId={selectedDatasetId}
+            selectedDatasetId={selectedDatasetId}
+            selectDataset={onSelectDataset}
             tool={tool}
             myId={annotationAuthor}
             sendCommand={sendCommand}
@@ -203,7 +207,8 @@ export function CanvasLayers({
             sendCursor={sendCursor}
             cameraMode={pane.cameraMode}
             loopRef={render.loopRef}
-            annotationDatasetId={selectedDatasetId}
+            selectedDatasetId={selectedDatasetId}
+            selectDataset={onSelectDataset}
             tool={tool}
             myId={annotationAuthor}
             sendCommand={sendCommand}

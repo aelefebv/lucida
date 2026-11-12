@@ -867,6 +867,13 @@ impl WasmScene {
         serde_json::to_string(&ids).unwrap_or_default()
     }
 
+    /// The layers `view` draws under `(x, y)`, fractions of its width and
+    /// height from its top left, topmost first, as a JSON array of ids
+    /// ([`Scene::layers_at`]).
+    pub fn layers_at(&self, view: u32, x: f64, y: f64) -> String {
+        serde_json::to_string(&self.inner.layers_at(ViewId(view), [x, y])).unwrap_or_default()
+    }
+
     /// Where `view` draws, as `[x, y, width, height]` fractions of the
     /// canvas from its top-left corner; empty for an unknown view.
     pub fn view_rect(&self, view: u32) -> Vec<f64> {
