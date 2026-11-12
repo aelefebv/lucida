@@ -547,6 +547,34 @@ mod tests {
     }
 
     #[test]
+    fn the_slice_views_fit_one_zoom_again_as_each_view_takes_new_datasets() {
+        let mut scene = four_up();
+        open(&mut scene, "b", [32, 512, 384]);
+        let zooms = |scene: &Scene| -> Vec<f64> {
+            scene
+                .views()
+                .iter()
+                .filter_map(|view| match &view.camera {
+                    Camera::Slice(slice) => Some(slice.zoom),
+                    _ => None,
+                })
+                .collect()
+        };
+        let both = zooms(&scene);
+        let ids: Vec<ViewId> = scene.views().iter().map(|v| v.id()).collect();
+        for view in ids {
+            let datasets = ViewDatasets::Only(vec![DatasetId::from("a")]);
+            apply(
+                &mut scene,
+                ViewportCommand::SetViewDatasets { view, datasets },
+            );
+        }
+        let alone = zooms(&scene);
+        assert!(alone[0] > both[0], "{alone:?} fits less than {both:?}");
+        assert_eq!(alone, vec![alone[0]; 3]);
+    }
+
+    #[test]
     fn side_views_take_a_placed_views_scale_and_its_place_on_the_axes_they_share() {
         let mut scene = Scene::new([800, 600]);
         open(&mut scene, "a", [32, 128, 96]);
