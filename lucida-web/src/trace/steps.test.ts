@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { SavedView } from "../savedView/types.ts";
+import type { SavedView, SliceCamera } from "../savedView/types.ts";
 import {
   awaitDatasetOpen,
   comparisonPair,
@@ -163,6 +163,40 @@ describe("what a step is judged by", () => {
 
   it("is null before a scene exists", () => {
     expect(viewSignature(null)).toBeNull();
+  });
+
+  describe("with several views", () => {
+    const slice = (zoom: number, viewport: [number, number] = [720, 900]): SliceCamera =>
+      ({ mode: "slice", center: [256, 256], zoom, viewport });
+    // The active view's camera and selectors stand at the top, as the scene exports them.
+    const columns = (active: number, zooms: [number, number], viewports?: [number, number][]): SavedView => {
+      const cameras = zooms.map((zoom, at) => slice(zoom, viewports?.[at]));
+      return {
+        ...base,
+        camera: cameras[active],
+        views: {
+          layout: "columns",
+          active,
+          views: cameras.map((camera) => ({ camera, axes: base.view, datasets: "all" as const })),
+        },
+      };
+    };
+    const signature = (saved: SavedView) => JSON.stringify(viewSignature(saved));
+
+    it("changes with any view's camera", () => {
+      expect(signature(columns(0, [1, 2]))).toBe(signature(columns(0, [1, 2])));
+      expect(signature(columns(0, [1, 2.2]))).not.toBe(signature(columns(0, [1, 2])));
+    });
+
+    it("leaves out which view is active, whose camera a gesture aimed at another view replaces", () => {
+      expect(signature(columns(1, [1, 2]))).toBe(signature(columns(0, [1, 2])));
+      expect(viewSignature(columns(1, [1, 2]))!.camera).toBeNull();
+    });
+
+    it("ignores each view's viewport", () => {
+      expect(signature(columns(0, [1, 2], [[600, 900], [840, 900]]))).toBe(signature(columns(0, [1, 2])));
+      expect(viewSignature(columns(0, [1, 2]))!.views!.views[1].camera).not.toHaveProperty("viewport");
+    });
   });
 });
 

@@ -3,7 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { LayerInfo } from "../components/LayerPanel.tsx";
 import type { DatasetManifest } from "../manifestTypes.ts";
-import type { DatasetState, ViewMode } from "../types.ts";
+import type { DatasetState } from "../types.ts";
 import { dtypeRange } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
@@ -11,7 +11,8 @@ import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import { invalidateDisplaySettings, invalidateSelection } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
-import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
+import { eligibleLabelInfos, volumeBudgetPrefix, type LabelSelectionCaps } from "../pipeline/planning/labelRequests.ts";
+import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
 import type { LevelsByView } from "../pipeline/datasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import { channelDisplayName, channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
@@ -28,38 +29,38 @@ interface PanelLabelRow {
 }
 
 /**
- * The per-label rows for one dataset, aware of the view mode.
+ * The per-label rows for one dataset, aware of what the active view cuts:
+ * `plane` in a slice view, null in a volume view.
  *
- * Lists every label drawable in either mode, so the panel is stable across a
- * 2D/3D switch. A label drawable only in the other mode, or past the 3D
- * label-volume memory budget ({@link volumeBudgetPrefix}, the same prefix the
- * render path applies), gets a `disabledReason`. A control must never show "on"
- * for a label that draws nothing. Visibility mirrors `resolveVisibleLabels`:
+ * Lists every label drawable in some slice plane or in the volume, so the
+ * panel is stable across a switch of plane or between 2D and 3D. A label the
+ * active view can't draw, or one past the 3D label-volume memory budget
+ * ({@link volumeBudgetPrefix}, the same prefix the render path applies), gets
+ * a `disabledReason`. A control must never show "on" for a label that draws
+ * nothing. Eligibility takes the same caps as fetch and render, the slice
+ * caps bounding the plane cut. Visibility mirrors `resolveVisibleLabels`:
  * masks are opt-in, so a label with no explicit setting starts hidden.
  */
 function buildLabelRows(
   manifest: DatasetManifest,
   rawLabelSettings: { visible: boolean; opacity: number }[] | undefined,
-  viewMode: ViewMode,
+  plane: SlicePlane | null,
 ): PanelLabelRow[] {
   const labels = manifest.labels;
   if (!labels || labels.length === 0) return [];
-  const sliceEligible = new Set(
-    eligibleLabelInfos(manifest, { mode: "slice" }).map((e) => e.index),
-  );
-  const volumeEligible = new Set(
-    eligibleLabelInfos(manifest, { mode: "volume" }).map((e) => e.index),
-  );
-  const is3d = viewMode === "3d";
-  const currentEligible = is3d ? volumeEligible : sliceEligible;
+  const eligibleUnder = (caps: LabelSelectionCaps) =>
+    new Set(eligibleLabelInfos(manifest, caps).map((e) => e.index));
+  const inPlane = (cut: SlicePlane) => eligibleUnder({ mode: "slice", cutAxis: cutAxis(cut) });
+  const sliceEligible: Record<SlicePlane, Set<number>> = { xy: inPlane("xy"), xz: inPlane("xz"), yz: inPlane("yz") };
+  const volumeEligible = eligibleUnder({ mode: "volume" });
+  const currentEligible = plane === null ? volumeEligible : sliceEligible[plane];
   const hasLabelSettings = !!rawLabelSettings && rawLabelSettings.length > 0;
 
   const rows: PanelLabelRow[] = [];
   for (let i = 0; i < labels.length; i++) {
-    const drawableInEitherMode = sliceEligible.has(i) || volumeEligible.has(i);
-    if (!drawableInEitherMode) continue; // drawable in neither → omitted
+    const drawable = volumeEligible.has(i) || Object.values(sliceEligible).some((eligible) => eligible.has(i));
+    if (!drawable) continue;
 
-    const drawableNow = currentEligible.has(i);
     const ls = rawLabelSettings?.[i];
     const row: PanelLabelRow = {
       index: i,
@@ -67,17 +68,15 @@ function buildLabelRows(
       visible: hasLabelSettings ? (ls?.visible ?? false) : false,
       opacity: ls?.opacity ?? 0.5,
     };
-    if (!drawableNow) {
-      row.disabledReason = is3d
-        ? "too large to render in 3D"
-        : "too large to render in 2D";
+    if (!currentEligible.has(i)) {
+      row.disabledReason = `too large to render in ${plane === null ? "3D" : plane.toUpperCase()}`;
     }
     rows.push(row);
   }
 
   // Same manifest-order budget prefix as the render path, so the panel and the
   // screen agree on which masks 3D shows.
-  if (is3d) {
+  if (plane === null) {
     const candidateIndices = rows
       .filter((r) => volumeEligible.has(r.index) && r.visible)
       .map((r) => r.index);
@@ -174,7 +173,7 @@ export function buildLayerInfos(
     /** The worker's per-dataset level readouts by view; a dataset it has not reported yet is absent. */
     levels: Map<string, LevelsByView>;
   },
-  viewMode: ViewMode = "2d",
+  plane: SlicePlane | null = "xy",
 ): LayerInfo[] {
   let layerOrder: string[];
   let allSettings: Record<string, RawDatasetSettings>;
@@ -193,7 +192,7 @@ export function buildLayerInfos(
     const dataType = multiscale?.data_type ?? "uint16";
 
     const rawLabelSettings = settings?.label_settings;
-    const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
+    const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, plane) : [];
     // The readout is the active view's, as the label rows are. Another view
     // lays out levels of its own, which a bare number here would misstate.
     const levels = maps.levels.get(id)?.get(activeView) ?? null;
@@ -266,8 +265,8 @@ interface Params {
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   datasetsVersion: number;
   remoteDocumentVersion: number;
-  /** Picks the label rows' eligibility caps (slice or volume). */
-  viewMode: ViewMode;
+  /** The plane the active view cuts, or null in a volume view: picks the label rows' eligibility caps. */
+  slicePlane: SlicePlane | null;
   /** The worker's per-dataset target and displayed levels, by view (see `useDatasetLevels`). */
   datasetLevels: Map<string, LevelsByView>;
 }
@@ -282,7 +281,7 @@ export function useDatasetSettings({
   datasetCallbacksRef,
   datasetsVersion,
   remoteDocumentVersion,
-  viewMode,
+  slicePlane,
   datasetLevels,
 }: Params) {
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
@@ -585,7 +584,7 @@ export function useDatasetSettings({
         autoContrast: autoContrastMap,
         contrastFit: contrastFitMap,
         levels: datasetLevels,
-      }, viewMode)
+      }, slicePlane)
     : [];
   void datasetsVersion;
   void remoteDocumentVersion;

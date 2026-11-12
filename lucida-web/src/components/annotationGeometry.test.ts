@@ -5,6 +5,7 @@ import {
   isClosedShape,
   liesOnPlane,
   onPlane,
+  shiftPin,
   translateOnPlane,
   withOnPlane,
 } from "./annotationGeometry.ts";
@@ -96,6 +97,16 @@ describe("a point's place on a plane", () => {
   it("moves a whole shape across a plane, each vertex at its own place along the cut", () => {
     const moved = translateOnPlane({ position: [1, 2, 3], end: [5, 6, 9] }, [10, -1], "xy");
     expect(moved).toEqual({ position: [11, 1, 3], end: [15, 5, 9] });
+  });
+});
+
+describe("shiftPin", () => {
+  it("moves every vertex alike, so a side-view box stays on its plane", () => {
+    const box: Annotation = { ...pin("box", [10, 52.5], [30, 52.5]), z: 2, end_z: 6 };
+    const moved = shiftPin(box, [0, -40, 20]);
+    expect(annotationVertices(moved)).toEqual(annotationVertices(box).map(([x, y, z]) => [x, y - 40, z + 20]));
+    expect(boxPlane([moved.position[0], moved.position[1], moved.z ?? 0], [30, 12.5, 26])).toBe("xz");
+    expect(shiftPin(box, [0, 0, 0])).toBe(box);
   });
 });
 
