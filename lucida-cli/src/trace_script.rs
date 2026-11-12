@@ -275,7 +275,9 @@ pub enum ScriptStep {
     /// `rows`, `grid` or `four_up`, then move into each view, in order, the open datasets
     /// whose source URLs `show` lists for it, as a layer dropped on a view
     /// moves there; with `keep`, shows them there as well, as "Show in both
-    /// views" does. Only a script file can name the datasets.
+    /// views" does. Four-up shows one set of datasets in all four views, so
+    /// there every dataset the lists name shows in each. Only a script file
+    /// can name the datasets.
     Views {
         layout: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1637,11 +1639,15 @@ pub struct StepRecord {
     /// Whether the driver's deadline passed while waiting for this step: for
     /// a wait, for quiescence; for a gesture, for its run to conclude.
     pub timed_out: bool,
-    /// The view as the page would save it, before and after.
+    /// The view as the page would save it, before and after. Its `camera`
+    /// is the active view's, and a gesture aimed at another view makes that
+    /// one active, so with several views each one's own camera is the one
+    /// under `views.views`, in the layout's order.
     pub view_before: Value,
     pub view_after: Value,
-    /// Whether the page's view signature differs between the two: camera,
-    /// selectors, and what is shown, by the page's own rule.
+    /// Whether the page's view signature differs between the two: each
+    /// view's camera, the selectors, and what is shown, by the page's own
+    /// rule.
     pub view_changed: bool,
 }
 
@@ -3337,23 +3343,44 @@ mod tests {
         assert!((reached - 2.0).abs() < 1e-9, "{reached}");
     }
 
-    /// The page receives a dispatched wheel delta divided by the emulated
-    /// ratio, so a zoom step scales the view by the same factor at every
-    /// ratio.
+    /// Chrome's device-metrics emulation hands the page a dispatched wheel
+    /// delta divided by the emulated ratio, as headless Chrome measures at
+    /// 1, 2 and 3. So a step of one notch reaches the page as the 100 px a
+    /// mouse notch raises, and any zoom step's events, burst or paced,
+    /// compound to its factor at every ratio.
     #[test]
     fn a_zoom_scales_the_view_alike_at_every_device_pixel_ratio() {
         let scale = InputScale::default();
-        let delta = wheel_zoom_delta(2.0, scale);
         for ratio in [1.0, 2.0, 3.0] {
-            let event = wheel_event((720.0, 450.0), delta, ratio);
-            let received = event["deltaY"].as_f64().unwrap() / ratio;
-            let zoom = (-received * scale.wheel_zoom_per_pixel).exp();
-            assert!((zoom - 2.0).abs() < 1e-9, "ratio {ratio}: {zoom}");
-            assert_eq!(event["type"], "mouseWheel");
+            let notch = wheel_event((720.0, 450.0), wheel_zoom_delta(1.1, scale), ratio);
+            let received = notch["deltaY"].as_f64().unwrap() / ratio;
+            assert!(
+                (received + WHEEL_NOTCH_DELTA).abs() < 1e-9,
+                "ratio {ratio}: {received}"
+            );
+            assert_eq!(notch["type"], "mouseWheel");
             assert_eq!(
-                (event["x"].as_f64(), event["y"].as_f64()),
+                (notch["x"].as_f64(), notch["y"].as_f64()),
                 (Some(720.0), Some(450.0))
             );
+            for factor in [1.1, 2.0, 0.5] {
+                let delta = wheel_zoom_delta(factor, scale);
+                let paced = paced_moves(Duration::from_millis(500)) as u32 + 1;
+                for events in [wheel_notches(delta), paced] {
+                    let zoom: f64 = (0..events)
+                        .map(|_| {
+                            let event =
+                                wheel_event((720.0, 450.0), delta / f64::from(events), ratio);
+                            let received = event["deltaY"].as_f64().unwrap() / ratio;
+                            (-received * scale.wheel_zoom_per_pixel).exp()
+                        })
+                        .product();
+                    assert!(
+                        (zoom - factor).abs() < 1e-9,
+                        "ratio {ratio}, {events} events: {zoom}, not {factor}"
+                    );
+                }
+            }
         }
     }
 
