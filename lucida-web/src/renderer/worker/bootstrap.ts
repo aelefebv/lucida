@@ -16,7 +16,7 @@ import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
 import { CursorRenderer } from "../cursorRenderer.ts";
-import { computeWantedSet, type AtlasSnapshot } from "../wantedSet.ts";
+import { computeWantedSet, WantedSetMemo, type AtlasSnapshot } from "../wantedSet.ts";
 import { createInitialState, type RendererState, type ViewDraw } from "./state.ts";
 import { drawOf, drawsOf } from "./draws.ts";
 import type { SliceAtlasState } from "../slice/atlas.ts";
@@ -133,6 +133,9 @@ export function createWantedSetPoster(
   state: RendererState,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
 ): (datasetId?: string, mode?: PoolMode, view?: number) => void {
+  // Each draw's member plans, kept between reports: a view move changes few
+  // members' wanted chunks, and every report reads residency afresh.
+  const memos = new WeakMap<ViewDraw, WantedSetMemo>();
   return function postWantedSet(datasetId?: string, mode?: PoolMode, view?: number): void {
     if (datasetId === undefined) {
       const cold = state.currentColdState;
@@ -148,12 +151,15 @@ export function createWantedSetPoster(
   function postFor(draw: ViewDraw): void {
     const { cold, mode } = draw;
     const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
+    let memo = memos.get(draw);
+    if (!memo) memos.set(draw, (memo = new WantedSetMemo()));
     const result = computeWantedSet(
       cold,
       draw.wanted,
       mode === "volume" ? viewSnapshots(state.volumeAtlases, draw) : new Map(),
       mode === "slice" ? viewSnapshots(state.sliceAtlases, draw) : new Map(),
       (memberId, tier, level) => draw.routes.get(memberId)?.get(sourceKey(tier, level)),
+      memo,
     );
     post({
       type: "wantedSetDelta",

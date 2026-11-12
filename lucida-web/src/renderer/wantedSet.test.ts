@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeWantedSet,
+  WantedSetMemo,
   type AtlasLevelMeta,
   type AtlasSnapshot,
   type SourcePoolResolver,
@@ -13,7 +14,7 @@ import type {
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
-import { indexWantedChunks, type WantedChunkIndex } from "./wantedChunks.ts";
+import { indexWantedChunks, wantedEntryKey, type WantedChunkIndex } from "./wantedChunks.ts";
 
 function chunks(missing: MissingChunk[]): MissingChunk[] {
   return missing;
@@ -651,5 +652,139 @@ describe("computeWantedSet", () => {
       expect(computeWantedSet(coldState, wantPlane, new Map(), wrongPlane, poolsFromAtlases(wrongPlane)).levels[0].displayed)
         .toBeNull();
     });
+  });
+});
+
+describe("computeWantedSet with a memo kept from one call to the next", () => {
+  // Two levels in one chunk shape: level 0 is 2 x 2 chunks, level 1 one.
+  const levels = [
+    { level: 0, chunkShape: [32, 32, 32] as [number, number, number], gridShape: [1, 2, 2] as [number, number, number], levelDims: [32, 64, 64] as [number, number, number] },
+    { level: 1, chunkShape: [32, 32, 32] as [number, number, number], gridShape: [1, 1, 1] as [number, number, number], levelDims: [16, 32, 32] as [number, number, number] },
+  ];
+  const level0: AtlasLevelMeta = { level: 0, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], offset: 0 };
+  const level1: AtlasLevelMeta = { level: 1, gridDims: [1, 1, 1], chunkDims: [32, 32, 32], offset: 4 };
+  const level0Keys = (c: number, t = 0) => ["0/0/0", "0/0/1", "0/1/0", "0/1/1"].map((zyx) => `0/${t}/${c}/${zyx}`);
+  const level1Key = (c: number, t = 0) => `1/${t}/${c}/0/0/0`;
+  type Pool = "detail" | "other" | "coarse";
+
+  /**
+   * What the worker keeps, replaced the way the cold state replaces it: a
+   * changed entry, wanted set, route or member's sections is a new object,
+   * while residency changes the pools' slot maps in place.
+   */
+  function world() {
+    const entries = ["a", "b"].map((name) =>
+      makeActiveEntry({ entityId: `entity-${name}`, imageId: name, levels, detailLevels: [0, 1], coarseLevel: 1 }));
+    const members = entries.flatMap((entry) => [0, 1].map((c) => ({ memberId: `${entry.imageId}:ch${c}`, c })));
+    const everyMember = <T>(value: T) => new Map(members.map(({ memberId }) => [memberId, value]));
+    const slots: Record<Pool, Map<string, number>> = { detail: new Map(), other: new Map(), coarse: new Map() };
+    const metas: Record<Pool, ReadonlyMap<string, readonly AtlasLevelMeta[]>> = {
+      detail: everyMember([level0, level1]),
+      other: everyMember([level0, level1]),
+      coarse: everyMember([level1]),
+    };
+    let routes: ReadonlyMap<string, ReadonlyMap<number, Pool>> = everyMember(new Map<number, Pool>([[0, "detail"], [1, "detail"]]));
+    let wantedIndex: WantedChunkIndex = wanted(
+      ...members.map(({ memberId, c }): [string, ResidencyTier, string[]] => [memberId, "detail", level0Keys(c)]),
+      ...members.map(({ memberId, c }): [string, ResidencyTier, string[]] => [memberId, "coarse", [level1Key(c)]]),
+    );
+    let cold = makeColdState({ activeSet: entries, visibleChannels: [0, 1] });
+    const poolFor: SourcePoolResolver = (memberId, tier, level) =>
+      tier === "coarse" ? "coarse" : routes.get(memberId)?.get(level);
+    // Snapshots are made afresh for each report, as the worker makes them.
+    const atlases = () => new Map<string, AtlasSnapshot>(
+      (["detail", "other", "coarse"] as const).map((pool) => [pool, { slots: slots[pool], entityMetas: metas[pool] }]),
+    );
+    return {
+      members,
+      report: (memo?: WantedSetMemo) => computeWantedSet(cold, wantedIndex, atlases(), new Map(), poolFor, memo),
+      arrive: (pool: Pool, memberId: string, chunkKey: string) => slots[pool].set(vk(memberId, chunkKey), 0),
+      leave: (pool: Pool, memberId: string, chunkKey: string) => slots[pool].delete(vk(memberId, chunkKey)),
+      want: (memberId: string, chunkKeys: string[]) => {
+        const next = new Map(wantedIndex);
+        next.set(wantedEntryKey("detail", memberId), new Set(chunkKeys));
+        wantedIndex = next;
+      },
+      retarget: (index: number, detailLevels: number[]) => {
+        const activeSet = cold.activeSet.slice();
+        activeSet[index] = { ...activeSet[index], detailLevels };
+        cold = { ...cold, activeSet };
+      },
+      relay: (memberId: string, sections: AtlasLevelMeta[]) => {
+        metas.detail = new Map([...metas.detail, [memberId, sections]]);
+      },
+      reroute: (memberId: string, level: number, pool: Pool) => {
+        routes = new Map([...routes, [memberId, new Map([...routes.get(memberId)!, [level, pool]])]]);
+      },
+      step: (t: number) => {
+        cold = { ...cold, currentT: t };
+      },
+    };
+  }
+
+  it("reads residency afresh on every call", () => {
+    const w = world();
+    const memo = new WantedSetMemo();
+    expect(w.report(memo).missing).toHaveLength(4 * 4 + 4);
+    expect(w.report(memo).levels[0].displayed).toBeNull();
+
+    for (const key of level0Keys(0)) w.arrive("detail", "a:ch0", key);
+    const report = w.report(memo);
+    expect(report.missing.filter((m) => m.memberId === "a:ch0" && m.tier === "detail")).toEqual([]);
+    expect(report.levels[0].displayed).toEqual({ min: 0, max: 0 });
+    w.arrive("coarse", "a:ch1", level1Key(1));
+    expect(w.report(memo).levels[0].displayed).toEqual({ min: 0, max: 1 });
+  });
+
+  it("keeps the plan of a member nothing changed for, and plans again the one whose wanted chunks changed", () => {
+    const w = world();
+    const memo = new WantedSetMemo();
+    const before = w.report(memo).missing;
+    w.want("a:ch0", level0Keys(0).slice(0, 2));
+    const after = w.report(memo).missing;
+
+    const of = (missing: MissingChunk[], memberId: string) => missing.filter((m) => m.memberId === memberId);
+    // The same objects: the plan was kept.
+    expect(of(after, "b:ch1")).toHaveLength(5);
+    expect(of(after, "b:ch1").every((m, i) => m === of(before, "b:ch1")[i])).toBe(true);
+    expect(of(after, "a:ch0").map((m) => m.chunkKey)).toEqual([...level0Keys(0).slice(0, 2), level1Key(0)]);
+  });
+
+  it("plans every member again when T moves", () => {
+    const w = world();
+    const memo = new WantedSetMemo();
+    // Resident at T 1 only: at T 0 nothing serves entity a.
+    for (const key of level0Keys(0, 1)) w.arrive("detail", "a:ch0", key);
+    expect(w.report(memo).levels[0].displayed).toBeNull();
+    w.step(1);
+    expect(w.report(memo).levels[0].displayed).toEqual({ min: 0, max: 0 });
+  });
+
+  it("reports what a fresh computation reports over a run of changes", () => {
+    const w = world();
+    const memo = new WantedSetMemo();
+    // A fixed pseudo-random sequence, so a failure replays.
+    let seed = 7;
+    const next = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return Math.floor(seed / 65536) % n;
+    };
+    const pools: Pool[] = ["detail", "other", "coarse"];
+    for (let i = 0; i < 500; i++) {
+      const { memberId, c } = w.members[next(w.members.length)];
+      const t = next(2);
+      const keys = [...level0Keys(c, t), level1Key(c, t)];
+      switch (next(8)) {
+        case 0: w.arrive(pools[next(3)], memberId, keys[next(5)]); break;
+        case 1: w.leave(pools[next(3)], memberId, keys[next(5)]); break;
+        case 2: w.want(memberId, keys.filter(() => next(2) === 1)); break;
+        case 3: w.retarget(next(2), next(2) ? [0, 1] : [1]); break;
+        case 4: w.relay(memberId, next(2) ? [level0, level1] : [level1]); break;
+        case 5: w.reroute(memberId, next(2), next(2) ? "detail" : "other"); break;
+        case 6: w.step(t); break;
+        case 7: break;
+      }
+      expect(w.report(memo)).toEqual(w.report());
+    }
   });
 });
