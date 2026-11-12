@@ -10,8 +10,10 @@
  * inverses. The 2D world is the scene frame every dataset is placed in, seen
  * across and down the plane the view cuts. A mark is stored in its own
  * dataset's frame, so it goes through the dataset's placement onto that plane
- * ({@link makeFrameToScreen}). Picking a mark's point, in 2D and 3D, and the
- * 3D projection live in WASM (`scene.pick_annotation_voxel`,
+ * ({@link makeFrameToScreen}), after the shift a side view of a collection
+ * draws its tile by ({@link makeMarkToScreen}). Picking a mark's point, in 2D
+ * and 3D, that shift, and the 3D projection live in WASM
+ * (`scene.pick_annotation_voxel`, `scene.annotation_shift`,
  * `scene.project_annotation`), so they use the same transforms as the passes
  * that draw the data.
  */
@@ -100,16 +102,19 @@ export function makeWorldToScreen(
  * The point of `datasetId`'s frame a mark placed at `e` in `surface`'s view
  * takes (`scene.pick_annotation_voxel`): on a slice view's plane, in the
  * middle of the dataset's plane there, or where a volume view's ray meets the
- * volume. Null where there is none.
+ * volume. A point of a mark whose first vertex is `on` goes on that mark's
+ * tile in a side view of a collection, and a new mark's on the tile under
+ * `e`. Null where there is none.
  */
 export function pickFramePoint(
   scene: Pick<WasmScene, "pick_annotation_voxel">,
   { view, element }: ViewSurface,
   datasetId: string,
   e: ClientPoint,
+  on?: FramePoint,
 ): FramePoint | null {
   const [x, y] = eventToScreenPx(element, e);
-  const point = scene.pick_annotation_voxel(view, datasetId, x, y);
+  const point = scene.pick_annotation_voxel(view, datasetId, x, y, on && new Float64Array(on));
   return point.length < 3 ? null : [point[0], point[1], point[2]];
 }
 
@@ -135,6 +140,39 @@ export function makeFrameToScreen(
   return (v: FramePoint): ScreenPoint => {
     const point = placePoint(placement, v);
     return project([point[across], point[down]]);
+  };
+}
+
+/**
+ * How far `surface`'s view draws a mark of `datasetId` whose first vertex is
+ * `start` from where its dataset's frame puts it (`scene.annotation_shift`):
+ * into its tile's cell in a side view of a collection, and nowhere in any
+ * other view. Every vertex of the mark moves by it.
+ */
+export function markShift(
+  scene: Pick<WasmScene, "annotation_shift">,
+  { view }: ViewSurface,
+  datasetId: string,
+  start: FramePoint,
+): FramePoint {
+  const shift = scene.annotation_shift(view, datasetId, start[0], start[1], start[2]);
+  return shift.length < 3 ? [0, 0, 0] : [shift[0], shift[1], shift[2]];
+}
+
+/**
+ * {@link makeFrameToScreen} for the vertices of one mark, of `datasetId` with
+ * its first vertex at `start`, each moved by the mark's {@link markShift}, so
+ * a whole shape draws in its tile's cell. Call once per frame.
+ */
+export function makeMarkToScreen(
+  scene: WasmScene,
+  surface: ViewSurface,
+): (datasetId: string, start: FramePoint) => (v: FramePoint) => ScreenPoint {
+  const frameToScreen = perDataset((datasetId) => makeFrameToScreen(scene, surface, datasetId));
+  return (datasetId, start) => {
+    const project = frameToScreen(datasetId);
+    const [dx, dy, dz] = markShift(scene, surface, datasetId, start);
+    return (v) => project([v[0] + dx, v[1] + dy, v[2] + dz]);
   };
 }
 

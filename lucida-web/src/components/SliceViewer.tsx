@@ -6,7 +6,7 @@ import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
-import { annotationTarget, sayNoLayerToAnnotate, sayNoMarksInThisView } from "./annotationTarget.ts";
+import { annotationTarget, sayNoLayerToAnnotate } from "./annotationTarget.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToViewFraction, eventToWorld as sceneEventToWorld, pickFramePoint, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
@@ -218,13 +218,11 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
         return;
       }
       // A mark is stored in its dataset's frame, on the plane the view cuts:
-      // a shape from the press to the release, a point at the release.
+      // a shape from the press to the release, a point at the release. A
+      // shape's release goes on the tile its press landed on.
       const start = pickFramePoint(scene, surface, datasetId, anchor);
-      const end = drawShape ? pickFramePoint(scene, surface, datasetId, e) : null;
-      if (!start || (drawShape && !end)) {
-        sayNoMarksInThisView();
-        return;
-      }
+      const end = drawShape && start ? pickFramePoint(scene, surface, datasetId, e, start) : null;
+      if (!start || (drawShape && !end)) return;
       const layer = readResolvedLayers(scene, surface.view).get(datasetId);
 
       const id = globalThis.crypto?.randomUUID

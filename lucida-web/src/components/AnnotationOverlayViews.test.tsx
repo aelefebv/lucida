@@ -42,6 +42,7 @@ function makeScene(byDataset: Record<string, Annotation[]>) {
     transposed: () => false,
     dataset_placement: (datasetId: string) => new Float64Array([OFFSET_X[datasetId] ?? 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
     slice_plane: () => "xy",
+    annotation_shift: () => new Float64Array(3),
     pick_annotation_voxel: (_view: number, datasetId: string, x: number, y: number) =>
       new Float64Array([x - 400 - (OFFSET_X[datasetId] ?? 0), y - 300, 3.5]),
     layers_at: (_view: number, x: number) => JSON.stringify(x > 0.5 ? ["beta", "alpha"] : ["alpha"]),
