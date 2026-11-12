@@ -188,9 +188,9 @@ way and checked against the runs listed below the table; the rest are still prov
 
 | rule | p95 ceiling | the delay a person would see | worst healthy p95 measured |
 | --- | --- | --- | --- |
-| `io.wire` | 1,000 ms, was 1,500 | A region stays coarse until its chunks land, and past a second the person stops watching it fill in and waits. | idle 316 ms local, 984 ms for a 2D image over `remote`; shared 633 ms; SwiftShader 264 ms |
+| `io.wire` | 1,000 ms, was 1,500 | A region stays coarse until its chunks land, and past a second the person stops watching it fill in and waits. | idle 316 ms local, 984 ms for a 2D image over `remote`; shared 633 ms; SwiftShader 351 ms |
 | `compute.upload` | 100 ms | A chunk already decoded trails a scrub or a switch of layout or mode, and past 100 ms the region visibly lags the input. | idle 82 ms, four views at ratio 2; the gate never judges it, since a cold open's upload is first paint |
-| `server.dispatch` | 100 ms, was 10 | Every chunk's detail trails the move that brought it into view by this much, and past 100 ms that shows. | idle 3.9 ms; shared 33 ms; SwiftShader 61 ms |
+| `server.dispatch` | 100 ms, was 10 | Every chunk's detail trails the move that brought it into view by this much, and past 100 ms that shows. | idle 3.9 ms; shared 33 ms; SwiftShader 3.3 ms, and 61 ms on 0.27.1 |
 | `server.cache-lookup` | 100 ms, was 10 | The same as dispatch. | idle 16 ms for a deep volume's scrub, under 5 ms otherwise; shared 51 ms; SwiftShader 0.2 ms |
 
 A busy machine stalls every request in flight at the same moment, so it moves a run's p95,
@@ -204,6 +204,7 @@ failed gate runs on it.
   run files over the `remote` and `deployed` networks.
 - **shared**: the same machine while other perf jobs ran on it, 2026-11-11 to 11-12, builds
   of `main` and branches off it. 2,414 run files, 4,536 runs.
-- **SwiftShader**: CI's trace gate. 72 run files kept by failed jobs, 2026-11-08 to 11-09,
-  builds 0.24.0 to 0.27.1. Then 610 runs in 61 workflow runs, 2026-11-11 to 11-12, whose
-  logs show none of the four over its old ceiling.
+- **SwiftShader**: CI's trace gate. 10 runs of a passing gate, 2026-11-12, build 0.39.2. 72
+  run files kept by failed jobs, 2026-11-08 to 11-09, builds 0.24.0 to 0.27.1.
+  610 runs in 61 workflow runs, 2026-11-11 to 11-12, whose logs show none of the four over
+  its old ceiling.

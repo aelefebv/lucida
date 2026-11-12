@@ -1,10 +1,10 @@
 /**
  * The threshold ruleset, shipped inside every diagnostic document so a
- * diagnostic read months later states which numbers judged it. A ceiling sits
- * where a person would notice the delay, not at a margin over a baseline.
- * docs/perf.md lists the runs io.wire, compute.upload, server.dispatch and
- * server.cache-lookup were checked against; the rest are provisional, from
- * research runs on one machine over one link.
+ * diagnostic read months later states which numbers judged it. A ceiling
+ * belongs where a person would notice the delay, not at a margin over a
+ * baseline. io.wire, compute.upload, server.dispatch and server.cache-lookup
+ * sit there, checked against the runs docs/perf.md lists; the rest are still
+ * provisional, from research runs on one machine over one link.
  *
  * Three families judge the run because one number cannot serve this pipeline:
  * absolute p95 ceilings for I/O and compute phases, a backlog ETA for queue
@@ -416,7 +416,7 @@ const ABSOLUTE: readonly AbsoluteRule[] = [
 export const RULESET: Ruleset = {
   version: RULESET_VERSION,
   note:
-    "Three threshold families over the run, and a fourth over the interval after it closed. One number cannot serve a pipeline whose p50 network first byte is 98 ms and whose p50 scheduler queue wait is 4,600 ms (#899 §1, §3). A ceiling sits where a person would notice the delay. io.wire, compute.upload, server.dispatch and server.cache-lookup were checked against current runs on a workstation GPU and on CI's software rasterizer; the rest are provisional, derived from throwaway-instrumented research runs on one machine and one link.",
+    "Three threshold families over the run, and a fourth over the interval after it closed. One number cannot serve a pipeline whose p50 network first byte is 98 ms and whose p50 scheduler queue wait is 4,600 ms (#899 §1, §3). A ceiling belongs where a person would notice the delay. io.wire, compute.upload, server.dispatch and server.cache-lookup sit there, checked against current runs on a workstation GPU and on CI's software rasterizer; the rest are still provisional, derived from throwaway-instrumented research runs on one machine and one link.",
   absolute: ABSOLUTE,
   queuePhases: Object.entries(PHASE_CLASSES)
     .filter(([, cls]) => cls === "queue")
