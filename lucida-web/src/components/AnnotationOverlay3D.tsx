@@ -9,12 +9,13 @@
  * slop, so it can still resolve into a click while the camera code stays the
  * canvas's alone. A tap on one's own line or box selects it for the context
  * menu and the Delete key. Markers re-project every frame through
- * `scene.project_annotation`, the same transform the volume pass uses.
+ * `scene.project_annotation`, the same transform the volume pass uses. One
+ * overlay serves a view, with the marks of every dataset it draws.
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import type { Annotation, AnnotationOverlayHandle } from "./annotationDocument.ts";
-import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
+import type { AnnotationOverlayHandle } from "./annotationDocument.ts";
+import { useAnnotationOverlay, type Mark } from "./useAnnotationOverlay.ts";
 import { useAnnotationEditing, type AnnotationPlacement } from "./useAnnotationEditing.ts";
 import {
   capturePointer,
@@ -25,7 +26,8 @@ import {
   startLongPress,
   useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { makeProjectAnnotationToCss, pickFramePoint, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { makeProjectAnnotationToCss, perDataset, pickFramePoint, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { annotationPlacement } from "./annotationTarget.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import { applyViewportCommand } from "../applyAndSend.ts";
@@ -39,17 +41,24 @@ import type { MentionCandidate } from "./annotationMentions.ts";
 import "./AnnotationOverlay.css";
 
 interface Props {
-  /** The dataset whose pins to show (annotations are scoped per dataset). */
-  datasetId: string;
+  /** Each dataset whose marks the view draws, in layer order, with the
+   * view's T and the dataset's channels; a volume shows every plane, so it
+   * cuts none. A pin off them renders dimmed with a locator, through the
+   * same {@link isOffContext} as the 2D overlay. */
+  viewContexts: ReadonlyMap<string, ViewContext>;
+  /** The selected layer, which a point from the menu goes on where the view
+   * draws it under the pointer. */
+  selectedDatasetId: string | null;
+  /** Select a layer, as a point placed on it does. */
+  onSelectDataset: (datasetId: string) => void;
+  /** Whether commands steer this view, so Delete and Escape act on its
+   * selection. */
+  active: boolean;
   wasmSceneRef: RefObject<WasmScene | null>;
   /** The view whose pins show, and the element over its rectangle, which they sit in. */
   surface: ViewSurface;
-  /** Bumped whenever the remote document changes; re-reads the pin set. */
+  /** Bumped whenever the remote document changes; re-reads the pins. */
   version: number;
-  /** The view's T and channels; a volume shows every plane, so it cuts
-   * none. A pin off them renders dimmed with a locator, through the same
-   * {@link isOffContext} as the 2D overlay. */
-  viewContext: ViewContext;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
    * per-connection `myId`, so ownership survives rejoining a workspace.
    * Own pins are tinted, and only their author may move or delete them. */
@@ -100,65 +109,58 @@ interface Pin3DDrag {
   cancelLongPress: () => void;
 }
 
-export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, surface, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ viewContexts, selectedDatasetId, onSelectDataset, active, wasmSceneRef, surface, version, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   // The view's own element: its pixels and its pointer events.
   const { element } = surface;
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // Lines and boxes re-project each frame through the same call as the dots.
   const shapeRefs = useRef<Map<string, SVGLineElement | SVGPolygonElement>>(new Map());
-  // The pin set, open thread, and selection, with the lifecycle shared with
+  // The marks, open thread, and selection, with the lifecycle shared with
   // the 2D overlay.
   const overlay = useAnnotationOverlay({
     wasmSceneRef,
-    datasetId,
+    datasetIds: [...viewContexts.keys()],
     version,
     visible,
   });
-  const { annotations, annotationsRef, openPinId, setOpenPinId, selectedId, setSelectedId } = overlay;
-  const editing = useAnnotationEditing({ state: overlay, datasetId, myId, wasmSceneRef, sendCommand, onDocumentChanged });
+  const { marks, marksRef, openPinId, setOpenPinId, selectedId, setSelectedId } = overlay;
+  const editing = useAnnotationEditing({ state: overlay, myId, active, wasmSceneRef, sendCommand, onDocumentChanged, onSelectDataset });
   const [menu, setMenu] = useState<CanvasMenuRequest | null>(null);
-
-  const datasetIdRef = useRef(datasetId);
-
-  datasetIdRef.current = datasetId;
-
-  /** Where a client point lands in the volume, by the same depth pick a 3D
-   * drop uses, or null when the ray misses. */
-  const pickPlacement = (point: ClientPoint): AnnotationPlacement | null => {
-    const scene = wasmSceneRef.current;
-    const voxel = scene && pickFramePoint(scene, surface, datasetId, point);
-    if (!scene || !voxel) return null;
-    return { position: [voxel[0], voxel[1]], z: voxel[2] };
-  };
+  // Marks are read only for the datasets in `viewContexts`.
+  const contextOf = ({ datasetId }: Mark): ViewContext => viewContexts.get(datasetId)!;
 
   /** One's own line or box under a client point, as projected now, or null. */
   const ownShapeAt = (point: ClientPoint, tolerance: number): string | null => {
     const scene = wasmSceneRef.current;
     if (!scene) return null;
-    const project = makeProjectAnnotationToCss(scene, surface.view, datasetId);
+    const projectOf = perDataset((datasetId) => makeProjectAnnotationToCss(scene, surface.view, datasetId));
     const rect = element.getBoundingClientRect();
     const shapes = [];
-    for (const pin of annotationsRef.current) {
+    for (const { datasetId, pin } of marksRef.current) {
       if (pin.author !== String(myId) || !pin.end || (pin.kind !== "line" && pin.kind !== "box")) continue;
-      const points = annotationVertices(pin).map(project);
+      const points = annotationVertices(pin).map(projectOf(datasetId));
       if (points.some((p) => p === null)) continue;
       shapes.push({ id: pin.id, points: points as ScreenPoint[], closed: isClosedShape(pin) });
     }
     return hitTestShapes([point.clientX - rect.left, point.clientY - rect.top], shapes, tolerance);
   };
 
-  /** Open the canvas menu at a client point. A press on one's own annotation
-   * selects it, so the menu can delete it; a press elsewhere deselects. */
+  /** Open the canvas menu at a client point, adding where its ray first
+   * meets a layer the view draws, by the same depth pick a 3D drop uses. A
+   * press on one's own annotation selects it, so the menu can delete it; a
+   * press elsewhere deselects. */
   const openMenu = (point: ClientPoint, pointerType: string, pinId?: string) => {
     if (visible) {
       if (pinId !== undefined) {
-        const pin = annotationsRef.current.find((p) => p.id === pinId);
-        setSelectedId(pin && pin.author === String(myId) ? pinId : null);
+        const mark = marksRef.current.find(({ pin }) => pin.id === pinId);
+        setSelectedId(mark && mark.pin.author === String(myId) ? pinId : null);
       } else {
         setSelectedId(ownShapeAt(point, pointerType === "touch" ? TOUCH_TAP_TOLERANCE : TAP_TOLERANCE));
       }
     }
-    setMenu({ x: point.clientX, y: point.clientY, target: pickPlacement(point) });
+    const scene = wasmSceneRef.current;
+    const target = scene && annotationPlacement(scene, surface, point, selectedDatasetId);
+    setMenu({ x: point.clientX, y: point.clientY, target });
   };
 
   // Read by the canvas listener, which binds once.
@@ -198,14 +200,15 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     ref,
     () => ({
       focusPin: (pinId: string) => {
-        const pin = annotationsRef.current.find((p) => p.id === pinId);
-        if (!pin) return;
-        setOpenPinId(pin.id);
+        const mark = marksRef.current.find(({ pin }) => pin.id === pinId);
+        if (!mark) return;
+        const { pin } = mark;
+        setOpenPinId(pinId);
         const scene = wasmSceneRef.current;
         if (scene) {
           applyViewportCommand(scene, {
             type: "arcball_center_on_voxel",
-            dataset_id: datasetIdRef.current,
+            dataset_id: mark.datasetId,
             x: pin.position[0],
             y: pin.position[1],
             // The pin's depth, so the target is its full 3D point. Pins saved
@@ -218,7 +221,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       },
       openContextMenu: (at: ClientPoint) => openMenuRef.current(at, "touch"),
     }),
-    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
+    [wasmSceneRef, onViewportChanged, marksRef, setOpenPinId],
   );
 
   // Declared before the RAF effect, which reads it to skip the dot being moved.
@@ -235,15 +238,15 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       if (scene) {
         // `null` means the vertex is behind the camera or the dataset has no
         // anchorable member.
-        const project = makeProjectAnnotationToCss(scene, surface.view, datasetIdRef.current);
+        const projectOf = perDataset((datasetId) => makeProjectAnnotationToCss(scene, surface.view, datasetId));
         // pointermove positions a dot being moved; reprojecting its stale
         // stored position would snap it back every frame. An orbit doesn't move
         // the pin, so its dot keeps reprojecting.
         const activeDrag = dragRef.current;
         const draggingId =
           activeDrag?.moved && activeDrag.mode === "move" ? activeDrag.pinId : null;
-        for (const pin of annotationsRef.current) {
-          const projected: (ScreenPoint | null)[] = annotationVertices(pin).map(project);
+        for (const { datasetId, pin } of marksRef.current) {
+          const projected: (ScreenPoint | null)[] = annotationVertices(pin).map(projectOf(datasetId));
           // If any vertex is behind the camera, hide the whole shape and dot; a
           // partly projected line would streak across the screen.
           const allVisible = projected.every((p) => p !== null);
@@ -284,12 +287,12 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       }
     };
     return frameClock.subscribe(tick);
-  }, [wasmSceneRef, surface.view, element, annotationsRef]);
+  }, [wasmSceneRef, surface.view, element, marksRef]);
 
   /** A right-click on a marker opens the canvas menu on it. A finger's long
    * press is timed by the gesture instead, so its native menu is only
    * suppressed. */
-  const onPinContextMenu = (pin: Annotation) => (e: ReactMouseEvent) => {
+  const onPinContextMenu = ({ pin }: Mark) => (e: ReactMouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     const pointerType = (e.nativeEvent as PointerEvent).pointerType ?? "mouse";
@@ -297,7 +300,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     openMenu(e, pointerType, pin.id);
   };
 
-  const onPinPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerDown = ({ pin }: Mark) => (e: ReactPointerEvent) => {
     if (e.button !== 0) return; // only a primary press starts a gesture
     // Ignore a second pointer mid-gesture so the first completes.
     if (dragRef.current) return;
@@ -334,7 +337,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     capturePointer(target, e.pointerId);
   };
 
-  const onPinPointerMove = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerMove = ({ pin }: Mark) => (e: ReactPointerEvent) => {
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
     if (!drag.moved) {
@@ -369,7 +372,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     }
   };
 
-  const onPinPointerUp = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerUp = ({ datasetId, pin }: Mark) => (e: ReactPointerEvent) => {
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
     drag.cancelLongPress();
@@ -402,7 +405,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     onDocumentChanged();
   };
 
-  const onPinPointerCancel = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerCancel = ({ pin }: Mark) => (e: ReactPointerEvent) => {
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
     drag.cancelLongPress();
@@ -412,9 +415,12 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   };
 
   const addPoint = (at: AnnotationPlacement, openThread: boolean) => {
+    // The menu targets only a layer whose marks the view draws.
+    const context = viewContexts.get(at.datasetId);
+    if (!context) return;
     const scene = wasmSceneRef.current;
     const view = scene ? buildAnnotationView(scene) : null;
-    editing.addPoint(at, { t: viewContext.t, c: viewContext.channels[0] ?? 0, view, openThread });
+    editing.addPoint(at, { t: context.t, c: context.channels[0] ?? 0, view, openThread });
     onViewportChanged?.();
   };
 
@@ -423,10 +429,10 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       request={menu}
       onClose={() => setMenu(null)}
       annotationsVisible={visible}
-      selected={editing.selected}
+      selected={editing.selected?.pin ?? null}
       onComment={(at) => addPoint(at, true)}
       onDropPoint={(at) => addPoint(at, false)}
-      onDelete={editing.remove}
+      onDelete={editing.removeSelected}
     />
   );
 
@@ -438,7 +444,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       {/* Starts hidden so nothing flashes at the origin before the first
           projection. */}
       <svg className="lc-annotation-svg" width="100%" height="100%">
-        {annotations.map((pin) => {
+        {marks.map(({ pin }) => {
           if (pin.kind !== "line" && pin.kind !== "box") return null;
           if (!pin.end) return null;
           const author = pin.author === String(myId) ? "own" : "peer";
@@ -458,14 +464,15 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
           return <line key={pin.id} {...shapeProps} x1={0} y1={0} x2={0} y2={0} />;
         })}
       </svg>
-      {annotations.map((pin) => {
+      {marks.map((mark) => {
+        const { datasetId, pin } = mark;
         const mine = pin.author === String(myId);
         const selected = mine && selectedId === pin.id;
         const comments = pin.comments ?? [];
         const isOpen = openPinId === pin.id;
         // The tick governs display; off-context only changes the look. The
         // volume renders every plane and cuts none, so only T/C dim a pin.
-        const offCtx = isOffContext(pin, viewContext);
+        const offCtx = isOffContext(pin, contextOf(mark));
         return (
           <div
             key={pin.id}
@@ -505,11 +512,11 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                   ? "Pin by you — click for thread; drag once selected, or Shift+drag, to move; drag to orbit"
                   : `Pin by ${pin.author} — click for thread, drag to orbit`
               }
-              onPointerDown={onPinPointerDown(pin)}
-              onPointerMove={onPinPointerMove(pin)}
-              onPointerUp={onPinPointerUp(pin)}
-              onPointerCancel={onPinPointerCancel(pin)}
-              onContextMenu={onPinContextMenu(pin)}
+              onPointerDown={onPinPointerDown(mark)}
+              onPointerMove={onPinPointerMove(mark)}
+              onPointerUp={onPinPointerUp(mark)}
+              onPointerCancel={onPinPointerCancel(mark)}
+              onContextMenu={onPinContextMenu(mark)}
               onClick={() => {
                 // Swallow the click after a real drag or a stationary
                 // Shift-press, once.

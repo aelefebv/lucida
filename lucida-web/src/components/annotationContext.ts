@@ -6,8 +6,10 @@
  * This is a pure function of pin and view, so overlays keep no off-context
  * state and navigating back restores the pin on the next render.
  */
+import type { WasmScene } from "lucida-core";
 import { positionLabel, positionNumber } from "../axes.ts";
-import type { ResolvedLayer } from "../resolvedLayers.ts";
+import { readResolvedLayers, shownChannels, type ResolvedLayer } from "../resolvedLayers.ts";
+import type { ViewPane } from "../sceneStore.ts";
 import { cutAxis, xyz, type SlicePlane, type SpatialAxis } from "../renderer/slicePlane.ts";
 import type { Annotation } from "./annotationDocument.ts";
 import { annotationVertices } from "./annotationGeometry.ts";
@@ -36,6 +38,30 @@ export function viewCut(layer: ResolvedLayer, plane: SlicePlane): ViewCut {
   if (axis === "z") return { axis, start: layer.z_range.start, end: layer.z_range.end };
   const index = axis === "y" ? layer.y : layer.x;
   return { axis, start: index, end: index + 1 };
+}
+
+/**
+ * Each dataset whose marks `pane`'s view draws, in layer order, and its
+ * context there at `t`. A view draws the marks of every dataset it draws in
+ * that dataset's own frame, whichever layer is selected, which leaves out a
+ * side view's collection. Each mark lies on its own dataset's planes, so
+ * where the view cuts that dataset and the channels it shows there decide
+ * which marks are in context. A volume view cuts none.
+ */
+export function viewContextsOf(
+  scene: WasmScene,
+  pane: Pick<ViewPane, "id" | "draws" | "cameraMode">,
+  t: number,
+): Map<string, ViewContext> {
+  const layers = readResolvedLayers(scene, pane.id);
+  const plane = pane.cameraMode === "slice" ? (scene.slice_plane(pane.id) as SlicePlane) : null;
+  const contexts = new Map<string, ViewContext>();
+  for (const datasetId of pane.draws) {
+    if (!scene.draws_annotations(pane.id, datasetId)) continue;
+    const layer = layers.get(datasetId);
+    contexts.set(datasetId, { cut: plane && layer ? viewCut(layer, plane) : null, t, channels: shownChannels(layer) });
+  }
+  return contexts;
 }
 
 /** The first and last plane a pin's shape lies on along `axis`: each vertex's

@@ -55,11 +55,13 @@ function renderIn(plane: SlicePlane, pins: Annotation[], cut: ViewContext["cut"]
   sceneRef.current = scene;
   render(
     <AnnotationOverlay
-      datasetId="ds"
+      selectedDatasetId="ds"
+      active
+      onSelectDataset={() => {}}
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: makeCanvas() }}
       version={0}
-      viewContext={{ cut, t: 0, channels: [0] }}
+      viewContexts={new Map([["ds", { cut, t: 0, channels: [0] }]])}
       myId={MY_ID}
       sendCommand={() => {}}
       onDocumentChanged={() => {}}

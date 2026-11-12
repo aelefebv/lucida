@@ -9,8 +9,8 @@ export interface CanvasMenuRequest {
   /** Client point of the right-click or long press. */
   x: number;
   y: number;
-  /** The point in the data under it, or null where there is none (a 3D press
-   * that misses the volume). */
+  /** The layer under it and the point of its frame there, or null where
+   * there is none (a 3D press that misses every volume). */
   target: AnnotationPlacement | null;
 }
 
@@ -44,7 +44,8 @@ export function AnnotationContextMenu({
   selected: Annotation | null;
   onComment: (target: AnnotationPlacement) => void;
   onDropPoint: (target: AnnotationPlacement) => void;
-  onDelete: (pin: Annotation) => void;
+  /** Delete `selected`. */
+  onDelete: () => void;
 }) {
   const target = request?.target ?? null;
   return (
@@ -64,7 +65,7 @@ export function AnnotationContextMenu({
       </MenuItem>
       {selected && <MenuSeparator />}
       {selected && (
-        <MenuItem icon={TrashIcon} variant="danger" shortcut="Delete" onAction={() => onDelete(selected)}>
+        <MenuItem icon={TrashIcon} variant="danger" shortcut="Delete" onAction={onDelete}>
           {`Delete ${annotationNoun(selected)}`}
         </MenuItem>
       )}

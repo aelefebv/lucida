@@ -95,11 +95,13 @@ function renderOverlay(opts: {
   const canvas = makeCanvas();
   const { rerender } = render(
     <AnnotationOverlay
-      datasetId="wds-1"
+      selectedDatasetId="wds-1"
+      active
+      onSelectDataset={() => {}}
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: canvas }}
       version={0}
-      viewContext={opts.viewContext ?? { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+      viewContexts={new Map([["wds-1", opts.viewContext ?? { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {
@@ -114,11 +116,13 @@ function renderOverlay(opts: {
   const setViewContext = (viewContext: ViewContext) => {
     rerender(
       <AnnotationOverlay
-        datasetId="wds-1"
+        selectedDatasetId="wds-1"
+        active
+        onSelectDataset={() => {}}
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={viewContext}
+        viewContexts={new Map([["wds-1", viewContext]])}
         myId={opts.myId ?? MY_ID}
         sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
         onDocumentChanged={() => {
@@ -1186,11 +1190,13 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     sceneRef.current = scene;
     const canvas = makeCanvas();
     const props = (version: number) => ({
-      datasetId: "wds-1",
+      selectedDatasetId: "wds-1",
+      active: true,
+      onSelectDataset: () => {},
       wasmSceneRef: sceneRef,
       surface: { view: 0, element: canvas },
       version,
-      viewContext: { cut: { axis: "z" as const, start: 0, end: 1 }, t: 0, channels: [0] },
+      viewContexts: new Map([["wds-1", { cut: { axis: "z" as const, start: 0, end: 1 }, t: 0, channels: [0] }]]),
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
@@ -1222,11 +1228,13 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
     sceneRef.current = scene;
     const canvas = makeCanvas();
     const props = (version: number) => ({
-      datasetId: "wds-1",
+      selectedDatasetId: "wds-1",
+      active: true,
+      onSelectDataset: () => {},
       wasmSceneRef: sceneRef,
       surface: { view: 0, element: canvas },
       version,
-      viewContext: { cut: { axis: "z" as const, start: 0, end: 1 }, t: 0, channels: [0] },
+      viewContexts: new Map([["wds-1", { cut: { axis: "z" as const, start: 0, end: 1 }, t: 0, channels: [0] }]]),
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
@@ -1275,11 +1283,13 @@ describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's 
     const canvas = makeCanvas();
     render(
       <AnnotationOverlay
-        datasetId="wds-1"
+        selectedDatasetId="wds-1"
+        active
+        onSelectDataset={() => {}}
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+        viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}

@@ -7,7 +7,8 @@
  */
 import type { WasmScene } from "lucida-core";
 import { toast } from "../ui/toastQueue.ts";
-import type { ClientPoint, ViewSurface } from "./cameraProjection.ts";
+import { pickFramePoint, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import type { AnnotationPlacement } from "./useAnnotationEditing.ts";
 
 /** The layer for a mark placed at `at` in `surface`'s view, or null where the view draws none. */
 export function annotationTarget(
@@ -23,6 +24,21 @@ export function annotationTarget(
     scene.layers_at(view, (at.clientX - rect.left) / width, (at.clientY - rect.top) / height),
   ) as string[];
   return selected !== null && under.includes(selected) ? selected : (under[0] ?? null);
+}
+
+/** Where a point placed at `at` in `surface`'s view goes: on the layer
+ * {@link annotationTarget} picks, at the point of its frame there. Null where
+ * the view draws no layer under it, or lays that layer out apart from its
+ * frame. */
+export function annotationPlacement(
+  scene: Pick<WasmScene, "layers_at" | "pick_annotation_voxel">,
+  surface: ViewSurface,
+  at: ClientPoint,
+  selected: string | null,
+): AnnotationPlacement | null {
+  const datasetId = annotationTarget(scene, surface, at, selected);
+  const point = datasetId === null ? null : pickFramePoint(scene, surface, datasetId, at);
+  return datasetId !== null && point ? { datasetId, position: [point[0], point[1]], z: point[2] } : null;
 }
 
 /** Say that a press placed no mark, since this view lays the layer under it

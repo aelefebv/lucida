@@ -12,10 +12,11 @@ import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { toast } from "../ui/toastQueue.ts";
 import type { Annotation } from "./annotationDocument.ts";
-import type { AnnotationOverlayState } from "./useAnnotationOverlay.ts";
+import type { AnnotationOverlayState, Mark } from "./useAnnotationOverlay.ts";
 
-/** Where a new point goes: the in-plane world position and its depth. */
+/** Where a new point goes: the dataset, the point's place across its frame and its depth. */
 export interface AnnotationPlacement {
+  datasetId: string;
   position: [number, number];
   z: number;
 }
@@ -39,28 +40,36 @@ export function newAnnotationId(): string {
 
 export function useAnnotationEditing({
   state,
-  datasetId,
   myId,
+  active,
   wasmSceneRef,
   sendCommand,
   onDocumentChanged,
+  onSelectDataset,
 }: {
   state: AnnotationOverlayState;
-  datasetId: string;
   myId: string;
+  /** Whether commands steer this view. Each view keeps its own selection, and
+   * only the active one's answers Delete and Escape. */
+  active: boolean;
   wasmSceneRef: RefObject<WasmScene | null>;
   sendCommand: (json: string) => void;
   onDocumentChanged: () => void;
+  /** Select a layer, as a point placed on it does. */
+  onSelectDataset: (datasetId: string) => void;
 }) {
-  const { annotations, openPinId, setOpenPinId, selectedId, setSelectedId, reread } = state;
+  const { marks, openPinId, setOpenPinId, selectedId, setSelectedId, reread } = state;
   // Deleting an annotation that has comments asks first, in its thread. The
   // nonce re-keys an already open thread so it remounts with the confirm armed.
   const [deleteRequest, setDeleteRequest] = useState<{ id: string; nonce: number } | null>(null);
   // A point made to comment on opens with its comment field focused, once.
   const [composeId, setComposeId] = useState<string | null>(null);
-  const selected = annotations.find((p) => p.id === selectedId && p.author === String(myId)) ?? null;
+  const selected = marks.find(({ pin }) => pin.id === selectedId && pin.author === String(myId)) ?? null;
 
-  useEffect(() => (selectedId === null ? undefined : pushEscapeLayer(() => setSelectedId(null))), [selectedId, setSelectedId]);
+  useEffect(
+    () => (selectedId === null || !active ? undefined : pushEscapeLayer(() => setSelectedId(null))),
+    [selectedId, active, setSelectedId],
+  );
 
   useEffect(() => {
     // The request is spent once its thread closes, so reopening it starts unarmed.
@@ -71,7 +80,7 @@ export function useAnnotationEditing({
 
   /** Delete one's own annotation, through the thread's confirm when comments
    * would go with it. */
-  const remove = (pin: Annotation) => {
+  const remove = ({ datasetId, pin }: Mark) => {
     if (pin.author !== String(myId)) return;
     if ((pin.comments?.length ?? 0) > 0) {
       setOpenPinId(pin.id);
@@ -86,18 +95,23 @@ export function useAnnotationEditing({
     toast(`${noun.charAt(0).toUpperCase()}${noun.slice(1)} deleted`);
   };
 
+  const removeSelected = () => {
+    if (selected) remove(selected);
+  };
+
+  // Every view's overlay offers this; only the active one's is enabled, as
+  // two enabled commands may not share an id.
   useCommand({
     id: "annotations.deleteSelected",
-    label: selected ? `Delete the selected ${annotationNoun(selected)}` : "Delete the selected annotation",
+    label: selected ? `Delete the selected ${annotationNoun(selected.pin)}` : "Delete the selected annotation",
     group: "Annotations",
     keys: ["Delete", "Backspace"],
-    enabled: selected !== null,
-    run: () => {
-      if (selected) remove(selected);
-    },
+    enabled: selected !== null && active,
+    run: removeSelected,
   });
 
-  /** Add a point of one's own, and optionally open its thread to comment. */
+  /** Add a point of one's own on its dataset, select that layer, and
+   * optionally open the point's thread to comment. */
   const addPoint = (
     at: AnnotationPlacement,
     context: { t: number; c: number; view: SavedView | null; openThread: boolean },
@@ -111,7 +125,7 @@ export function useAnnotationEditing({
       scene,
       {
         type: "add_annotation",
-        dataset_id: datasetId,
+        dataset_id: at.datasetId,
         id,
         position: at.position,
         end: null,
@@ -125,6 +139,7 @@ export function useAnnotationEditing({
       sendCommand,
     );
     onDocumentChanged();
+    onSelectDataset(at.datasetId);
     if (context.openThread) {
       reread();
       setOpenPinId(id);
@@ -136,7 +151,8 @@ export function useAnnotationEditing({
   return {
     /** The selected annotation, when it is one's own to edit. */
     selected,
-    remove,
+    /** Delete the selected annotation, as the Delete key does. */
+    removeSelected,
     addPoint,
     /** The key for a pin's thread, which a delete request changes. */
     threadKey: (pinId: string) => (deleteRequest?.id === pinId ? `${pinId}:delete:${deleteRequest.nonce}` : pinId),
