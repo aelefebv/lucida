@@ -47,11 +47,10 @@ check kubeconform "$(pin KUBECONFORM_VERSION "$ci")" "$(github_latest yannh/kube
   "\`KUBECONFORM_VERSION\` and its sha256 in \`ci.yml\`"
 check wasm-pack "$(pin WASM_PACK_VERSION "$ci")" "$(crates_latest wasm-pack)" \
   "\`WASM_PACK_VERSION\` in \`ci.yml\` and the \`Dockerfile\`"
-# Moving pnpm to 11 or later also means moving the `pnpm.overrides` in
-# lucida-web/package.json into a pnpm-workspace.yaml, the only place those
-# majors read them from.
+# The lockfile records the pinned pnpm as well, and a frozen install fails
+# until `pnpm install --lockfile-only` under the new pin rewrites that entry.
 check pnpm "$(jq -r '.packageManager | sub("^pnpm@"; "")' lucida-web/package.json)" "$(npm_latest pnpm)" \
-  "\`packageManager\` in \`lucida-web/package.json\`"
+  "\`packageManager\` in \`lucida-web/package.json\` and its entry in \`pnpm-lock.yaml\`"
 check gitleaks "$(pin GITLEAKS_VERSION .github/workflows/secret-scan.yml)" "$(github_latest gitleaks/gitleaks)" \
   "\`GITLEAKS_VERSION\` and its sha256 in \`secret-scan.yml\`"
 check trivy "$(pin TRIVY_VERSION .github/workflows/release.yml)" "$(github_latest aquasecurity/trivy)" \
