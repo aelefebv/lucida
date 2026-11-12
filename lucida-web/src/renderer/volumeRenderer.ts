@@ -107,7 +107,7 @@ export interface VolumeMemberDraw {
    */
   cut?: Float32Array;
   /**
-   * For a draw {@link VolumeRenderer.renderMemberBatch} makes of many
+   * Makes this a draw {@link VolumeRenderer.renderMemberBatch} makes of many
    * members: the display each of them takes in place of its descriptor's.
    */
   display?: MemberDisplay;
@@ -173,8 +173,8 @@ interface MemberDrawSet {
   instanceCapacity: number;
   /** The id pass's bind group over {@link instanceBuffer}. */
   instanceGroup: GPUBindGroup | null;
-  /** The batch draws' group-2 bind group per id target, over {@link instanceBuffer}. */
-  memberIdGroups: Map<GPUTexture, GPUBindGroup>;
+  /** The batch draws' group-2 bind group over the last id target and {@link instanceBuffer}. */
+  memberIdGroup: { target: GPUTexture; group: GPUBindGroup } | null;
 }
 
 export class VolumeRenderer {
@@ -635,7 +635,7 @@ export class VolumeRenderer {
         instanceBuffer: null,
         instanceCapacity: 0,
         instanceGroup: null,
-        memberIdGroups: new Map(),
+        memberIdGroup: null,
       };
       this.memberDrawSets.set(name, set);
     }
@@ -882,7 +882,7 @@ export class VolumeRenderer {
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
       set.instanceGroup = null;
-      set.memberIdGroups.clear();
+      set.memberIdGroup = null;
     }
     if (instances.length === 0) return;
     const bytes = new ArrayBuffer(instances.length * MEMBER_INSTANCE_SIZE);
@@ -970,20 +970,17 @@ export class VolumeRenderer {
   }
 
   private memberIdGroupOf(set: MemberDrawSet, memberIds: GPUTexture): GPUBindGroup {
-    let group = set.memberIdGroups.get(memberIds);
-    if (!group) {
-      // A replaced target never comes back, so its group goes with it.
-      set.memberIdGroups.clear();
-      group = this.device.createBindGroup({
+    if (set.memberIdGroup?.target !== memberIds) {
+      const group = this.device.createBindGroup({
         layout: this.memberBatchLayout,
         entries: [
           { binding: 0, resource: this.viewOf(memberIds) },
           { binding: 1, resource: { buffer: set.instanceBuffer! } },
         ],
       });
-      set.memberIdGroups.set(memberIds, group);
+      set.memberIdGroup = { target: memberIds, group };
     }
-    return group;
+    return set.memberIdGroup.group;
   }
 
   /** Grow the set's buffers to hold `count` draws. Bind groups name the old buffers, so they go too. */
