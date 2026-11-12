@@ -161,7 +161,8 @@ describe("annotationContext — pinLabel (the marker's accessible name)", () => 
 
 describe("annotationContext — viewContextsOf (the datasets whose marks a view draws)", () => {
   /** A scene whose view resolves `alpha` at Z 2, `beta` at Z 5 showing
-   * channel 1, and `tiles`, a collection a side view lays out in cells. */
+   * channel 1, and `tiles`, a collection a side view lays out in cells,
+   * each tile cut at its own plane 4. */
   function scene(plane: string): WasmScene {
     return {
       epochs: () => "no epochs",
@@ -169,10 +170,9 @@ describe("annotationContext — viewContextsOf (the datasets whose marks a view 
         JSON.stringify([
           resolvedLayer("alpha", [0], { z_range: { start: 2, end: 3 }, y: 7 }),
           resolvedLayer("beta", [1], { z_range: { start: 5, end: 6 }, y: 9 }),
-          resolvedLayer("tiles"),
+          resolvedLayer("tiles", [0], { y: 4 }),
         ]),
       slice_plane: () => plane,
-      draws_annotations: (_view: number, datasetId: string) => plane === "xy" || datasetId !== "tiles",
     } as unknown as WasmScene;
   }
 
@@ -183,10 +183,11 @@ describe("annotationContext — viewContextsOf (the datasets whose marks a view 
     expect(contexts.get("beta")).toEqual({ cut: { axis: "z", start: 5, end: 6 }, t: 3, channels: [1] });
   });
 
-  it("leaves out a dataset the view lays out apart from its frame", () => {
+  it("holds a collection a side view lays out in cells, cut where it cuts each tile", () => {
     const contexts = viewContextsOf(scene("xz"), { id: 1, draws: ["alpha", "tiles"], cameraMode: "slice", t: 0 });
-    expect([...contexts.keys()]).toEqual(["alpha"]);
+    expect([...contexts.keys()]).toEqual(["alpha", "tiles"]);
     expect(contexts.get("alpha")?.cut).toEqual({ axis: "y", start: 7, end: 8 });
+    expect(contexts.get("tiles")?.cut).toEqual({ axis: "y", start: 4, end: 5 });
   });
 
   it("cuts nothing in a volume view", () => {
