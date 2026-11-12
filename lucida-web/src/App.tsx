@@ -249,7 +249,7 @@ function Viewer({
     datasetCallbacksRef,
     datasetsVersion,
     remoteDocumentVersion,
-    viewMode: dims.viewMode,
+    slicePlane: dims.viewMode === "2d" ? dims.slicePlane : null,
     datasetLevels: datasetLevels.levels,
   });
 
