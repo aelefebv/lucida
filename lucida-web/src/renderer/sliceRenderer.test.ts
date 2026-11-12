@@ -73,33 +73,33 @@ describe("the slice renderer's member draws", () => {
     return { device, renderer, frame, member, createView, texture };
   }
 
-  it("writes every member's uniforms in one write and creates bind groups only on the first frame", async () => {
+  it("writes every member's uniforms in one write, and members that bind the same resources share bind groups", async () => {
     const { device, frame, member, createView } = await setup();
     const bindGroupsAtStart = device.createBindGroup.mock.calls.length;
 
     frame([member(0, 5), member(1, 15), member(2, 25)]);
-    expect(device.createBindGroup.mock.calls.length - bindGroupsAtStart).toBe(6);
+    // One pools group and one entity group, which the three draws share.
+    expect(device.createBindGroup.mock.calls.length - bindGroupsAtStart).toBe(2);
     // The uniform blocks, then the entity references.
     expect(device.queue.writeBuffer.mock.calls.slice(-2).map((call) => call[4])).toEqual([3 * 256, 3 * 256]);
     const views = createView.mock.calls.length;
 
     // A pan: every member moves and the roster reorders, but the resources
-    // each draw index binds stay the same.
+    // the draws bind stay the same.
     const pass = frame([member(2, 30), member(0, 10), member(1, 20)]);
-    expect(device.createBindGroup.mock.calls.length - bindGroupsAtStart).toBe(6);
+    expect(device.createBindGroup.mock.calls.length - bindGroupsAtStart).toBe(2);
     expect(createView.mock.calls.length).toBe(views);
     expect(pass.draw).toHaveBeenCalledTimes(3);
 
-    // Each draw index reads its own block of the shared buffers.
-    const pools = device.createBindGroup.mock.results.slice(bindGroupsAtStart).map((r) => r.value.entries);
-    const offsets = pools
-      .filter((entries: GPUBindGroupEntry[]) => entries.length > 3)
-      .map((entries: GPUBindGroupEntry[]) => (entries[0].resource as GPUBufferBinding));
-    expect(offsets.map((b: GPUBufferBinding) => [b.offset, b.size])).toEqual([
-      [0, SLICE_UNIFORM_SIZE],
-      [256, SLICE_UNIFORM_SIZE],
-      [512, SLICE_UNIFORM_SIZE],
-    ]);
+    // The groups name the whole block size, and each draw index picks its own
+    // block of the shared buffers by dynamic offset.
+    const poolEntries = device.createBindGroup.mock.results.slice(bindGroupsAtStart)
+      .map((r) => r.value.entries as GPUBindGroupEntry[])
+      .find((entries) => entries.length > 3)!;
+    const uniform = poolEntries[0].resource as GPUBufferBinding;
+    expect([uniform.offset, uniform.size]).toEqual([undefined, SLICE_UNIFORM_SIZE]);
+    const offsets = pass.setBindGroup.mock.calls.map((call) => [call[0], call[2][0]]);
+    expect(offsets).toEqual([[0, 0], [1, 0], [0, 256], [1, 256], [0, 512], [1, 512]]);
 
     // The uniforms written carry this frame's camera, member by member.
     const uniforms = new Float32Array(device.queue.writeBuffer.mock.calls.at(-2)![2] as ArrayBuffer);
@@ -107,6 +107,20 @@ describe("the slice renderer's member draws", () => {
     expect([tx(0), tx(1), tx(2)]).toEqual([-5 + 3, -5 + 1, -5 + 2]);
     const refs = new Uint32Array(device.queue.writeBuffer.mock.calls.at(-1)![2] as ArrayBuffer);
     expect([refs[0], refs[64], refs[128]]).toEqual([2, 0, 1]);
+  });
+
+  it("creates no bind group when a zoom changes which members draw and the pools each binds", async () => {
+    const { device, frame, member, texture } = await setup();
+    const fine = pool(texture());
+    const coarser = pool(texture());
+    const at = (entityIndex: number, levels: SlicePoolBinding[]) => member(entityIndex, entityIndex * 10, { levels });
+    frame([at(0, [fine]), at(1, [fine]), at(2, [coarser])]);
+    const before = device.createBindGroup.mock.calls.length;
+
+    // Members leave and arrive, and draw indices now bind other pools than
+    // they did, but every combination was bound last frame.
+    frame([at(2, [coarser]), at(1, [fine]), at(3, [coarser]), at(4, [fine])]);
+    expect(device.createBindGroup.mock.calls.length).toBe(before);
   });
 
   it("places a turned member through its quad: the screen point of each corner reads that corner's UV", async () => {
@@ -130,19 +144,24 @@ describe("the slice renderer's member draws", () => {
     expect([m[36], m[37]]).toEqual([20, 10]);
   });
 
-  it("rebuilds a draw index's bind groups when a resource it names is replaced", async () => {
+  it("makes a bind group for a replaced resource, and keeps no group the frame left out", async () => {
     const { device, frame, member, texture } = await setup();
     frame([member(0, 5), member(1, 15)]);
     const before = device.createBindGroup.mock.calls.length;
 
-    // A grown pool is a new texture: only the draw that binds it rebuilds its pools group.
-    frame([member(0, 5), member(1, 15, { levels: [pool(texture())] })]);
+    // A grown pool is a new texture: the draw that binds it gets a pools group of its own.
+    const grown = pool(texture());
+    frame([member(0, 5), member(1, 15, { levels: [grown] })]);
     expect(device.createBindGroup.mock.calls.length - before).toBe(1);
 
-    // A rebuilt descriptor buffer replaces every entity group.
+    // A rebuilt descriptor buffer replaces the entity group the draws share.
     const descriptorBuffer = { destroy: vi.fn() } as unknown as GPUBuffer;
     frame([member(0, 5, { descriptorBuffer }), member(1, 15, { descriptorBuffer })]);
-    expect(device.createBindGroup.mock.calls.length - before).toBe(1 + 2 + 1);
+    expect(device.createBindGroup.mock.calls.length - before).toBe(1 + 1);
+
+    // The grown pool's group went with the frame that left it out.
+    frame([member(0, 5, { descriptorBuffer }), member(1, 15, { descriptorBuffer, levels: [grown] })]);
+    expect(device.createBindGroup.mock.calls.length - before).toBe(1 + 1 + 1);
   });
 
   it("grows its shared buffers past their capacity and drops the bind groups that named the old ones", async () => {
@@ -156,6 +175,6 @@ describe("the slice renderer's member draws", () => {
     const grown = device.createBuffer.mock.results.slice(created.length).map((r) => r.value);
     expect(grown.map((b) => b.size)).toEqual([128 * 256, 128 * 256]);
     expect(created.at(-1).destroy).toHaveBeenCalled();
-    expect(device.createBindGroup.mock.calls.length - before).toBe(65 * 2);
+    expect(device.createBindGroup.mock.calls.length - before).toBe(2);
   });
 });
