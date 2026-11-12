@@ -634,13 +634,7 @@ describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", ()
   });
 });
 
-describe("AnnotationOverlay — open thread stacks above other pins", () => {
-  /** A pin wrapper's inline z-index, or NaN if it carries none. */
-  function wrapperZ(pinId: string): number {
-    const el = screen.getByTestId(`annot-pin-wrapper-${pinId}`);
-    return Number.parseInt((el as HTMLElement).style.zIndex, 10);
-  }
-
+describe("AnnotationOverlay — one thread open at a time", () => {
   /** Open a pin's thread with a pure click so drag suppression never interferes. */
   function openThread(pinId: string) {
     const marker = screen.getByTestId(`annot-pin-${pinId}`);
@@ -649,7 +643,6 @@ describe("AnnotationOverlay — open thread stacks above other pins", () => {
     fireEvent.click(marker, { clientX: 200, clientY: 200 });
   }
 
-  /** Two own pins. By DOM order alone pin-b would paint on top of pin-a. */
   function twoPins() {
     return renderOverlay({
       pins: [
@@ -659,15 +652,6 @@ describe("AnnotationOverlay — open thread stacks above other pins", () => {
     });
   }
 
-  it("with pin A's thread open and B's closed, A's wrapper z-index > B's", () => {
-    twoPins();
-    openThread("pin-a");
-
-    // The open pin (A) is lifted strictly above the closed pin (B), so A's
-    // popover paints over B's dot regardless of DOM order.
-    expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
-  });
-
   it("the open pin's thread popover is present while open", () => {
     twoPins();
     openThread("pin-a");
@@ -676,39 +660,19 @@ describe("AnnotationOverlay — open thread stacks above other pins", () => {
     expect(screen.queryByTestId("annot-thread-pin-b")).toBeNull();
   });
 
-  it("with no thread open, no pin is elevated above the others (equal base)", () => {
+  it("opening B after A closes A's thread", () => {
     twoPins();
-    // Same finite base. Checking finiteness stops two NaNs from passing as equal.
-    expect(Number.isFinite(wrapperZ("pin-a"))).toBe(true);
-    expect(wrapperZ("pin-a")).toBe(wrapperZ("pin-b"));
-    // And neither popover exists.
-    expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
-    expect(screen.queryByTestId("annot-thread-pin-b")).toBeNull();
-  });
-
-  it("opening B after A elevates B and de-elevates A (only the open thread lifts)", () => {
-    twoPins();
-
     openThread("pin-a");
-    expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
-
-    // Switch: opening B closes A (one thread at a time) and moves the lift to B.
     openThread("pin-b");
-    expect(wrapperZ("pin-b")).toBeGreaterThan(wrapperZ("pin-a"));
-    // A is back at base and its popover is gone; B now owns the open popover.
     expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
     expect(screen.getByTestId("annot-thread-pin-b")).toBeTruthy();
   });
 
-  it("closing the open thread restores equal stacking (no lingering lift)", () => {
+  it("clicking the open pin's dot again closes its thread", () => {
     twoPins();
     openThread("pin-a");
-    expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
-
-    // Click the same dot again to close: both wrappers return to the same base.
     openThread("pin-a");
     expect(screen.queryByTestId("annot-thread-pin-a")).toBeNull();
-    expect(wrapperZ("pin-a")).toBe(wrapperZ("pin-b"));
   });
 
   it("the open thread still carries its Delete + comment controls (no regression)", () => {

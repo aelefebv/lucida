@@ -86,8 +86,12 @@ function Pane({ pane, actions, several, onToggle, children }: {
         select();
       }}
       onWheelCapture={select}
-      // A finger's double tap zooms the view instead.
-      onDoubleClick={onToggle && (() => pointerType.current !== "touch" && onToggle())}
+      // A finger's double tap zooms the view instead. React carries a double
+      // click up from what the pane's content draws elsewhere, as a comment
+      // thread over the floating controls, and one there is not on the view.
+      onDoubleClick={onToggle && ((event) => {
+        if (pointerType.current !== "touch" && event.currentTarget.contains(event.target as Node)) onToggle();
+      })}
       onDragOver={(event) => {
         if (!dragsLayer(event)) return;
         event.preventDefault();

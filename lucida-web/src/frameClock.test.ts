@@ -83,6 +83,20 @@ describe("FrameClock", () => {
     unsubscribe();
   });
 
+  it("draws a follow callback after every move callback of the frame, whichever subscribed first", () => {
+    const clock = new FrameClock();
+    const order: string[] = [];
+    const unsubscribeFollow = clock.subscribe(() => void order.push("follow"), "follow");
+    const unsubscribeMove = clock.subscribe(() => void order.push("move"));
+    vi.advanceTimersByTime(16);
+    expect(order.slice(0, 2)).toEqual(["move", "follow"]);
+
+    unsubscribeMove();
+    expect(clock.running).toBe(true);
+    unsubscribeFollow();
+    expect(clock.running).toBe(false);
+  });
+
   it("stops and stops listening once the last subscriber leaves", () => {
     const clock = new FrameClock();
     const unsubscribe = clock.subscribe(() => true);
