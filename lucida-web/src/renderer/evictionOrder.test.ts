@@ -2,12 +2,14 @@
  * A pool's eviction order against the kernel it keeps: through random holds,
  * releases and changes to everything the classes read, its pick is always
  * the one `findEvictionSlot` makes classifying every slot, and its count of
- * wanted slots is the one reading every slot gives.
+ * wanted slots is the one reading every slot gives. Each view's camera
+ * references come with their own revision, as the worker keeps them.
  */
 
 import { describe, expect, it } from "vitest";
 import { findEvictionSlot, readSlotKey, type EvictionView, type FindEvictionParams } from "./eviction.ts";
 import { EvictionOrder } from "./evictionOrder.ts";
+import { CameraRefs } from "./cameraRefs.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 
 const SLOTS = 24;
@@ -35,7 +37,6 @@ interface SimView {
   entityMetas: ReadonlyMap<string, readonly LodIndirectionMeta[]>;
   wanted: ReadonlyMap<string, ReadonlySet<string>>;
   targets: ReadonlyMap<string, number>;
-  cameras: Map<string, [number, number, number]>;
 }
 
 /** `checkRate`: the share of steps after which the order is asked for its pick. */
@@ -60,24 +61,25 @@ function simulate(seed: number, is3D: boolean, steps: number, checkRate = 1): vo
   };
 
   let slots = new Map<string, number>();
-  let cameraRevision = 0;
+  const cameras = new CameraRefs<[number, number, number]>();
   const views: SimView[] = [0, 1].map(() => ({
     slotGridIdx: new Int32Array(SLOTS).fill(-1),
     entityMetas: someMetas(),
     wanted: someWanted(),
     targets: someTargets(),
-    cameras: new Map(MEMBERS.map((member) => [member, camera()])),
   }));
+  views.forEach((_, i) => { for (const member of MEMBERS) cameras.set(i, member, camera()); });
+  const viewIndexes = views.map((_, i) => i);
   const params = (): FindEvictionParams => ({
     slots,
     is3D,
-    views: views.map((view): EvictionView => ({
+    views: views.map((view, i): EvictionView => ({
       slotGridIdx: view.slotGridIdx,
       entityMetas: view.entityMetas,
-      cameraFor: (member) => view.cameras.get(member) ?? [0.5, 0.5, 0.5],
+      cameraFor: (member) => cameras.get(i, member) ?? [0.5, 0.5, 0.5],
       targetLevelFor: (member) => view.targets.get(member),
       isWanted: (member, chunkKey) => view.wanted.get(`detail|${member}`)?.has(chunkKey) ?? false,
-      sources: [view.wanted, view.targets, cameraRevision],
+      sources: [view.wanted, view.targets, cameras.revisionOf(i)],
     })),
   });
   const order = new EvictionOrder();
@@ -99,9 +101,14 @@ function simulate(seed: number, is3D: boolean, steps: number, checkRate = 1): vo
       slots.delete(key);
       order.release(slot);
       for (const view of views) view.slotGridIdx[slot] = -1;
+    } else if (op < 0.66) {
+      cameras.set(pick(viewIndexes), pick(MEMBERS), camera());
+    } else if (op < 0.68) {
+      cameras.forget(pick(MEMBERS), pick(viewIndexes));
+    } else if (op < 0.69) {
+      cameras.forget(pick(MEMBERS));
     } else if (op < 0.7) {
-      pick(views).cameras.set(pick(MEMBERS), camera());
-      cameraRevision++;
+      cameras.clear();
     } else if (op < 0.76) {
       pick(views).wanted = someWanted();
     } else if (op < 0.82) {

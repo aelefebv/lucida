@@ -70,7 +70,7 @@ export function sliceEvictionParams(
 ): FindEvictionParams {
   return {
     slots: atlas.slots,
-    views: evictionViewsOf(atlas, tier, (view, memberId) => cameraUVForMember(state, view, memberId), state.cameraUVs.revision),
+    views: evictionViewsOf(atlas, tier, (view, memberId) => cameraUVForMember(state, view, memberId), state.cameraUVs),
     is3D: false,
     sliceAxis: atlas.axis,
   };
