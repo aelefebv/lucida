@@ -1,59 +1,27 @@
 /**
- * Pure view hot-state builder. Walks the cold-state message via
- * `iterateColdMembers` (same iteration the worker uses), emitting one
- * ray-hit per memberId. Composite ids (`imageId:chN`) dedup because the
- * camera ray hit is per-dataset, not per-channel.
+ * Pure view hot-state builder: one ray hit per member of the view's draw. The
+ * camera ray's hit is per dataset, not per channel, so every member gets the
+ * same one.
  */
-import type {
-  ColdStateMessage,
-  ViewHotStateMessage,
-} from "../../../renderer/workerProtocol.ts";
+import type { ViewHotStateMessage } from "../../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../../epochs.ts";
-import { iterateColdMembers } from "../../../renderer/descriptorBuffer.ts";
 
 /**
- * Core builder: one ray-hit per unique member id, in first-seen order.
- * Both the full path (member ids walked from a cold-state message) and the
- * view-move delta path (member ids walked from the planner active set) feed the
- * same dedup, so they emit identical hot state for the same members.
+ * `memberIds` are the keys of the view's member index map: each member once,
+ * in the canonical order the worker builds its descriptors in.
  */
-export function buildViewHotStateFromMembers(args: {
+export function buildViewHotState(args: {
   memberIds: Iterable<string>;
   rayHit: [number, number, number];
   epochs: SceneEpochs;
   datasetId: string;
   view: number;
 }): ViewHotStateMessage {
-  const rayHitsByEntity: Array<[string, [number, number, number]]> = [];
-  const seen = new Set<string>();
-  for (const memberId of args.memberIds) {
-    if (seen.has(memberId)) continue;
-    seen.add(memberId);
-    rayHitsByEntity.push([memberId, args.rayHit]);
-  }
   return {
     type: "viewHotState",
     epochs: args.epochs,
     datasetId: args.datasetId,
     view: args.view,
-    rayHitsByEntity,
+    rayHitsByEntity: Array.from(args.memberIds, (memberId): [string, [number, number, number]] => [memberId, args.rayHit]),
   };
-}
-
-export function buildViewHotState(args: {
-  coldMsg: ColdStateMessage;
-  rayHit: [number, number, number];
-  epochs: SceneEpochs;
-  datasetId: string;
-}): ViewHotStateMessage {
-  const memberIds = (function* () {
-    for (const { memberId } of iterateColdMembers(args.coldMsg)) yield memberId;
-  })();
-  return buildViewHotStateFromMembers({
-    memberIds,
-    rayHit: args.rayHit,
-    epochs: args.epochs,
-    datasetId: args.datasetId,
-    view: args.coldMsg.view,
-  });
 }

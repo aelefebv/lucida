@@ -207,44 +207,36 @@ function writeSliceUniformData(
 }
 
 /**
- * Bytes between two members' blocks in the shared member buffers. A bind
- * group may start a uniform binding only at a multiple of the device's
- * `minUniformBufferOffsetAlignment`, which is at most 256 on every device.
+ * Bytes between two members' blocks in the shared member buffers. A dynamic
+ * offset must be a multiple of the device's `minUniformBufferOffsetAlignment`,
+ * which is at most 256 on every device.
  */
 const MEMBER_BLOCK_STRIDE = 256;
 
 /**
- * The resources a member draw's group-0 bind group names besides its uniform
- * block, in binding order: colormap, then texture and indirection of the
- * coarse pool and of each level pool slot.
+ * The member bind groups one group pass bound, which the same pass reuses in
+ * the view's next frame. Each pass replaces them with the ones it used, so a
+ * group that names pools or a descriptor buffer replaced since goes with the
+ * next pass. Each group pass of a view keeps its own (`worker/viewResources.ts`):
+ * the passes of one frame bind other colormaps and pools, and one set shared
+ * between them would keep only the last pass's.
  */
-function poolResourcesOf(draw: MemberDraw): Array<GPUTexture | GPUBuffer | null> {
-  const out: Array<GPUTexture | GPUBuffer | null> = [
-    draw.colormap, draw.coarse?.texture ?? null, draw.coarse?.indirectionBuf ?? null,
-  ];
-  for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
-    const b = draw.levels[i] ?? null;
-    out.push(b?.texture ?? null, b?.indirectionBuf ?? null);
-  }
-  return out;
+export class MemberBindGroups {
+  /**
+   * The shared member uniform buffer the groups name. The entity reference
+   * buffer grows with it, and the groups go when they do.
+   */
+  buffer: GPUBuffer | null = null;
+  pools = new Map<string, GPUBindGroup>();
+  entities = new Map<GPUBuffer, GPUBindGroup>();
 }
 
-function samePoolResources(held: ReadonlyArray<GPUTexture | GPUBuffer | null>, draw: MemberDraw): boolean {
-  if (held[0] !== draw.colormap) return false;
-  if (held[1] !== (draw.coarse?.texture ?? null) || held[2] !== (draw.coarse?.indirectionBuf ?? null)) return false;
-  for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
-    const b = draw.levels[i] ?? null;
-    if (held[3 + 2 * i] !== (b?.texture ?? null) || held[4 + 2 * i] !== (b?.indirectionBuf ?? null)) return false;
-  }
-  return true;
-}
-
-/** A draw index's bind groups, and what each names that can be replaced. */
-interface MemberBindGroups {
-  pools: GPUBindGroup | null;
-  poolResources: Array<GPUTexture | GPUBuffer | null>;
-  entity: GPUBindGroup | null;
-  descriptorBuffer: GPUBuffer | null;
+/** What one member draw of a group pass binds. */
+interface PreparedMember {
+  pools: GPUBindGroup;
+  entity: GPUBindGroup;
+  /** The dynamic offset of the draw's block in both shared member buffers. */
+  offset: number;
 }
 
 export class SliceRenderer {
@@ -274,17 +266,21 @@ export class SliceRenderer {
   private aggregateQuadCapacity = 0;
   private aggregateUniformBuffers: GPUBuffer[] = [];
   // Per-draw member resources for a group pass: one block per draw index in
-  // two shared buffers, each filled by one write per pass. A draw index keeps
-  // its bind groups while the resources they name stay the same, which they
-  // do from frame to frame until a pool, colormap or descriptor buffer is
-  // replaced, so a pan creates none.
+  // two shared buffers, each filled by one write per pass and picked by a
+  // dynamic offset. The bind groups name only the buffers and the pools,
+  // colormap or descriptor buffer, so every draw that binds the same ones
+  // shares a group, and each group pass keeps its groups for its next frame
+  // (`MemberBindGroups`): neither a pan nor a zoom that changes which members
+  // draw creates any.
   private memberUniformBuffer: GPUBuffer | null = null;
   private memberEntityRefBuffer: GPUBuffer | null = null;
   private memberCapacity = 0;
   private memberUniformData = new Float32Array(0);
   private memberUniformWords = new Uint32Array(0);
   private memberRefWords = new Uint32Array(0);
-  private memberBindGroups: MemberBindGroups[] = [];
+  /** A number per texture or buffer a member bind group names, for its cache key. */
+  private readonly resourceIds = new WeakMap<object, number>();
+  private nextResourceId = 1;
   /** One view per texture, which lives as long as the texture does. */
   private textureViews = new WeakMap<GPUTexture, GPUTextureView>();
 
@@ -321,10 +317,11 @@ export class SliceRenderer {
     }
     this.bindGroupLayout = device.createBindGroupLayout({
       entries: [
+        // Dynamic, so member draws pick their block of one shared buffer.
         {
           binding: 0,
           visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-          buffer: { type: "uniform" },
+          buffer: { type: "uniform", hasDynamicOffset: true },
         },
         {
           binding: 1,
@@ -363,7 +360,7 @@ export class SliceRenderer {
         {
           binding: 1,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "uniform" },
+          buffer: { type: "uniform", hasDynamicOffset: true },
         },
         // Declared label palette: [id, packedRgba] pairs scanned in-shader
         // for categorical draws. A 1-entry dummy is bound for intensity.
@@ -623,8 +620,8 @@ export class SliceRenderer {
     });
 
     pass.setPipeline(pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.setBindGroup(1, this.descriptorBindGroup);
+    pass.setBindGroup(0, this.bindGroup, [0]);
+    pass.setBindGroup(1, this.descriptorBindGroup, [0]);
     pass.draw(3);
     pass.end();
   }
@@ -634,18 +631,20 @@ export class SliceRenderer {
    * pass: the aggregate's quads first, one instanced draw per pool-binding
    * batch, then each member clipped to its footprint. Every draw binds its
    * own pools, colormap, and entity, so each samples what a pass of its own
-   * would have.
+   * would have. `kept` holds the member bind groups this pass bound in the
+   * view's last frame, and takes the ones it binds now.
    */
   renderLayerGroup(
     target: GPUTextureView,
     encoder: GPUCommandEncoder,
     group: LayerGroupDraw,
+    kept: MemberBindGroups,
     timing?: PassTiming,
   ) {
     const aggregate = group.aggregate && group.aggregate.batches.length > 0 && group.aggregate.quadData.byteLength > 0
       ? this.prepareAggregate(group.aggregate, group.canvasW, group.canvasH)
       : null;
-    const members = this.prepareMembers(group.members, group.canvasW, group.canvasH);
+    const members = this.prepareMembers(group.members, group.canvasW, group.canvasH, kept);
     if (!aggregate && members.length === 0) return;
     const memberPipeline = requireCompiled(this.memberPipelines, "slice renderer")[group.blendMode];
     const aggregatePipeline = requireCompiled(this.aggregatePipelines, "slice renderer")[group.blendMode];
@@ -666,7 +665,7 @@ export class SliceRenderer {
       pass.setBindGroup(1, aggregate.quadBindGroup);
       aggregate.batches.forEach((batch, i) => {
         if (batch.count <= 0) return;
-        pass.setBindGroup(0, aggregate.batchBindGroups[i]);
+        pass.setBindGroup(0, aggregate.batchBindGroups[i], [0]);
         // `firstInstance` addresses the batch's contiguous run inside the
         // shared quad buffer (instance_index includes the offset).
         pass.draw(6, batch.count, 0, batch.firstInstance);
@@ -676,25 +675,32 @@ export class SliceRenderer {
     group.members.forEach((draw, i) => {
       const [x, y, w, h] = draw.scissor;
       pass.setScissorRect(x, y, w, h);
-      pass.setBindGroup(0, members[i].pools);
-      pass.setBindGroup(1, members[i].entity);
+      pass.setBindGroup(0, members[i].pools, [members[i].offset]);
+      pass.setBindGroup(1, members[i].entity, [members[i].offset]);
       pass.draw(3);
     });
     pass.end();
   }
 
   /**
-   * The bind groups each member draw of a group pass binds, with every
-   * member's uniforms and entity reference written to its block of the
-   * shared buffers.
+   * The bind groups and block offset each member draw of a group pass binds,
+   * with every member's uniforms and entity reference written to its block of
+   * the shared buffers. A group `kept` holds is reused, and `kept` is left
+   * holding the groups this pass binds.
    */
   private prepareMembers(
     draws: readonly MemberDraw[],
     canvasW: number,
     canvasH: number,
-  ): Array<{ pools: GPUBindGroup; entity: GPUBindGroup }> {
+    kept: MemberBindGroups,
+  ): PreparedMember[] {
     if (draws.length === 0) return [];
     this.ensureMemberCapacity(draws.length);
+    if (kept.buffer !== this.memberUniformBuffer) {
+      kept.pools.clear();
+      kept.entities.clear();
+      kept.buffer = this.memberUniformBuffer;
+    }
     const f32 = this.memberUniformData;
     const u32 = this.memberUniformWords;
     const refs = this.memberRefWords;
@@ -715,10 +721,49 @@ export class SliceRenderer {
     const bytes = draws.length * MEMBER_BLOCK_STRIDE;
     this.device.queue.writeBuffer(this.memberUniformBuffer!, 0, f32.buffer, 0, bytes);
     this.device.queue.writeBuffer(this.memberEntityRefBuffer!, 0, refs.buffer, 0, bytes);
-    return draws.map((draw, i) => this.memberBindGroupsAt(i, draw));
+
+    const poolGroupsUsed = new Map<string, GPUBindGroup>();
+    const entityGroupsUsed = new Map<GPUBuffer, GPUBindGroup>();
+    const prepared = draws.map((draw, i) => {
+      const poolKey = this.poolGroupKey(draw);
+      let pools = poolGroupsUsed.get(poolKey) ?? kept.pools.get(poolKey);
+      if (!pools) {
+        pools = this.device.createBindGroup({
+          layout: this.bindGroupLayout,
+          entries: this.poolBindGroupEntries(
+            { buffer: this.memberUniformBuffer!, size: SLICE_UNIFORM_SIZE },
+            draw.levels, draw.coarse, draw.colormap,
+          ),
+        });
+      }
+      poolGroupsUsed.set(poolKey, pools);
+
+      let entity = entityGroupsUsed.get(draw.descriptorBuffer) ?? kept.entities.get(draw.descriptorBuffer);
+      if (!entity) {
+        entity = this.device.createBindGroup({
+          layout: this.descriptorBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: draw.descriptorBuffer } },
+            { binding: 1, resource: { buffer: this.memberEntityRefBuffer!, size: ENTITY_REF_SIZE } },
+            { binding: 2, resource: { buffer: this.dummyLabelColorBuffer } },
+          ],
+        });
+      }
+      entityGroupsUsed.set(draw.descriptorBuffer, entity);
+      return { pools, entity, offset: i * MEMBER_BLOCK_STRIDE };
+    });
+    // A group this pass left out names pools or a descriptor buffer that
+    // may since have been replaced, so it is not kept.
+    kept.pools = poolGroupsUsed;
+    kept.entities = entityGroupsUsed;
+    return prepared;
   }
 
-  /** Grow the shared member buffers to hold `count` blocks. Bind groups name the old buffers, so they go too. */
+  /**
+   * Grow the shared member buffers to hold `count` blocks. The bind groups
+   * each pass kept name the old buffers, and a pass drops them when it sees
+   * the new ones.
+   */
   private ensureMemberCapacity(count: number): void {
     if (count <= this.memberCapacity) return;
     const capacity = Math.max(count, this.memberCapacity * 2, 64);
@@ -730,37 +775,27 @@ export class SliceRenderer {
     this.memberUniformData = new Float32Array(capacity * MEMBER_BLOCK_STRIDE / 4);
     this.memberUniformWords = new Uint32Array(this.memberUniformData.buffer);
     this.memberRefWords = new Uint32Array(capacity * MEMBER_BLOCK_STRIDE / 4);
-    this.memberBindGroups = [];
     this.memberCapacity = capacity;
   }
 
-  /** The bind groups for draw index `index`, kept from the last frame when they name the same resources. */
-  private memberBindGroupsAt(index: number, draw: MemberDraw): { pools: GPUBindGroup; entity: GPUBindGroup } {
-    const offset = index * MEMBER_BLOCK_STRIDE;
-    const held = this.memberBindGroups[index]
-      ?? (this.memberBindGroups[index] = { pools: null, poolResources: [], entity: null, descriptorBuffer: null });
-    if (!held.pools || !samePoolResources(held.poolResources, draw)) {
-      held.pools = this.device.createBindGroup({
-        layout: this.bindGroupLayout,
-        entries: this.poolBindGroupEntries(
-          { buffer: this.memberUniformBuffer!, offset, size: SLICE_UNIFORM_SIZE },
-          draw.levels, draw.coarse, draw.colormap,
-        ),
-      });
-      held.poolResources = poolResourcesOf(draw);
+  private resourceId(resource: object): number {
+    let id = this.resourceIds.get(resource);
+    if (id === undefined) {
+      id = this.nextResourceId++;
+      this.resourceIds.set(resource, id);
     }
-    if (!held.entity || held.descriptorBuffer !== draw.descriptorBuffer) {
-      held.entity = this.device.createBindGroup({
-        layout: this.descriptorBindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: draw.descriptorBuffer } },
-          { binding: 1, resource: { buffer: this.memberEntityRefBuffer!, offset, size: ENTITY_REF_SIZE } },
-          { binding: 2, resource: { buffer: this.dummyLabelColorBuffer } },
-        ],
-      });
-      held.descriptorBuffer = draw.descriptorBuffer;
+    return id;
+  }
+
+  /** Names every resource a member draw's group-0 bind group binds besides the shared uniform buffer. */
+  private poolGroupKey(draw: MemberDraw): string {
+    const id = (r: object | null | undefined) => (r ? this.resourceId(r) : 0);
+    let key = `${id(draw.colormap)}|${id(draw.coarse?.texture)}|${id(draw.coarse?.indirectionBuf)}`;
+    for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+      const b = draw.levels[i] ?? null;
+      key += `|${id(b?.texture)}|${id(b?.indirectionBuf)}`;
     }
-    return { pools: held.pools, entity: held.entity };
+    return key;
   }
 
   /**

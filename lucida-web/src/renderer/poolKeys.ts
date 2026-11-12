@@ -71,5 +71,10 @@ export function chunkPoolTier(poolKey: string): ResidencyTier {
  * (`ViewDraw.routes`): the tier and level it serves.
  */
 export function sourceKey(tier: ResidencyTier, level: number): string {
-  return `${tier}:${level}`;
+  // One string per key, made once: a routing lookup runs for every chunk an
+  // upload or a wanted-set report routes, and a string made afresh is hashed
+  // afresh on each.
+  return (SOURCE_KEYS[tier][level] ??= `${tier}:${level}`);
 }
+
+const SOURCE_KEYS: Record<ResidencyTier, string[]> = { detail: [], coarse: [] };

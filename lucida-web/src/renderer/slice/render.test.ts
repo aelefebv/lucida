@@ -316,6 +316,36 @@ describe("handleSliceRenderMultiPass", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
+  it("hands each drawn group's pass the member bind groups it kept in the view's last frame", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([["img-a", residentMetas()]])));
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: "coarse-pool" } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite: vi.fn(), descIndex });
+    // Two layers without a pass group each draw as a group of their own.
+    const twoGroups = (): SliceRenderMultiPassMessage => {
+      const msg = memberMsg("img-a");
+      return { ...msg, layers: [msg.layers[0], { ...msg.layers[0] }] };
+    };
+
+    await handleSliceRenderMultiPass(ctx, twoGroups());
+    await handleSliceRenderMultiPass(ctx, twoGroups());
+    const kept = renderer.renderLayerGroup.mock.calls.map((call) => call[3]);
+    expect(kept).toHaveLength(4);
+    expect(kept[0]).not.toBe(kept[1]);
+    expect(kept[2]).toBe(kept[0]);
+    expect(kept[3]).toBe(kept[1]);
+
+    // A frame that draws one group lets the other's go.
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    const held = state.viewResources.get(0)!.memberGroups;
+    expect(held).toHaveLength(1);
+    expect(held[0]).toBe(kept[0]);
+  });
+
   it("binds every level pool the entity's level sources name, in slot order", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();

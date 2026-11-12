@@ -40,7 +40,7 @@ import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
-import { trimViewLayerTargets } from "../worker/viewResources.ts";
+import { trimViewLayerTargets, viewMemberBindGroups } from "../worker/viewResources.ts";
 import { beginViewFrame } from "../worker/viewFrame.ts";
 
 const IDENTITY_4X4 = new Float32Array([
@@ -348,9 +348,10 @@ export async function handleSliceRenderMultiPass(
 
     const draw = buildLayerGroup(ctx, msg, group);
     if (!draw) continue;
-    const target = targetFor(renderedLayers.length);
+    const index = renderedLayers.length;
+    const target = targetFor(index);
     const encoder = ctx.device.createCommandEncoder();
-    renderer.renderLayerGroup(target.createView(), encoder, draw, timing);
+    renderer.renderLayerGroup(target.createView(), encoder, draw, viewMemberBindGroups(ctx, msg.view, index), timing);
     ctx.device.queue.submit([encoder.finish()]);
     renderedLayers.push({ view: target.createView(), blendMode: first.blendMode, clip: first.clip });
   }
