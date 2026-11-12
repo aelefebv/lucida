@@ -26,7 +26,7 @@ export function annotationCutCommand(
 ): SetZCommand | SetYCommand | SetXCommand | null {
   const view = scene.active_view();
   const [x, y, z] = pinStart(pin);
-  const cut = JSON.parse(scene.annotation_cut(view, datasetId, x, y, z)) as AnnotationCut | null;
+  const cut = JSON.parse(scene.annotation_cut(view, datasetId, x, y, z, pin.anchor ?? undefined)) as AnnotationCut | null;
   if (!cut) return null;
   // A volume view steps along Z, the slice view's cut along its own axis.
   const at = cut.axis === "z" ? scene.z() : scene.cut_index(view);

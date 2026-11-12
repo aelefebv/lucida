@@ -23,6 +23,20 @@ export function pinStart(pin: Annotation): FramePoint {
   return [pin.position[0], pin.position[1], pin.z ?? 0];
 }
 
+/** A mark, as what says which tile a side view of a collection draws it on:
+ * the tile it is glued to, or for one with none yet, such as a shape still
+ * being drawn, the tile its first vertex lies on. Mirrors
+ * `lucida_core::scene::MarkOn`. */
+export interface MarkOn {
+  start: FramePoint;
+  anchor?: string | null;
+}
+
+/** `pin` as a {@link MarkOn}. */
+export function markOn(pin: Annotation): MarkOn {
+  return { start: pinStart(pin), anchor: pin.anchor ?? null };
+}
+
 /** A pin's second vertex, at its own depth or else the anchor's; null for a point. */
 export function pinEnd(pin: Annotation): FramePoint | null {
   const end = pin.end ?? null;

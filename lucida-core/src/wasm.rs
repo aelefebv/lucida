@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 
-use lucida_content::DatasetId;
+use lucida_content::{DatasetId, EntityId};
 
 use crate::camera::{Arcball, Camera, ClipMode, Framing};
 use crate::command::{Command, ViewportCommand};
@@ -10,8 +10,8 @@ use crate::placement::{
 };
 use crate::saved_view::SavedView;
 use crate::scene::{
-    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, PlaneTile,
-    Scene, ViewsRecord, member_transform,
+    CompareMode, DatasetDisplaySettings, DisplayState, DocumentState, FrameTarget, MarkOn,
+    PlaneTile, Scene, ViewsRecord, member_transform,
 };
 use crate::view::{AxisPositions, View, ViewId, ViewLayout};
 
@@ -1280,7 +1280,8 @@ impl WasmScene {
     /// ([`Scene::pick_annotation_voxel`]): on a slice view's plane, or where
     /// a volume view's ray meets the volume. In a side view of a collection
     /// it lands on the tile of the mark whose first vertex is `on`, `[x, y,
-    /// z]`, or without one on the tile under the pointer. Returns an empty
+    /// z]`, and whose anchor is `on_anchor`, or without `on` on the tile
+    /// under the pointer ([`crate::scene::MarkOn`]). Returns an empty
     /// `Vec` (length 0) where there is none, such as a ray that misses, so
     /// the caller can decline to drop a mark into empty space. The point
     /// re-projects (via `project_annotation`) back under the cursor that
@@ -1292,9 +1293,16 @@ impl WasmScene {
         screen_x: f64,
         screen_y: f64,
         on: Option<Vec<f64>>,
+        on_anchor: Option<String>,
     ) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
-        let on = on.and_then(|v| Some([*v.first()?, *v.get(1)?, *v.get(2)?]));
+        let anchor = on_anchor.map(EntityId);
+        let on = on.and_then(|v| {
+            Some(MarkOn {
+                start: [*v.first()?, *v.get(1)?, *v.get(2)?],
+                anchor: anchor.as_ref(),
+            })
+        });
         match self
             .inner
             .pick_annotation_voxel(ViewId(view), &id, screen_x, screen_y, on)
@@ -1305,9 +1313,9 @@ impl WasmScene {
     }
 
     /// How far `view` draws a mark of `dataset_id` whose first vertex is the
-    /// frame point `(x, y, z)` from where the dataset's placement puts it,
-    /// `[dx, dy, dz]`, the same for each of its vertices
-    /// ([`Scene::annotation_shift`]).
+    /// frame point `(x, y, z)` and whose anchor is `anchor` from where the
+    /// dataset's placement puts it, `[dx, dy, dz]`, the same for each of its
+    /// vertices ([`Scene::annotation_shift`]).
     pub fn annotation_shift(
         &self,
         view: u32,
@@ -1315,19 +1323,39 @@ impl WasmScene {
         x: f64,
         y: f64,
         z: f64,
+        anchor: Option<String>,
     ) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
+        let anchor = anchor.map(EntityId);
+        let mark = MarkOn {
+            start: [x, y, z],
+            anchor: anchor.as_ref(),
+        };
         self.inner
-            .annotation_shift(ViewId(view), &id, [x, y, z])
+            .annotation_shift(ViewId(view), &id, mark)
             .to_vec()
     }
 
-    /// Where `view` stands to cut the plane of `dataset_id` holding the frame
-    /// point `(x, y, z)`, as JSON `{"axis": "z", "position": 3}`
-    /// ([`Scene::annotation_cut`]); `null` for an unknown view or dataset.
-    pub fn annotation_cut(&self, view: u32, dataset_id: &str, x: f64, y: f64, z: f64) -> String {
+    /// Where `view` stands to cut the plane of `dataset_id` holding the first
+    /// vertex `(x, y, z)` of a mark whose anchor is `anchor`, as JSON
+    /// `{"axis": "z", "position": 3}` ([`Scene::annotation_cut`]); `null` for
+    /// an unknown view or dataset.
+    pub fn annotation_cut(
+        &self,
+        view: u32,
+        dataset_id: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        anchor: Option<String>,
+    ) -> String {
         let id = DatasetId(dataset_id.into());
-        serde_json::to_string(&self.inner.annotation_cut(ViewId(view), &id, [x, y, z]))
+        let anchor = anchor.map(EntityId);
+        let mark = MarkOn {
+            start: [x, y, z],
+            anchor: anchor.as_ref(),
+        };
+        serde_json::to_string(&self.inner.annotation_cut(ViewId(view), &id, mark))
             .unwrap_or_default()
     }
 
