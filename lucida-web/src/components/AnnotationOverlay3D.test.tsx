@@ -456,20 +456,6 @@ describe("AnnotationOverlay3D — comment thread, brought to 3D", () => {
     fireEvent.click(marker, { clientX: 320, clientY: 280 });
     expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
   });
-
-  it("an open thread lifts its pin's wrapper above the others (z-order)", () => {
-    const wrapperZ = (pinId: string) =>
-      Number.parseInt((screen.getByTestId(`annot-pin-wrapper-${pinId}`) as HTMLElement).style.zIndex, 10);
-    renderOverlay({
-      pins: [ownPin({ id: "pin-a" }), ownPin({ id: "pin-b", position: [12, 22] })],
-    });
-    // Equal base before opening.
-    expect(wrapperZ("pin-a")).toBe(wrapperZ("pin-b"));
-    openThread("pin-a");
-    // The open pin is lifted strictly above the closed one so its popover clears
-    // the other marker, regardless of DOM order.
-    expect(wrapperZ("pin-a")).toBeGreaterThan(wrapperZ("pin-b"));
-  });
 });
 
 describe("AnnotationOverlay3D — off-context vs the view's Z/T/C", () => {

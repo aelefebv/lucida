@@ -32,7 +32,7 @@ const railTabs: RailPanel[] = [
 function Shell() {
   return (
     <div className="lc-shell-center">
-      <div className="lc-canvas-stage-layers" />
+      <div className="lc-canvas-stage-above" />
       <PhoneSheet peek={<p>peek body</p>} layerTabs={layerTabs} railTabs={railTabs} />
     </div>
   );
@@ -133,7 +133,7 @@ describe("PhoneSheet", () => {
     await act(async () => {
       const thread = document.createElement("div");
       thread.setAttribute("role", "dialog");
-      document.querySelector(".lc-canvas-stage-layers")!.append(thread);
+      document.querySelector(".lc-canvas-stage-above")!.append(thread);
     });
     expect(sheet().dataset.snap).toBe("peek");
   });
