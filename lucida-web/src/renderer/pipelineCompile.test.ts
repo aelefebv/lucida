@@ -98,7 +98,7 @@ describe.each<[string, (device: GPUDevice) => Compiles, number]>([
   ["slice renderer", (device) => new SliceRenderer(device), 6],
   ["layer compositor", (device) => new LayerCompositor(device, "bgra8unorm"), 4],
   ["cursor renderer", (device) => new CursorRenderer(device, "bgra8unorm"), 2],
-  ["volume renderer", (device) => new VolumeRenderer(device), 1],
+  ["volume renderer", (device) => new VolumeRenderer(device), 2],
 ])("the %s", (_name, construct, pipelineCount) => {
   it("creates every pipeline asynchronously and is compiled once the last one resolves", async () => {
     const { device, pending } = makeDevice();
@@ -136,13 +136,14 @@ describe("the volume renderer's tilted cuts", () => {
     const { device, pending } = makeDevice();
     const volumes = new VolumeRenderer(device);
     pending[0].resolve(pipeline("volume"));
+    pending[1].resolve(pipeline("member ids"));
     await volumes.compiled;
-    expect(pending).toHaveLength(1);
+    expect(pending).toHaveLength(2);
 
     const cuts = volumes.compileCuts();
     expect(volumes.compileCuts()).toBe(cuts);
-    expect(pending).toHaveLength(4);
-    for (const cut of pending.slice(1)) cut.resolve(pipeline("cut"));
+    expect(pending).toHaveLength(5);
+    for (const cut of pending.slice(2)) cut.resolve(pipeline("cut"));
     await expect(cuts).resolves.toBeUndefined();
   });
 });
@@ -244,6 +245,7 @@ describe("drawing before the compile", () => {
 
     const main = pipeline("volume");
     pending[0].resolve(main);
+    pending[1].resolve(pipeline("member ids"));
     await volumes.compiled;
 
     volumes.renderTo(view, encoder);

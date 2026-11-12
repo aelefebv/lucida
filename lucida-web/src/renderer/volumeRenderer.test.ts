@@ -118,8 +118,9 @@ describe("the volume renderer's member draws", () => {
 
     expect(encoder.beginRenderPass).toHaveBeenCalledOnce();
     expect(pass.setScissorRect.mock.calls).toEqual([[0, 0, 10, 10], [20, 0, 10, 10], [40, 0, 10, 10]]);
-    const offsets = pass.setBindGroup.mock.calls.map((call) => [call[0], call[2][0]]);
-    expect(offsets).toEqual([[0, 0], [1, 0], [0, 0], [1, 2 * 256], [0, 0], [1, 4 * 256]]);
+    // Group 2, a member batch's, once and with nothing in it.
+    const offsets = pass.setBindGroup.mock.calls.map((call) => [call[0], call[2]?.[0]]);
+    expect(offsets).toEqual([[2, undefined], [0, 0], [1, 0], [0, 0], [1, 2 * 256], [0, 0], [1, 4 * 256]]);
     expect(pass.draw).toHaveBeenCalledTimes(3);
   });
 
@@ -188,7 +189,7 @@ describe("the volume renderer's member batches", () => {
   async function setup() {
     const { device, texture } = makeDevice();
     const renderer = new VolumeRenderer(device as unknown as GPUDevice);
-    await Promise.all([renderer.compiled, renderer.compileMemberBatches()]);
+    await renderer.compiled;
     const descriptorBuffer = { destroy: vi.fn() } as unknown as GPUBuffer;
     const run = (c: number, contrastMax: number): VolumeMemberDraw => ({
       levels: [pool(texture())], coarse: null, colormap: texture(), descriptorBuffer, entityIndex: 0,
@@ -198,7 +199,7 @@ describe("the volume renderer's member batches", () => {
     return { device, renderer, run };
   }
 
-  it("writes each draw's index, and its members' display, into its entity reference", async () => {
+  it("writes each draw's index, that it draws a batch, and its members' display into its entity reference", async () => {
     const { device, renderer, run } = await setup();
     renderer.prepareMembers("minimap", [run(0, 10), run(0, 20)]);
 
@@ -207,8 +208,8 @@ describe("the volume renderer's member batches", () => {
     expect([offset, start]).toEqual([0, 0]);
     const words = new Uint32Array(data as ArrayBuffer, 0, size as number / 4);
     const floats = new Float32Array(data as ArrayBuffer, 0, size as number / 4);
-    expect([words[2], ...floats.subarray(4, 8)]).toEqual([0, 0, 10, 0.5, 1]);
-    expect([words[64 + 2], ...floats.subarray(64 + 4, 64 + 8)]).toEqual([1, 0, 20, 0.5, 1]);
+    expect([words[2], words[3], ...floats.subarray(4, 8)]).toEqual([0, 1, 0, 10, 0.5, 1]);
+    expect([words[64 + 2], words[64 + 3], ...floats.subarray(64 + 4, 64 + 8)]).toEqual([1, 1, 0, 20, 0.5, 1]);
   });
 
   it("writes each instance's rect in the target's NDC, with its entity and draw", async () => {

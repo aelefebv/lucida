@@ -1,7 +1,7 @@
 // A member batch's id pass: every pixel inside a member's rect takes the
 // member's instance index, so that one full-screen draw of volume.wgsl's
-// `fsMembers` marches each member through the same ray the full-screen
-// triangle gives the pixel when the member is drawn alone. A batch's rects do
+// `fs` marches each member through the same ray the full-screen triangle
+// gives the pixel when the member is drawn alone. A batch's rects do
 // not meet, so a pixel has at most one member.
 
 // Matches MemberInstance in volume.wgsl.

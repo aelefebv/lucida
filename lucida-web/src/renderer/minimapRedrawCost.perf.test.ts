@@ -50,7 +50,7 @@ function makeDevice(): GPUDevice {
 async function minimapOf(members: number) {
   const device = makeDevice();
   const renderer = new VolumeRenderer(device);
-  await Promise.all([renderer.compiled, renderer.compileMemberBatches()]);
+  await renderer.compiled;
   const lut = { createView: () => ({}) };
   const ctx = {
     device,

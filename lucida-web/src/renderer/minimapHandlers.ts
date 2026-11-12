@@ -152,13 +152,12 @@ export function handleMinimapLayers(ctx: WorkerCtx, msg: MinimapLayersMessage): 
 
 /** Whether every pipeline an overview draw takes has compiled. */
 function overviewPipelinesReady(ctx: WorkerCtx): boolean {
-  return ctx.getVolumeRenderer().isCompiled && ctx.getVolumeRenderer().memberBatchesCompiled && ctx.getCompositor().isCompiled;
+  return ctx.getVolumeRenderer().isCompiled && ctx.getCompositor().isCompiled;
 }
 
 /** Resolves once every pipeline an overview draw takes has compiled. */
 function overviewPipelinesCompiled(ctx: WorkerCtx): Promise<unknown> {
-  const renderer = ctx.getVolumeRenderer();
-  return Promise.all([renderer.compiled, renderer.compileMemberBatches(), ctx.getCompositor().compiled]);
+  return Promise.all([ctx.getVolumeRenderer().compiled, ctx.getCompositor().compiled]);
 }
 
 export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): void {

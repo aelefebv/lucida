@@ -43,9 +43,7 @@ function makeVolumeRenderer() {
   });
   const renderer = {
     isCompiled: false,
-    memberBatchesCompiled: false,
     compiled,
-    compileMemberBatches: () => compiled,
     setPixelRatio: vi.fn(),
     setMatrices: vi.fn(),
     writeDescriptorTable: vi.fn((_set: string, _descriptors: TransientDescriptorParams[]) => ({})),
@@ -58,7 +56,6 @@ function makeVolumeRenderer() {
     renderer,
     compile() {
       renderer.isCompiled = true;
-      renderer.memberBatchesCompiled = true;
       finish();
     },
     fail(message: string) {

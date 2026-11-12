@@ -26,7 +26,8 @@ struct Uniforms {
 
 struct EntityRef {
   // x = entity index, y = declared palette pair count, z = the draw's index
-  // in its member draw set, which a member batch's instances name.
+  // in its member draw set, which a member batch's instances name, w = 1 for
+  // a member batch's draw.
   index: vec4u,
   // A member batch draw's window min and max, gamma and opacity. Its
   // members share a colormap, so they share these too, in place of their
@@ -457,29 +458,32 @@ fn fsCut(input: VSOut) -> @location(0) vec4f {
   return vec4f(color * entity.opacity, entity.opacity);
 }
 
+// A draw marches its entity. A member batch's draw (`index.w` set) marches
+// whichever member memberIds.wgsl put under the pixel, when that member takes
+// this draw's pools, so one draw marches every such member. It keeps the
+// full-screen triangle, so each pixel's ray and samples are the ones a draw
+// of its member alone gives it. One entry point serves both, so the march
+// compiles once.
 @fragment
 fn fs(input: VSOut) -> FsOut {
-  activeEntity = entityDescriptors[currentEntity.index.x];
-  return march(input);
-}
-
-// A member batch's draw: the full-screen triangle's ray at every pixel, as
-// `fs` marches it, for the member memberIds.wgsl put under the pixel when it
-// takes this draw's pools. One draw marches every such member, and each
-// pixel's ray and samples are the ones a draw of that member alone gives it.
-@fragment
-fn fsMembers(input: VSOut) -> FsOut {
-  let at = textureLoad(memberIds, vec2i(input.pos.xy), 0).r;
-  if (at == NO_MEMBER || memberInstances[at].draw != currentEntity.index.z) {
-    var none: FsOut;
-    discard;
-    return none;
+  let batch = currentEntity.index.w != 0u;
+  var entityIndex = currentEntity.index.x;
+  if (batch) {
+    let at = textureLoad(memberIds, vec2i(input.pos.xy), 0).r;
+    if (at == NO_MEMBER || memberInstances[at].draw != currentEntity.index.z) {
+      var none: FsOut;
+      discard;
+      return none;
+    }
+    entityIndex = memberInstances[at].entity;
   }
-  activeEntity = entityDescriptors[memberInstances[at].entity];
-  activeEntity.contrastMin = currentEntity.display.x;
-  activeEntity.contrastMax = currentEntity.display.y;
-  activeEntity.gamma = currentEntity.display.z;
-  activeEntity.opacity = currentEntity.display.w;
+  activeEntity = entityDescriptors[entityIndex];
+  if (batch) {
+    activeEntity.contrastMin = currentEntity.display.x;
+    activeEntity.contrastMax = currentEntity.display.y;
+    activeEntity.gamma = currentEntity.display.z;
+    activeEntity.opacity = currentEntity.display.w;
+  }
   return march(input);
 }
 

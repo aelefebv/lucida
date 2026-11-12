@@ -180,17 +180,20 @@ interface MemberDrawSet {
 export class VolumeRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline | null = null;
-  /** Resolves once the pipeline has compiled. See `pipelineCompile.ts`. */
+  /** Resolves once the main pipeline and the id pass have compiled. See `pipelineCompile.ts`. */
   readonly compiled: Promise<void>;
   /** One pipeline per blend mode for a slice view's tilted cuts ({@link renderCut}). */
   private cutPipelines: Record<BlendMode, GPURenderPipeline> | null = null;
   private cutsCompiled: Promise<void> | null = null;
-  /** The id pass and the march of {@link renderMemberBatch}. */
-  private memberPipelines: { ids: GPURenderPipeline; march: GPURenderPipeline } | null = null;
-  private memberPipelinesCompiled: Promise<void> | null = null;
-  private memberIdsLayout: GPUBindGroupLayout | null = null;
-  private memberBatchLayout: GPUBindGroupLayout | null = null;
+  /** The id pass of {@link renderMemberBatch}, whose march is the main pipeline's. */
+  private idPipeline: GPURenderPipeline | null = null;
+  private readonly memberIdsLayout: GPUBindGroupLayout;
+  /** Group 2 of the main pipeline: a member batch's id target and instances. */
+  private readonly memberBatchLayout: GPUBindGroupLayout;
+  /** Group 2 for a draw of one entity, which never reads it. */
+  private readonly noMembersGroup: GPUBindGroup;
   private readonly shaderModule: GPUShaderModule;
+  /** The cut pipelines' layout: the main one's, less group 2, which `fsCut` never reads. */
   private readonly pipelineLayout: GPUPipelineLayout;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
@@ -225,7 +228,7 @@ export class VolumeRenderer {
   private nextResourceId = 1;
 
   get isCompiled(): boolean {
-    return this.pipeline !== null;
+    return this.pipeline !== null && this.idPipeline !== null;
   }
 
   constructor(device: GPUDevice) {
@@ -306,12 +309,29 @@ export class VolumeRenderer {
       ],
     });
 
-    const pipelineLayout = this.pipelineLayout = device.createPipelineLayout({
+    this.pipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
     });
-
-    this.compiled = device.createRenderPipelineAsync({
-      layout: pipelineLayout,
+    this.memberBatchLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint", viewDimension: "2d" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+      ],
+    });
+    this.noMembersGroup = device.createBindGroup({
+      layout: this.memberBatchLayout,
+      entries: [
+        { binding: 0, resource: createMemberIdTarget(device, 1, 1).createView() },
+        {
+          binding: 1,
+          resource: { buffer: device.createBuffer({ size: MEMBER_INSTANCE_SIZE, usage: GPUBufferUsage.STORAGE }) },
+        },
+      ],
+    });
+    const main = device.createRenderPipelineAsync({
+      layout: device.createPipelineLayout({
+        bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout, this.memberBatchLayout],
+      }),
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
         module: shaderModule, entryPoint: "fs",
@@ -326,6 +346,20 @@ export class VolumeRenderer {
     }).then((pipeline) => {
       this.pipeline = pipeline;
     });
+    this.memberIdsLayout = device.createBindGroupLayout({
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } }],
+    });
+    const idsModule = device.createShaderModule({ code: memberIdsSource });
+    const ids = device.createRenderPipelineAsync({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.memberIdsLayout] }),
+      vertex: { module: idsModule, entryPoint: "vs" },
+      fragment: { module: idsModule, entryPoint: "fs", targets: [{ format: MEMBER_ID_FORMAT }] },
+      primitive: { topology: "triangle-list" },
+    }).then((pipeline) => {
+      this.idPipeline = pipeline;
+    });
+
+    this.compiled = Promise.all([main, ids]).then(() => {});
 
     this.uniformBuffer = device.createBuffer({
       size: VOLUME_UNIFORM_SIZE,
@@ -547,6 +581,7 @@ export class VolumeRenderer {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.bindGroup, [0]);
     pass.setBindGroup(1, this.descriptorBindGroup, [0]);
+    pass.setBindGroup(2, this.noMembersGroup);
     pass.draw(3); // full-screen triangle
     pass.end();
   }
@@ -667,6 +702,7 @@ export class VolumeRenderer {
       ref[0] = draw.entityIndex >>> 0;
       ref[2] = i;
       if (draw.display) {
+        ref[3] = 1;
         refDisplay[0] = draw.display.contrastMin;
         refDisplay[1] = draw.display.contrastMax;
         refDisplay[2] = draw.display.gamma;
@@ -762,6 +798,7 @@ export class VolumeRenderer {
       timestampWrites: timing?.nextPass(),
     });
     pass.setPipeline(pipeline);
+    pass.setBindGroup(2, this.noMembersGroup);
     for (const index of indices) {
       const draw = set.draws[index];
       const rect = clipToBand(draw.scissor ?? [0, 0, targetWidth, targetHeight], band);
@@ -829,48 +866,6 @@ export class VolumeRenderer {
     pass.end();
   }
 
-  get memberBatchesCompiled(): boolean {
-    return this.memberPipelines !== null;
-  }
-
-  /**
-   * Compile {@link renderMemberBatch}'s pipelines, once; resolves when they
-   * have. Only member batches wait on them, not a volume view's first frame.
-   */
-  compileMemberBatches(): Promise<void> {
-    if (this.memberPipelinesCompiled) return this.memberPipelinesCompiled;
-    const idsLayout = this.memberIdsLayout = this.device.createBindGroupLayout({
-      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } }],
-    });
-    const batchLayout = this.memberBatchLayout = this.device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint", viewDimension: "2d" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
-      ],
-    });
-    const idsModule = this.device.createShaderModule({ code: memberIdsSource });
-    const ids = this.device.createRenderPipelineAsync({
-      layout: this.device.createPipelineLayout({ bindGroupLayouts: [idsLayout] }),
-      vertex: { module: idsModule, entryPoint: "vs" },
-      fragment: { module: idsModule, entryPoint: "fs", targets: [{ format: MEMBER_ID_FORMAT }] },
-      primitive: { topology: "triangle-list" },
-    });
-    // The main pipeline's march, so a member draws as a draw of it alone does.
-    const march = this.device.createRenderPipelineAsync({
-      layout: this.device.createPipelineLayout({
-        bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout, batchLayout],
-      }),
-      vertex: { module: this.shaderModule, entryPoint: "vs" },
-      fragment: { module: this.shaderModule, entryPoint: "fsMembers", targets: [{ format: OFFSCREEN_FORMAT }] },
-      primitive: { topology: "triangle-list" },
-      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "always" },
-    });
-    this.memberPipelinesCompiled = Promise.all([ids, march]).then(([idsPipeline, marchPipeline]) => {
-      this.memberPipelines = { ids: idsPipeline, march: marchPipeline };
-    });
-    return this.memberPipelinesCompiled;
-  }
-
   /**
    * Write the instances member batches draw, in batch order, for a target of
    * `width` by `height`. They hold until the next call, so a frame whose
@@ -927,7 +922,8 @@ export class VolumeRenderer {
     encoder: GPUCommandEncoder,
   ): void {
     const set = this.memberDrawSet(setName);
-    const pipelines = requireCompiled(this.memberPipelines, "member batch");
+    const idPipeline = requireCompiled(this.idPipeline, "member batch");
+    const pipeline = requireCompiled(this.pipeline, "volume renderer");
     const [x, y, w, h] = batch.bounds;
 
     const ids = encoder.beginRenderPass({
@@ -936,7 +932,7 @@ export class VolumeRenderer {
       }],
     });
     if (batch.count > 0) {
-      ids.setPipeline(pipelines.ids);
+      ids.setPipeline(idPipeline);
       ids.setBindGroup(0, this.instanceGroupOf(set));
       ids.draw(6, batch.count, 0, batch.first);
     }
@@ -952,7 +948,7 @@ export class VolumeRenderer {
       },
     });
     if (batch.count > 0 && w > 0 && h > 0) {
-      pass.setPipeline(pipelines.march);
+      pass.setPipeline(pipeline);
       pass.setScissorRect(x, y, w, h);
       pass.setBindGroup(2, this.memberIdGroupOf(set, memberIds));
       for (const index of batch.draws) {
@@ -967,7 +963,7 @@ export class VolumeRenderer {
 
   private instanceGroupOf(set: MemberDrawSet): GPUBindGroup {
     set.instanceGroup ??= this.device.createBindGroup({
-      layout: this.memberIdsLayout!,
+      layout: this.memberIdsLayout,
       entries: [{ binding: 0, resource: { buffer: set.instanceBuffer! } }],
     });
     return set.instanceGroup;
@@ -979,7 +975,7 @@ export class VolumeRenderer {
       // A replaced target never comes back, so its group goes with it.
       set.memberIdGroups.clear();
       group = this.device.createBindGroup({
-        layout: this.memberBatchLayout!,
+        layout: this.memberBatchLayout,
         entries: [
           { binding: 0, resource: this.viewOf(memberIds) },
           { binding: 1, resource: { buffer: set.instanceBuffer! } },
