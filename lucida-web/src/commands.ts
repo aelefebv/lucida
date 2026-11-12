@@ -58,6 +58,8 @@ export interface AddAnnotationCommand {
   id: string;
   position: [number, number];
   end?: [number, number] | null;
+  /** The second vertex's depth, sent only where it differs from `z`. */
+  end_z?: number;
   z?: number;
   t?: number;
   c?: number;
@@ -82,6 +84,8 @@ export interface MoveAnnotationCommand {
   id: string;
   position: [number, number];
   end?: [number, number] | null;
+  /** A reshape's second-vertex depth, sent only where it differs from `z`. */
+  end_z?: number;
   z?: number;
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hitTestShapes, translateShape, type ShapeOnScreen } from "./annotationGeometry.ts";
+import { hitTestShapes, type ShapeOnScreen } from "./annotationGeometry.ts";
 
 const square = (id: string, x0: number, y0: number, x1: number, y1: number): ShapeOnScreen => ({
   id,
@@ -43,11 +43,5 @@ describe("hitTestShapes", () => {
 
   it("measures a line's ends as points, not its infinite extension", () => {
     expect(hitTestShapes([320, 0], [line("ln", 200, 0, 300, 0)], 6)).toBeNull();
-  });
-});
-
-describe("translateShape", () => {
-  it("moves both vertices by the same delta", () => {
-    expect(translateShape({ position: [1, 2], end: [5, 8] }, [10, -2])).toEqual({ position: [11, 0], end: [15, 6] });
   });
 });

@@ -24,6 +24,11 @@ function stubScene(annotations: Annotation[]): WasmScene {
     center: () => [0, 0] as [number, number],
     transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    slice_plane: () => "xy",
+    draws_annotations: () => true,
+    // The inverse of the camera above on the 800 by 600 view, cutting Z
+    // through the middle of plane 3.
+    pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => new Float64Array([x - 400, y - 300, 3.5]),
   } as unknown as WasmScene;
 }
 
@@ -61,7 +66,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={1}
-        viewContext={{ z: 0, t: 0, channels: [0] }}
+        viewContext={{ cut: { axis: "z", start: 0, end: 1 }, t: 0, channels: [0] }}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -103,7 +108,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={1}
-        viewContext={{ z: 0, t: 0, channels: [0] }}
+        viewContext={{ cut: { axis: "z", start: 0, end: 1 }, t: 0, channels: [0] }}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}

@@ -5,8 +5,10 @@ import type { WasmScene } from "lucida-core";
 import {
   eventToScreenPx,
   eventToWorld,
+  makeFrameToScreen,
   makeProjectAnnotationToCss,
   makeWorldToScreen,
+  pickFramePoint,
 } from "./cameraProjection.ts";
 
 /** A scene stub exposing only the 2D camera accessors the projections read. */
@@ -128,7 +130,7 @@ describe("makeProjectAnnotationToCss (3D per-vertex marker projection)", () => {
         new Float64Array([200, 300]),
     } as unknown as WasmScene;
     const project = makeProjectAnnotationToCss(scene, 0, "wds-1");
-    expect(project([10, 20], 3)).toEqual([100, 150]);
+    expect(project([10, 20, 3])).toEqual([100, 150]);
   });
 
   it("returns null for an empty projection (vertex behind the camera)", () => {
@@ -136,7 +138,7 @@ describe("makeProjectAnnotationToCss (3D per-vertex marker projection)", () => {
       project_annotation: () => new Float64Array([]),
     } as unknown as WasmScene;
     const project = makeProjectAnnotationToCss(scene, 0, "wds-1");
-    expect(project([10, 20], 3)).toBeNull();
+    expect(project([10, 20, 3])).toBeNull();
   });
 
   it("passes the view, the dataset id and the full (x, y, z) point through to the scene", () => {
@@ -147,7 +149,53 @@ describe("makeProjectAnnotationToCss (3D per-vertex marker projection)", () => {
         return new Float64Array([0, 0]);
       },
     } as unknown as WasmScene;
-    makeProjectAnnotationToCss(scene, 2, "wds-9")([7, 8], 9);
+    makeProjectAnnotationToCss(scene, 2, "wds-9")([7, 8, 9]);
     expect(calls).toEqual([[2, "wds-9", 7, 8, 9]]);
+  });
+});
+
+describe("makeFrameToScreen (a mark's frame point on the view's plane)", () => {
+  /** A view of `plane` at one device pixel per unit, centred on the scene
+   * origin, over a dataset placed with samples 2 apart along Z. */
+  function sideScene(plane: string): WasmScene {
+    return {
+      zoom: () => 1,
+      center: () => new Float64Array([0, 0]),
+      transposed: () => false,
+      slice_plane: () => plane,
+      dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 2]),
+    } as unknown as WasmScene;
+  }
+
+  it("draws a point at its place across and down each plane, through the placement", () => {
+    const surface = { view: 0, element: makeCanvas() };
+    const point: [number, number, number] = [30, 40, 5.5];
+    // XY: X across, Y down; the depth doesn't show.
+    expect(makeFrameToScreen(sideScene("xy"), surface, "ds")(point)).toEqual([430, 340]);
+    // XZ: X across, Z down, 2 scene units a sample.
+    expect(makeFrameToScreen(sideScene("xz"), surface, "ds")(point)).toEqual([430, 311]);
+    // YZ: Y across, Z down.
+    expect(makeFrameToScreen(sideScene("yz"), surface, "ds")(point)).toEqual([440, 311]);
+  });
+});
+
+describe("pickFramePoint", () => {
+  it("asks the scene for the view's point under the pointer, in device pixels", () => {
+    setDpr(2);
+    const calls: unknown[][] = [];
+    const scene = {
+      pick_annotation_voxel: (...args: unknown[]) => {
+        calls.push(args);
+        return new Float64Array([1, 2, 3.5]);
+      },
+    } as unknown as WasmScene;
+    const surface = { view: 3, element: makeCanvas(100, 50) };
+    expect(pickFramePoint(scene, surface, "ds", { clientX: 110, clientY: 70 })).toEqual([1, 2, 3.5]);
+    expect(calls).toEqual([[3, "ds", 20, 40]]);
+  });
+
+  it("is null where the scene has no point", () => {
+    const scene = { pick_annotation_voxel: () => new Float64Array([]) } as unknown as WasmScene;
+    expect(pickFramePoint(scene, { view: 0, element: makeCanvas() }, "ds", { clientX: 1, clientY: 1 })).toBeNull();
   });
 });

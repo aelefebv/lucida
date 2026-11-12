@@ -27,6 +27,11 @@ function makeScene(initial: Annotation[]): {
     center: () => new Float64Array([0, 0]),
     transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    slice_plane: () => "xy",
+    draws_annotations: () => true,
+    // The inverse of the camera above on the 800 by 600 view, cutting Z
+    // through the middle of plane 3.
+    pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => new Float64Array([x - 400, y - 300, 3.5]),
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
       applied.push(cmd);
@@ -72,7 +77,7 @@ function renderOverlay(opts: { pins: Annotation[]; myId?: string }) {
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: canvas }}
       version={0}
-      viewContext={{ z: 3, t: 0, channels: [0] }}
+      viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {

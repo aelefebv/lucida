@@ -1232,6 +1232,7 @@ mod tests {
             id: "pin-1".into(),
             position: [3.0, 4.0],
             end: None,
+            end_z: None,
             z: 8.5,
             t: 0,
             c: 0,
@@ -1284,6 +1285,7 @@ mod tests {
             id: "pin-1".into(),
             position: [3.0, 4.0],
             end: None,
+            end_z: None,
             z: 0.0,
             t: 0,
             c: 0,
@@ -1340,6 +1342,7 @@ mod tests {
             id: "pin-1".into(),
             position: [10.0, 20.0],
             end: None,
+            end_z: None,
             z: 12.5,
             t: 0,
             c: 0,
@@ -1406,6 +1409,7 @@ mod tests {
                         id,
                         position,
                         end,
+                        end_z: _,
                         z,
                     },
             } => {
@@ -1454,6 +1458,7 @@ mod tests {
             id: "pin-1".into(),
             position: [10.0, 20.0],
             end: None,
+            end_z: None,
             z: 1.0,
             t: 0,
             c: 0,
@@ -1474,6 +1479,7 @@ mod tests {
             id: "pin-1".into(),
             position: [55.0, 66.0],
             end: None,
+            end_z: None,
             z: 7.5,
         });
         doc.apply(DocumentCommand::EditComment {

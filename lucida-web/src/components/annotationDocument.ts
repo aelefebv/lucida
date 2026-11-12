@@ -15,14 +15,18 @@ export interface Comment {
   text: string;
 }
 
-/** One pin. The full world point is `(position[0], position[1], z)`. Optional
- * fields may be absent on older documents and default on read. */
+/** One pin, in its dataset's frame: continuous samples on every axis, the
+ * anchor at `(position[0], position[1], z)`. Optional fields may be absent on
+ * older documents and default on read. */
 export interface Annotation {
   id: string;
   position: [number, number];
   /** A line's far endpoint or a box's opposite corner; absent for a point. */
   end?: [number, number] | null;
-  /** Additive depth; defaults to 0. */
+  /** The second vertex's depth where it differs from `z`, as a shape drawn
+   * in a side view does; absent when both share `z`. */
+  end_z?: number | null;
+  /** The anchor's depth; defaults to 0. */
   z?: number;
   /** Timepoint the pin was placed on; defaults to 0. Drives off-context
    * rendering. */

@@ -174,6 +174,7 @@ vi.mock("lucida-core", () => {
     plane_lines() { return "[]"; }
     view_comparison() { return "null"; }
     slice_plane() { return "xy"; }
+    draws_annotations() { return true; }
     transposed() { return false; }
     cut_index() { return this.view.z; }
     cut_reading() { return JSON.stringify({ position: this.view.z, count: 1, place: this.view.z + 0.5 }); }

@@ -1,5 +1,6 @@
 /**
- * DOM overlay for annotations and their comment threads in the 2D slice view.
+ * DOM overlay for annotations and their comment threads in a slice view, of
+ * whichever plane it cuts.
  *
  * Like `PeerCursors`, it is a `pointerEvents: none` layer whose markers are
  * re-projected from world space every frame, so pins stay glued to the data
@@ -29,24 +30,29 @@ import {
   startLongPress,
   useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { eventToFrame, makeFrameToScreen, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
-import { frameToScene, readPlaneMap } from "../placement.ts";
+import { makeFrameToScreen, pickFramePoint, viewPlane, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { planeCutting, type SlicePlane } from "../renderer/slicePlane.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import {
   annotationVertices,
   hitTestShapes,
   isClosedShape,
-  translateShape,
+  liesOnPlane,
+  onPlane,
+  pinEnd,
+  pinStart,
+  translateOnPlane,
+  withOnPlane,
   BOX_HANDLES,
   boxHandlePoint,
   reshapeBox,
   LINE_HANDLES,
   lineHandlePoint,
   reshapeLine,
-  type BoxCorners,
   type BoxHandle,
-  type LineEndpoints,
+  type FramePoint,
+  type FrameVertices,
   type LineHandle,
   type ScreenPoint,
 } from "./annotationGeometry.ts";
@@ -66,8 +72,8 @@ interface Props {
   surface: ViewSurface;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
-  /** The current Z/T/C. A pin that differs on any axis renders off-context:
-   * dimmed, with a locator naming where it lives. */
+  /** Where the view cuts the layer, and its T and channels. A pin off them
+   * renders off-context: dimmed, with a locator naming where it lives. */
   viewContext: ViewContext;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
    * per-connection `myId`, so a pin authored here stays mine across
@@ -144,18 +150,13 @@ interface PinDrag {
    * event. */
   lastX: number;
   lastY: number;
-  /** The pin's depth at press; preserved across a move (z is not edited). */
-  z: number;
   /** True once travel passes the slop. */
   moved: boolean;
-  /** The dragged anchor's world point while a move is under way. */
-  preview: [number, number] | null;
+  /** Where the anchor is dragged while a move is under way: under the
+   * pointer on the view's plane, at its own place along the cut. */
+  preview: FramePoint | null;
   cancelLongPress: () => void;
 }
-
-/** A box's two corners or a line's two endpoints. Both are `{position, end}`,
- * so one reshape path carries either. */
-type ShapeVertices = BoxCorners & LineEndpoints;
 
 /** A drag on one's own shape, for one captured pointer: a handle reshapes it,
  * and `body` (the selected shape itself) moves it whole. Release emits one
@@ -169,30 +170,37 @@ interface HandleDrag {
   /** Press point in CSS px (clientX/Y), to measure travel against the slop. */
   startX: number;
   startY: number;
-  /** The press in world space, which a body drag measures its travel from. */
+  /** The plane the view cuts at the press, which the drag moves the shape
+   * across. */
+  plane: SlicePlane;
+  /** The press across and down that plane, which a body drag measures its
+   * travel from. */
   startWorld: [number, number];
   /** Vertices at press. Every recompute builds on them, so the other handle
    * never drifts. */
-  base: ShapeVertices;
-  /** Depth at press; a 2D handle drag doesn't edit z. */
-  z: number;
+  base: FrameVertices;
   /** True once travel passes the slop. */
   moved: boolean;
   /** Live vertices while dragging, null until past the slop. The tick previews
    * from this; release commits. */
-  preview: ShapeVertices | null;
+  preview: FrameVertices | null;
   cancelLongPress: () => void;
 }
 
-/** The vertices a drag to `world` gives: a box handle moves the coordinates it
- * owns, a line handle only its endpoint, and the body everything. */
-function dragShape(drag: HandleDrag, world: [number, number]): ShapeVertices {
+/** The vertices a drag to `world`, across and down the drag's plane, gives:
+ * the body moves both across it, keeping each one's place along the cut. A
+ * box handle moves the coordinates it owns and a line handle only its
+ * endpoint, both in the plane the shape lies on, which handles only show on. */
+function dragShape(drag: HandleDrag, world: [number, number]): FrameVertices {
+  const { base, plane } = drag;
   if (drag.handle === "body") {
-    return translateShape(drag.base, [world[0] - drag.startWorld[0], world[1] - drag.startWorld[1]]);
+    return translateOnPlane(base, [world[0] - drag.startWorld[0], world[1] - drag.startWorld[1]], plane);
   }
-  return drag.kind === "box"
-    ? reshapeBox(drag.base, drag.handle as BoxHandle, world)
-    : reshapeLine(drag.base, drag.handle as LineHandle, world);
+  const corners = { position: onPlane(base.position, plane), end: onPlane(base.end, plane) };
+  const reshaped = drag.kind === "box"
+    ? reshapeBox(corners, drag.handle as BoxHandle, world)
+    : reshapeLine(corners, drag.handle as LineHandle, world);
+  return { position: withOnPlane(base.position, reshaped.position, plane), end: withOnPlane(base.end, reshaped.end, plane) };
 }
 
 /** An own box with a second vertex, eligible for resize handles. */
@@ -205,16 +213,28 @@ function isOwnLine(pin: Annotation, myId: string): boolean {
   return pin.kind === "line" && (pin.end ?? null) !== null && pin.author === String(myId);
 }
 
-/** Whether this shape has handles to edit: an own box or line. */
+/** Whether this shape is one's own to select and edit: an own box or line. */
 function isOwnHandledShape(pin: Annotation, myId: string): boolean {
   return isOwnBox(pin, myId) || isOwnLine(pin, myId);
 }
 
 /** A non-point pin's two vertices, or null for a degenerate shape. */
-function shapeVertices(pin: Annotation): ShapeVertices | null {
-  const end = pin.end ?? null;
-  if (!end) return null;
-  return { position: [pin.position[0], pin.position[1]], end: [end[0], end[1]] };
+function shapeVertices(pin: Annotation): FrameVertices | null {
+  const end = pinEnd(pin);
+  return end ? { position: pinStart(pin), end } : null;
+}
+
+/** Whether a shape lies on a plane of `plane`'s kind, the one it was drawn
+ * on, where its handles can reshape it. */
+function reshapesOn(pin: Annotation, plane: SlicePlane): boolean {
+  const end = pinEnd(pin);
+  return end !== null && liesOnPlane(pinStart(pin), end, plane);
+}
+
+/** `pin` with its vertices moved to `vertices`. */
+function withVertices(pin: Annotation, vertices: FrameVertices): Annotation {
+  const { position, end } = vertices;
+  return { ...pin, position: [position[0], position[1]], z: position[2], end: [end[0], end[1]], end_z: end[2] };
 }
 
 /** Points for an SVG polygon or line from projected vertices. */
@@ -251,6 +271,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   const editing = useAnnotationEditing({ state: overlay, datasetId, myId, wasmSceneRef, sendCommand, onDocumentChanged });
   const coarse = usePointerCoarse();
   const [menu, setMenu] = useState<CanvasMenuRequest | null>(null);
+  // The plane the view cuts, across which its pins move and on which its
+  // shapes show handles.
+  const plane = planeCutting(viewContext.cut?.axis ?? "z");
+  const layerRef = useRef<HTMLDivElement>(null);
 
   // Mirrors for the RAF tick, written after each commit.
   const selectedIdRef = useRef(selectedId);
@@ -333,11 +357,18 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     }
   }, [annotations, activeShapeId]);
 
-  /** The shared inverse projection, tolerating an unready scene, so a moved pin
-   * lands in the dataset frame add_annotation stores. */
-  const pointerWorld = (e: ClientPoint): [number, number] => {
+  /** The point under the pointer in the dataset's frame, on the view's
+   * plane, tolerating an unready scene. */
+  const pointerPoint = (e: ClientPoint): FramePoint | null => {
     const scene = wasmSceneRef.current;
-    return scene ? eventToFrame(scene, surface, e, datasetId) : [0, 0];
+    return scene ? pickFramePoint(scene, surface, datasetId, e) : null;
+  };
+
+  /** The pointer's place across and down the view's plane, where a drag
+   * moves what it holds. */
+  const pointerOnPlane = (e: ClientPoint, on: SlicePlane): [number, number] | null => {
+    const point = pointerPoint(e);
+    return point && onPlane(point, on);
   };
 
   /** One's own line or box under a client point, or null. */
@@ -363,12 +394,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         setSelectedId(ownShapeAt(point, pointerType === "touch" ? TOUCH_TAP_TOLERANCE : TAP_TOLERANCE));
       }
     }
-    const scene = wasmSceneRef.current;
-    setMenu({
-      x: point.clientX,
-      y: point.clientY,
-      target: scene ? { position: eventToFrame(scene, surface, point, datasetId), z: viewContext.z } : null,
-    });
+    const at = pointerPoint(point);
+    setMenu({ x: point.clientX, y: point.clientY, target: at && { position: [at[0], at[1]], z: at[2] } });
   };
 
   // Read by the canvas listener, which binds once.
@@ -413,8 +440,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         setOpenPinId(pin.id);
         const scene = wasmSceneRef.current;
         if (scene) {
-          const [x, y] = frameToScene(readPlaneMap(scene, datasetId), pin.position);
-          applyViewportCommand(scene, { type: "set_center", x, y });
+          // Pan the pin's place on the view's plane to the view's middle.
+          const [x, y] = makeFrameToScreen(scene, surface, datasetId)(pinStart(pin));
+          const dpr = devicePixelRatio;
+          applyViewportCommand(scene, { type: "pan", dx: (x - element.clientWidth / 2) * dpr, dy: (y - element.clientHeight / 2) * dpr });
           // Repaint under the recentered camera; the pull-based loop won't
           // otherwise.
           onViewportChanged?.();
@@ -422,7 +451,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       },
       openContextMenu: (at: ClientPoint) => openMenuRef.current(at, "touch"),
     }),
-    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId, datasetId],
+    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId, datasetId, surface, element],
   );
 
   // A new or changed pin needs a frame to be placed.
@@ -430,10 +459,15 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   useEffect(() => {
     const tick = () => {
       const scene = wasmSceneRef.current;
-      if (scene) {
-        // Frame to screen in CSS px, the inverse of the shared screen-to-frame,
-        // with the camera snapshotted once per frame.
+      // A view that lays the dataset out apart from its frame, a side view
+      // of a collection, has no place for its pins.
+      const drawn = scene?.draws_annotations(surface.view, datasetId) ?? false;
+      if (layerRef.current) layerRef.current.style.display = drawn ? "" : "none";
+      if (scene && drawn) {
+        // Frame to screen in CSS px, the inverse of the pick, with the camera
+        // and the view's plane snapshotted once per frame.
         const project = makeFrameToScreen(scene, surface, datasetId);
+        const on = viewPlane(scene, surface);
 
         // A pin being moved previews at the pointer, carrying its shape along;
         // a pan doesn't move the pin, so its dot keeps reprojecting.
@@ -447,15 +481,16 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         for (const pin of annotationsRef.current) {
           // Geometry, the dot, and handles all use these, so they stay
           // coincident.
-          let liveVertices: ShapeVertices | null = shapeVertices(pin);
-          let anchor: [number, number] = pin.position;
+          let liveVertices: FrameVertices | null = shapeVertices(pin);
+          let anchor: FramePoint = pinStart(pin);
           if (pin.id === resizingId && resize?.preview) {
             liveVertices = resize.preview;
             anchor = liveVertices.position;
           } else if (pinMove && pin.id === pinMove.pinId && pinMove.preview) {
-            const to = pinMove.preview;
-            if (liveVertices) liveVertices = translateShape(liveVertices, [to[0] - pin.position[0], to[1] - pin.position[1]]);
-            anchor = to;
+            const [fromAcross, fromDown] = onPlane(anchor, on);
+            const [toAcross, toDown] = onPlane(pinMove.preview, on);
+            if (liveVertices) liveVertices = translateOnPlane(liveVertices, [toAcross - fromAcross, toDown - fromDown], on);
+            anchor = pinMove.preview;
           }
           // Anchor dot (the interaction target) sits at the first vertex.
           const el = dotRefs.current.get(pin.id);
@@ -465,27 +500,32 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
           }
           const shape = shapeRefs.current.get(pin.id);
           if (shape) {
-            const previewPin = liveVertices ? { ...pin, position: liveVertices.position, end: liveVertices.end } : pin;
+            const previewPin = liveVertices ? withVertices(pin, liveVertices) : pin;
             const pts = annotationVertices(previewPin).map(project);
             setShapeGeometry(shape, pts, isClosedShape(pin));
             if (pin.id === selectedIdRef.current && bodyRef.current) {
               setShapeGeometry(bodyRef.current, pts, isClosedShape(pin));
             }
           }
-          if (!liveVertices) continue;
+          // Handles show only on a shape lying on the view's plane, so its
+          // corners and ends there are its own.
+          if (!liveVertices || !liesOnPlane(liveVertices.position, liveVertices.end, on)) continue;
+          const held = liveVertices.position;
+          const corners = { position: onPlane(held, on), end: onPlane(liveVertices.end, on) };
+          const projectOnPlane = (at: [number, number]) => project(withOnPlane(held, at, on));
           if (pin.kind === "box") {
             // Each handle is nudged outward from the box center, which lifts the
             // `nw` handle off the anchor dot at `position`, so a click or a
             // whole-shape Shift+drag still lands on the dot. Release math uses
-            // eventToFrame, never this offset.
-            const [cx, cy] = project([
-              (liveVertices.position[0] + liveVertices.end[0]) / 2,
-              (liveVertices.position[1] + liveVertices.end[1]) / 2,
+            // the pick, never this offset.
+            const [cx, cy] = projectOnPlane([
+              (corners.position[0] + corners.end[0]) / 2,
+              (corners.position[1] + corners.end[1]) / 2,
             ]);
             for (const h of BOX_HANDLES) {
               const handleEl = handleRefs.current.get(`${pin.id}:${h}`);
               if (!handleEl) continue;
-              const [hx, hy] = project(boxHandlePoint(liveVertices, h));
+              const [hx, hy] = projectOnPlane(boxHandlePoint(corners, h));
               const ox = hx - cx;
               const oy = hy - cy;
               const len = Math.hypot(ox, oy);
@@ -498,8 +538,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             // Each grip is nudged outward along the line's axis, away from the
             // other end, so the `start` grip clears the anchor dot as the box
             // handles do. Cosmetic only.
-            const [sx, sy] = project(liveVertices.position);
-            const [ex, ey] = project(liveVertices.end);
+            const [sx, sy] = projectOnPlane(corners.position);
+            const [ex, ey] = projectOnPlane(corners.end);
             // `start` outsets along the negated axis, `end` along the axis. A
             // zero-length line gets no offset.
             const ax = ex - sx;
@@ -510,7 +550,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             for (const h of LINE_HANDLES) {
               const handleEl = handleRefs.current.get(`${pin.id}:${h}`);
               if (!handleEl) continue;
-              const [hx, hy] = project(lineHandlePoint(liveVertices, h));
+              const [hx, hy] = projectOnPlane(lineHandlePoint(corners, h));
               const sign = h === "start" ? -1 : 1;
               const ox = sign * ux * outset;
               const oy = sign * uy * outset;
@@ -540,6 +580,13 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // element. A press that never passes the slop is a click: plain toggles the
   // thread and selects, Shift does nothing. A finger held still opens the menu.
 
+  /** Where a pin moved to the pointer goes: under it on the view's plane, at
+   * its own place along the cut, so a move never re-slices it. */
+  const movedAnchor = (pin: Annotation, e: ClientPoint): FramePoint | null => {
+    const at = pointerOnPlane(e, plane);
+    return at && withOnPlane(pinStart(pin), at, plane);
+  };
+
   const onPinPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => {
     if (e.button !== 0) return;
     // Ignore a second pointer mid-gesture so the first completes.
@@ -563,7 +610,6 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       startY: e.clientY,
       lastX: e.clientX,
       lastY: e.clientY,
-      z: pin.z ?? 0,
       moved: false,
       preview: null,
       cancelLongPress: () => {},
@@ -622,7 +668,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     }
 
     // Move: the tick previews the pin under the pointer, and release commits.
-    drag.preview = pointerWorld(e);
+    drag.preview = movedAnchor(pin, e);
   };
 
   const onPinPointerUp = (pin: Annotation) => (e: ReactPointerEvent) => {
@@ -644,12 +690,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     if (drag.mode !== "move") return;
     // Emit one move_annotation.
     const scene = wasmSceneRef.current;
-    if (!scene) return;
-    emitMoveAnnotation(
-      scene,
-      { datasetId, id: pin.id, position: pointerWorld(e), z: drag.z },
-      sendCommand,
-    );
+    const to = movedAnchor(pin, e);
+    if (!scene || !to) return;
+    emitMoveAnnotation(scene, { datasetId, id: pin.id, position: [to[0], to[1]], z: to[2] }, sendCommand);
     onDocumentChanged();
   };
 
@@ -674,7 +717,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     // Let an in-flight gesture finish rather than racing it.
     if (dragRef.current || handleDragRef.current) return;
     const base = shapeVertices(pin);
-    if (!base) return;
+    const startWorld = pointerOnPlane(e, plane);
+    if (!base || !startWorld) return;
+    // Handles reshape a shape only on the plane it was drawn on.
+    if (handle !== "body" && !reshapesOn(pin, plane)) return;
     // The press must not also reach the anchor-dot gesture or the canvas
     // beneath: it owns this pointer outright.
     e.stopPropagation();
@@ -691,9 +737,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       handle,
       startX: e.clientX,
       startY: e.clientY,
-      startWorld: pointerWorld(e),
+      plane,
+      startWorld,
       base,
-      z: pin.z ?? 0,
       moved: false,
       preview: null,
       cancelLongPress: () => {},
@@ -728,7 +774,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       }
       // Recompute from the press-time base, never the running preview, so the
       // held vertex doesn't drift.
-      drag.preview = dragShape(drag, pointerWorld(e));
+      const at = pointerOnPlane(e, drag.plane);
+      if (at) drag.preview = dragShape(drag, at);
     };
 
   const onHandlePointerUp =
@@ -746,16 +793,16 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       if (drag.handle !== "body") scheduleHideHandles(pin.id);
       // A press that never crossed the slop is a no-op; a handle has no click.
       if (!drag.moved) return;
-      const vertices = dragShape(drag, pointerWorld(e));
+      const at = pointerOnPlane(e, drag.plane);
       const scene = wasmSceneRef.current;
-      if (!scene) return;
+      if (!scene || !at) return;
+      const { position, end } = dragShape(drag, at);
       // A reshape carries both vertices (a line drag moves only the grabbed
       // end); a whole-shape move carries only the anchor.
+      const anchor = { datasetId, id: pin.id, position: [position[0], position[1]] as [number, number], z: position[2] };
       emitMoveAnnotation(
         scene,
-        drag.handle === "body"
-          ? { datasetId, id: pin.id, position: vertices.position, z: drag.z }
-          : { datasetId, id: pin.id, position: vertices.position, end: vertices.end, z: drag.z },
+        drag.handle === "body" ? anchor : { ...anchor, end: [end[0], end[1]], endZ: end[2] },
         sendCommand,
       );
       onDocumentChanged();
@@ -800,11 +847,12 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   if (!visible) return contextMenu;
 
   const showsHandles = (pin: Annotation) =>
-    (activeShapeId === pin.id || selectedId === pin.id) && openPinId !== pin.id;
+    (activeShapeId === pin.id || selectedId === pin.id) && openPinId !== pin.id && reshapesOn(pin, plane);
+  const cutAxis = viewContext.cut?.axis ?? "z";
   const selectedShape = annotations.find((p) => p.id === selectedId && isOwnHandledShape(p, myId)) ?? null;
 
   return (
-    <div className="lc-annotation-layer">
+    <div ref={layerRef} className="lc-annotation-layer">
       {/* One SVG element per line or box, beneath the DOM markers. The tick
           rewrites their coordinates every frame. */}
       <svg className="lc-annotation-svg" width="100%" height="100%">
@@ -993,7 +1041,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             <button
               type="button"
               className="lc-annotation-pin"
-              aria-label={pinLabel(pin, mine, offCtx)}
+              aria-label={pinLabel(pin, mine, offCtx, cutAxis)}
               data-testid={`annot-pin-${pin.id}`}
               data-author={mine ? "own" : "peer"}
               data-off-context={offCtx || undefined}
@@ -1025,7 +1073,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                 cursor: selected ? "move" : mine ? "grab" : "pointer",
               }}
             />
-            {offCtx && <OffContextHelptext pin={pin} />}
+            {offCtx && <OffContextHelptext pin={pin} axis={cutAxis} />}
             <CommentCountBadge
               count={comments.length}
               onToggleThread={() => setOpenPinId((cur) => (cur === pin.id ? null : pin.id))}

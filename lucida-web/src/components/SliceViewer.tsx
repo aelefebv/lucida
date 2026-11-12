@@ -6,16 +6,15 @@ import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
-import { annotationTarget, sayNoLayerToAnnotate } from "./annotationTarget.ts";
+import { annotationTarget, sayNoLayerToAnnotate, sayNoMarksInThisView } from "./annotationTarget.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
-import { eventToViewFraction, eventToWorld as sceneEventToWorld, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { eventToViewFraction, eventToWorld as sceneEventToWorld, pickFramePoint, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { wheelZoom } from "../input/wheel.ts";
 import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { comboFromEvent, useShortcut } from "../ui/shortcuts.ts";
 import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
-import { readPlaneMap, sceneToFrame } from "../placement.ts";
 
 /** An arrow key pans by this share of the canvas's shorter side. */
 const KEY_PAN_FRACTION = 0.1;
@@ -72,14 +71,13 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
   const lastPos = useRef({ x: 0, y: 0 });
   // The press in progress. `kind` is what it draws (null when it pans), fixed
   // at press time so a tool change mid-drag can't reshape it; `panning` turns
-  // on at once for a pan and past the click slop for a point; `world` is a
-  // line or box's first vertex; `endEscape` drops the press's Escape layer.
+  // on at once for a pan and past the click slop for a point; `endEscape`
+  // drops the press's Escape layer.
   const pressStart = useRef<{
     x: number;
     y: number;
     kind: AnnotationKind | null;
     panning: boolean;
-    world: [number, number];
     endEscape: () => void;
   } | null>(null);
 
@@ -132,13 +130,12 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
         y: e.clientY,
         kind,
         panning: kind === null,
-        world: eventToWorld(e),
         endEscape: kind === null ? () => {} : pushEscapeLayer(cancelPress),
       };
       setDragging(kind === null);
       lastPos.current = { x: e.clientX, y: e.clientY };
     },
-    [eventToWorld, cancelPress],
+    [cancelPress],
   );
 
   const onPointerDown = useCallback(
@@ -220,15 +217,19 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
         sayNoLayerToAnnotate();
         return;
       }
+      // A mark is stored in its dataset's frame, on the plane the view cuts:
+      // a shape from the press to the release, a point at the release.
+      const start = pickFramePoint(scene, surface, datasetId, anchor);
+      const end = drawShape ? pickFramePoint(scene, surface, datasetId, e) : null;
+      if (!start || (drawShape && !end)) {
+        sayNoMarksInThisView();
+        return;
+      }
       const layer = readResolvedLayers(scene, surface.view).get(datasetId);
 
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      // A pin is stored in its dataset's frame, wherever the scene places it.
-      const placement = readPlaneMap(scene, datasetId);
-      const start = sceneToFrame(placement, press.world);
-      const end = sceneToFrame(placement, eventToWorld(e));
       // Snapshot the author's view onto the pin so navigation can restore it.
       // A null capture just omits the view.
       const capturedView = buildAnnotationView(scene);
@@ -236,20 +237,20 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
       // without the local apply the author would never see their shape. The
       // client-supplied id makes the local and peer copies converge.
       //
-      // Both vertices share the plane of the layer the view cuts, which
-      // anchors the shape in 3D. A pin stored without z/end loads as a point
-      // at z = 0.0.
+      // Both vertices lie in the middle of the layer's plane the view cuts,
+      // which anchors the shape in every other view. A side view's vertices
+      // differ in depth, so the second carries its own. A pin stored without
+      // z/end loads as a point at z = 0.0.
       applyDocumentCommand(
         scene,
         {
           type: "add_annotation",
           dataset_id: datasetId,
           id,
-          // A point anchors at the release; a line/box at the press, with `end`
-          // at the release.
-          position: drawShape ? start : end,
-          end: drawShape ? end : null,
-          z: layer?.z_range.start ?? scene.z(),
+          position: [start[0], start[1]],
+          end: end && [end[0], end[1]],
+          ...(end && end[2] !== start[2] ? { end_z: end[2] } : {}),
+          z: start[2],
           // The overlay shows the pin off-context when the view's T differs or
           // none of the channels its layer shows now did then.
           t: scene.t(),
@@ -264,7 +265,7 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
       onDocumentChangedRef.current();
       selectDatasetRef.current(datasetId);
     },
-    [loopRef, eventToWorld, scene, surface, annotationDraftRef],
+    [loopRef, scene, surface, annotationDraftRef],
   );
 
   const onPointerUp = useCallback(
