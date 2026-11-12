@@ -109,10 +109,11 @@ export interface LayerInfo {
   renderMode: string;
   channelBlendMode: string;
   /**
-   * Rows for every label drawable in either view mode, so the panel is stable
-   * across a mode switch. `index` is the manifest index the handlers take. A row
-   * not drawable in the current mode carries a `disabledReason`, shown as text
-   * beside disabled controls. Empty hides the Labels subsection and badge.
+   * Rows for every label drawable in some slice plane or in 3D, so the panel is
+   * stable across a switch of plane or mode. `index` is the manifest index the
+   * handlers take. A row the active view can't draw carries a `disabledReason`,
+   * shown as text beside disabled controls. Empty hides the Labels subsection
+   * and badge.
    */
   labelRows?: { index: number; name: string; visible: boolean; opacity: number; disabledReason?: string }[];
   /** The dataset's level pin; `null` means the target level follows the screen. */
@@ -741,9 +742,8 @@ function LabelList({ layer, ...props }: LayerRowProps) {
       <ul className="lc-label-list">
         {rows.map((row) => {
           const labelName = row.name.trim() || `Label ${row.index}`;
-          // A label drawable only in the other view mode gets disabled
-          // controls and its reason as text, rather than a toggle that draws
-          // nothing.
+          // A label the active view can't draw gets disabled controls and
+          // its reason as text, rather than a toggle that draws nothing.
           const disabled = row.disabledReason !== undefined;
           return (
             <li key={row.index} className="lc-label">
