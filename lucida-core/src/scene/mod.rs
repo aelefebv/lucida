@@ -45,7 +45,7 @@ use crate::camera::{Camera, Framing};
 use crate::chunk::{self, ChunkCoord, ChunkQuery, ChunkView, CullCounts};
 use crate::epoch::SceneEpochs;
 use crate::framing::{FitBounds, PlaneBox, WorldBox};
-use crate::placement::{Affine, CameraSpace, DeclaredFrame, TileCells};
+use crate::placement::{Affine, CameraSpace, DeclaredFrame, TileCells, tile_holding};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::slice_plane::SlicePlane;
 use crate::target_level::{self, MAX_RENDER_PIXEL_RATIO, VOLUME_AXES, level_shape_ratios};
@@ -124,21 +124,14 @@ impl DatasetDerivedState {
         }
     }
 
-    /// The first member whose box holds the frame point `point` across X
-    /// and Y, or else the one nearest it there.
+    /// The member a mark whose first vertex is the frame point `point`
+    /// belongs to, by its box across X and Y ([`tile_holding`]).
     pub fn member_holding(&self, point: [f64; 3]) -> Option<&MemberState> {
-        // Below zero for a box that holds it, so any such beats every other.
-        let gap = |member: &MemberState| {
+        let boxes = self.members.iter().filter_map(|member| {
             let (lo, hi) = placement::frame_box(member)?;
-            let [dx, dy] = [0, 1].map(|a| (lo[a] - point[a]).max(point[a] - hi[a]).max(0.0));
-            let holds = (0..2).all(|a| lo[a] <= point[a] && point[a] < hi[a]);
-            Some(if holds { -1.0 } else { dx.hypot(dy) })
-        };
-        self.members
-            .iter()
-            .filter_map(|member| Some((member, gap(member)?)))
-            .reduce(|best, next| if next.1 < best.1 { next } else { best })
-            .map(|(member, _)| member)
+            Some((member, [lo[0], lo[1]], [hi[0] - lo[0], hi[1] - lo[1]]))
+        });
+        tile_holding(boxes, [point[0], point[1]])
     }
 
     /// The member a view drawing `plane` draws at `drawn`, a point of the
@@ -2175,9 +2168,10 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
 /// first-match semantics of [`resolve_entity_position`] but O(1) per lookup.
 ///
 /// [`build_derived_state`] constructs one per rebuild and resolves every image
-/// through it; [`resolve_entity_position`] remains the single-lookup form for
-/// callers resolving a handful of entities (annotation anchoring), where
-/// building an index would cost more than the scan it replaces.
+/// through it, as anchoring a pin to its tile does; [`resolve_entity_position`]
+/// remains the single-lookup form for callers resolving a handful of entities
+/// (moving a pin's anchor on a layout switch), where building an index would
+/// cost more than the scan it replaces.
 pub(crate) struct LayoutPositionIndex<'a> {
     /// First placement per entity id.
     placement_by_entity: HashMap<&'a EntityId, [f64; 2]>,
@@ -2251,9 +2245,9 @@ impl<'a> LayoutPositionIndex<'a> {
 /// Unlike that render-path fallback, the `Option` here distinguishes
 /// "genuinely placed at the origin" from "not placeable in this layout".
 /// Annotation anchoring (`DocumentState::apply` in `scene::types`) depends on
-/// that distinction:
-///   - picking the nearest entity must not treat unplaceable entities as if they
-///     sat at the origin, and
+/// that distinction, here and in the index:
+///   - picking a pin's tile must not treat unplaceable tiles as if they sat at
+///     the origin, and
 ///   - re-anchoring on a layout switch must skip a pin whose anchor isn't placed
 ///     in *both* layouts (leaving it untouched) rather than yanking it toward a
 ///     phantom `[0, 0]`.
