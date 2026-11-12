@@ -8,6 +8,7 @@ import type { DatasetManifest, ImageSpec, LabelSpec } from "../manifestTypes.ts"
 import type { DatasetLevels, LevelsByView } from "../pipeline/datasetLevels.ts";
 import { withLevels } from "./useDatasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
+import type { SlicePlane } from "../renderer/slicePlane.ts";
 
 // A single-level image with the given dtype + [Y, X] shape (chunked so a small
 // label's footprint fits the default caps).
@@ -201,13 +202,13 @@ function deepZLabel(name: string): LabelSpec {
 }
 
 describe("buildLayerInfos view-mode-aware label rows", () => {
-  it("lists a slice-eligible/volume-ineligible label as a normal row in 2D", () => {
+  it("lists a slice-eligible/volume-ineligible label as a normal row in XY", () => {
     const scene = stubScene(["ds-0"], settingsWith([{ visible: true, opacity: 0.5 }]));
     const infos = buildLayerInfos(
       scene,
       datasetsWith([deepZLabel("deep")]),
       emptyMaps,
-      "2d",
+      "xy",
     );
     expect(infos[0].labelRows).toEqual([
       { index: 0, name: "deep", visible: true, opacity: 0.5 },
@@ -220,14 +221,14 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
       scene,
       datasetsWith([deepZLabel("deep")]),
       emptyMaps,
-      "3d",
+      null,
     );
     expect(infos[0].labelRows).toEqual([
       { index: 0, name: "deep", visible: true, opacity: 0.5, disabledReason: "too large to render in 3D" },
     ]);
   });
 
-  it("defaults viewMode to 2d for 3-arg callers (no disabledReason)", () => {
+  it("defaults to the XY plane for 3-arg callers (no disabledReason)", () => {
     const scene = stubScene(["ds-0"], settingsWith([{ visible: true, opacity: 0.5 }]));
     const infos = buildLayerInfos(scene, datasetsWith([deepZLabel("deep")]), emptyMaps);
     expect(infos[0].labelRows?.[0].disabledReason).toBeUndefined();
@@ -245,7 +246,7 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
       scene,
       datasetsWith([deepZLabel("deep"), label("flat")]),
       emptyMaps,
-      "3d",
+      null,
     );
     expect(infos[0].labelRows).toEqual([
       { index: 0, name: "deep", visible: true, opacity: 0.5, disabledReason: "too large to render in 3D" },
@@ -306,13 +307,13 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
         bigVolumeLabel("c", 768, 256, 256),
       ]),
       emptyMaps,
-      "3d",
+      null,
     );
     const rows = infos[0].labelRows!;
     expect(rows[0].disabledReason).toBeUndefined();
     expect(rows[1].disabledReason).toBeUndefined();
     expect(rows[2].disabledReason).toContain("memory");
-    // The same masks are fully interactive in 2D (budget is 3D-only).
+    // The same masks are fully interactive in XY (budget is 3D-only).
     const infos2d = buildLayerInfos(
       scene,
       datasetsWith([
@@ -321,7 +322,7 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
         bigVolumeLabel("c", 768, 256, 256),
       ]),
       emptyMaps,
-      "2d",
+      "xy",
     );
     expect(infos2d[0].labelRows!.every((r) => r.disabledReason === undefined)).toBe(true);
   });
@@ -345,11 +346,48 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
         bigVolumeLabel("c", 768, 256, 256),
       ]),
       emptyMaps,
-      "3d",
+      null,
     );
     const rows = infos[0].labelRows!;
     expect(rows[2].visible).toBe(true);
     expect(rows[2].disabledReason).toBeUndefined();
+  });
+});
+
+// A single-level uint32 label too tall in Y for a plane that shows Y, and cut
+// one Z plane per chunk, too many for a volume: only an XZ view draws it.
+function tallYLabel(name: string): LabelSpec {
+  const deep = deepZLabel(name);
+  const level = deep.image.multiscale.levels[0];
+  return {
+    ...deep,
+    image: {
+      ...deep.image,
+      multiscale: {
+        ...deep.image.multiscale,
+        levels: [{ ...level, shape: [1, 1, 64, 8192, 64], chunk_shape: [1, 1, 1, 64, 64] }],
+      },
+    },
+  };
+}
+
+describe("buildLayerInfos label rows follow the active view's plane", () => {
+  const scene = stubScene(["ds-0"], settingsWith([{ visible: true, opacity: 0.5 }]));
+  const rowIn = (labelSpec: LabelSpec, plane: SlicePlane | null) =>
+    buildLayerInfos(scene, datasetsWith([labelSpec]), emptyMaps, plane)[0].labelRows?.[0];
+
+  it("disables a label in a side view whose plane it is too large for", () => {
+    // Deep in Z with one plane per chunk: an XZ or YZ cut spans 4096 chunks.
+    expect(rowIn(deepZLabel("deep"), "xy")?.disabledReason).toBeUndefined();
+    expect(rowIn(deepZLabel("deep"), "xz")?.disabledReason).toBe("too large to render in XZ");
+    expect(rowIn(deepZLabel("deep"), "yz")?.disabledReason).toBe("too large to render in YZ");
+  });
+
+  it("lists a label only a side view draws, and enables it there", () => {
+    expect(rowIn(tallYLabel("tall"), "xz")).toEqual({ index: 0, name: "tall", visible: true, opacity: 0.5 });
+    expect(rowIn(tallYLabel("tall"), "xy")?.disabledReason).toBe("too large to render in XY");
+    expect(rowIn(tallYLabel("tall"), "yz")?.disabledReason).toBe("too large to render in YZ");
+    expect(rowIn(tallYLabel("tall"), null)?.disabledReason).toBe("too large to render in 3D");
   });
 });
 
@@ -383,7 +421,7 @@ describe("buildLayerInfos level readout", () => {
       displayedLevel: { min: 1, max: 1 },
       displayedCoarserThanTarget: false,
     });
-    expect(buildLayerInfos(sceneIn(1), datasetsWith([]), maps, "3d")[0]).toMatchObject({
+    expect(buildLayerInfos(sceneIn(1), datasetsWith([]), maps, null)[0]).toMatchObject({
       targetLevel: { min: 2, max: 2 },
       displayedLevel: { min: 3, max: 3 },
       displayedCoarserThanTarget: true,

@@ -169,9 +169,9 @@ const AboveControlsTier = createContext<HTMLElement | null | undefined>(undefine
 
 /**
  * Draws `children` over the floating controls from inside the layers, which
- * lie under them. Nothing in the tier takes the pointer, so a press on a
- * control under it still reaches the control. Outside a stage, `children`
- * draw in place.
+ * lie under them. The tier takes no pointer itself, so a press on a control
+ * under it reaches the control unless what is drawn there takes the pointer.
+ * Outside a stage, `children` draw in place.
  */
 export function AboveControls({ children }: { children: ReactNode }) {
   const tier = useContext(AboveControlsTier);
