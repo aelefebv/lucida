@@ -6,6 +6,8 @@
  * each other's, and a view's resources go when the view does.
  *
  * Every byte counts against the page's one GPU budget through the ledger.
+ * The member bind groups each of a view's slice group passes keeps hold no
+ * memory of their own, and go with the view too.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -13,6 +15,7 @@ import { createOffscreenTarget } from "../gpuContext.ts";
 import { allocateWatched } from "./gpuErrors.ts";
 import { handleGpuOutOfMemory } from "./gpuBudget.ts";
 import { setGpuLedgerLine } from "./gpuLedger.ts";
+import { MemberBindGroups } from "../sliceRenderer.ts";
 
 /** Bytes one `rgba16float` layer-target texel holds. */
 export const OFFSCREEN_BYTES_PER_TEXEL = 8;
@@ -28,12 +31,14 @@ export interface ViewResources {
   depth: GPUTexture | null;
   /** The frame of a view that covers part of the canvas, kept between presents. */
   frame: GPUTexture | null;
+  /** Per drawn group, as `layers` is indexed, the member bind groups its slice pass kept. */
+  memberGroups: MemberBindGroups[];
 }
 
 function resourcesOf(ctx: WorkerCtx, view: number): ViewResources {
   let held = ctx.state.viewResources.get(view);
   if (!held) {
-    held = { layers: [], layersW: 0, layersH: 0, depth: null, frame: null };
+    held = { layers: [], layersW: 0, layersH: 0, depth: null, frame: null, memberGroups: [] };
     ctx.state.viewResources.set(view, held);
   }
   return held;
@@ -85,12 +90,28 @@ export function viewLayerTargets(ctx: WorkerCtx, view: number, count: number, w:
   return held.layers;
 }
 
-/** Free `view`'s layer targets past the first `count`, which its frame just drawn did not use. */
+/**
+ * Free `view`'s layer targets past the first `count`, which its frame just
+ * drawn did not use, and the member bind groups kept for the groups past them.
+ */
 export function trimViewLayerTargets(ctx: WorkerCtx, view: number, count: number): void {
   const held = ctx.state.viewResources.get(view);
-  if (!held || held.layers.length <= count) return;
+  if (!held) return;
+  held.memberGroups.splice(count);
+  if (held.layers.length <= count) return;
   for (const texture of held.layers.splice(count)) texture.destroy();
   noteViewBytes(ctx);
+}
+
+/**
+ * The member bind groups the slice pass of `view`'s `index`th drawn group
+ * keeps from frame to frame. A pass that takes another group's place, as
+ * when a group before it stops drawing, finds that group's and makes its own.
+ */
+export function viewMemberBindGroups(ctx: WorkerCtx, view: number, index: number): MemberBindGroups {
+  const held = resourcesOf(ctx, view);
+  while (held.memberGroups.length <= index) held.memberGroups.push(new MemberBindGroups());
+  return held.memberGroups[index];
 }
 
 /** `view`'s depth at `w`×`h`, which its volume pass writes and its cursors test against. */

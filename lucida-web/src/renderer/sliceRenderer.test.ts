@@ -13,7 +13,14 @@ import { describe, expect, it, vi } from "vitest";
 };
 
 import { axisAlignedQuad } from "./sliceQuad.ts";
-import { SLICE_UNIFORM_SIZE, SliceRenderer, type LayerGroupDraw, type MemberDraw, type SlicePoolBinding } from "./sliceRenderer.ts";
+import {
+  MemberBindGroups,
+  SLICE_UNIFORM_SIZE,
+  SliceRenderer,
+  type LayerGroupDraw,
+  type MemberDraw,
+  type SlicePoolBinding,
+} from "./sliceRenderer.ts";
 
 function makeDevice() {
   const createView = vi.fn(() => ({}));
@@ -65,9 +72,11 @@ describe("the slice renderer's member draws", () => {
     const group = (members: MemberDraw[]): LayerGroupDraw => ({
       blendMode: "alpha", canvasW: 100, canvasH: 100, aggregate: null, members,
     });
-    const frame = (members: MemberDraw[]) => {
+    // The bind groups one group pass keeps, as a view's first drawn group would.
+    const kept = new MemberBindGroups();
+    const frame = (members: MemberDraw[], groups = kept) => {
       const { encoder, pass } = makeEncoder();
-      renderer.renderLayerGroup({} as GPUTextureView, encoder, group(members));
+      renderer.renderLayerGroup({} as GPUTextureView, encoder, group(members), groups);
       return pass;
     };
     return { device, renderer, frame, member, createView, texture };
@@ -120,6 +129,23 @@ describe("the slice renderer's member draws", () => {
     // Members leave and arrive, and draw indices now bind other pools than
     // they did, but every combination was bound last frame.
     frame([at(2, [coarser]), at(1, [fine]), at(3, [coarser]), at(4, [fine])]);
+    expect(device.createBindGroup.mock.calls.length).toBe(before);
+  });
+
+  it("keeps each group pass's bind groups apart, so two groups drawn alternately create none on the second frame", async () => {
+    const { device, frame, member, texture } = await setup();
+    // Two channels of one dataset: each group binds its own colormap and pools.
+    const green = { colormap: texture(), levels: [pool(texture())] };
+    const magenta = { colormap: texture(), levels: [pool(texture())] };
+    const channel = (over: Partial<MemberDraw>) => [member(0, 5, over), member(1, 15, over)];
+    const first = new MemberBindGroups();
+    const second = new MemberBindGroups();
+    frame(channel(green), first);
+    frame(channel(magenta), second);
+    const before = device.createBindGroup.mock.calls.length;
+
+    frame(channel(green), first);
+    frame(channel(magenta), second);
     expect(device.createBindGroup.mock.calls.length).toBe(before);
   });
 

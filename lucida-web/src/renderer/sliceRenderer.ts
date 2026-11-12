@@ -213,6 +213,24 @@ function writeSliceUniformData(
  */
 const MEMBER_BLOCK_STRIDE = 256;
 
+/**
+ * The member bind groups one group pass bound, which the same pass reuses in
+ * the view's next frame. Each pass replaces them with the ones it used, so a
+ * group that names pools or a descriptor buffer replaced since goes with the
+ * next pass. Each group pass of a view keeps its own (`worker/viewResources.ts`):
+ * the passes of one frame bind other colormaps and pools, and one set shared
+ * between them would keep only the last pass's.
+ */
+export class MemberBindGroups {
+  /**
+   * The shared member uniform buffer the groups name. The entity reference
+   * buffer grows with it, and the groups go when they do.
+   */
+  buffer: GPUBuffer | null = null;
+  pools = new Map<string, GPUBindGroup>();
+  entities = new Map<GPUBuffer, GPUBindGroup>();
+}
+
 /** What one member draw of a group pass binds. */
 interface PreparedMember {
   pools: GPUBindGroup;
@@ -251,16 +269,15 @@ export class SliceRenderer {
   // two shared buffers, each filled by one write per pass and picked by a
   // dynamic offset. The bind groups name only the buffers and the pools,
   // colormap or descriptor buffer, so every draw that binds the same ones
-  // shares a group, kept from frame to frame: neither a pan nor a zoom that
-  // changes which members draw creates any.
+  // shares a group, and each group pass keeps its groups for its next frame
+  // (`MemberBindGroups`): neither a pan nor a zoom that changes which members
+  // draw creates any.
   private memberUniformBuffer: GPUBuffer | null = null;
   private memberEntityRefBuffer: GPUBuffer | null = null;
   private memberCapacity = 0;
   private memberUniformData = new Float32Array(0);
   private memberUniformWords = new Uint32Array(0);
   private memberRefWords = new Uint32Array(0);
-  private memberPoolGroups = new Map<string, GPUBindGroup>();
-  private memberEntityGroups = new Map<GPUBuffer, GPUBindGroup>();
   /** A number per texture or buffer a member bind group names, for its cache key. */
   private readonly resourceIds = new WeakMap<object, number>();
   private nextResourceId = 1;
@@ -614,18 +631,20 @@ export class SliceRenderer {
    * pass: the aggregate's quads first, one instanced draw per pool-binding
    * batch, then each member clipped to its footprint. Every draw binds its
    * own pools, colormap, and entity, so each samples what a pass of its own
-   * would have.
+   * would have. `kept` holds the member bind groups this pass bound in the
+   * view's last frame, and takes the ones it binds now.
    */
   renderLayerGroup(
     target: GPUTextureView,
     encoder: GPUCommandEncoder,
     group: LayerGroupDraw,
+    kept: MemberBindGroups,
     timing?: PassTiming,
   ) {
     const aggregate = group.aggregate && group.aggregate.batches.length > 0 && group.aggregate.quadData.byteLength > 0
       ? this.prepareAggregate(group.aggregate, group.canvasW, group.canvasH)
       : null;
-    const members = this.prepareMembers(group.members, group.canvasW, group.canvasH);
+    const members = this.prepareMembers(group.members, group.canvasW, group.canvasH, kept);
     if (!aggregate && members.length === 0) return;
     const memberPipeline = requireCompiled(this.memberPipelines, "slice renderer")[group.blendMode];
     const aggregatePipeline = requireCompiled(this.aggregatePipelines, "slice renderer")[group.blendMode];
@@ -666,15 +685,22 @@ export class SliceRenderer {
   /**
    * The bind groups and block offset each member draw of a group pass binds,
    * with every member's uniforms and entity reference written to its block of
-   * the shared buffers.
+   * the shared buffers. A group `kept` holds is reused, and `kept` is left
+   * holding the groups this pass binds.
    */
   private prepareMembers(
     draws: readonly MemberDraw[],
     canvasW: number,
     canvasH: number,
+    kept: MemberBindGroups,
   ): PreparedMember[] {
     if (draws.length === 0) return [];
     this.ensureMemberCapacity(draws.length);
+    if (kept.buffer !== this.memberUniformBuffer) {
+      kept.pools.clear();
+      kept.entities.clear();
+      kept.buffer = this.memberUniformBuffer;
+    }
     const f32 = this.memberUniformData;
     const u32 = this.memberUniformWords;
     const refs = this.memberRefWords;
@@ -700,7 +726,7 @@ export class SliceRenderer {
     const entityGroupsUsed = new Map<GPUBuffer, GPUBindGroup>();
     const prepared = draws.map((draw, i) => {
       const poolKey = this.poolGroupKey(draw);
-      let pools = poolGroupsUsed.get(poolKey) ?? this.memberPoolGroups.get(poolKey);
+      let pools = poolGroupsUsed.get(poolKey) ?? kept.pools.get(poolKey);
       if (!pools) {
         pools = this.device.createBindGroup({
           layout: this.bindGroupLayout,
@@ -712,7 +738,7 @@ export class SliceRenderer {
       }
       poolGroupsUsed.set(poolKey, pools);
 
-      let entity = entityGroupsUsed.get(draw.descriptorBuffer) ?? this.memberEntityGroups.get(draw.descriptorBuffer);
+      let entity = entityGroupsUsed.get(draw.descriptorBuffer) ?? kept.entities.get(draw.descriptorBuffer);
       if (!entity) {
         entity = this.device.createBindGroup({
           layout: this.descriptorBindGroupLayout,
@@ -726,14 +752,18 @@ export class SliceRenderer {
       entityGroupsUsed.set(draw.descriptorBuffer, entity);
       return { pools, entity, offset: i * MEMBER_BLOCK_STRIDE };
     });
-    // A group this frame left out names pools or a descriptor buffer that
+    // A group this pass left out names pools or a descriptor buffer that
     // may since have been replaced, so it is not kept.
-    this.memberPoolGroups = poolGroupsUsed;
-    this.memberEntityGroups = entityGroupsUsed;
+    kept.pools = poolGroupsUsed;
+    kept.entities = entityGroupsUsed;
     return prepared;
   }
 
-  /** Grow the shared member buffers to hold `count` blocks. Bind groups name the old buffers, so they go too. */
+  /**
+   * Grow the shared member buffers to hold `count` blocks. The bind groups
+   * each pass kept name the old buffers, and a pass drops them when it sees
+   * the new ones.
+   */
   private ensureMemberCapacity(count: number): void {
     if (count <= this.memberCapacity) return;
     const capacity = Math.max(count, this.memberCapacity * 2, 64);
@@ -745,8 +775,6 @@ export class SliceRenderer {
     this.memberUniformData = new Float32Array(capacity * MEMBER_BLOCK_STRIDE / 4);
     this.memberUniformWords = new Uint32Array(this.memberUniformData.buffer);
     this.memberRefWords = new Uint32Array(capacity * MEMBER_BLOCK_STRIDE / 4);
-    this.memberPoolGroups.clear();
-    this.memberEntityGroups.clear();
     this.memberCapacity = capacity;
   }
 
