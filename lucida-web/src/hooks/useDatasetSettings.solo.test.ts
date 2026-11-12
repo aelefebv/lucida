@@ -40,7 +40,7 @@ function renderSettings() {
       datasetCallbacksRef: { current: { removeDataset: vi.fn() } },
       datasetsVersion: 0,
       remoteDocumentVersion: 0,
-      viewMode: "2d",
+      slicePlane: "xy",
       datasetLevels: new Map(),
     }),
   );
