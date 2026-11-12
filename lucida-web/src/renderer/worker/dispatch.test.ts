@@ -8,6 +8,7 @@ import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
 import { UNTIMED } from "../passTiming.ts";
 import { indexWantedChunks } from "../wantedChunks.ts";
+import { EvictionOrder } from "../evictionOrder.ts";
 
 async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
@@ -265,6 +266,7 @@ describe("worker dispatch upload feedback", () => {
       datasetId: "ds",
       chunkX: 8, chunkY: 8, chunkZ: 8,
       slots: new Map<string, number>(),
+      order: new EvictionOrder(),
       views: new Map(),
       freeSlots: [0],
       totalSlots: 1,

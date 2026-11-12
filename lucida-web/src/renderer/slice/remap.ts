@@ -51,4 +51,7 @@ export function remapSliceIndirection(
     },
   });
   view.dirty = true;
+  // The remap rewrote which slots the view samples in place, which the
+  // order can't tell by identity.
+  atlas.order.invalidate();
 }

@@ -30,11 +30,14 @@ import { labelSlicePoolKey } from "../labelPools.ts";
 import {
   compactViewSlots,
   destroyViewIndirection,
+  dropSlot,
   emptyViewIndirections,
   growViewSlots,
+  holdSlot,
   viewIndirectionBytes,
   type ViewIndirection,
 } from "../viewIndirection.ts";
+import { EvictionOrder } from "../evictionOrder.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding one plane of the
@@ -305,9 +308,12 @@ export interface SliceAtlasState {
    * insertion order = LRU. The plane is the level plane along {@link axis}
    * the slot's 2D data was cut from, so one chunk can be held at several
    * planes. Changed only through {@link holdSliceSlot} and
-   * {@link dropSliceSlot}, which keep {@link planesByChunk} in step.
+   * {@link dropSliceSlot}, which keep {@link planesByChunk} and {@link order}
+   * in step.
    */
   slots: Map<string, number>;
+  /** The held slots in the order eviction takes them. */
+  order: EvictionOrder;
   /**
    * `"memberId|chunkKey"` → plane → slot index: the planes of each chunk the
    * pool holds, so an upload finds them without walking every slot.
@@ -388,7 +394,7 @@ function createSliceAtlas(
   return {
     datasetId,
     texture, format,
-    slots: new Map(), planesByChunk: new Map(), views: new Map(), freeSlots, totalSlots,
+    slots: new Map(), order: new EvictionOrder(), planesByChunk: new Map(), views: new Map(), freeSlots, totalSlots,
     chunkX, chunkY,
     slotsX, slotsY, maxSlotsY,
     entityZInfo: new Map(),
@@ -430,7 +436,7 @@ export function holdSliceSlot(
 function holdSliceSlotKey(atlas: SliceAtlasState, key: string, slot: number): void {
   const parsed = parseCompositeKey(key);
   if (!parsed || parsed.plane === null) return;
-  atlas.slots.set(key, slot);
+  holdSlot(atlas, key, slot);
   const chunk = makeCompositeKey(parsed.memberId, parsed.chunkKey);
   let planes = atlas.planesByChunk.get(chunk);
   if (!planes) {
@@ -442,7 +448,7 @@ function holdSliceSlotKey(atlas: SliceAtlasState, key: string, slot: number): vo
 
 /** Forget the slot a slot key names. Its slot index is the caller's to reuse. */
 export function dropSliceSlot(atlas: SliceAtlasState, key: string): void {
-  if (!atlas.slots.delete(key)) return;
+  if (dropSlot(atlas, key) === undefined) return;
   const parsed = parseCompositeKey(key);
   if (!parsed || parsed.plane === null) return;
   const chunk = makeCompositeKey(parsed.memberId, parsed.chunkKey);

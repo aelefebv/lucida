@@ -19,7 +19,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 import { UNTIMED } from "../passTiming.ts";
 import type { VolumeMemberDraw, VolumePoolBinding } from "../volumeRenderer.ts";
 import type { VolumeRenderMultiPassMessage } from "../workerProtocol.ts";
-import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
+import { attachView, fakeDraw, layOut, viewOf } from "../viewIndirectionFixtures.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
 
@@ -286,7 +286,7 @@ describe("handleVolumeRenderMultiPass", () => {
     const composite = vi.fn();
     const state = createInitialState();
     const atlas = withView(getOrCreateVolumePool({ device, state } as unknown as WorkerCtx, "pool-b", "ds-0", 16, 16, 16, 0, "u16"));
-    viewOf(atlas).entityMetas.set("img-b", [
+    layOut(viewOf(atlas), "img-b", [
       {
         level: 0,
         gridDims: [1, 1, 1],
@@ -324,7 +324,7 @@ describe("handleVolumeRenderMultiPass", () => {
     const state = createInitialState();
     const coarseAtlas = withView(getOrCreateVolumePool({ device, state } as unknown as WorkerCtx, "coarse-pool", "ds-0", 64, 64, 16, 0, "u16"));
     viewOf(coarseAtlas).dirty = false;
-    viewOf(coarseAtlas).entityMetas.set("img-a", [
+    layOut(viewOf(coarseAtlas), "img-a", [
       {
         level: 2,
         gridDims: [1, 2, 2],
@@ -362,9 +362,9 @@ describe("handleVolumeRenderMultiPass", () => {
       levelDims: [chunk, chunk, chunk] as [number, number, number],
       offset: 0,
     }];
-    viewOf(finePool).entityMetas.set("img-a", meta(0, 32));
-    viewOf(smallChunkPool).entityMetas.set("img-a", meta(1, 16));
-    viewOf(coarsePool).entityMetas.set("img-a", meta(3, 16));
+    layOut(viewOf(finePool), "img-a", meta(0, 32));
+    layOut(viewOf(smallChunkPool), "img-a", meta(1, 16));
+    layOut(viewOf(coarsePool), "img-a", meta(3, 16));
     viewOf(finePool).dirty = true;
     viewOf(smallChunkPool).dirty = true;
     viewOf(coarsePool).dirty = true;
@@ -404,7 +404,7 @@ describe("handleVolumeRenderMultiPass", () => {
       viewOf(pool).dirty = false;
       const members = ["c0", "c1"];
       for (const id of members) {
-        viewOf(pool).entityMetas.set(id, [{ level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0 }]);
+        layOut(viewOf(pool), id, [{ level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0 }]);
       }
       const descIndex = makeDescIndex(members, {
         sourceBindingByMember: bindings(Object.fromEntries(
@@ -496,7 +496,7 @@ describe("handleVolumeRenderMultiPass", () => {
     // Three members side by side, each shown in two channels.
     const members = ["a0", "a1", "b0", "b1", "c0", "c1"];
     for (const id of members) {
-      viewOf(pool).entityMetas.set(id, [{
+      layOut(viewOf(pool), id, [{
         level: 2, gridDims: [1, 1, 1], chunkDims: [16, 16, 16], levelDims: [16, 16, 16], offset: 0,
       }]);
     }

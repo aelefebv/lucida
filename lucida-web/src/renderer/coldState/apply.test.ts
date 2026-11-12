@@ -205,9 +205,8 @@ function wantChunks(
   ctx: WorkerCtx, mode: "slice" | "volume", memberId: string, tier: ResidencyTier, keys: string[],
 ): void {
   for (const draw of drawsOf(ctx.state, ctx.state.memberToDataset.get(memberId)!, mode)) {
-    const index = draw.wanted as Map<string, ReadonlySet<string>>;
     const entry = wantedEntryKey(tier, memberId);
-    index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
+    draw.wanted = new Map([...draw.wanted, [entry, new Set([...(draw.wanted.get(entry) ?? []), ...keys])]]);
   }
 }
 
@@ -725,7 +724,7 @@ describe("Suite A — applyColdState", () => {
         chunks: [{ ...base.chunks[0], x, y, z, key: `${level}/0/0/${z}/${y}/${x}` }],
       };
     };
-    ctx.state.rayHits.set(0, new Map([["imgA:ch0", [0, 0, 0]]]));
+    ctx.state.rayHits.set(0, "imgA:ch0", [0, 0, 0]);
 
     const coldCoarse = ingest(ctx, [entryAt(2)]);
     const poolKey = poolOf(ctx.state, "imgA:ch0", "detail", 2)!;

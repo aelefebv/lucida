@@ -1,18 +1,17 @@
 /**
  * Slice-mode eviction state, over `ctx.state.cameraUVs`: each view's camera
- * UV per entity, which `findEvictionSlot2D` uses to keep chunks near the
- * center of a view that draws them.
+ * UV per entity, which eviction uses to keep chunks near the center of a view
+ * that draws them.
  */
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import type { RendererState } from "../worker/state.ts";
 import {
   chunkDistSq as sharedChunkDistSq,
-  findEvictionSlot,
   type EvictionCandidate,
   type FindEvictionParams,
 } from "../eviction.ts";
-import { wantedEntryKey } from "../wantedChunks.ts";
+import { evictionViewsOf } from "../worker/draws.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import type { SliceAtlasState } from "./atlas.ts";
 
@@ -23,12 +22,7 @@ export function setCameraUVForMember(
   memberId: string,
   uv: [number, number],
 ): void {
-  let byMember = state.cameraUVs.get(view);
-  if (!byMember) {
-    byMember = new Map();
-    state.cameraUVs.set(view, byMember);
-  }
-  byMember.set(memberId, uv);
+  state.cameraUVs.set(view, memberId, uv);
 }
 
 /** Read one view's camera-UV reference for an entity (with [0.5, 0.5] fallback). */
@@ -37,12 +31,12 @@ export function cameraUVForMember(
   view: number,
   memberId: string,
 ): [number, number] {
-  return state.cameraUVs.get(view)?.get(memberId) ?? [0.5, 0.5];
+  return state.cameraUVs.get(view, memberId) ?? [0.5, 0.5];
 }
 
 /** Drop camera-UV state for a removed dataset / member, in every view. */
 export function clearCameraUVForMember(state: RendererState, idOrMember: string): void {
-  for (const byMember of state.cameraUVs.values()) byMember.delete(idOrMember);
+  state.cameraUVs.forget(idOrMember);
 }
 
 /** Drop all camera-UV state (worker destroy). */
@@ -59,13 +53,13 @@ export function chunkDistSq2D(
   return sharedChunkDistSq(lodMeta, cx, cy, null, cam);
 }
 
-/** The slot a chunk arriving in `tier`'s pool may take; see `findEvictionSlot`. */
+/** The slot a chunk arriving in `tier`'s pool may take; see the shared `findEvictionSlot`. */
 export function findEvictionSlot2D(
   state: RendererState,
   atlas: SliceAtlasState,
   tier: ResidencyTier,
 ): EvictionCandidate | null {
-  return findEvictionSlot(sliceEvictionParams(state, atlas, tier));
+  return atlas.order.next(sliceEvictionParams(state, atlas, tier));
 }
 
 /** What the shared eviction kernels read of a slice pool of `tier`, and of each view drawing from it. */
@@ -76,13 +70,7 @@ export function sliceEvictionParams(
 ): FindEvictionParams {
   return {
     slots: atlas.slots,
-    views: [...atlas.views.values()].map((view) => ({
-      slotGridIdx: view.slotGridIdx,
-      entityMetas: view.entityMetas,
-      cameraFor: (memberId) => cameraUVForMember(state, view.draw.view, memberId),
-      targetLevelFor: (memberId) => view.draw.targetLevels.get(memberId),
-      isWanted: (memberId, chunkKey) => view.draw.wanted.get(wantedEntryKey(tier, memberId))?.has(chunkKey) ?? false,
-    })),
+    views: evictionViewsOf(atlas, tier, (view, memberId) => cameraUVForMember(state, view, memberId), state.cameraUVs.revision),
     is3D: false,
     sliceAxis: atlas.axis,
   };

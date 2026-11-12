@@ -143,6 +143,7 @@ function viewOver(ctx: WorkerCtx, pool: SharedChunkPool, draw: ViewDraw): ViewIn
  */
 function takeLayout(
   ctx: WorkerCtx,
+  pool: SharedChunkPool,
   view: ViewIndirection,
   layout: SectionLayout,
   inputs: RemapInputs,
@@ -156,7 +157,7 @@ function takeLayout(
     ctx.state.remappedFor.set(view, inputs);
     return undefined;
   }
-  clearSections(view, layout.removed, dimArity);
+  clearSections(pool, view, layout.removed, dimArity);
   growViewIndirection(ctx.device, view, layout.space.end);
   return layout.added.size > 0 ? layout.added : null;
 }
@@ -186,15 +187,16 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const wanted = indexWantedChunks(msg.wantedChunks);
   const draw = drawFor(ctx, msg, wanted);
   draw.routes.clear();
-  draw.targetLevels.clear();
 
   // 1. Register member→dataset mappings and target levels. Canonical
   // iteration produces the same memberId scheme as the rest of the pipeline.
+  const targetLevels = new Map<string, number>();
   for (const { entry, memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
     const target = targetLevelOf(entry);
-    if (target !== undefined) draw.targetLevels.set(memberId, target);
+    if (target !== undefined) targetLevels.set(memberId, target);
   }
+  draw.targetLevels = targetLevels;
 
   // 2. Partition activeSet by (tier, channel, chunkDims). Entries with no
   // chunk levels are skipped here but stay in memberToDataset from step 1.
@@ -243,7 +245,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       const atlas = getOrCreateVolumePool(ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, group.channel, msg.sampleFormat);
       const view = viewOver(ctx, atlas, draw);
       const layout = layoutSections(view.entityMetas, requests);
-      const only = takeLayout(ctx, view, layout, inputs, dimArity);
+      const only = takeLayout(ctx, atlas, view, layout, inputs, dimArity);
       if (only !== null) {
         remapIndirection(atlas, view, msg.currentT, group.channel, {
           visibleRegion: msg.visibleRegion, renderRadiusView: radius, entryByMember, failed, only,
@@ -255,7 +257,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       atlas.axis = msg.sliceAxis ?? "z";
       const view = viewOver(ctx, atlas, draw);
       const layout = layoutSections(view.entityMetas, requests);
-      const only = takeLayout(ctx, view, layout, inputs, dimArity);
+      const only = takeLayout(ctx, atlas, view, layout, inputs, dimArity);
       if (only !== null) {
         remapSliceIndirection(atlas, view, msg.currentT, group.channel, msg.currentZ, {
           visibleRegion: msg.visibleRegion, renderRadiusView: radius, entryByMember, failed, only,
@@ -352,8 +354,8 @@ export function releaseDraw(ctx: WorkerCtx, draw: ViewDraw): void {
   state.draws.delete(datasetViewKey(draw.datasetId, draw.view));
   for (const [memberId, owner] of state.memberToDataset) {
     if (owner !== draw.datasetId) continue;
-    state.cameraUVs.get(draw.view)?.delete(memberId);
-    state.rayHits.get(draw.view)?.delete(memberId);
+    state.cameraUVs.forget(memberId, draw.view);
+    state.rayHits.forget(memberId, draw.view);
   }
   syncLabelPools(ctx, draw.datasetId);
   if (state.currentColdState === draw.cold) state.currentColdState = null;

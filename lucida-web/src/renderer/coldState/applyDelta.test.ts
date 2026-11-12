@@ -33,6 +33,8 @@ import { UNTIMED } from "../passTiming.ts";
 import { buildDescriptorBuffer } from "../descriptorBuffer.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { growViewSlots } from "../viewIndirection.ts";
+import { volumeEvictionParams } from "../volume/eviction.ts";
+import { findEvictionSlot } from "../eviction.ts";
 
 function makeMockDevice(): GPUDevice {
   const createTexture = vi.fn((desc: GPUTextureDescriptor) => ({
@@ -330,6 +332,10 @@ describe("applyColdStateDelta", () => {
         }
       });
       expect(view.indirectionData.length).toBeGreaterThanOrEqual(Math.max(...cells.keys()) + 1);
+
+      // Eviction's kept order picks what classifying every slot afresh picks.
+      const params = volumeEvictionParams(ctx.state, atlas, "detail");
+      expect(atlas.order.next(params), `${targets}`).toEqual(findEvictionSlot(params));
 
       // Each resident chunk is mapped at its member's section for its level, and only there.
       for (const id of ids) {

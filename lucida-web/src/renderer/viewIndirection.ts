@@ -10,12 +10,16 @@ import type { SectionSpace } from "./coldState/sectionLayout.ts";
 import type { ViewDraw } from "./worker/state.ts";
 import { INDIRECTION_MISS } from "./remap.ts";
 import { remapSlotEntries, type CompactionPlan } from "./poolCompaction.ts";
+import type { EvictionOrder } from "./evictionOrder.ts";
 
 export interface ViewIndirection {
   /** The view's draw of the pool's dataset: its cut, timepoint, wanted chunks and target levels. */
   draw: ViewDraw;
-  /** Per-entity level sections, at absolute offsets into {@link indirectionData}. */
-  entityMetas: Map<string, LodIndirectionMeta[]>;
+  /**
+   * Per-entity level sections, at absolute offsets into {@link indirectionData}.
+   * Replaced, never changed in place: eviction's order compares it by identity.
+   */
+  entityMetas: ReadonlyMap<string, readonly LodIndirectionMeta[]>;
   /** The cells {@link entityMetas} leaves free, where the next sections go. */
   space: SectionSpace;
   indirectionData: Uint32Array<ArrayBuffer>;
@@ -29,7 +33,13 @@ export interface ViewIndirection {
 /** What every chunk pool has, slice or volume: its slots, and the views that sample them. */
 export interface SharedChunkPool {
   datasetId: string;
+  /**
+   * Composite slot keys → slot index. Changed through {@link holdSlot} and
+   * {@link dropSlot}, which keep {@link order} in step.
+   */
   slots: Map<string, number>;
+  /** The held slots in the order eviction takes them. */
+  order: EvictionOrder;
   freeSlots: number[];
   totalSlots: number;
   /** view id → that view's indirection over the pool. */
@@ -84,12 +94,20 @@ export function growViewIndirection(device: GPUDevice, view: ViewIndirection, to
 }
 
 /**
- * Empty the cells of sections a view no longer lays out and forget the slots
- * they mapped, so a section placed there later starts empty and an eviction
- * of one of those slots leaves it alone. A slice section is one plane of its
- * grid (`dimArity` 2), a volume section the whole grid.
+ * Empty the cells of sections a view of `pool` no longer lays out and forget
+ * the slots they mapped, so a section placed there later starts empty and an
+ * eviction of one of those slots leaves it alone. A slice section is one
+ * plane of its grid (`dimArity` 2), a volume section the whole grid.
  */
-export function clearSections(view: ViewIndirection, sections: readonly LodIndirectionMeta[], dimArity: 2 | 3): void {
+export function clearSections(
+  pool: SharedChunkPool,
+  view: ViewIndirection,
+  sections: readonly LodIndirectionMeta[],
+  dimArity: 2 | 3,
+): void {
+  if (sections.length === 0) return;
+  // The slot map changes in place, which the order can't tell by identity.
+  pool.order.invalidate();
   const data = view.indirectionData;
   for (const section of sections) {
     const [gridZ, gridY, gridX] = section.gridDims;
@@ -108,6 +126,21 @@ export function flushViewIndirection(device: GPUDevice, view: ViewIndirection): 
   if (!view.dirty) return;
   device.queue.writeBuffer(view.indirectionBuf, 0, view.indirectionData);
   view.dirty = false;
+}
+
+/** Record that `slot` holds the chunk `key`. */
+export function holdSlot(pool: SharedChunkPool, key: string, slot: number): void {
+  pool.slots.set(key, slot);
+  pool.order.hold(slot, key);
+}
+
+/** Forget the slot `key` holds, and return it for the caller to reuse, or undefined when none does. */
+export function dropSlot(pool: SharedChunkPool, key: string): number | undefined {
+  const slot = pool.slots.get(key);
+  if (slot === undefined) return undefined;
+  pool.slots.delete(key);
+  pool.order.release(slot);
+  return slot;
 }
 
 /** Point a view's cell at `slot`. */
