@@ -1059,15 +1059,12 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
               else dotRefs.current.delete(pin.id);
             }}
             style={{
-              // The marker is positioned via transform each frame; the popover
-              // is an absolutely-positioned child anchored to it.
+              // The marker is positioned via transform each frame, and the
+              // popover follows it.
               transform: "translate(0px, 0px)",
-              // Dimmed like an off-view peer cursor. An open thread is never
-              // dimmed.
+              // Dimmed like an off-view peer cursor. A pin whose thread is
+              // open is never dimmed.
               opacity: offCtx && !isOpen ? 0.5 : 1,
-              // Pins share one layer, so a later pin's dot would paint over an
-              // earlier pin's open popover. Lift only the open pin.
-              zIndex: isOpen ? 2 : 1,
             }}
           >
             {/* Every pin's dot opens its thread on click, and selects one's own.

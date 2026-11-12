@@ -5,6 +5,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
+import { createPortal } from "react-dom";
 import type { ViewPane } from "../sceneStore.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
 import { DATASET_DRAG_TYPE, forwardWheel, isViewPane, paneOf } from "./viewPane.ts";
@@ -78,6 +79,19 @@ describe("with several views", () => {
     const alone = panes([{ ...RIGHT, rect: [0, 0, 1, 1] }], 3);
     fireEvent.doubleClick(alone.pane(3));
     expect(alone.actions.maximize).toHaveBeenCalledWith(null);
+  });
+
+  it("leaves a double click on what a view draws elsewhere, as over the controls, alone", () => {
+    const elsewhere = document.body.appendChild(document.createElement("div"));
+    const actions = { activate: vi.fn(), maximize: vi.fn(), move: vi.fn() };
+    const rendered = render(
+      <ViewPanes views={[LEFT, RIGHT]} maximized={null} actions={actions}>
+        {(pane) => pane.id === 3 && createPortal(<p data-testid="thread">Thread</p>, elsewhere)}
+      </ViewPanes>,
+    );
+    fireEvent.doubleClick(rendered.getByTestId("thread"));
+    expect(actions.maximize).not.toHaveBeenCalled();
+    elsewhere.remove();
   });
 
   it("leaves a finger's double tap to the view", () => {

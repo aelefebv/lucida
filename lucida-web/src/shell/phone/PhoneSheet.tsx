@@ -134,12 +134,12 @@ export function PhoneSheet({ peek, layerTabs, railTabs }: PhoneSheetProps) {
   // A thread opened on the canvas belongs above the sheet, not under it.
   const raised = openTab !== null;
   useEffect(() => {
-    const layers = document.querySelector(".lc-canvas-stage-layers");
-    if (!raised || !layers) return;
+    const above = document.querySelector(".lc-canvas-stage-above");
+    if (!raised || !above) return;
     const observer = new MutationObserver(() => {
-      if (layers.querySelector('[role="dialog"]')) close();
+      if (above.querySelector('[role="dialog"]')) close();
     });
-    observer.observe(layers, { childList: true, subtree: true });
+    observer.observe(above, { childList: true, subtree: true });
     return () => observer.disconnect();
   }, [raised, close]);
 

@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { ThreadPopover } from "./ThreadPopover.tsx";
+import { CanvasStage } from "../shell/CanvasStage.tsx";
 import type { Annotation } from "./annotationDocument.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
 import { toastQueue } from "../ui/toastQueue.ts";
@@ -245,5 +246,39 @@ describe("ThreadPopover — Escape", () => {
     fireEvent.keyDown(screen.getByTestId("comment-edit-input-c1"), { key: "Escape" });
     expect(screen.queryByTestId("comment-edit-input-c1")).toBeNull();
     expect(closes).toHaveLength(0);
+  });
+});
+
+describe("ThreadPopover — over the floating controls", () => {
+  it("draws over the controls from a pin's anchor in a stage, and leaves the layers under them", () => {
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = makeScene();
+    const pin: Annotation = { id: "pin-up", position: [1, 2], author: MY_ID, kind: "point", comments: [] };
+    const { container } = render(
+      <CanvasStage
+        canvasRef={createRef()}
+        canvasKey={0}
+        pixelated={false}
+        label="View"
+        slots={{ "bottom-center": <button type="button">Control</button> }}
+      >
+        <div className="anchor">
+          <ThreadPopover
+            pin={pin}
+            datasetId="wds-1"
+            myId={MY_ID}
+            wasmSceneRef={sceneRef}
+            sendCommand={() => {}}
+            onDocumentChanged={() => {}}
+            onClose={() => {}}
+          />
+        </div>
+      </CanvasStage>,
+    );
+    const thread = screen.getByTestId("annot-thread-pin-up");
+    expect(thread.closest(".lc-canvas-stage-above")).not.toBeNull();
+    // A dialog in the layers lifts them, the views' panes with them, over the controls.
+    expect(container.querySelector('.lc-canvas-stage-layers [role="dialog"]')).toBeNull();
+    expect(container.querySelector(".anchor")?.children).toHaveLength(1);
   });
 });
