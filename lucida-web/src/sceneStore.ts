@@ -33,6 +33,8 @@ export interface ViewPane {
   /** `[x, y, width, height]` in fractions of the canvas from its top-left corner. */
   readonly rect: readonly [number, number, number, number];
   readonly cameraMode: CameraMode;
+  /** Its timepoint, apart from the active view's while time is not linked. */
+  readonly t: number;
   /** Whether commands steer it. */
   readonly active: boolean;
   /** The layers its comparison sets aside, in layer order. */
@@ -97,7 +99,7 @@ const NO_SCENE_VIEW: SceneView = {
   layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
-  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", active: true, setAside: [] }],
+  views: [{ id: 0, shows: "all", draws: [], rect: [0, 0, 1, 1], cameraMode: "slice", t: 0, active: true, setAside: [] }],
   layout: "single",
   maximized: null,
   links: null,
@@ -247,6 +249,7 @@ function readViews(scene: WasmScene, previous: readonly ViewPane[]): readonly Vi
       draws: JSON.parse(scene.drawn_datasets(id)) as string[],
       rect: [x, y, width, height],
       cameraMode: (scene.view_camera_mode(id) || "slice") as CameraMode,
+      t: scene.view_t(id),
       active: id === active,
       setAside: JSON.parse(scene.set_aside(id)) as string[],
     };

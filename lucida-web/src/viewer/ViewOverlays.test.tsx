@@ -15,10 +15,10 @@ import type { Coverage } from "./coverage.ts";
 afterEach(cleanup);
 
 const LEFT: ViewPane = {
-  id: 0, shows: "all", draws: ["a", "b"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, setAside: [],
+  id: 0, shows: "all", draws: ["a", "b"], rect: [0, 0, 0.5, 1], cameraMode: "slice", t: 0, active: true, setAside: [],
 };
 const RIGHT: ViewPane = {
-  id: 3, shows: "all", draws: ["a", "b"], rect: [0.5, 0, 0.5, 1], cameraMode: "slice", active: false, setAside: ["c"],
+  id: 3, shows: "all", draws: ["a", "b"], rect: [0.5, 0, 0.5, 1], cameraMode: "slice", t: 0, active: false, setAside: ["c"],
 };
 const SWIPE: Comparison = { a: "a", b: "b", mode: "swipe", divider: 0.5, showing: "a" };
 

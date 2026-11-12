@@ -167,6 +167,7 @@ vi.mock("lucida-core", () => {
     view_links() { return "null"; }
     view_rect() { return [0, 0, 1, 1]; }
     view_camera_mode() { return this.mode; }
+    view_t() { return this.view.t; }
     view_mode() { return this.mode === "slice" ? "slice" : "volume"; }
     withheld() { return "[]"; }
     scale_bar() { return "null"; }

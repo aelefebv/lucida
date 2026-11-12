@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { beforeAll, describe, it, expect } from "vitest";
 import type { WasmScene } from "lucida-core";
 import type { Annotation } from "./annotationDocument.ts";
 import { isOffContext, offContextLabel, pinLabel, viewContextsOf, viewCut, type ViewContext } from "./annotationContext.ts";
 import type { ResolvedLayer } from "../resolvedLayers.ts";
 import { resolvedLayer } from "../resolvedLayerFixtures.ts";
+import { SceneStore } from "../sceneStore.ts";
+import { VIEWPORTS, datasetId, fixture, loadWasm, openedScene } from "../viewProperties.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 
 /** A point pin at the given z/t/c (other fields irrelevant to the context calc). */
@@ -175,20 +177,48 @@ describe("annotationContext — viewContextsOf (the datasets whose marks a view 
   }
 
   it("holds every dataset the view draws, in its order, each cut where the view cuts it", () => {
-    const contexts = viewContextsOf(scene("xy"), { id: 1, draws: ["beta", "alpha", "tiles"], cameraMode: "slice" }, 3);
+    const contexts = viewContextsOf(scene("xy"), { id: 1, draws: ["beta", "alpha", "tiles"], cameraMode: "slice", t: 3 });
     expect([...contexts.keys()]).toEqual(["beta", "alpha", "tiles"]);
     expect(contexts.get("alpha")).toEqual({ cut: { axis: "z", start: 2, end: 3 }, t: 3, channels: [0] });
     expect(contexts.get("beta")).toEqual({ cut: { axis: "z", start: 5, end: 6 }, t: 3, channels: [1] });
   });
 
   it("leaves out a dataset the view lays out apart from its frame", () => {
-    const contexts = viewContextsOf(scene("xz"), { id: 1, draws: ["alpha", "tiles"], cameraMode: "slice" }, 0);
+    const contexts = viewContextsOf(scene("xz"), { id: 1, draws: ["alpha", "tiles"], cameraMode: "slice", t: 0 });
     expect([...contexts.keys()]).toEqual(["alpha"]);
     expect(contexts.get("alpha")?.cut).toEqual({ axis: "y", start: 7, end: 8 });
   });
 
   it("cuts nothing in a volume view", () => {
-    const contexts = viewContextsOf(scene("xy"), { id: 1, draws: ["alpha"], cameraMode: "arcball" }, 0);
+    const contexts = viewContextsOf(scene("xy"), { id: 1, draws: ["alpha"], cameraMode: "arcball", t: 0 });
     expect(contexts.get("alpha")).toEqual({ cut: null, t: 0, channels: [0] });
+  });
+});
+
+describe("annotationContext — each view's own T", () => {
+  beforeAll(loadWasm);
+
+  it("dims a mark by the T of the view that draws it, with time not linked", () => {
+    const volume = fixture("volume");
+    const scene = openedScene(volume, VIEWPORTS[0], 1, "slice");
+    const write = (command: object) => scene.apply_command(JSON.stringify(command));
+    write({ type: "set_view_layout", layout: "columns" });
+    const [left, right] = scene.view_ids();
+    write({ type: "set_view_datasets", view: right, datasets: "all" });
+    write({ type: "set_view_link", property: "t", mode: "off" });
+    write({ type: "set_active_view", view: right });
+    write({ type: "set_t", t: 1 });
+    // The view at T 0 steers, so the page's T is not the right view's.
+    write({ type: "set_active_view", view: left });
+
+    const store = new SceneStore(() => scene);
+    store.subscribe(() => {});
+    const panes = store.getView().views;
+    expect(panes.map((pane) => [pane.id, pane.t])).toEqual([[left, 0], [right, 1]]);
+    const offContext = panes.map((pane) => {
+      const context = viewContextsOf(scene, pane).get(datasetId(volume))!;
+      return isOffContext(pin(context.cut!.start, 1, 0), context);
+    });
+    expect(offContext).toEqual([true, false]);
   });
 });

@@ -727,6 +727,14 @@ impl WasmScene {
         self.active().axes.t
     }
 
+    /// `view`'s timepoint, which stands apart from the active view's while
+    /// time is not linked; 0 for an unknown view.
+    pub fn view_t(&self, view: u32) -> u32 {
+        self.inner
+            .view(ViewId(view))
+            .map_or(0, |shown| shown.axes.t)
+    }
+
     /// The plane `view`'s slice camera cuts: `xy`, `xz` or `yz`, and `xy`
     /// for an unknown view.
     pub fn slice_plane(&self, view: u32) -> String {

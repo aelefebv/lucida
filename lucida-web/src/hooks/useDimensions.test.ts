@@ -68,6 +68,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
     view_links: () => "null",
     view_rect: () => [0, 0, 1, 1],
     view_camera_mode: () => "slice",
+    view_t: () => state.t,
     withheld: () => "[]",
     set_aside: () => "[]",
     view_comparison: () => "null",
