@@ -23,6 +23,7 @@ import {
   awaitDatasetOpen,
   comparisonPair,
   datasetIdForSource,
+  layOutViews,
   scrubIndex,
   scrubSolo,
   selectDataset,
@@ -260,18 +261,7 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         } catch (error) {
           return { applied: false, reason: error instanceof Error ? error.message : String(error) };
         }
-        viewLayout.setLayout(layout);
-        const views = viewLayout.views();
-        if (shown.length > views.length) {
-          return { applied: false, reason: `a ${layout} layout has ${views.length} view(s), not ${shown.length}` };
-        }
-        // Each dataset moves into its view, as a layer dropped on it does, or
-        // with `keep` shows there as well, as a layer shown in both views.
-        shown.forEach((ids, at) => {
-          if (!keep) ids.forEach((id) => viewLayout.move(views[at], id));
-          else if (ids.length > 0) viewLayout.add(views[at], ids);
-        });
-        return { applied: true, reason: null };
+        return layOutViews(viewLayout, layout, shown, keep);
       },
       link: async (property, mode) => {
         const links = viewLayout.links();
