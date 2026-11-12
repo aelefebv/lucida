@@ -1232,6 +1232,7 @@ function Viewer({
               datasets={datasetsRef.current}
               hasDatasets={datasetsVersion > 0}
               selectedDatasetId={selectedDatasetId}
+              onSelectDataset={layers.handleLayerSelect}
               tool={tool}
               annotationsVisible={annotationsVisible}
               annotationAuthor={annotationAuthor}

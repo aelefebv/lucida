@@ -2,6 +2,7 @@ mod channel_links;
 mod comparison;
 mod crosshair;
 mod cut_grid;
+mod drawn_at;
 mod four_up;
 mod layers;
 mod link_notices;
