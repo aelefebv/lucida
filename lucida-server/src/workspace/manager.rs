@@ -1193,6 +1193,13 @@ impl WorkspaceManager {
         let mut session = Session::new();
         session.document = record.document;
         session.seq = record.seq;
+        // Not written here, where it would take a seq no command took: the
+        // next edit stores it, with the record that it ran. A load before
+        // then reads the same pins and glues them alike.
+        let reanchored = session.document.anchor_legacy_pins();
+        if reanchored > 0 {
+            tracing::info!(workspace_id, reanchored, "workspace.pins_reanchored");
+        }
         let live = Arc::new(LiveWorkspace::new(
             workspace_id.to_string(),
             session,

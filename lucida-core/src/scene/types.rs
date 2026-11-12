@@ -740,6 +740,10 @@ impl Annotation {
     }
 }
 
+/// A placed tile of a collection: its entity, and its box's corner and size
+/// in the active layout, `[x, y]` in samples.
+type TileBox<'a> = (&'a EntityId, [f64; 2], [f64; 2]);
+
 /// Shared document state — dataset manifests synced across all clients.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DocumentState {
@@ -756,6 +760,13 @@ pub struct DocumentState {
     /// dataset without an entry sits where its declared frame places it.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub user_transforms: IndexMap<DatasetId, UserTransform>,
+    /// Whether every pin's anchor is the tile its first vertex lay on when it
+    /// was placed or last moved ([`DocumentState::tile_anchor`]). A document
+    /// stored before anchors followed that rule lacks it, and
+    /// [`DocumentState::anchor_legacy_pins`] sets it once it has re-anchored
+    /// them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anchors_by_tile: bool,
 }
 
 impl DocumentState {
@@ -999,15 +1010,22 @@ impl DocumentState {
     /// nearest ([`tile_holding`]), the tile a side view draws the pin on.
     ///
     /// Returns `None` when the dataset is unknown, not a collection, or has no
-    /// placed tile. A tile whose position doesn't resolve is left out rather
-    /// than counted as sitting at the origin.
+    /// placed tile.
     ///
     /// The server and every client derive the same anchor from the same synced
     /// state, so the anchor never travels on the wire.
     fn tile_anchor(&self, dataset_id: &DatasetId, position: [f64; 2]) -> Option<EntityId> {
+        tile_holding(self.tile_boxes(dataset_id)?, position).cloned()
+    }
+
+    /// Each placed tile of the collection `dataset_id` in its active layout,
+    /// as `(entity, corner, size)` in samples. `None` for an unknown dataset
+    /// or one that isn't a collection: a single image has no tile to glue a
+    /// pin to, and does not move between layouts. A tile whose position
+    /// doesn't resolve is left out rather than counted as sitting at the
+    /// origin.
+    fn tile_boxes(&self, dataset_id: &DatasetId) -> Option<Vec<TileBox<'_>>> {
         let manifest = self.manifests.get(dataset_id)?;
-        // A single-image dataset has no tile to glue to, and its lone image
-        // does not move between layouts.
         if !matches!(manifest.kind, DatasetKind::Collection { .. }) {
             return None;
         }
@@ -1021,13 +1039,67 @@ impl DocumentState {
             manifest.entities(),
             manifest.transforms(),
         );
-        let tiles = manifest.images().iter().filter_map(|image| {
-            let corner = positions.resolve(&image.owner)?;
-            let level0 = image.multiscale.levels.first()?;
-            let size = [level0.shape[4] as f64, level0.shape[3] as f64];
-            Some((&image.owner, corner, size))
-        });
-        tile_holding(tiles, position).cloned()
+        Some(
+            manifest
+                .images()
+                .iter()
+                .filter_map(|image| {
+                    let corner = positions.resolve(&image.owner)?;
+                    let level0 = image.multiscale.levels.first()?;
+                    let size = [level0.shape[4] as f64, level0.shape[3] as f64];
+                    Some((&image.owner, corner, size))
+                })
+                .collect(),
+        )
+    }
+
+    /// Glue every pin of a document stored before [`Self::tile_anchor`] chose
+    /// anchors to the tile its first vertex lies on. Those anchors went to the
+    /// entity with the nearest corner, which for a pin in a tile's far part is
+    /// a neighbour, so a layout switch carried it off its data. No pin moves.
+    ///
+    /// It runs once per document and records that it has: later, a pin in a
+    /// gap between tiles can lie nearest another tile than the one it was
+    /// glued to, and keeps its glue. A document with no glued pin has nothing
+    /// to record, and is left as it is. Returns how many anchors changed.
+    pub fn anchor_legacy_pins(&mut self) -> usize {
+        let glued = self
+            .annotations
+            .values()
+            .flatten()
+            .any(|pin| pin.anchor.is_some());
+        if self.anchors_by_tile || !glued {
+            return 0;
+        }
+        self.anchors_by_tile = true;
+        let anchors: Vec<(DatasetId, Vec<Option<EntityId>>)> = self
+            .annotations
+            .iter()
+            .map(|(id, pins)| {
+                let tiles = self.tile_boxes(id);
+                let anchors = pins
+                    .iter()
+                    .map(|pin| {
+                        let tiles = tiles.as_ref()?.iter().copied();
+                        tile_holding(tiles, pin.position).cloned()
+                    })
+                    .collect();
+                (id.clone(), anchors)
+            })
+            .collect();
+        let mut changed = 0;
+        for (id, anchors) in anchors {
+            let Some(pins) = self.annotations.get_mut(&id) else {
+                continue;
+            };
+            for (pin, anchor) in pins.iter_mut().zip(anchors) {
+                if pin.anchor != anchor {
+                    pin.anchor = anchor;
+                    changed += 1;
+                }
+            }
+        }
+        changed
     }
 
     /// Re-anchor every anchored pin in `dataset_id` for a layout change from

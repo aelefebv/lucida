@@ -4753,6 +4753,53 @@ mod tests {
     }
 
     #[test]
+    fn a_document_stored_with_corner_anchors_glues_its_pins_to_their_tiles_once() {
+        use lucida_content::EntityId;
+        let (mut doc, ds) = collection_with_two_layouts();
+        // With no glued pin there is nothing to record.
+        assert_eq!(doc.anchor_legacy_pins(), 0);
+        assert!(!doc.anchors_by_tile);
+        // Both lie on w1, nearer w2's corner than w1's own, where the rule
+        // before glued them.
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "far",
+            [60.0, 60.0],
+            "alice",
+        ));
+        doc.apply(add_annotation_cmd(
+            "collection",
+            "edge",
+            [63.0, 2.0],
+            "alice",
+        ));
+        let mut json = serde_json::to_value(&doc).unwrap();
+        for pin in json["annotations"]["collection"].as_array_mut().unwrap() {
+            pin["anchor"] = "w2".into();
+        }
+        assert!(json.get("anchors_by_tile").is_none());
+        let mut stored: crate::scene::DocumentState = serde_json::from_value(json).unwrap();
+        assert!(!stored.anchors_by_tile);
+
+        assert_eq!(stored.anchor_legacy_pins(), 2);
+        let w1 = Some(EntityId("w1".into()));
+        assert_eq!(pin(&stored, &ds, "far").anchor, w1);
+        assert_eq!(pin(&stored, &ds, "edge").anchor, w1);
+        assert!(stored.anchors_by_tile);
+        let json = serde_json::to_value(&stored).unwrap();
+        assert_eq!(json["anchors_by_tile"], true);
+        // Positions are untouched, and the pins now ride w1.
+        assert_eq!(pin(&stored, &ds, "far").position, [60.0, 60.0]);
+        switch_to(&mut stored, &ds, "moved");
+        assert_eq!(pin(&stored, &ds, "far").position, [60.0, 110.0]);
+
+        // Recorded, it never runs again, whatever glue a pin has since.
+        stored.annotations.get_mut(&ds).unwrap()[0].anchor = Some(EntityId("w2".into()));
+        assert_eq!(stored.anchor_legacy_pins(), 0);
+        assert_eq!(pin(&stored, &ds, "far").anchor, Some(EntityId("w2".into())));
+    }
+
+    #[test]
     fn a_pin_moved_onto_another_tile_follows_that_tile() {
         use lucida_content::EntityId;
         let (mut doc, ds) = collection_with_two_layouts();

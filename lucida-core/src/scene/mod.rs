@@ -18,6 +18,7 @@ pub use channel_links::{ChannelPair, PairedBy};
 pub use comparison::{BLINK_RATES, CompareMode, Comparison, Side};
 pub use crosshair::{CrosshairMark, ViewCrosshair};
 pub use cut_grid::{AxisReading, CutGrid};
+pub use drawn_at::MarkOn;
 pub use four_up::{FOUR_UP, PlaneLine, PlaneTile};
 pub(crate) use layers::LayerExtent;
 pub use layers::{CutReach, ResolvedLayer, ShownChannel, in_channel_context};
@@ -1207,7 +1208,7 @@ impl Scene {
         let placed = self.placed(dataset_id)?;
         match &shown.camera {
             Camera::Slice(slice) => {
-                let [dx, dy, dz] = self.annotation_shift(view, dataset_id, [x, y, z]);
+                let [dx, dy, dz] = self.annotation_shift(view, dataset_id, MarkOn::at([x, y, z]));
                 let point = placed.to_scene.apply([x + dx, y + dy, z + dz]);
                 let [across, down, _] = slice.plane.axes().map(SpatialAxis::xyz);
                 Some(slice.to_screen([point[across], point[down]]))
@@ -1242,9 +1243,9 @@ impl Scene {
     /// middle of the dataset's plane there, clamped into the dataset, so the
     /// mark belongs to the plane it was drawn on in every other view. In a
     /// side view of a collection it lands on one tile's samples
-    /// ([`Self::annotation_shift`]): the tile a mark whose first vertex is
-    /// `on` starts on, or for a new mark, with no `on`, the tile whose cell
-    /// is under the pointer, and `None` between cells. A volume view gives
+    /// ([`Self::annotation_shift`]): the tile of `on`, the mark the point
+    /// belongs to, or for a new mark, with no `on`, the tile whose cell is
+    /// under the pointer, and `None` between cells. A volume view gives
     /// where the ray first meets the dataset, inside the member it meets, or
     /// `None` where it misses, so a mark never floats in empty space.
     pub fn pick_annotation_voxel(
@@ -1253,7 +1254,7 @@ impl Scene {
         dataset_id: &DatasetId,
         screen_x: f64,
         screen_y: f64,
-        on: Option<[f64; 3]>,
+        on: Option<MarkOn>,
     ) -> Option<[f64; 3]> {
         let shown = self.view(view)?;
         let placed = self.placed(dataset_id)?;
@@ -1267,7 +1268,7 @@ impl Scene {
                 at[cut.xyz()] = self.cut_place(view, cut);
                 let mut drawn = placed.to_scene.inverse().apply(at);
                 let shift = match on {
-                    Some(start) => self.annotation_shift(view, dataset_id, start),
+                    Some(mark) => self.annotation_shift(view, dataset_id, mark),
                     None => self.shift_drawn_at(view, dataset_id, drawn)?,
                 };
                 // A placement that tilts the cut has no plane of the dataset
@@ -1298,24 +1299,25 @@ impl Scene {
         }
     }
 
-    /// Where `view` stands to cut the plane of `dataset_id` that holds the
-    /// frame point `point`: the axis it steps along, the one its slice plane
-    /// cuts or Z in a volume view, and its position there, which a side view
-    /// of a collection reads from the edge of the tile the point lies on.
-    /// `None` for an unknown view or dataset.
+    /// Where `view` stands to cut the plane of `dataset_id` that holds
+    /// `mark`'s first vertex: the axis it steps along, the one its slice
+    /// plane cuts or Z in a volume view, and its position there, which a side
+    /// view of a collection reads from the edge of the mark's tile. `None`
+    /// for an unknown view or dataset.
     pub fn annotation_cut(
         &self,
         view: ViewId,
         dataset_id: &DatasetId,
-        point: [f64; 3],
+        mark: MarkOn,
     ) -> Option<AnnotationCut> {
+        let point = mark.start;
         let axis = match &self.view(view)?.camera {
             Camera::Slice(slice) => slice.plane.cut(),
             Camera::Arcball(_) | Camera::Fly(_) => SpatialAxis::Z,
         };
         let to_scene = self.placement(dataset_id)?;
         let a = axis.xyz();
-        let shift = self.annotation_shift(view, dataset_id, point);
+        let shift = self.annotation_shift(view, dataset_id, mark);
         let mut middle: [f64; 3] = std::array::from_fn(|i| point[i] + shift[i]);
         // The middle of the plane holding the point, so a point on a plane's
         // edge reads that plane and not, by a rounding error, the one before.
@@ -3905,7 +3907,7 @@ mod tests {
             let cut = point[plane.cut().xyz()];
             assert_eq!(cut.fract(), 0.5, "{plane}: {point:?}");
             assert_eq!(
-                scene.annotation_cut(view, &id, point),
+                scene.annotation_cut(view, &id, MarkOn::at(point)),
                 Some(AnnotationCut {
                     axis: plane.cut(),
                     position: scene.axis_index(view, plane.cut()),
@@ -3928,7 +3930,7 @@ mod tests {
             let (mut scene, id) = uneven_volume(plane);
             let view = scene.active_view().id();
             // Stand where the mark is, as going to it does.
-            let cut = scene.annotation_cut(view, &id, placed).unwrap();
+            let cut = scene.annotation_cut(view, &id, MarkOn::at(placed)).unwrap();
             let position = cut.position;
             scene.apply(
                 match cut.axis {

@@ -44,6 +44,7 @@ import {
   liesOnPlane,
   onPlane,
   pinEnd,
+  markOn,
   pinStart,
   shiftPin,
   translateOnPlane,
@@ -292,7 +293,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // collection, moved into the cell of the tile it starts on.
   const asDrawn = ({ datasetId, pin }: Mark): Annotation => {
     const scene = wasmSceneRef.current;
-    return scene ? shiftPin(pin, markShift(scene, surface, datasetId, pinStart(pin))) : pin;
+    return scene ? shiftPin(pin, markShift(scene, surface, datasetId, markOn(pin))) : pin;
   };
 
   // Mirrors for the RAF tick, written after each commit.
@@ -381,7 +382,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
    * unready scene. */
   const pointerOnPlane = ({ datasetId, pin }: Mark, e: ClientPoint, on: SlicePlane): [number, number] | null => {
     const scene = wasmSceneRef.current;
-    const point = scene && pickFramePoint(scene, surface, datasetId, e, pinStart(pin));
+    const point = scene && pickFramePoint(scene, surface, datasetId, e, markOn(pin));
     return point && onPlane(point, on);
   };
 
@@ -395,7 +396,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       .filter(({ pin }) => isOwnHandledShape(pin, myId))
       .map(({ datasetId, pin }) => ({
         id: pin.id,
-        points: annotationVertices(pin).map(projectOf(datasetId, pinStart(pin))),
+        points: annotationVertices(pin).map(projectOf(datasetId, markOn(pin))),
         closed: isClosedShape(pin),
       }));
     return hitTestShapes([point.clientX - rect.left, point.clientY - rect.top], shapes, tolerance);
@@ -462,7 +463,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         if (scene) {
           // Pan the pin's place on the view's plane to the view's middle.
           const start = pinStart(mark.pin);
-          const [x, y] = makeMarkToScreen(scene, surface)(mark.datasetId, start)(start);
+          const [x, y] = makeMarkToScreen(scene, surface)(mark.datasetId, markOn(mark.pin))(start);
           const dpr = devicePixelRatio;
           applyViewportCommand(scene, { type: "pan", dx: (x - element.clientWidth / 2) * dpr, dy: (y - element.clientHeight / 2) * dpr });
           // Repaint under the recentered camera; the pull-based loop won't
@@ -497,9 +498,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         const outset = handleOutsetRef.current;
 
         for (const { datasetId, pin } of marksRef.current) {
-          // A drag's vertices too go to the tile the stored mark starts on,
-          // where the drag picks them.
-          const project = projectOf(datasetId, pinStart(pin));
+          // A drag's vertices too go to the stored mark's tile, where the
+          // drag picks them.
+          const project = projectOf(datasetId, markOn(pin));
           // Geometry, the dot, and handles all use these, so they stay
           // coincident.
           let liveVertices: FrameVertices | null = shapeVertices(pin);
