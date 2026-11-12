@@ -5,7 +5,7 @@
  * selectors come from the scene store; the engine supplies the scene, client,
  * canvas, loop, and session.
  */
-import { lazy, Suspense, useCallback, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { viewSettleSignal } from "../pipeline/viewSettle.ts";
 import { AnnotationDraftOverlay } from "../components/AnnotationDraftOverlay.tsx";
 import { AnnotationOverlay } from "../components/AnnotationOverlay.tsx";
@@ -35,6 +35,7 @@ import { ViewPanes } from "./ViewPanes.tsx";
 import { ViewOverlays } from "./ViewOverlays.tsx";
 import { HOME_KEYS, useViewHome } from "./useViewHome.ts";
 import { FourUpPlanes, useFollowTile } from "./planeLines.ts";
+import { forwardStrayWheels } from "./viewPane.ts";
 import { Hover } from "./hover.ts";
 import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
@@ -153,6 +154,11 @@ export function CanvasLayers({
   const [panesRoot, setPanesRoot] = useState<HTMLDivElement | null>(null);
   const planes = useMemo(() => (wasmScene ? new FourUpPlanes(wasmScene, engine.store) : null), [wasmScene, engine.store]);
   useFollowTile(planes, panesRoot, layout === "four_up");
+  useEffect(() => {
+    // The stage holds the floating controls over the views as well as the views.
+    const stage = panesRoot?.closest<HTMLElement>(".lc-canvas-stage");
+    return stage && panesRoot ? forwardStrayWheels(stage, panesRoot) : undefined;
+  }, [panesRoot]);
   const annotationScene = hasDatasets && wasmScene && canvas ? wasmScene : null;
   const nameOf = (datasetId: string) => datasets.get(datasetId)?.name ?? datasetId;
 
@@ -275,7 +281,6 @@ export function CanvasLayers({
             const index = planes?.positionAt(view, axis, fraction) ?? null;
             if (index !== null) onAxisChange(axis, index);
           }}
-          panes={panesRoot}
           hover={hover}
           home={home ? { run: home, keys: HOME_KEYS } : undefined}
         />

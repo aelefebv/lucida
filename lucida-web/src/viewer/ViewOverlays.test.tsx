@@ -4,14 +4,13 @@
  * that holds the view's notices, and a press in them makes that view the one
  * they steer.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import type { Comparison, ComparisonActions } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
 import type { ViewLinkNotices } from "../viewLinks.ts";
 import { ViewOverlays } from "./ViewOverlays.tsx";
 import type { Coverage } from "./coverage.ts";
-import { FourUpPlanes } from "./planeLines.ts";
 
 afterEach(cleanup);
 
@@ -144,89 +143,5 @@ describe("a view's overlays", () => {
     fireEvent.click(icon);
     expect(activate).not.toHaveBeenCalled();
     expect(icon.getAttribute("aria-expanded")).toBe("false");
-  });
-});
-
-describe("a wheel over a plane line's grip", () => {
-  // happy-dom's WheelEvent leaves out the MouseEvent a browser's extends,
-  // which carries the pointer's place and the modifier keys.
-  class BrowserWheelEvent extends MouseEvent {
-    readonly deltaX: number;
-    readonly deltaY: number;
-    readonly deltaZ: number;
-    readonly deltaMode: number;
-    constructor(type: string, init: WheelEventInit = {}) {
-      super(type, init);
-      this.deltaX = init.deltaX ?? 0;
-      this.deltaY = init.deltaY ?? 0;
-      this.deltaZ = init.deltaZ ?? 0;
-      this.deltaMode = init.deltaMode ?? 0;
-    }
-  }
-  beforeAll(() => vi.stubGlobal("WheelEvent", BrowserWheelEvent));
-  afterAll(() => vi.unstubAllGlobals());
-
-  // Each view crossed by an upright line, as four-up's slice views are.
-  const epochs = { view: 0 } as never;
-  const planes = new FourUpPlanes(
-    {
-      tile_at: () => "null",
-      plane_lines: () => JSON.stringify([{ axis: "x", from: [0.5, 0], to: [0.5, 1] }]),
-      plane_line_position: () => BigInt(0),
-    },
-    { subscribe: () => () => {}, getEpochs: () => epochs },
-  );
-
-  function overGrips() {
-    // The panes the viewers listen on, beside the overlays as `ViewPanes` lays them.
-    const panes = document.createElement("div");
-    const heard = new Map<number, WheelEvent[]>();
-    for (const view of [LEFT.id, RIGHT.id]) {
-      const pane = document.createElement("div");
-      pane.dataset.viewPane = String(view);
-      heard.set(view, []);
-      pane.addEventListener("wheel", (e) => {
-        e.preventDefault();
-        heard.get(view)!.push(e);
-      }, { passive: false });
-      panes.append(pane);
-    }
-    const dragPlane = vi.fn();
-    const none = new Map<number, Comparison>();
-    const { container } = render(
-      <ViewOverlays
-        views={[LEFT, RIGHT]}
-        store={{ subscribe: () => () => {}, getComparisons: () => none }}
-        actions={{} as ComparisonActions}
-        nameOf={(id) => id}
-        activate={vi.fn()}
-        coverageOf={() => undefined}
-        byHand={() => null}
-        planes={planes}
-        dragPlane={dragPlane}
-        panes={panes}
-      />,
-    );
-    const grip = (view: number) =>
-      container.querySelector(`[data-view="${view}"] .lc-plane-line-grip`) as SVGLineElement;
-    return { heard, dragPlane, grip };
-  }
-
-  it("goes on to the view's pane, to zoom it as a wheel anywhere in it does", () => {
-    const { heard, dragPlane, grip } = overGrips();
-    const notPrevented = fireEvent.wheel(grip(RIGHT.id), { deltaY: -100, deltaMode: 0, clientX: 610, clientY: 240 });
-    const [wheel] = heard.get(RIGHT.id)!;
-    expect([wheel.deltaY, wheel.deltaMode, wheel.clientX, wheel.clientY, wheel.ctrlKey]).toEqual([-100, 0, 610, 240, false]);
-    expect(heard.get(LEFT.id)).toEqual([]);
-    // The pane's viewer kept the page from scrolling, so the grip's wheel doesn't either.
-    expect(notPrevented).toBe(false);
-    expect(dragPlane).not.toHaveBeenCalled();
-  });
-
-  it("goes on as a trackpad's pinch, a wheel with Ctrl, which the page must not zoom by", () => {
-    const { heard, grip } = overGrips();
-    const notPrevented = fireEvent.wheel(grip(LEFT.id), { deltaY: -4.5, ctrlKey: true, clientX: 300, clientY: 200 });
-    expect(heard.get(LEFT.id)!.map((e) => [e.deltaY, e.ctrlKey])).toEqual([[-4.5, true]]);
-    expect(notPrevented).toBe(false);
   });
 });
