@@ -275,6 +275,7 @@ export function CanvasLayers({
             const index = planes?.positionAt(view, axis, fraction) ?? null;
             if (index !== null) onAxisChange(axis, index);
           }}
+          panes={panesRoot}
           hover={hover}
           home={home ? { run: home, keys: HOME_KEYS } : undefined}
         />
