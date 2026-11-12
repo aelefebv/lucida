@@ -6,6 +6,7 @@
  */
 
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
+import type { SectionSpace } from "./coldState/sectionLayout.ts";
 import type { ViewDraw } from "./worker/state.ts";
 import { INDIRECTION_MISS } from "./remap.ts";
 import { remapSlotEntries, type CompactionPlan } from "./poolCompaction.ts";
@@ -19,6 +20,8 @@ export interface ViewIndirection {
    * Replaced, never changed in place: eviction's order compares it by identity.
    */
   entityMetas: ReadonlyMap<string, readonly LodIndirectionMeta[]>;
+  /** The cells {@link entityMetas} leaves free, where the next sections go. */
+  space: SectionSpace;
   indirectionData: Uint32Array<ArrayBuffer>;
   indirectionBuf: GPUBuffer;
   /** slot index → the cell it fills here, or -1 where this view samples it nowhere. */
@@ -50,6 +53,7 @@ export function createViewIndirection(device: GPUDevice, draw: ViewDraw, totalSl
   return {
     draw,
     entityMetas: new Map(),
+    space: { free: [], end: 0, used: 0 },
     indirectionData,
     indirectionBuf,
     slotGridIdx: new Int32Array(totalSlots).fill(-1),
@@ -66,6 +70,55 @@ export function resizeViewIndirection(device: GPUDevice, view: ViewIndirection, 
     size: Math.max(totalEntries * 4, 4),
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+}
+
+/**
+ * Give a view's indirection room for `totalEntries` cells, keeping what its
+ * cells hold. Every draw's bind group names the buffer, so it never shrinks
+ * and grows by half again at least: a zoom that adds sections a few at a
+ * time replaces it a few times, not on every replan.
+ */
+export function growViewIndirection(device: GPUDevice, view: ViewIndirection, totalEntries: number): void {
+  const held = view.indirectionData.length;
+  if (totalEntries <= held) return;
+  const length = Math.max(totalEntries, Math.ceil(held * 1.5));
+  const data = new Uint32Array(length).fill(INDIRECTION_MISS);
+  data.set(view.indirectionData);
+  view.indirectionData = data;
+  view.indirectionBuf.destroy();
+  view.indirectionBuf = device.createBuffer({
+    size: length * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  view.dirty = true;
+}
+
+/**
+ * Empty the cells of sections a view of `pool` no longer lays out and forget
+ * the slots they mapped, so a section placed there later starts empty and an
+ * eviction of one of those slots leaves it alone. A slice section is one
+ * plane of its grid (`dimArity` 2), a volume section the whole grid.
+ */
+export function clearSections(
+  pool: SharedChunkPool,
+  view: ViewIndirection,
+  sections: readonly LodIndirectionMeta[],
+  dimArity: 2 | 3,
+): void {
+  if (sections.length === 0) return;
+  // The slot map changes in place, which the order can't tell by identity.
+  pool.order.invalidate();
+  const data = view.indirectionData;
+  for (const section of sections) {
+    const [gridZ, gridY, gridX] = section.gridDims;
+    const end = Math.min(data.length, section.offset + gridX * gridY * (dimArity === 3 ? gridZ : 1));
+    for (let cell = section.offset; cell < end; cell++) {
+      const slot = data[cell];
+      if (slot < view.slotGridIdx.length && view.slotGridIdx[slot] === cell) view.slotGridIdx[slot] = -1;
+      data[cell] = INDIRECTION_MISS;
+    }
+    view.dirty = true;
+  }
 }
 
 /** Write a view's indirection to the GPU when it changed. */

@@ -1,7 +1,7 @@
 /**
  * Per-entity level section computation. Pure. A section is
  * `gridX * gridY * gridZ` slots for volume pools and `gridX * gridY` for
- * slice pools; `applyColdState` threads each `nextOffset` into the next call.
+ * slice pools.
  */
 
 import type { ColdStateActiveEntry } from "../workerProtocol.ts";

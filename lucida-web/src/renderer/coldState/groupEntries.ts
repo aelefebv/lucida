@@ -30,10 +30,41 @@ export interface PoolGroup {
   entries: Array<{ entry: ColdStateActiveEntry; memberId: string; tier: ResidencyTier; level: number }>;
 }
 
+/** One section an entry holds in one channel, and the pool it goes to. */
+export interface PoolSource {
+  poolKey: string;
+  tier: ResidencyTier;
+  level: number;
+  /** `[Z, Y, X]`; slice mode sets `Z = 1`. */
+  chunkDims: [number, number, number];
+}
+
+/** The sections one entry holds in one channel, each with its pool, in {@link tierSourcesForEntry} order. */
+export function entryPoolSources(
+  cold: Pick<ColdStateMessage, "datasetId" | "sliceAxis">,
+  mode: "volume" | "slice",
+  entry: ColdStateActiveEntry,
+  channel: number,
+): PoolSource[] {
+  const out: PoolSource[] = [];
+  for (const source of tierSourcesForEntry(entry)) {
+    const levelMeta = entry.levels.find(l => l.level === source.level);
+    if (!levelMeta) continue;
+    const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+    // `chunkTierPoolKey` takes `[X, Y, Z]` or `[X, Y]`; the group keeps `[Z, Y, X]`.
+    const poolKey =
+      mode === "volume"
+        ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ])
+        : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY], cold.sliceAxis);
+    const chunkDims: [number, number, number] = mode === "volume" ? [chunkZ, chunkY, chunkX] : [1, chunkY, chunkX];
+    out.push({ poolKey, tier: source.tier, level: source.level, chunkDims });
+  }
+  return out;
+}
+
 /**
  * Partition `cold.activeSet × cold.visibleChannels` into pool groups,
- * channel outer and entry inner. Callers assign sequential section offsets
- * in this insertion order.
+ * channel outer and entry inner.
  */
 export function groupEntriesByPool(
   cold: ColdStateMessage,
@@ -44,24 +75,13 @@ export function groupEntriesByPool(
   for (const channel of cold.visibleChannels) {
     for (const entry of cold.activeSet) {
       const memberId = memberIdForColdEntry(entry, channel);
-      for (const source of tierSourcesForEntry(entry)) {
-        const levelMeta = entry.levels.find(l => l.level === source.level);
-        if (!levelMeta) continue;
-        const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-        // `chunkTierPoolKey` takes `[X, Y, Z]` or `[X, Y]`; the group keeps `[Z, Y, X]`.
-        const poolKey =
-          mode === "volume"
-            ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ])
-            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY], cold.sliceAxis);
-        const dims: [number, number, number] =
-          mode === "volume" ? [chunkZ, chunkY, chunkX] : [1, chunkY, chunkX];
-
+      for (const { poolKey, tier, level, chunkDims } of entryPoolSources(cold, mode, entry, channel)) {
         let group = groups.get(poolKey);
         if (!group) {
-          group = { poolKey, tier: source.tier, channel, chunkDims: dims, entries: [] };
+          group = { poolKey, tier, channel, chunkDims, entries: [] };
           groups.set(poolKey, group);
         }
-        group.entries.push({ entry, memberId, tier: source.tier, level: source.level });
+        group.entries.push({ entry, memberId, tier, level });
       }
     }
   }
