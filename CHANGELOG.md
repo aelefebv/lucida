@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.39.2](https://github.com/aelefebv/lucida/compare/v0.39.1...v0.39.2) (2026-11-12)
+
+
+### Performance
+
+* **web:** draw a collection's minimap from a shared overview atlas ([#1624](https://github.com/aelefebv/lucida/issues/1624)) ([5e0b6c9](https://github.com/aelefebv/lucida/commit/5e0b6c984204ba5f41cdc677fc554a1926988684))
+* **web:** finding room in a full pool measures and counts less per chunk ([#1620](https://github.com/aelefebv/lucida/issues/1620)) ([9e29baf](https://github.com/aelefebv/lucida/commit/9e29baf80497996be3d9d64d7bff5c9572a9fe34))
+* **web:** reuse bind groups, wanted-set plans and the member index map across view moves ([#1623](https://github.com/aelefebv/lucida/issues/1623)) ([cffaa9a](https://github.com/aelefebv/lucida/commit/cffaa9a655de5f3933ef264155629a8b7d8ae7ec))
+
 ## [0.39.1](https://github.com/aelefebv/lucida/compare/v0.39.0...v0.39.1) (2026-11-12)
 
 
