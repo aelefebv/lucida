@@ -38,7 +38,8 @@ interface SimView {
   cameras: Map<string, [number, number, number]>;
 }
 
-function simulate(seed: number, is3D: boolean, steps: number): void {
+/** `checkRate`: the share of steps after which the order is asked for its pick. */
+function simulate(seed: number, is3D: boolean, steps: number, checkRate = 1): void {
   const rand = random(seed);
   const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)];
   const chunkKeyAt = (meta: LodIndirectionMeta) =>
@@ -116,6 +117,7 @@ function simulate(seed: number, is3D: boolean, steps: number): void {
       slots = new Map(slots);
     }
 
+    if (rand() >= checkRate) continue;
     const now = params();
     expect(order.next(now), `step ${step}`).toEqual(findEvictionSlot(now));
     let wanted = 0;
@@ -134,6 +136,10 @@ describe("EvictionOrder", () => {
 
   it.each([5, 6, 7, 8])("picks what classifying every slice slot picks, seed %i", (seed) => {
     simulate(seed, false, 1500);
+  });
+
+  it("picks the same after long runs of holds and releases with no pick between", () => {
+    simulate(9, true, 8000, 0.004);
   });
 
   it("holds nothing to pick in an empty pool", () => {

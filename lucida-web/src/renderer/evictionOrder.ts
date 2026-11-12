@@ -56,6 +56,9 @@ export class EvictionOrder {
     this.bySlot[slot] = entry;
     this.held++;
     this.pending.push(entry);
+    // A pool with free slots picks nothing, so nothing drains the list; keep
+    // it to the slots still held.
+    if (this.pending.length > 2 * this.held + 32) this.pending = this.pending.filter((e) => this.bySlot[e.slot] === e);
   }
 
   /** `slot` holds nothing now. */
