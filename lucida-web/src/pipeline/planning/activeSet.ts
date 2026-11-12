@@ -63,7 +63,7 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
 }
 
 /**
- * Build the active set, one entry per entity.
+ * Build the active set, one entry per entity, in entity order.
  *
  * Every visible image or tile becomes a tile entry. Its detail tier holds
  * one level, the entity's target level, which the core already resolved
@@ -77,21 +77,22 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
  * cache's eviction tier mapping, the trace's per-tick tallies) can see
  * them. They live in the dedicated {@link InvisibleEntry} variant and
  * contribute no chunk requests.
+ *
+ * Entity order keeps every entry where it was when a view move turns a tile
+ * visible or invisible, so the render worker's descriptor indices, which
+ * follow this order, change for that tile alone.
  */
 export function buildActiveSet(entities: EntitySnapshot[]): ActiveSetEntry[] {
-  const out: ActiveSetEntry[] = [];
-
+  const tiles = new Set<EntitySnapshot>();
   for (const group of groupMembers(entities)) {
-    for (const tile of group.tiles) {
-      out.push(makeTileEntry(tile));
-    }
+    for (const tile of group.tiles) tiles.add(tile);
   }
 
+  const out: ActiveSetEntry[] = [];
   for (const entity of entities) {
-    if (entity.visible) continue;
-    out.push(makeInvisibleEntry(entity));
+    if (tiles.has(entity)) out.push(makeTileEntry(entity));
+    else if (!entity.visible) out.push(makeInvisibleEntry(entity));
   }
-
   return out;
 }
 

@@ -77,6 +77,8 @@ function makeDescIndex(
     entityCount: memberIds.length,
     colormapLutIndices: new Map([["gray", 0]]),
     colormapNameByMember: new Map(memberIds.map((id) => [id, "gray"])),
+    written: new Map(),
+    bytes: new ArrayBuffer(0),
     ...overrides,
   };
 }

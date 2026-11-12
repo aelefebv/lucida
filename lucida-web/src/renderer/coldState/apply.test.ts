@@ -500,16 +500,16 @@ describe("Suite A — applyColdState", () => {
     expect(slot).toBeDefined();
     expect(viewOf(atlas).indirectionData[0]).toBe(slot);
 
-    // Target 0: sections for 0..3. The resident level-2 chunk stays mapped
-    // in level 2's section, so it fills the screen until level 0 arrives.
+    // Target 0: sections for 0..3. Levels 2 and 3 keep their cells, so the
+    // resident level-2 chunk fills the screen until level 0 arrives.
     const coldFine = makeCold([entryAt(0)]);
     ctx.state.currentColdState = coldFine;
     applyColdState(ctx, coldFine);
     expect(poolOf(ctx.state, "imgA:ch0", "detail", 0)).toBe(poolKey);
     const metas = viewOf(atlas).entityMetas.get("imgA:ch0")!;
-    expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 32], [2, 36], [3, 37]]);
-    expect(viewOf(atlas).indirectionData[36]).toBe(slot);
-    expect(viewOf(atlas).slotGridIdx[slot!]).toBe(36);
+    expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 2], [1, 34], [2, 0], [3, 1]]);
+    expect(viewOf(atlas).indirectionData[0]).toBe(slot);
+    expect(viewOf(atlas).slotGridIdx[slot!]).toBe(0);
 
     // Target 3: level 2 is now finer than the target. Its chunk stays in
     // the pool but is unmapped, which makes it the first eviction victim.
@@ -547,6 +547,70 @@ describe("Suite A — applyColdState", () => {
     expect(viewOf(atlas).dirty).toBe(true);
     expect(viewOf(atlas).indirectionData[0]).toBe(0xffffffff);
     expect(viewOf(atlas).slotGridIdx[slot]).toBe(-1);
+  });
+
+  it("moves only the sections of a member whose levels changed, and keeps the indirection buffer", () => {
+    const ctx = makeCtx(makeMockDevice());
+    const entry = (id: string, target: number) =>
+      makeEntry({ entityId: id, imageId: id, detailLevels: [target], levels: HALVING_PYRAMID });
+    const first = ingest(ctx, [entry("imgA", 2), entry("imgB", 2)]);
+    const poolKey = poolOf(ctx.state, "imgA:ch0", "detail", 2)!;
+    for (const member of ["imgA:ch0", "imgB:ch0"]) {
+      deliverVolume(ctx, chunkUpload(member, 2), first.epochs, poolKey, member);
+    }
+    const atlas = vol(ctx.state).get(poolKey)!;
+    const view = viewOf(atlas);
+    const slotA = atlas.slots.get("imgA:ch0|2/0/0/0/0/0")!;
+    const slotB = atlas.slots.get("imgB:ch0|2/0/0/0/0/0")!;
+    const [sectionA] = view.entityMetas.get("imgA:ch0")!;
+    const cellA = sectionA.offset;
+
+    // B goes finer: it gains sections for levels 0 and 1. A keeps its cells.
+    ingest(ctx, [entry("imgA", 2), entry("imgB", 0)]);
+    expect(view.entityMetas.get("imgA:ch0")![0]).toBe(sectionA);
+    expect(view.indirectionData[cellA]).toBe(slotA);
+    expect(view.slotGridIdx[slotA]).toBe(cellA);
+    const level2B = view.entityMetas.get("imgB:ch0")!.find((m) => m.level === 2)!;
+    expect(view.indirectionData[level2B.offset]).toBe(slotB);
+    const buffer = view.indirectionBuf;
+
+    // B goes back to level 2: its finer sections free their cells, and the
+    // indirection keeps its buffer, which every draw's bind group names.
+    ingest(ctx, [entry("imgA", 2), entry("imgB", 2)]);
+    expect(view.entityMetas.get("imgB:ch0")!.map((m) => m.level)).toEqual([2, 3]);
+    expect(view.indirectionData[cellA]).toBe(slotA);
+    expect(view.indirectionData[view.entityMetas.get("imgB:ch0")![0].offset]).toBe(slotB);
+    expect(view.indirectionBuf).toBe(buffer);
+    const mapped = [...view.indirectionData].filter((cell) => cell !== 0xffffffff).sort();
+    expect(mapped).toEqual([slotA, slotB].sort());
+  });
+
+  it("maps every resident chunk in its member's section for its level, after a sequence of view moves", () => {
+    const entry = (id: string, target: number) =>
+      makeEntry({ entityId: id, imageId: id, detailLevels: [target], levels: HALVING_PYRAMID });
+    const ids = ["imgA", "imgB", "imgC"];
+    const ctx = makeCtx(makeMockDevice());
+    const first = ingest(ctx, ids.map((id) => entry(id, 2)));
+    const poolKey = poolOf(ctx.state, "imgA:ch0", "detail", 2)!;
+    for (const id of ids) {
+      for (const level of [2, 3]) deliverVolume(ctx, chunkUpload(`${id}:ch0`, level), first.epochs, poolKey, `${id}:ch0`);
+    }
+    const atlas = vol(ctx.state).get(poolKey)!;
+    expect(atlas.slots.size).toBe(6);
+    for (const targets of [[3, 2, 1], [0, 3, 1], [3, 0, 3], [1, 1, 2], [2, 2, 2]]) {
+      ingest(ctx, ids.map((id, i) => entry(id, targets[i])));
+      const view = viewOf(atlas);
+      for (const [key, slot] of atlas.slots) {
+        const [member, chunkKey] = key.split("|");
+        const level = Number(chunkKey.split("/")[0]);
+        const meta = view.entityMetas.get(member)?.find((m) => m.level === level);
+        // Each upload is a level's chunk 0, so it maps at its section's first cell.
+        expect(view.slotGridIdx[slot], `${key} after ${targets}`).toBe(meta ? meta.offset : -1);
+        if (meta) expect(view.indirectionData[meta.offset], key).toBe(slot);
+      }
+      const mapped = [...view.indirectionData].filter((cell) => cell !== 0xffffffff);
+      expect(new Set(mapped).size, `${targets}`).toBe(mapped.length);
+    }
   });
 
   it("remaps only the pools whose sections moved", () => {
@@ -725,22 +789,22 @@ describe("Suite A — applyColdState", () => {
     const slot1 = atlas.slots.get("imgA:ch0|1/0/0/0/0/0|10")!;
     expect(viewOf(atlas).indirectionData[0]).toBe(slot1);
 
-    // Target 0: level 1's plane stays mapped in its own section while
-    // level 0 has nothing yet.
+    // Target 0: level 1's plane stays mapped in its own section, which keeps
+    // its cells, while level 0 has nothing yet.
     const coldFine = makeCold([entryAt(0)], { viewMode: "slice", currentZ: 20 });
     ctx.state.currentColdState = coldFine;
     applyColdState(ctx, coldFine);
     const metas = viewOf(atlas).entityMetas.get("imgA:ch0")!;
-    expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 0], [1, 16]]);
-    expect(viewOf(atlas).indirectionData[16]).toBe(slot1);
+    expect(metas.map((m) => [m.level, m.offset])).toEqual([[0, 4], [1, 0]]);
+    expect(viewOf(atlas).indirectionData[0]).toBe(slot1);
 
     // Level 0's chunk for the same plane is z=1; both levels map at once,
     // each against its own chunk-Z target.
     deliverSlice(ctx, sliceUpload(0, 1), coldFine.epochs, poolOf(ctx.state, "imgA:ch0", "detail", 0)!, "imgA:ch0");
     const slot0 = atlas.slots.get("imgA:ch0|0/0/0/1/0/0|20")!;
     applyColdState(ctx, coldFine);
-    expect(viewOf(atlas).indirectionData[0]).toBe(slot0);
-    expect(viewOf(atlas).indirectionData[16]).toBe(slot1);
+    expect(viewOf(atlas).indirectionData[4]).toBe(slot0);
+    expect(viewOf(atlas).indirectionData[0]).toBe(slot1);
   });
 
   // 7. Slice mode cold state

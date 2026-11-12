@@ -161,6 +161,18 @@ describe("buildActiveSet", () => {
     ]);
   });
 
+  it("keeps every entry where it is, in entity order, as tiles turn invisible", () => {
+    const entities = makeCollectionEntities("groupA", [
+      { id: "fA1", image: "imgA1", px: 40 },
+      { id: "fA2", image: "imgA2", px: 200 },
+      { id: "fA3", image: "imgA3", px: 200 },
+    ]);
+    const order = (set: ReturnType<typeof buildActiveSet>) => set.map((e) => [e.kind, e.entityId]);
+    expect(order(buildActiveSet(entities))).toEqual([["tile", "fA1"], ["tile", "fA2"], ["tile", "fA3"]]);
+    const moved = entities.map((e) => (e.entityId === "fA2" ? { ...e, visible: false } : e));
+    expect(order(buildActiveSet(moved))).toEqual([["tile", "fA1"], ["invisible", "fA2"], ["tile", "fA3"]]);
+  });
+
   it("invisible entity emits an InvisibleEntry at the coarsest level", () => {
     const entity = createSyntheticEntity({
       visible: false,
