@@ -154,3 +154,16 @@ export function makeProjectAnnotationToCss(
     return proj.length < 2 ? null : [proj[0] / dpr, proj[1] / dpr];
   };
 }
+
+/**
+ * `make` for each dataset, called once on its first use. A view draws the
+ * marks of several datasets, each placed its own way, so a frame snapshots
+ * each one's projection once and shares it among its marks.
+ */
+export function perDataset<T>(make: (datasetId: string) => T): (datasetId: string) => T {
+  const made = new Map<string, T>();
+  return (datasetId) => {
+    if (!made.has(datasetId)) made.set(datasetId, make(datasetId));
+    return made.get(datasetId) as T;
+  };
+}

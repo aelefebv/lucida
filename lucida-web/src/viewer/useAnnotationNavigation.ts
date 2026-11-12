@@ -172,8 +172,8 @@ export function useAnnotationNavigation({
     restoreCapturedView(pin);
   }, [annotations, restoreCapturedView]);
 
-  // The pin may live on an unselected dataset; selecting it mounts that
-  // dataset's overlay, so the restore waits a frame for the overlay's ref.
+  // The pin may live on an unselected dataset, which the restore selects
+  // first and gives a frame to land.
   const restoreDeepLinkPin = useCallback(
     (pin: Annotation, datasetId: string, onRestored: () => void) => {
       // Collapse `#a=` to `#view=` only after the restore, in the same frame, so

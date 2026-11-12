@@ -4,8 +4,10 @@
  *
  * Like `PeerCursors`, it is a `pointerEvents: none` layer whose markers are
  * re-projected from world space every frame, so pins stay glued to the data
- * across pan and zoom for every peer. Annotation state lives in the WASM scene
- * and is read through `scene.annotations(datasetId)`, never copied here.
+ * across pan and zoom for every peer. One overlay serves a view, with the
+ * marks of every dataset it draws, each placed as its dataset is. Annotation
+ * state lives in the WASM scene and is read through `scene.annotations`,
+ * never copied here.
  *
  * Editing is select-then-drag, so it needs neither hover nor a modifier key: a
  * tap or click selects one's own shape or pin, a selected one moves by
@@ -19,7 +21,7 @@ import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import { usePointerCoarse } from "../theme/viewport.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { Annotation } from "./annotationDocument.ts";
-import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
+import { useAnnotationOverlay, type Mark } from "./useAnnotationOverlay.ts";
 import { useAnnotationEditing, type AnnotationPlacement } from "./useAnnotationEditing.ts";
 import {
   capturePointer,
@@ -30,7 +32,8 @@ import {
   startLongPress,
   useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { makeFrameToScreen, pickFramePoint, viewPlane, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { makeFrameToScreen, perDataset, pickFramePoint, viewPlane, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { annotationPlacement } from "./annotationTarget.ts";
 import { planeCutting, type SlicePlane } from "../renderer/slicePlane.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
@@ -65,16 +68,23 @@ import type { AnnotationOverlayHandle } from "./annotationDocument.ts";
 import "./AnnotationOverlay.css";
 
 interface Props {
-  /** The dataset whose pins to show (annotations are scoped per dataset). */
-  datasetId: string;
+  /** Each dataset whose marks the view draws, in layer order, and where the
+   * view cuts it, with its T and channels. A pin off them renders
+   * off-context: dimmed, with a locator naming where it lives. */
+  viewContexts: ReadonlyMap<string, ViewContext>;
+  /** The selected layer, which a point from the menu goes on where the view
+   * draws it under the pointer. */
+  selectedDatasetId: string | null;
+  /** Select a layer, as a point placed on it does. */
+  onSelectDataset: (datasetId: string) => void;
+  /** Whether commands steer this view, so Delete and Escape act on its
+   * selection. */
+  active: boolean;
   wasmSceneRef: RefObject<WasmScene | null>;
   /** The view whose pins show, and the element over its rectangle, which they sit in. */
   surface: ViewSurface;
-  /** Bumped whenever the remote document changes; re-reads the pin set. */
+  /** Bumped whenever the remote document changes; re-reads the pins. */
   version: number;
-  /** Where the view cuts the layer, and its T and channels. A pin off them
-   * renders off-context: dimmed, with a locator naming where it lives. */
-  viewContext: ViewContext;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
    * per-connection `myId`, so a pin authored here stays mine across
    * rejoin. Gates move, reshape, and delete. */
@@ -249,7 +259,7 @@ function setShapeGeometry(el: SVGLineElement | SVGPolygonElement, pts: ScreenPoi
   }
 }
 
-export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ datasetId, wasmSceneRef, surface, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay({ viewContexts, selectedDatasetId, onSelectDataset, active, wasmSceneRef, surface, version, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   // The view's own element: its pixels and its pointer events.
   const { element } = surface;
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -259,22 +269,24 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // The selected shape's own hit target, wider than its stroke, which a drag
   // moves. At most one shape is selected.
   const bodyRef = useRef<SVGLineElement | SVGPolygonElement | null>(null);
-  // The pin set, open thread, and selection, with the lifecycle shared with
+  // The marks, open thread, and selection, with the lifecycle shared with
   // the 3D overlay.
   const overlay = useAnnotationOverlay({
     wasmSceneRef,
-    datasetId,
+    datasetIds: [...viewContexts.keys()],
     version,
     visible,
   });
-  const { annotations, annotationsRef, openPinId, setOpenPinId, selectedId, setSelectedId } = overlay;
-  const editing = useAnnotationEditing({ state: overlay, datasetId, myId, wasmSceneRef, sendCommand, onDocumentChanged });
+  const { marks, marksRef, openPinId, setOpenPinId, selectedId, setSelectedId } = overlay;
+  const editing = useAnnotationEditing({ state: overlay, myId, active, wasmSceneRef, sendCommand, onDocumentChanged, onSelectDataset });
   const coarse = usePointerCoarse();
   const [menu, setMenu] = useState<CanvasMenuRequest | null>(null);
-  // The plane the view cuts, across which its pins move and on which its
-  // shapes show handles.
-  const plane = planeCutting(viewContext.cut?.axis ?? "z");
-  const layerRef = useRef<HTMLDivElement>(null);
+  // Marks are read only for the datasets in `viewContexts`.
+  const contextOf = ({ datasetId }: Mark): ViewContext => viewContexts.get(datasetId)!;
+  // The axis the view cuts a mark's dataset along, and the plane it cuts
+  // there, across which the mark moves and on which a shape shows handles.
+  const cutAxisOf = (mark: Mark) => contextOf(mark).cut?.axis ?? "z";
+  const planeOf = (mark: Mark) => planeCutting(cutAxisOf(mark));
 
   // Mirrors for the RAF tick, written after each commit.
   const selectedIdRef = useRef(selectedId);
@@ -350,24 +362,18 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // Drop the hover if its shape vanishes from under the cursor, so its handles
   // can't linger as orphans.
   useEffect(() => {
-    if (activeShapeId !== null && !annotations.some((p) => p.id === activeShapeId)) {
+    if (activeShapeId !== null && !marks.some(({ pin }) => pin.id === activeShapeId)) {
       // Deliberate reset driven by external data, not derived render state.
 
       setActiveShapeId(null);
     }
-  }, [annotations, activeShapeId]);
+  }, [marks, activeShapeId]);
 
-  /** The point under the pointer in the dataset's frame, on the view's
-   * plane, tolerating an unready scene. */
-  const pointerPoint = (e: ClientPoint): FramePoint | null => {
+  /** The pointer's place across and down the view's plane in `datasetId`'s
+   * frame, where a drag moves what it holds, tolerating an unready scene. */
+  const pointerOnPlane = (datasetId: string, e: ClientPoint, on: SlicePlane): [number, number] | null => {
     const scene = wasmSceneRef.current;
-    return scene ? pickFramePoint(scene, surface, datasetId, e) : null;
-  };
-
-  /** The pointer's place across and down the view's plane, where a drag
-   * moves what it holds. */
-  const pointerOnPlane = (e: ClientPoint, on: SlicePlane): [number, number] | null => {
-    const point = pointerPoint(e);
+    const point = scene && pickFramePoint(scene, surface, datasetId, e);
     return point && onPlane(point, on);
   };
 
@@ -375,27 +381,33 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   const ownShapeAt = (point: ClientPoint, tolerance: number): string | null => {
     const scene = wasmSceneRef.current;
     if (!scene) return null;
-    const project = makeFrameToScreen(scene, surface, datasetId);
+    const projectOf = perDataset((datasetId) => makeFrameToScreen(scene, surface, datasetId));
     const rect = element.getBoundingClientRect();
-    const shapes = annotationsRef.current
-      .filter((pin) => isOwnHandledShape(pin, myId))
-      .map((pin) => ({ id: pin.id, points: annotationVertices(pin).map(project), closed: isClosedShape(pin) }));
+    const shapes = marksRef.current
+      .filter(({ pin }) => isOwnHandledShape(pin, myId))
+      .map(({ datasetId, pin }) => ({
+        id: pin.id,
+        points: annotationVertices(pin).map(projectOf(datasetId)),
+        closed: isClosedShape(pin),
+      }));
     return hitTestShapes([point.clientX - rect.left, point.clientY - rect.top], shapes, tolerance);
   };
 
-  /** Open the canvas menu at a client point. A press on one's own annotation
-   * selects it, so the menu can delete it; a press elsewhere deselects. */
+  /** Open the canvas menu at a client point, adding to the layer the view
+   * draws under it. A press on one's own annotation selects it, so the menu
+   * can delete it; a press elsewhere deselects. */
   const openMenu = (point: ClientPoint, pointerType: string, pinId?: string) => {
     if (visible) {
       if (pinId !== undefined) {
-        const pin = annotationsRef.current.find((p) => p.id === pinId);
-        setSelectedId(pin && pin.author === String(myId) ? pinId : null);
+        const mark = marksRef.current.find(({ pin }) => pin.id === pinId);
+        setSelectedId(mark && mark.pin.author === String(myId) ? pinId : null);
       } else {
         setSelectedId(ownShapeAt(point, pointerType === "touch" ? TOUCH_TAP_TOLERANCE : TAP_TOLERANCE));
       }
     }
-    const at = pointerPoint(point);
-    setMenu({ x: point.clientX, y: point.clientY, target: at && { position: [at[0], at[1]], z: at[2] } });
+    const scene = wasmSceneRef.current;
+    const target = scene && annotationPlacement(scene, surface, point, selectedDatasetId);
+    setMenu({ x: point.clientX, y: point.clientY, target });
   };
 
   // Read by the canvas listener, which binds once.
@@ -435,13 +447,13 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     ref,
     () => ({
       focusPin: (pinId: string) => {
-        const pin = annotationsRef.current.find((p) => p.id === pinId);
-        if (!pin) return;
-        setOpenPinId(pin.id);
+        const mark = marksRef.current.find(({ pin }) => pin.id === pinId);
+        if (!mark) return;
+        setOpenPinId(pinId);
         const scene = wasmSceneRef.current;
         if (scene) {
           // Pan the pin's place on the view's plane to the view's middle.
-          const [x, y] = makeFrameToScreen(scene, surface, datasetId)(pinStart(pin));
+          const [x, y] = makeFrameToScreen(scene, surface, mark.datasetId)(pinStart(mark.pin));
           const dpr = devicePixelRatio;
           applyViewportCommand(scene, { type: "pan", dx: (x - element.clientWidth / 2) * dpr, dy: (y - element.clientHeight / 2) * dpr });
           // Repaint under the recentered camera; the pull-based loop won't
@@ -451,7 +463,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       },
       openContextMenu: (at: ClientPoint) => openMenuRef.current(at, "touch"),
     }),
-    [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId, datasetId, surface, element],
+    [wasmSceneRef, onViewportChanged, marksRef, setOpenPinId, surface, element],
   );
 
   // A new or changed pin needs a frame to be placed.
@@ -459,14 +471,11 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   useEffect(() => {
     const tick = () => {
       const scene = wasmSceneRef.current;
-      // A view that lays the dataset out apart from its frame, a side view
-      // of a collection, has no place for its pins.
-      const drawn = scene?.draws_annotations(surface.view, datasetId) ?? false;
-      if (layerRef.current) layerRef.current.style.display = drawn ? "" : "none";
-      if (scene && drawn) {
-        // Frame to screen in CSS px, the inverse of the pick, with the camera
-        // and the view's plane snapshotted once per frame.
-        const project = makeFrameToScreen(scene, surface, datasetId);
+      if (scene) {
+        // Frame to screen in CSS px, the inverse of the pick, with the camera,
+        // the view's plane and each dataset's placement snapshotted once per
+        // frame.
+        const projectOf = perDataset((datasetId) => makeFrameToScreen(scene, surface, datasetId));
         const on = viewPlane(scene, surface);
 
         // A pin being moved previews at the pointer, carrying its shape along;
@@ -478,7 +487,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         const resizingId = resize?.moved && resize.preview ? resize.pinId : null;
         const outset = handleOutsetRef.current;
 
-        for (const pin of annotationsRef.current) {
+        for (const { datasetId, pin } of marksRef.current) {
+          const project = projectOf(datasetId);
           // Geometry, the dot, and handles all use these, so they stay
           // coincident.
           let liveVertices: FrameVertices | null = shapeVertices(pin);
@@ -561,12 +571,12 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       }
     };
     return frameClock.subscribe(tick);
-  }, [surface, wasmSceneRef, element, annotationsRef, datasetId]);
+  }, [surface, wasmSceneRef, element, marksRef]);
 
   /** A right-click on a marker or shape opens the canvas menu on it. A finger's
    * long press is timed by the gesture instead, so its native menu is only
    * suppressed. */
-  const onAnnotationContextMenu = (pin: Annotation) => (e: ReactMouseEvent) => {
+  const onAnnotationContextMenu = ({ pin }: Mark) => (e: ReactMouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     const pointerType = (e.nativeEvent as PointerEvent).pointerType ?? "mouse";
@@ -582,12 +592,14 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
 
   /** Where a pin moved to the pointer goes: under it on the view's plane, at
    * its own place along the cut, so a move never re-slices it. */
-  const movedAnchor = (pin: Annotation, e: ClientPoint): FramePoint | null => {
-    const at = pointerOnPlane(e, plane);
-    return at && withOnPlane(pinStart(pin), at, plane);
+  const movedAnchor = (mark: Mark, e: ClientPoint): FramePoint | null => {
+    const plane = planeOf(mark);
+    const at = pointerOnPlane(mark.datasetId, e, plane);
+    return at && withOnPlane(pinStart(mark.pin), at, plane);
   };
 
-  const onPinPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerDown = (mark: Mark) => (e: ReactPointerEvent) => {
+    const { pin } = mark;
     if (e.button !== 0) return;
     // Ignore a second pointer mid-gesture so the first completes.
     if (dragRef.current || handleDragRef.current) return;
@@ -628,7 +640,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     capturePointer(target, e.pointerId);
   };
 
-  const onPinPointerMove = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerMove = (mark: Mark) => (e: ReactPointerEvent) => {
+    const { pin } = mark;
     const drag = dragRef.current;
     // No pointerId check: capture already guarantees it in a browser, and some
     // harnesses don't echo the id on every event.
@@ -668,10 +681,11 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     }
 
     // Move: the tick previews the pin under the pointer, and release commits.
-    drag.preview = movedAnchor(pin, e);
+    drag.preview = movedAnchor(mark, e);
   };
 
-  const onPinPointerUp = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerUp = (mark: Mark) => (e: ReactPointerEvent) => {
+    const { datasetId, pin } = mark;
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
     drag.cancelLongPress();
@@ -690,13 +704,13 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     if (drag.mode !== "move") return;
     // Emit one move_annotation.
     const scene = wasmSceneRef.current;
-    const to = movedAnchor(pin, e);
+    const to = movedAnchor(mark, e);
     if (!scene || !to) return;
     emitMoveAnnotation(scene, { datasetId, id: pin.id, position: [to[0], to[1]], z: to[2] }, sendCommand);
     onDocumentChanged();
   };
 
-  const onPinPointerCancel = (pin: Annotation) => (e: ReactPointerEvent) => {
+  const onPinPointerCancel = ({ pin }: Mark) => (e: ReactPointerEvent) => {
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
     // A cancelled gesture (e.g. the OS stealing the pointer) never moves the pin;
@@ -710,14 +724,16 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   // so does the selected shape's body. Neither pans: release emits one
   // `move_annotation`. The same handlers serve boxes and lines.
 
-  const beginShapeDrag = (pin: Annotation, handle: HandleDrag["handle"], e: ReactPointerEvent) => {
+  const beginShapeDrag = (mark: Mark, handle: HandleDrag["handle"], e: ReactPointerEvent) => {
+    const { pin } = mark;
     // Belt-and-suspenders author gate (handles aren't rendered for peers).
     if (!isOwnHandledShape(pin, myId)) return;
     if (e.button !== 0) return;
     // Let an in-flight gesture finish rather than racing it.
     if (dragRef.current || handleDragRef.current) return;
+    const plane = planeOf(mark);
     const base = shapeVertices(pin);
-    const startWorld = pointerOnPlane(e, plane);
+    const startWorld = pointerOnPlane(mark.datasetId, e, plane);
     if (!base || !startWorld) return;
     // Handles reshape a shape only on the plane it was drawn on.
     if (handle !== "body" && !reshapesOn(pin, plane)) return;
@@ -757,13 +773,13 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   };
 
   const onHandlePointerDown =
-    (pin: Annotation, handle: BoxHandle | LineHandle) => (e: ReactPointerEvent) =>
-      beginShapeDrag(pin, handle, e);
+    (mark: Mark, handle: BoxHandle | LineHandle) => (e: ReactPointerEvent) =>
+      beginShapeDrag(mark, handle, e);
 
-  const onBodyPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => beginShapeDrag(pin, "body", e);
+  const onBodyPointerDown = (mark: Mark) => (e: ReactPointerEvent) => beginShapeDrag(mark, "body", e);
 
   const onHandlePointerMove =
-    (pin: Annotation) => (e: ReactPointerEvent) => {
+    ({ datasetId, pin }: Mark) => (e: ReactPointerEvent) => {
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       if (!drag.moved) {
@@ -774,12 +790,12 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       }
       // Recompute from the press-time base, never the running preview, so the
       // held vertex doesn't drift.
-      const at = pointerOnPlane(e, drag.plane);
+      const at = pointerOnPlane(datasetId, e, drag.plane);
       if (at) drag.preview = dragShape(drag, at);
     };
 
   const onHandlePointerUp =
-    (pin: Annotation) => (e: ReactPointerEvent) => {
+    ({ datasetId, pin }: Mark) => (e: ReactPointerEvent) => {
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       drag.cancelLongPress();
@@ -793,7 +809,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       if (drag.handle !== "body") scheduleHideHandles(pin.id);
       // A press that never crossed the slop is a no-op; a handle has no click.
       if (!drag.moved) return;
-      const at = pointerOnPlane(e, drag.plane);
+      const at = pointerOnPlane(datasetId, e, drag.plane);
       const scene = wasmSceneRef.current;
       if (!scene || !at) return;
       const { position, end } = dragShape(drag, at);
@@ -809,7 +825,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     };
 
   const onHandlePointerCancel =
-    (pin: Annotation) => (e: ReactPointerEvent) => {
+    ({ pin }: Mark) => (e: ReactPointerEvent) => {
       const drag = handleDragRef.current;
       if (!drag || drag.pinId !== pin.id) return;
       drag.cancelLongPress();
@@ -827,7 +843,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     return scene ? buildAnnotationView(scene) : null;
   };
   const addPoint = (at: AnnotationPlacement, openThread: boolean) => {
-    editing.addPoint(at, { t: viewContext.t, c: viewContext.channels[0] ?? 0, view: viewForNewPoint(), openThread });
+    // The menu targets only a layer whose marks the view draws.
+    const context = viewContexts.get(at.datasetId);
+    if (!context) return;
+    editing.addPoint(at, { t: context.t, c: context.channels[0] ?? 0, view: viewForNewPoint(), openThread });
     onViewportChanged?.();
   };
 
@@ -836,27 +855,29 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       request={menu}
       onClose={() => setMenu(null)}
       annotationsVisible={visible}
-      selected={editing.selected}
+      selected={editing.selected?.pin ?? null}
       onComment={(at) => addPoint(at, true)}
       onDropPoint={(at) => addPoint(at, false)}
-      onDelete={editing.remove}
+      onDelete={editing.removeSelected}
     />
   );
 
   // After every hook, so hook order stays stable.
   if (!visible) return contextMenu;
 
-  const showsHandles = (pin: Annotation) =>
-    (activeShapeId === pin.id || selectedId === pin.id) && openPinId !== pin.id && reshapesOn(pin, plane);
-  const cutAxis = viewContext.cut?.axis ?? "z";
-  const selectedShape = annotations.find((p) => p.id === selectedId && isOwnHandledShape(p, myId)) ?? null;
+  const showsHandles = (mark: Mark) => {
+    const { pin } = mark;
+    return (activeShapeId === pin.id || selectedId === pin.id) && openPinId !== pin.id && reshapesOn(pin, planeOf(mark));
+  };
+  const selectedShape = marks.find(({ pin }) => pin.id === selectedId && isOwnHandledShape(pin, myId)) ?? null;
 
   return (
-    <div ref={layerRef} className="lc-annotation-layer">
+    <div className="lc-annotation-layer">
       {/* One SVG element per line or box, beneath the DOM markers. The tick
           rewrites their coordinates every frame. */}
       <svg className="lc-annotation-svg" width="100%" height="100%">
-        {annotations.map((pin) => {
+        {marks.map((mark) => {
+          const { pin } = mark;
           if (pin.kind !== "line" && pin.kind !== "box") return null;
           if (!pin.end) return null;
           // Only an own box or line reveals handles on hover; a peer's stays
@@ -867,7 +888,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             "data-testid": `annot-shape-${pin.id}`,
             "data-author": pin.author === String(myId) ? "own" : "peer",
             // Dimmed off-context, like the dot.
-            "data-off-context": isOffContext(pin, viewContext) || undefined,
+            "data-off-context": isOffContext(pin, contextOf(mark)) || undefined,
             "data-hoverable": hoverable || undefined,
             "data-selected": selectedId === pin.id || undefined,
             onPointerEnter: hoverable ? () => revealHandles(pin.id) : undefined,
@@ -877,12 +898,12 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             // A mouse keeps the plain hover and click.
             onPointerDown: hoverable
               ? (e: ReactPointerEvent) => {
-                  if (e.pointerType === "touch") onPinPointerDown(pin)(e);
+                  if (e.pointerType === "touch") onPinPointerDown(mark)(e);
                 }
               : undefined,
-            onPointerMove: hoverable ? onPinPointerMove(pin) : undefined,
-            onPointerUp: hoverable ? onPinPointerUp(pin) : undefined,
-            onPointerCancel: hoverable ? onPinPointerCancel(pin) : undefined,
+            onPointerMove: hoverable ? onPinPointerMove(mark) : undefined,
+            onPointerUp: hoverable ? onPinPointerUp(mark) : undefined,
+            onPointerCancel: hoverable ? onPinPointerCancel(mark) : undefined,
             onClick: hoverable
               ? () => {
                   if (suppressClickRef.current === pin.id) {
@@ -892,7 +913,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                   setSelectedId(pin.id);
                 }
               : undefined,
-            onContextMenu: hoverable ? onAnnotationContextMenu(pin) : undefined,
+            onContextMenu: hoverable ? onAnnotationContextMenu(mark) : undefined,
           };
           if (isClosedShape(pin)) {
             return (
@@ -925,9 +946,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         {/* The selected shape's drag target: its inside and a band around its
             stroke wide enough for a finger. */}
         {selectedShape && (() => {
+          const { pin } = selectedShape;
           const bodyProps = {
             className: "lc-annotation-body",
-            "data-testid": `annot-body-${selectedShape.id}`,
+            "data-testid": `annot-body-${pin.id}`,
             ref: (el: SVGLineElement | SVGPolygonElement | null) => {
               bodyRef.current = el;
             },
@@ -937,10 +959,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             onPointerCancel: onHandlePointerCancel(selectedShape),
             onContextMenu: onAnnotationContextMenu(selectedShape),
           };
-          return isClosedShape(selectedShape) ? (
-            <polygon key={selectedShape.id} {...bodyProps} points="" />
+          return isClosedShape(pin) ? (
+            <polygon key={pin.id} {...bodyProps} points="" />
           ) : (
-            <line key={selectedShape.id} {...bodyProps} x1={0} y1={0} x2={0} y2={0} />
+            <line key={pin.id} {...bodyProps} x1={0} y1={0} x2={0} y2={0} />
           );
         })()}
       </svg>
@@ -948,9 +970,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
           because they need pointer capture. They render only while the box is
           hovered or selected and its thread is closed, so an idle box has no
           `annot-resize-<id>-<h>` nodes and an open thread is never covered. */}
-      {annotations.map((pin) => {
+      {marks.map((mark) => {
+        const { pin } = mark;
         if (!isOwnBox(pin, myId)) return null;
-        if (!showsHandles(pin)) return null;
+        if (!showsHandles(mark)) return null;
         return (coarse ? COARSE_BOX_HANDLES : BOX_HANDLES).map((h) => (
           <div
             key={`${pin.id}:${h}`}
@@ -961,11 +984,11 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
               if (el) handleRefs.current.set(`${pin.id}:${h}`, el);
               else handleRefs.current.delete(`${pin.id}:${h}`);
             }}
-            onPointerDown={onHandlePointerDown(pin, h)}
-            onPointerMove={onHandlePointerMove(pin)}
-            onPointerUp={onHandlePointerUp(pin)}
-            onPointerCancel={onHandlePointerCancel(pin)}
-            onContextMenu={onAnnotationContextMenu(pin)}
+            onPointerDown={onHandlePointerDown(mark, h)}
+            onPointerMove={onHandlePointerMove(mark)}
+            onPointerUp={onHandlePointerUp(mark)}
+            onPointerCancel={onHandlePointerCancel(mark)}
+            onContextMenu={onAnnotationContextMenu(mark)}
             // Handles join the shape's hover region: entering cancels a pending
             // hide, leaving re-arms it.
             onPointerEnter={() => revealHandles(pin.id)}
@@ -976,9 +999,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
       })}
       {/* Endpoint handles: two per own line. Dragging one moves only that end.
           Same gating as the box handles. */}
-      {annotations.map((pin) => {
+      {marks.map((mark) => {
+        const { pin } = mark;
         if (!isOwnLine(pin, myId)) return null;
-        if (!showsHandles(pin)) return null;
+        if (!showsHandles(mark)) return null;
         return LINE_HANDLES.map((h) => (
           <div
             key={`${pin.id}:${h}`}
@@ -989,11 +1013,11 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
               if (el) handleRefs.current.set(`${pin.id}:${h}`, el);
               else handleRefs.current.delete(`${pin.id}:${h}`);
             }}
-            onPointerDown={onHandlePointerDown(pin, h)}
-            onPointerMove={onHandlePointerMove(pin)}
-            onPointerUp={onHandlePointerUp(pin)}
-            onPointerCancel={onHandlePointerCancel(pin)}
-            onContextMenu={onAnnotationContextMenu(pin)}
+            onPointerDown={onHandlePointerDown(mark, h)}
+            onPointerMove={onHandlePointerMove(mark)}
+            onPointerUp={onHandlePointerUp(mark)}
+            onPointerCancel={onHandlePointerCancel(mark)}
+            onContextMenu={onAnnotationContextMenu(mark)}
             // Same hover region as the box handles.
             onPointerEnter={() => revealHandles(pin.id)}
             onPointerLeave={() => scheduleHideHandles(pin.id)}
@@ -1002,14 +1026,17 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
           />
         ));
       })}
-      {annotations.map((pin) => {
+      {marks.map((mark) => {
+        const { datasetId, pin } = mark;
         const mine = pin.author === String(myId);
         const selected = mine && selectedId === pin.id;
         const comments = pin.comments ?? [];
         const isOpen = openPinId === pin.id;
-        // Pure in pin and viewContext, so navigating to the pin's Z/T/C restores
-        // it with no state to clear. The marker stays clickable.
-        const offCtx = isOffContext(pin, viewContext);
+        // Pure in pin and its dataset's view context, so navigating to the
+        // pin's Z/T/C restores it with no state to clear. The marker stays
+        // clickable.
+        const offCtx = isOffContext(pin, contextOf(mark));
+        const cutAxis = cutAxisOf(mark);
         return (
           <div
             key={pin.id}
@@ -1052,11 +1079,11 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                   ? `Pin by you — click for thread; drag once selected, or Shift+drag, to move`
                   : `Pin by ${pin.author} — click for thread`
               }
-              onPointerDown={onPinPointerDown(pin)}
-              onPointerMove={onPinPointerMove(pin)}
-              onPointerUp={onPinPointerUp(pin)}
-              onPointerCancel={onPinPointerCancel(pin)}
-              onContextMenu={onAnnotationContextMenu(pin)}
+              onPointerDown={onPinPointerDown(mark)}
+              onPointerMove={onPinPointerMove(mark)}
+              onPointerUp={onPinPointerUp(mark)}
+              onPointerCancel={onPinPointerCancel(mark)}
+              onContextMenu={onAnnotationContextMenu(mark)}
               onClick={() => {
                 // Swallow the click after a real drag or a stationary
                 // Shift-press, once.

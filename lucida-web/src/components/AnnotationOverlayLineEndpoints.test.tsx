@@ -73,11 +73,13 @@ function renderOverlay(opts: { pins: Annotation[]; myId?: string }) {
   const canvas = makeCanvas();
   render(
     <AnnotationOverlay
-      datasetId="wds-1"
+      selectedDatasetId="wds-1"
+      active
+      onSelectDataset={() => {}}
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: canvas }}
       version={0}
-      viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+      viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {

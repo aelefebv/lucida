@@ -62,11 +62,13 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
 
     const { findByTestId } = render(
       <AnnotationOverlay
-        datasetId="ds-1"
+        selectedDatasetId="ds-1"
+        active
+        onSelectDataset={() => {}}
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={1}
-        viewContext={{ cut: { axis: "z", start: 0, end: 1 }, t: 0, channels: [0] }}
+        viewContexts={new Map([["ds-1", { cut: { axis: "z", start: 0, end: 1 }, t: 0, channels: [0] }]])}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -104,11 +106,13 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
 
     const { findByTestId } = render(
       <AnnotationOverlay
-        datasetId="ds-1"
+        selectedDatasetId="ds-1"
+        active
+        onSelectDataset={() => {}}
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={1}
-        viewContext={{ cut: { axis: "z", start: 0, end: 1 }, t: 0, channels: [0] }}
+        viewContexts={new Map([["ds-1", { cut: { axis: "z", start: 0, end: 1 }, t: 0, channels: [0] }]])}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}

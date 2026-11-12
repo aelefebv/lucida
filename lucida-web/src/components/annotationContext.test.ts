@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
+import type { WasmScene } from "lucida-core";
 import type { Annotation } from "./annotationDocument.ts";
-import { isOffContext, offContextLabel, pinLabel, viewCut, type ViewContext } from "./annotationContext.ts";
+import { isOffContext, offContextLabel, pinLabel, viewContextsOf, viewCut, type ViewContext } from "./annotationContext.ts";
 import type { ResolvedLayer } from "../resolvedLayers.ts";
+import { resolvedLayer } from "../resolvedLayerFixtures.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 
 /** A point pin at the given z/t/c (other fields irrelevant to the context calc). */
@@ -152,5 +154,41 @@ describe("annotationContext — pinLabel (the marker's accessible name)", () => 
 
   it("names where a pin off the view lives", () => {
     expect(pinLabel(pin(4, 0, 0), true, true)).toBe("Pin by you, Z 5 · T 1 · Channel 1");
+  });
+});
+
+describe("annotationContext — viewContextsOf (the datasets whose marks a view draws)", () => {
+  /** A scene whose view resolves `alpha` at Z 2, `beta` at Z 5 showing
+   * channel 1, and `tiles`, a collection a side view lays out in cells. */
+  function scene(plane: string): WasmScene {
+    return {
+      epochs: () => "no epochs",
+      resolved_layers: () =>
+        JSON.stringify([
+          resolvedLayer("alpha", [0], { z_range: { start: 2, end: 3 }, y: 7 }),
+          resolvedLayer("beta", [1], { z_range: { start: 5, end: 6 }, y: 9 }),
+          resolvedLayer("tiles"),
+        ]),
+      slice_plane: () => plane,
+      draws_annotations: (_view: number, datasetId: string) => plane === "xy" || datasetId !== "tiles",
+    } as unknown as WasmScene;
+  }
+
+  it("holds every dataset the view draws, in its order, each cut where the view cuts it", () => {
+    const contexts = viewContextsOf(scene("xy"), { id: 1, draws: ["beta", "alpha", "tiles"], cameraMode: "slice" }, 3);
+    expect([...contexts.keys()]).toEqual(["beta", "alpha", "tiles"]);
+    expect(contexts.get("alpha")).toEqual({ cut: { axis: "z", start: 2, end: 3 }, t: 3, channels: [0] });
+    expect(contexts.get("beta")).toEqual({ cut: { axis: "z", start: 5, end: 6 }, t: 3, channels: [1] });
+  });
+
+  it("leaves out a dataset the view lays out apart from its frame", () => {
+    const contexts = viewContextsOf(scene("xz"), { id: 1, draws: ["alpha", "tiles"], cameraMode: "slice" }, 0);
+    expect([...contexts.keys()]).toEqual(["alpha"]);
+    expect(contexts.get("alpha")?.cut).toEqual({ axis: "y", start: 7, end: 8 });
+  });
+
+  it("cuts nothing in a volume view", () => {
+    const contexts = viewContextsOf(scene("xy"), { id: 1, draws: ["alpha"], cameraMode: "arcball" }, 0);
+    expect(contexts.get("alpha")).toEqual({ cut: null, t: 0, channels: [0] });
   });
 });

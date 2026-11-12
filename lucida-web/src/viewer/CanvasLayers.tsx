@@ -23,8 +23,7 @@ import { VolumeViewer } from "../components/VolumeViewer.tsx";
 import { useEngine } from "../engine.ts";
 import type { PeerStore } from "../peerStore.ts";
 import { useSceneView } from "../hooks/useSceneView.ts";
-import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
-import { viewCut, type ViewContext } from "../components/annotationContext.ts";
+import { viewContextsOf } from "../components/annotationContext.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CanvasSize } from "../shell/CanvasStage.tsx";
 import type { DatasetState } from "../types.ts";
@@ -39,7 +38,7 @@ import { FourUpPlanes, useFollowTile } from "./planeLines.ts";
 import { Hover } from "./hover.ts";
 import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
-import type { SlicePlane, SpatialAxis } from "../renderer/slicePlane.ts";
+import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
 import type { UserTransformActions } from "../hooks/useUserTransforms.ts";
 
@@ -154,29 +153,31 @@ export function CanvasLayers({
   const [panesRoot, setPanesRoot] = useState<HTMLDivElement | null>(null);
   const planes = useMemo(() => (wasmScene ? new FourUpPlanes(wasmScene, engine.store) : null), [wasmScene, engine.store]);
   useFollowTile(planes, panesRoot, layout === "four_up");
-  const overlays = hasDatasets && selectedDatasetId && wasmScene && canvas
-    ? { datasetId: selectedDatasetId }
-    : null;
-  // The overlays draw the selected layer's pins, which lie on its own planes,
-  // so where each view cuts that layer and the channels it shows there decide
-  // which pins are in context. A volume view cuts none.
-  const viewContextOf = (pane: ViewPane): ViewContext => {
-    const layer = overlays && wasmScene ? readResolvedLayers(wasmScene, pane.id).get(overlays.datasetId) : undefined;
-    const plane = wasmScene?.slice_plane(pane.id) as SlicePlane | undefined;
-    return {
-      cut: pane.cameraMode === "slice" && layer && plane ? viewCut(layer, plane) : null,
-      t,
-      channels: shownChannels(layer),
-    };
-  };
+  const annotationScene = hasDatasets && wasmScene && canvas ? wasmScene : null;
   const nameOf = (datasetId: string) => datasets.get(datasetId)?.name ?? datasetId;
 
-  // What a view's pane holds: its viewer, in its own mode; the annotations of
-  // the selected layer, where the view draws it; and in the active view the
-  // draft and the peer cursors. Only the active view's overlay opens a menu.
+  // What a view's pane holds: its viewer, in its own mode; the marks of the
+  // datasets it draws, with its own menu and selection; and in the active
+  // view the draft and the peer cursors.
   const paneContent = (pane: ViewPane, surface: ViewSurface) => {
     const slice = pane.cameraMode === "slice";
-    const pins = overlays !== null && pane.draws.includes(overlays.datasetId);
+    const overlay = annotationScene && {
+      viewContexts: viewContextsOf(annotationScene, pane, t),
+      selectedDatasetId,
+      onSelectDataset,
+      active: pane.active,
+      wasmSceneRef: scene.wasmSceneRef,
+      surface,
+      version: remoteDocumentVersion,
+      myId: annotationAuthor,
+      sendCommand,
+      onDocumentChanged,
+      onViewportChanged,
+      visible: annotationsVisible,
+      tool,
+      mentionCandidates,
+      onGoToAuthorView,
+    };
     return (
       <>
         {viewers && slice && (
@@ -221,55 +222,21 @@ export function CanvasLayers({
             onLongPress={openContextMenu3d}
           />
         )}
-        {overlays && pane.active && (
+        {annotationScene && pane.active && (
           <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
         )}
-        {viewers && overlays && slice && tool === "move" && userTransforms.canEdit &&
-          pane.draws.includes(overlays.datasetId) && (
+        {viewers && selectedDatasetId && slice && tool === "move" && userTransforms.canEdit &&
+          pane.draws.includes(selectedDatasetId) && (
           <MoveScaleOverlay
-            datasetId={overlays.datasetId}
-            name={nameOf(overlays.datasetId)}
+            datasetId={selectedDatasetId}
+            name={nameOf(selectedDatasetId)}
             scene={viewers.scene}
             surface={surface}
             actions={userTransforms}
           />
         )}
-        {overlays && pins && slice && (
-          <AnnotationOverlay
-            ref={pane.active ? overlay2dRef : undefined}
-            datasetId={overlays.datasetId}
-            wasmSceneRef={scene.wasmSceneRef}
-            surface={surface}
-            version={remoteDocumentVersion}
-            viewContext={viewContextOf(pane)}
-            myId={annotationAuthor}
-            sendCommand={sendCommand}
-            onDocumentChanged={onDocumentChanged}
-            onViewportChanged={onViewportChanged}
-            visible={annotationsVisible}
-            tool={tool}
-            mentionCandidates={mentionCandidates}
-            onGoToAuthorView={onGoToAuthorView}
-          />
-        )}
-        {overlays && pins && !slice && (
-          <AnnotationOverlay3D
-            ref={pane.active ? overlay3dRef : undefined}
-            datasetId={overlays.datasetId}
-            wasmSceneRef={scene.wasmSceneRef}
-            surface={surface}
-            version={remoteDocumentVersion}
-            viewContext={viewContextOf(pane)}
-            myId={annotationAuthor}
-            sendCommand={sendCommand}
-            onDocumentChanged={onDocumentChanged}
-            onViewportChanged={onViewportChanged}
-            visible={annotationsVisible}
-            tool={tool}
-            mentionCandidates={mentionCandidates}
-            onGoToAuthorView={onGoToAuthorView}
-          />
-        )}
+        {overlay && slice && <AnnotationOverlay ref={pane.active ? overlay2dRef : undefined} {...overlay} />}
+        {overlay && !slice && <AnnotationOverlay3D ref={pane.active ? overlay3dRef : undefined} {...overlay} />}
         {pane.active && (
           <PeerCursorLayer
             peerStore={peerStore}

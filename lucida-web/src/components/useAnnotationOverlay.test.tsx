@@ -31,18 +31,18 @@ function pin(id: string): Annotation {
 
 function renderOverlayState(opts: {
   scene: WasmScene;
-  datasetId?: string;
+  datasetIds?: string[];
   version?: number;
   visible?: boolean;
 }) {
   const sceneRef = createRef<WasmScene | null>();
   sceneRef.current = opts.scene;
   return renderHook(
-    (props: { datasetId: string; version: number; visible: boolean }) =>
+    (props: { datasetIds: string[]; version: number; visible: boolean }) =>
       useAnnotationOverlay({ wasmSceneRef: sceneRef, ...props }),
     {
       initialProps: {
-        datasetId: opts.datasetId ?? "wds-1",
+        datasetIds: opts.datasetIds ?? ["wds-1"],
         version: opts.version ?? 0,
         visible: opts.visible ?? true,
       },
@@ -50,12 +50,23 @@ function renderOverlayState(opts: {
   );
 }
 
+/** Each mark as `dataset/pin`. */
+function named(marks: { datasetId: string; pin: Annotation }[]): string[] {
+  return marks.map(({ datasetId, pin }) => `${datasetId}/${pin.id}`);
+}
+
 describe("useAnnotationOverlay — authoritative read", () => {
-  it("reads the dataset's pin set on mount (and mirrors it into annotationsRef)", () => {
+  it("reads the dataset's pins on mount (and mirrors them into marksRef)", () => {
     const { scene } = makeScene({ "wds-1": [pin("pin-a"), pin("pin-b")] });
     const { result } = renderOverlayState({ scene });
-    expect(result.current.annotations.map((p) => p.id)).toEqual(["pin-a", "pin-b"]);
-    expect(result.current.annotationsRef.current).toBe(result.current.annotations);
+    expect(named(result.current.marks)).toEqual(["wds-1/pin-a", "wds-1/pin-b"]);
+    expect(result.current.marksRef.current).toBe(result.current.marks);
+  });
+
+  it("reads every dataset's pins, in the order the view draws them, each with its dataset", () => {
+    const { scene } = makeScene({ "wds-1": [pin("pin-a")], "wds-2": [pin("pin-z"), pin("pin-y")] });
+    const { result } = renderOverlayState({ scene, datasetIds: ["wds-2", "wds-1"] });
+    expect(named(result.current.marks)).toEqual(["wds-2/pin-z", "wds-2/pin-y", "wds-1/pin-a"]);
   });
 
   it("re-reads when the document version bumps", () => {
@@ -63,25 +74,35 @@ describe("useAnnotationOverlay — authoritative read", () => {
     const { result, rerender } = renderOverlayState({ scene });
     setPins("wds-1", [pin("pin-a"), pin("pin-c")]);
     // No re-read yet — the tick never re-reads; only a version bump does.
-    expect(result.current.annotations).toHaveLength(1);
-    rerender({ datasetId: "wds-1", version: 1, visible: true });
-    expect(result.current.annotations.map((p) => p.id)).toEqual(["pin-a", "pin-c"]);
+    expect(result.current.marks).toHaveLength(1);
+    rerender({ datasetIds: ["wds-1"], version: 1, visible: true });
+    expect(named(result.current.marks)).toEqual(["wds-1/pin-a", "wds-1/pin-c"]);
   });
 
-  it("re-reads when the scoped dataset changes", () => {
+  it("re-reads when the view's datasets change", () => {
     const { scene } = makeScene({ "wds-1": [pin("pin-a")], "wds-2": [pin("pin-z")] });
     const { result, rerender } = renderOverlayState({ scene });
-    rerender({ datasetId: "wds-2", version: 0, visible: true });
-    expect(result.current.annotations.map((p) => p.id)).toEqual(["pin-z"]);
+    rerender({ datasetIds: ["wds-1", "wds-2"], version: 0, visible: true });
+    expect(named(result.current.marks)).toEqual(["wds-1/pin-a", "wds-2/pin-z"]);
+    rerender({ datasetIds: ["wds-2"], version: 0, visible: true });
+    expect(named(result.current.marks)).toEqual(["wds-2/pin-z"]);
+  });
+
+  it("keeps the same marks when the list is rebuilt with the same datasets", () => {
+    const { scene } = makeScene({ "wds-1": [pin("pin-a")] });
+    const { result, rerender } = renderOverlayState({ scene });
+    const marks = result.current.marks;
+    rerender({ datasetIds: ["wds-1"], version: 0, visible: true });
+    expect(result.current.marks).toBe(marks);
   });
 
   it("an unready scene reads as an empty set (no throw)", () => {
     const sceneRef = createRef<WasmScene | null>();
     sceneRef.current = null;
     const { result } = renderHook(() =>
-      useAnnotationOverlay({ wasmSceneRef: sceneRef, datasetId: "wds-1", version: 0, visible: true }),
+      useAnnotationOverlay({ wasmSceneRef: sceneRef, datasetIds: ["wds-1"], version: 0, visible: true }),
     );
-    expect(result.current.annotations).toEqual([]);
+    expect(result.current.marks).toEqual([]);
   });
 });
 
@@ -90,7 +111,7 @@ describe("useAnnotationOverlay — open-thread lifecycle", () => {
     const { scene } = makeScene({ "wds-1": [pin("pin-a")] });
     const { result, rerender } = renderOverlayState({ scene });
     act(() => result.current.setOpenPinId("pin-a"));
-    rerender({ datasetId: "wds-1", version: 1, visible: true });
+    rerender({ datasetIds: ["wds-1"], version: 1, visible: true });
     expect(result.current.openPinId).toBe("pin-a");
   });
 
@@ -99,28 +120,44 @@ describe("useAnnotationOverlay — open-thread lifecycle", () => {
     const { result, rerender } = renderOverlayState({ scene });
     act(() => result.current.setOpenPinId("pin-a"));
     setPins("wds-1", []);
-    rerender({ datasetId: "wds-1", version: 1, visible: true });
+    rerender({ datasetIds: ["wds-1"], version: 1, visible: true });
     expect(result.current.openPinId).toBeNull();
   });
 
-  it("closes the thread when the dataset switches (even if the id exists there too)", () => {
-    const { scene } = makeScene({ "wds-1": [pin("pin-a")], "wds-2": [pin("pin-a")] });
+  it("keeps the thread and selection when another dataset joins the view", () => {
+    const { scene } = makeScene({ "wds-1": [pin("pin-a")], "wds-2": [pin("pin-z")] });
     const { result, rerender } = renderOverlayState({ scene });
-    act(() => result.current.setOpenPinId("pin-a"));
-    rerender({ datasetId: "wds-2", version: 0, visible: true });
+    act(() => {
+      result.current.setOpenPinId("pin-a");
+      result.current.setSelectedId("pin-a");
+    });
+    rerender({ datasetIds: ["wds-1", "wds-2"], version: 0, visible: true });
+    expect(result.current.openPinId).toBe("pin-a");
+    expect(result.current.selectedId).toBe("pin-a");
+  });
+
+  it("closes the thread and selection when their dataset leaves the view", () => {
+    const { scene } = makeScene({ "wds-1": [pin("pin-a")], "wds-2": [pin("pin-z")] });
+    const { result, rerender } = renderOverlayState({ scene, datasetIds: ["wds-1", "wds-2"] });
+    act(() => {
+      result.current.setOpenPinId("pin-a");
+      result.current.setSelectedId("pin-a");
+    });
+    rerender({ datasetIds: ["wds-2"], version: 0, visible: true });
     expect(result.current.openPinId).toBeNull();
+    expect(result.current.selectedId).toBeNull();
   });
 
   it("hiding the overlay closes the thread but never mutates the pin set", () => {
     const { scene } = makeScene({ "wds-1": [pin("pin-a")] });
     const { result, rerender } = renderOverlayState({ scene });
     act(() => result.current.setOpenPinId("pin-a"));
-    rerender({ datasetId: "wds-1", version: 0, visible: false });
+    rerender({ datasetIds: ["wds-1"], version: 0, visible: false });
     expect(result.current.openPinId).toBeNull();
-    expect(result.current.annotations.map((p) => p.id)).toEqual(["pin-a"]);
+    expect(named(result.current.marks)).toEqual(["wds-1/pin-a"]);
     // Re-showing re-renders the untouched set from a clean baseline.
-    rerender({ datasetId: "wds-1", version: 0, visible: true });
+    rerender({ datasetIds: ["wds-1"], version: 0, visible: true });
     expect(result.current.openPinId).toBeNull();
-    expect(result.current.annotations.map((p) => p.id)).toEqual(["pin-a"]);
+    expect(named(result.current.marks)).toEqual(["wds-1/pin-a"]);
   });
 });

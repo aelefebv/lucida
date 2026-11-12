@@ -83,11 +83,13 @@ describe("AnnotationOverlay (2D) — visible prop", () => {
     const canvas = makeCanvas();
     const { rerender } = render(
       <AnnotationOverlay
-        datasetId="wds-1"
+        selectedDatasetId="wds-1"
+        active
+        onSelectDataset={() => {}}
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+        viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -97,11 +99,13 @@ describe("AnnotationOverlay (2D) — visible prop", () => {
     const setVisible = (next: boolean) =>
       rerender(
         <AnnotationOverlay
-          datasetId="wds-1"
+          selectedDatasetId="wds-1"
+          active
+          onSelectDataset={() => {}}
           wasmSceneRef={sceneRef}
           surface={{ view: 0, element: canvas }}
           version={0}
-          viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+          viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
@@ -190,11 +194,13 @@ describe("AnnotationOverlay3D — visible prop", () => {
     const canvas = makeCanvas();
     const { rerender } = render(
       <AnnotationOverlay3D
-        datasetId="wds-1"
+        selectedDatasetId="wds-1"
+        active
+        onSelectDataset={() => {}}
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+        viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -204,11 +210,13 @@ describe("AnnotationOverlay3D — visible prop", () => {
     const setVisible = (next: boolean) =>
       rerender(
         <AnnotationOverlay3D
-          datasetId="wds-1"
+          selectedDatasetId="wds-1"
+          active
+          onSelectDataset={() => {}}
           wasmSceneRef={sceneRef}
           surface={{ view: 0, element: canvas }}
           version={0}
-          viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+          viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
@@ -264,11 +272,13 @@ describe("toolbar toggle wiring — button flips overlay visibility", () => {
           {annotationsVisible ? "Hide Annotations" : "Show Annotations"}
         </button>
         <AnnotationOverlay
-          datasetId="wds-1"
+          selectedDatasetId="wds-1"
+          active
+          onSelectDataset={() => {}}
           wasmSceneRef={sceneRef}
           surface={{ view: 0, element: canvas }}
           version={0}
-          viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
+          viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }]])}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}

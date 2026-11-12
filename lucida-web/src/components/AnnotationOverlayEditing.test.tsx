@@ -33,6 +33,8 @@ function makeScene(initial: Annotation[]) {
     // The inverse of the camera above on the 800 by 600 view, cutting Z
     // through the middle of plane 3.
     pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => new Float64Array([x - 400, y - 300, 3.5]),
+    // The one layer, under every point of the view.
+    layers_at: () => JSON.stringify(["wds-1"]),
     export_presence: () => "not json",
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
@@ -76,11 +78,13 @@ function renderOverlay(pins: Annotation[], tool: Tool = "pan") {
   const ui = (v: number) => (
     <AnnotationOverlay
       ref={handle}
-      datasetId="wds-1"
+      selectedDatasetId="wds-1"
+      active
+      onSelectDataset={() => {}}
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: canvas }}
       version={v}
-      viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 1, channels: [0] }}
+      viewContexts={new Map([["wds-1", { cut: { axis: "z", start: 3, end: 4 }, t: 1, channels: [0] }]])}
       myId={MY_ID}
       tool={tool}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}

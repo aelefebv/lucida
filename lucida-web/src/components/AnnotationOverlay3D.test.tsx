@@ -26,6 +26,8 @@ function makeScene(
       new Float64Array([100, 100]),
     pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) =>
       new Float64Array(pick(x, y)),
+    // The one layer, wherever a ray meets it.
+    layers_at: (_view: number, x: number, y: number) => JSON.stringify(pick(x * 800, y * 600).length < 3 ? [] : ["wds-1"]),
     export_presence: () => "not json",
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
@@ -124,11 +126,13 @@ function renderOverlay(opts: {
   const { canvas, capturedPointers, forwardedDowns } = makeCanvas();
   const overlay = (v: number) => (
     <AnnotationOverlay3D
-      datasetId="wds-1"
+      selectedDatasetId="wds-1"
+      active
+      onSelectDataset={() => {}}
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: canvas }}
       version={v}
-      viewContext={viewContext}
+      viewContexts={new Map([["wds-1", viewContext]])}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {
@@ -585,11 +589,13 @@ describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author'
     const { canvas } = makeCanvas();
     render(
       <AnnotationOverlay3D
-        datasetId="wds-1"
+        selectedDatasetId="wds-1"
+        active
+        onSelectDataset={() => {}}
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={{ cut: null, t: 0, channels: [0] }}
+        viewContexts={new Map([["wds-1", { cut: null, t: 0, channels: [0] }]])}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
