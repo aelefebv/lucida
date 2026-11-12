@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { frameClock } from "../frameClock.ts";
 import "./CanvasStage.css";
 
 /**
@@ -106,9 +107,20 @@ export function CanvasStage({
       watchRatio();
     };
     if (typeof window.matchMedia === "function") watchRatio();
+    // Neither fires when the ratio changes under device emulation, and the
+    // layers that follow the camera read the ratio afresh on their next frame,
+    // so a scene still sized for the old one would misplace them. Checking it
+    // on the frames they draw on tells the scene before they draw again.
+    let ratio = window.devicePixelRatio;
+    const stopChecking = frameClock.subscribe(() => {
+      if (window.devicePixelRatio === ratio) return;
+      ratio = window.devicePixelRatio;
+      report();
+    });
     return () => {
       observer.disconnect();
       media?.removeEventListener("change", onRatioChange);
+      stopChecking();
     };
   }, []);
 
