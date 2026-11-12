@@ -274,6 +274,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+      # A passing run's phases are what the diagnostic's ceilings are checked
+      # against on this rasterizer, so its run files are kept too, without
+      # the bundles.
+      - name: Upload runs
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trace-gate-runs-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/gate-out
+            !${{ runner.temp }}/gate-out/**/*.bundle.json
+          if-no-files-found: ignore
+          retention-days: 14
+
   # One check whatever the matrix holds, and a pass when the filter skipped
   # the gate.
   result:
