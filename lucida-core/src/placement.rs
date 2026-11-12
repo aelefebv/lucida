@@ -650,6 +650,32 @@ pub fn boxes_overlap(a: ([f64; 3], [f64; 3]), b: ([f64; 3], [f64; 3])) -> bool {
     (0..3).all(|i| a.0[i] < b.1[i] && b.0[i] < a.1[i])
 }
 
+/// The tile a mark whose first vertex lies at `point` belongs to. Of `tiles`,
+/// each `(tile, corner, size)` in a collection's layout, `[x, y]` in samples,
+/// it is the first whose box holds the point, or else the one nearest it.
+/// A box holds its near edges and not its far ones, so a point on a shared
+/// edge belongs to one tile. Anchoring a mark and drawing it in its tile's
+/// cell both go by this rule, so the two never name different tiles.
+pub fn tile_holding<T>(
+    tiles: impl IntoIterator<Item = (T, [f64; 2], [f64; 2])>,
+    point: [f64; 2],
+) -> Option<T> {
+    // Below zero for a box that holds it, so any such beats every other.
+    let gap = |corner: [f64; 2], size: [f64; 2]| {
+        let [dx, dy] = [0, 1].map(|a| {
+            let (lo, hi) = (corner[a], corner[a] + size[a]);
+            (lo - point[a]).max(point[a] - hi).max(0.0)
+        });
+        let holds = (0..2).all(|a| corner[a] <= point[a] && point[a] < corner[a] + size[a]);
+        if holds { -1.0 } else { dx.hypot(dy) }
+    };
+    tiles
+        .into_iter()
+        .map(|(tile, corner, size)| (tile, gap(corner, size)))
+        .reduce(|best, next| if next.1 < best.1 { next } else { best })
+        .map(|(tile, _)| tile)
+}
+
 /// The map from a member's unit cube to its box in the dataset's frame. The
 /// box starts at the member's layout `position` and spans its level-0 `shape`
 /// `[z, y, x]`. The cube's Y points up, so its top face is the image's first
@@ -1168,6 +1194,24 @@ mod tests {
             // Along the cut it is where the view reads every tile.
             assert_eq!(at[cut], local[cut], "{plane}");
         }
+    }
+
+    #[test]
+    fn a_point_belongs_to_the_tile_holding_it_or_else_the_nearest() {
+        // Two tiles 10 square side by side with no gap, and one apart.
+        let tiles = [
+            ("a", [0.0, 0.0], [10.0, 10.0]),
+            ("b", [10.0, 0.0], [10.0, 10.0]),
+            ("c", [0.0, 30.0], [10.0, 10.0]),
+        ];
+        let at = |point| tile_holding(tiles, point);
+        assert_eq!(at([9.9, 9.9]), Some("a"));
+        // A shared edge is the near edge of the tile past it.
+        assert_eq!(at([10.0, 5.0]), Some("b"));
+        // Off every tile, the nearest box wins, not the nearest corner.
+        assert_eq!(at([5.0, 22.0]), Some("c"));
+        assert_eq!(at([25.0, 1.0]), Some("b"));
+        assert_eq!(tile_holding::<&str>([], [0.0, 0.0]), None);
     }
 
     #[test]

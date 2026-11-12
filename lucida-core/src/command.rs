@@ -4694,6 +4694,84 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_anchors_to_the_tile_it_lies_on_or_else_the_nearest() {
+        use lucida_content::EntityId;
+        let (mut doc, ds) = collection_with_two_layouts();
+        // w1 spans 0..64 and w2 100..164, both 64 tall. The far corner of w1
+        // lies nearer w2's corner than w1's own, and it is still w1's.
+        for (id, at, tile) in [
+            ("far-corner", [60.0, 60.0], "w1"),
+            ("near-edge", [0.0, 0.0], "w1"),
+            // Between the two, each goes to the tile whose edge is nearer.
+            ("gap-left", [70.0, 10.0], "w1"),
+            ("gap-right", [95.0, 10.0], "w2"),
+            ("below", [130.0, 90.0], "w2"),
+        ] {
+            doc.apply(add_annotation_cmd("collection", id, at, "alice"));
+            assert_eq!(
+                pin(&doc, &ds, id).anchor,
+                Some(EntityId(tile.into())),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_layout_switch_keeps_every_mark_on_the_tile_it_was_placed_on() {
+        let (mut doc, ds) = collection_with_two_layouts();
+        // Each tile's corner in each layout; both are 64 square.
+        let corner = |layout: &str, tile: &str| match (layout, tile) {
+            ("moved", "w1") => [0.0, 50.0],
+            (_, "w1") => [0.0, 0.0],
+            _ => [100.0, 0.0],
+        };
+        let on = |at: [f64; 2], c: [f64; 2]| (0..2).all(|a| c[a] <= at[a] && at[a] < c[a] + 64.0);
+        let mut placed = Vec::new();
+        for (i, x) in (0..164).step_by(9).enumerate() {
+            for (j, y) in (0..64).step_by(7).enumerate() {
+                let at = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+                let Some(tile) = ["w1", "w2"]
+                    .into_iter()
+                    .find(|tile| on(at, corner("default", tile)))
+                else {
+                    continue;
+                };
+                let id = format!("p{i}-{j}");
+                doc.apply(add_annotation_cmd("collection", &id, at, "alice"));
+                placed.push((id, tile, at));
+            }
+        }
+        switch_to(&mut doc, &ds, "moved");
+        for (id, tile, _) in &placed {
+            let at = pin(&doc, &ds, id).position;
+            assert!(on(at, corner("moved", tile)), "{id} on {tile}: {at:?}");
+        }
+        switch_to(&mut doc, &ds, "default");
+        for (id, _, at) in &placed {
+            assert_eq!(pin(&doc, &ds, id).position, *at, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_pin_moved_onto_another_tile_follows_that_tile() {
+        use lucida_content::EntityId;
+        let (mut doc, ds) = collection_with_two_layouts();
+        doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
+        doc.apply(DocumentCommand::MoveAnnotation {
+            dataset_id: ds.clone(),
+            id: "p".into(),
+            position: [110.0, 5.0],
+            end: None,
+            end_z: None,
+            z: 0.0,
+        });
+        assert_eq!(pin(&doc, &ds, "p").anchor, Some(EntityId("w2".into())));
+        // w2 stays where it is when w1 moves, so the pin does too.
+        switch_to(&mut doc, &ds, "moved");
+        assert_eq!(pin(&doc, &ds, "p").position, [110.0, 5.0]);
+    }
+
+    #[test]
     fn pin_without_anchor_is_left_in_place_on_switch() {
         // An unanchored pin is untouched by a layout switch.
         let (mut doc, ds) = collection_with_two_layouts();
