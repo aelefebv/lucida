@@ -42,16 +42,16 @@ export function viewCut(layer: ResolvedLayer, plane: SlicePlane): ViewCut {
 
 /**
  * Each dataset whose marks `pane`'s view draws, in layer order, and its
- * context there at `t`. A view draws the marks of every dataset it draws in
- * that dataset's own frame, whichever layer is selected, which leaves out a
- * side view's collection. Each mark lies on its own dataset's planes, so
- * where the view cuts that dataset and the channels it shows there decide
- * which marks are in context. A volume view cuts none.
+ * context there. A view draws the marks of every dataset it draws in that
+ * dataset's own frame, whichever layer is selected, which leaves out a side
+ * view's collection. Each mark lies on its own dataset's planes, so where
+ * the view cuts that dataset and the channels it shows there decide which
+ * marks are in context. A volume view cuts none. The T is the view's own,
+ * which another view's need not match while time is not linked.
  */
 export function viewContextsOf(
   scene: WasmScene,
-  pane: Pick<ViewPane, "id" | "draws" | "cameraMode">,
-  t: number,
+  pane: Pick<ViewPane, "id" | "draws" | "cameraMode" | "t">,
 ): Map<string, ViewContext> {
   const layers = readResolvedLayers(scene, pane.id);
   const plane = pane.cameraMode === "slice" ? (scene.slice_plane(pane.id) as SlicePlane) : null;
@@ -59,7 +59,7 @@ export function viewContextsOf(
   for (const datasetId of pane.draws) {
     if (!scene.draws_annotations(pane.id, datasetId)) continue;
     const layer = layers.get(datasetId);
-    contexts.set(datasetId, { cut: plane && layer ? viewCut(layer, plane) : null, t, channels: shownChannels(layer) });
+    contexts.set(datasetId, { cut: plane && layer ? viewCut(layer, plane) : null, t: pane.t, channels: shownChannels(layer) });
   }
   return contexts;
 }

@@ -13,10 +13,10 @@ import { coverageMessage } from "./coverage.ts";
 afterEach(cleanup);
 
 const LEFT: ViewPane = {
-  id: 0, shows: "all", draws: ["a"], rect: [0, 0, 0.5, 1], cameraMode: "slice", active: true, setAside: [],
+  id: 0, shows: "all", draws: ["a"], rect: [0, 0, 0.5, 1], cameraMode: "slice", t: 0, active: true, setAside: [],
 };
 const RIGHT: ViewPane = {
-  id: 3, shows: [], draws: [], rect: [0.5, 0, 0.5, 1], cameraMode: "arcball", active: false, setAside: [],
+  id: 3, shows: [], draws: [], rect: [0.5, 0, 0.5, 1], cameraMode: "arcball", t: 0, active: false, setAside: [],
 };
 
 function panes(views: ViewPane[], maximized: number | null = null) {

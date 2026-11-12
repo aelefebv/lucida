@@ -162,7 +162,7 @@ export function CanvasLayers({
   const paneContent = (pane: ViewPane, surface: ViewSurface) => {
     const slice = pane.cameraMode === "slice";
     const overlay = annotationScene && {
-      viewContexts: viewContextsOf(annotationScene, pane, t),
+      viewContexts: viewContextsOf(annotationScene, pane),
       selectedDatasetId,
       onSelectDataset,
       active: pane.active,
