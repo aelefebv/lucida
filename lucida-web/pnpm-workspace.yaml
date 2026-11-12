@@ -1,4 +1,12 @@
 overrides:
   js-yaml: ^4.2.0
   '@babel/core': ^7.29.6
-  esbuild: ^0.28.1
+
+# A version published less than a day ago resolves only when nothing older fits
+# its range. pnpm then lists it under minimumReleaseAgeExclude, and that entry
+# has to be committed, because a frozen install rejects a younger version that
+# is not listed. Strict mode would fail the resolve instead. Dependabot's version
+# updates wait out its own 3-day cooldown, so only a security update can bring
+# one in, and if that PR lacks the entry, CI fails until the version is a day old.
+minimumReleaseAge: 1440
+minimumReleaseAgeStrict: false
