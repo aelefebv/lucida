@@ -25,7 +25,7 @@ import {
   startLongPress,
   useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { eventToScreenPx, makeProjectAnnotationToCss, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { makeProjectAnnotationToCss, pickFramePoint, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import { applyViewportCommand } from "../applyAndSend.ts";
@@ -46,8 +46,9 @@ interface Props {
   surface: ViewSurface;
   /** Bumped whenever the remote document changes; re-reads the pin set. */
   version: number;
-  /** The current Z/T/C. A pin off it renders dimmed with a locator, through the
-   * same {@link isOffContext} as the 2D overlay. */
+  /** The view's T and channels; a volume shows every plane, so it cuts
+   * none. A pin off them renders dimmed with a locator, through the same
+   * {@link isOffContext} as the 2D overlay. */
   viewContext: ViewContext;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
    * per-connection `myId`, so ownership survives rejoining a workspace.
@@ -125,15 +126,9 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
    * drop uses, or null when the ray misses. */
   const pickPlacement = (point: ClientPoint): AnnotationPlacement | null => {
     const scene = wasmSceneRef.current;
-    if (!scene) return null;
-    const [screenX, screenY] = eventToScreenPx(element, point);
-    const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
-    if (voxel.length < 3) return null;
-    // A far-face pick can round past the last plane, where 2D could never
-    // reach the point; clamp as a drawn point does.
-    const depth = scene.dataset_volume_shape(datasetId)[0] ?? 0;
-    const z = depth > 0 ? Math.max(0, Math.min(voxel[2], depth - 1)) : voxel[2];
-    return { position: [voxel[0], voxel[1]], z };
+    const voxel = scene && pickFramePoint(scene, surface, datasetId, point);
+    if (!scene || !voxel) return null;
+    return { position: [voxel[0], voxel[1]], z: voxel[2] };
   };
 
   /** One's own line or box under a client point, as projected now, or null. */
@@ -145,7 +140,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     const shapes = [];
     for (const pin of annotationsRef.current) {
       if (pin.author !== String(myId) || !pin.end || (pin.kind !== "line" && pin.kind !== "box")) continue;
-      const points = annotationVertices(pin).map((v) => project(v, pin.z ?? 0));
+      const points = annotationVertices(pin).map(project);
       if (points.some((p) => p === null)) continue;
       shapes.push({ id: pin.id, points: points as ScreenPoint[], closed: isClosedShape(pin) });
     }
@@ -239,7 +234,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
       const scene = wasmSceneRef.current;
       if (scene) {
         // `null` means the vertex is behind the camera or the dataset has no
-        // anchorable member. A line or box shares one depth `z` across vertices.
+        // anchorable member.
         const project = makeProjectAnnotationToCss(scene, surface.view, datasetIdRef.current);
         // pointermove positions a dot being moved; reprojecting its stale
         // stored position would snap it back every frame. An orbit doesn't move
@@ -248,9 +243,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
         const draggingId =
           activeDrag?.moved && activeDrag.mode === "move" ? activeDrag.pinId : null;
         for (const pin of annotationsRef.current) {
-          const pinZ = pin.z ?? 0;
-          const verts = annotationVertices(pin);
-          const projected: (ScreenPoint | null)[] = verts.map((v) => project(v, pinZ));
+          const projected: (ScreenPoint | null)[] = annotationVertices(pin).map(project);
           // If any vertex is behind the camera, hide the whole shape and dot; a
           // partly projected line would streak across the screen.
           const allVisible = projected.every((p) => p !== null);
@@ -396,10 +389,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     // declines, so a pin never floats in empty space.
     suppressClickRef.current = pin.id;
     const scene = wasmSceneRef.current;
-    if (!scene) return;
-    const [screenX, screenY] = eventToScreenPx(element, e);
-    const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
-    if (voxel.length < 3) return; // ray missed → don't move
+    const voxel = scene && pickFramePoint(scene, surface, datasetId, e);
+    if (!scene || !voxel) return; // ray missed → don't move
     // A move is in-plane only: take x/y from the picked voxel but keep the pin's
     // own depth, not `voxel[2]`, or a 3D drag would re-slice the pin. The 2D move
     // does the same. `move_annotation` carries no T/C.
@@ -473,8 +464,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
         const comments = pin.comments ?? [];
         const isOpen = openPinId === pin.id;
         // The tick governs display; off-context only changes the look. The
-        // volume renders every slice, so only T/C dim a pin here. 2D keeps Z.
-        const offCtx = isOffContext(pin, viewContext, { ignoreZ: true });
+        // volume renders every plane and cuts none, so only T/C dim a pin.
+        const offCtx = isOffContext(pin, viewContext);
         return (
           <div
             key={pin.id}

@@ -1115,6 +1115,7 @@ async fn presence_identity_is_never_persisted_into_document_json() {
             id: "pin-1".into(),
             position: [1.0, 2.0],
             end: None,
+            end_z: None,
             z: 0.0,
             t: 0,
             c: 0,

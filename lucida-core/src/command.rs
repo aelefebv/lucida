@@ -75,6 +75,10 @@ pub enum DocumentCommand {
         position: [f64; 2],
         #[serde(default)]
         end: Option<[f64; 2]>,
+        /// The second vertex's depth where it differs from `z`
+        /// ([`crate::scene::Annotation::end_z`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_z: Option<f64>,
         #[serde(default)]
         z: f64,
         #[serde(default)]
@@ -125,8 +129,8 @@ pub enum DocumentCommand {
     ///   any second vertex moves by the same delta, so a box or line keeps its
     ///   size, length, and angle (see
     ///   [`crate::scene::Annotation::set_position`]).
-    /// - `end: Some([x, y])`: reshape. `position`, `end`, and `z` are set
-    ///   exactly, which is how a corner or edge resize lands (see
+    /// - `end: Some([x, y])`: reshape. `position`, `end`, `z` and `end_z`
+    ///   are set exactly, which is how a corner or edge resize lands (see
     ///   [`crate::scene::Annotation::set_vertices`]). A `Point` ignores `end`.
     ///
     /// `z` and `end` are `#[serde(default)]`, so a move from a client that
@@ -138,6 +142,9 @@ pub enum DocumentCommand {
         position: [f64; 2],
         #[serde(default)]
         end: Option<[f64; 2]>,
+        /// A reshape's second-vertex depth where it differs from `z`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_z: Option<f64>,
         #[serde(default)]
         z: f64,
     },
@@ -3964,6 +3971,7 @@ mod tests {
             id: "11111111-2222-3333-4444-555555555555".into(),
             position: [12.5, -7.25],
             end: None,
+            end_z: None,
             z: 3.5,
             t: 4,
             c: 2,
@@ -3995,6 +4003,7 @@ mod tests {
                 id,
                 position,
                 end,
+                end_z: _,
                 z,
                 t,
                 c,
@@ -4027,6 +4036,7 @@ mod tests {
                 id,
                 position,
                 end,
+                end_z: _,
                 z,
                 t,
                 c,
@@ -4071,6 +4081,7 @@ mod tests {
             id: "pin-tc".into(),
             position: [1.0, 2.0],
             end: None,
+            end_z: None,
             z: 0.0,
             t: 7,
             c: 3,
@@ -4099,6 +4110,7 @@ mod tests {
             id: "pin-tc".into(),
             position: [1.0, 2.0],
             end: None,
+            end_z: None,
             z: 4.0,
             t: 9,
             c: 5,
@@ -4148,6 +4160,7 @@ mod tests {
             id: "pin-tc".into(),
             position: [10.0, 20.0],
             end: None,
+            end_z: None,
             z: 1.0,
             t: 12,
             c: 2,
@@ -4206,6 +4219,7 @@ mod tests {
             id: "ln-1".into(),
             position: [1.0, 2.0],
             end: Some([5.5, -6.5]),
+            end_z: None,
             z: 3.0,
             t: 0,
             c: 0,
@@ -4353,6 +4367,7 @@ mod tests {
             position: [2.0, 3.0],
             // No `end`: whole-shape move.
             end: None,
+            end_z: None,
             z: 5.0,
         });
         let line = &doc.annotations[&DatasetId("wds-1".into())][0];
@@ -4569,6 +4584,7 @@ mod tests {
                 id: "legacy".into(),
                 position: [5.0, 5.0],
                 end: None,
+                end_z: None,
                 z: 0.0,
                 t: 0,
                 c: 0,
@@ -4757,6 +4773,7 @@ mod tests {
             id: id.into(),
             position,
             end: None,
+            end_z: None,
             z,
             t: 0,
             c: 0,
@@ -4779,6 +4796,7 @@ mod tests {
             id: id.into(),
             position,
             end: Some(end),
+            end_z: None,
             z: 0.0,
             t: 0,
             c: 0,
@@ -5088,6 +5106,7 @@ mod tests {
             id: id.into(),
             position,
             end: None,
+            end_z: None,
             z,
         }
     }
@@ -5105,6 +5124,7 @@ mod tests {
             id: id.into(),
             position,
             end: Some(end),
+            end_z: None,
             z,
         }
     }
@@ -5136,6 +5156,7 @@ mod tests {
                 id,
                 position,
                 end,
+                end_z: _,
                 z,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-abc".into()));
@@ -5159,6 +5180,7 @@ mod tests {
                 id,
                 position,
                 end,
+                end_z: _,
                 z,
             } => {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
@@ -5508,7 +5530,7 @@ mod tests {
             Some([4.0, 4.0]),
             crate::scene::AnnotationKind::Box,
         );
-        r#box.set_vertices([1.0, 1.0], [9.0, 7.0], 2.5);
+        r#box.set_vertices([1.0, 1.0], [9.0, 7.0], 2.5, None);
         assert_eq!(r#box.position, [1.0, 1.0]);
         assert_eq!(r#box.end, Some([9.0, 7.0]));
         assert_eq!(r#box.z, 2.5);
@@ -5525,7 +5547,7 @@ mod tests {
             Some([4.0, 4.0]),
             crate::scene::AnnotationKind::Box,
         );
-        r#box.set_vertices([1.0, 1.0], [4.0, 4.0], 0.0);
+        r#box.set_vertices([1.0, 1.0], [4.0, 4.0], 0.0, None);
         assert_eq!(r#box.position, [1.0, 1.0]);
         assert_eq!(
             r#box.end,
@@ -5546,7 +5568,7 @@ mod tests {
         );
         r#box.author = "analyst".into();
         r#box.add_comment(comment("c1", "alice", "this region"));
-        r#box.set_vertices([2.0, 2.0], [6.0, 5.0], 1.0);
+        r#box.set_vertices([2.0, 2.0], [6.0, 5.0], 1.0, None);
         assert_eq!(r#box.id, "bx");
         assert_eq!(r#box.author, "analyst");
         assert_eq!(r#box.kind, crate::scene::AnnotationKind::Box);
@@ -5559,7 +5581,7 @@ mod tests {
         // A reshape of a point repositions its anchor but must not invent an
         // `end`, which would silently make it a line or box.
         let mut pin = point_pin("p1");
-        pin.set_vertices([3.0, 4.0], [9.0, 9.0], 5.0);
+        pin.set_vertices([3.0, 4.0], [9.0, 9.0], 5.0, None);
         assert_eq!(pin.position, [3.0, 4.0]);
         assert_eq!(pin.z, 5.0);
         assert_eq!(pin.end, None, "reshape must not mint a vertex on a point");
@@ -5851,6 +5873,7 @@ mod tests {
             id: id.into(),
             position: [0.0, 0.0],
             end: None,
+            end_z: None,
             z: 0.0,
             t: 0,
             c: 0,
@@ -5873,6 +5896,7 @@ mod tests {
             id: id.into(),
             position,
             end,
+            end_z: None,
             z: 0.0,
             t: 0,
             c: 0,
@@ -5887,7 +5911,7 @@ mod tests {
     #[test]
     fn vertices_point_is_single_anchor() {
         let pin = point_pin("p");
-        assert_eq!(pin.vertices(), vec![[0.0, 0.0]]);
+        assert_eq!(pin.vertices(), vec![[0.0, 0.0, 0.0]]);
         assert!(!pin.is_closed());
     }
 
@@ -5899,7 +5923,7 @@ mod tests {
             Some([5.0, 6.0]),
             crate::scene::AnnotationKind::Line,
         );
-        assert_eq!(line.vertices(), vec![[1.0, 2.0], [5.0, 6.0]]);
+        assert_eq!(line.vertices(), vec![[1.0, 2.0, 0.0], [5.0, 6.0, 0.0]]);
         // A line is an open run, not a closed ring.
         assert!(!line.is_closed());
     }
@@ -5917,9 +5941,121 @@ mod tests {
         );
         assert_eq!(
             r#box.vertices(),
-            vec![[0.0, 0.0], [10.0, 0.0], [10.0, 4.0], [0.0, 4.0]]
+            vec![
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [10.0, 4.0, 0.0],
+                [0.0, 4.0, 0.0]
+            ]
         );
         assert!(r#box.is_closed());
+    }
+
+    /// A box drawn in `plane` from `start` to `end`, through the command a
+    /// slice view sends, read back from the document after a JSON round trip.
+    fn drawn_box(start: [f64; 3], end: [f64; 3]) -> crate::scene::Annotation {
+        let dataset_id = DatasetId("wds-1".into());
+        let cmd = DocumentCommand::AddAnnotation {
+            dataset_id: dataset_id.clone(),
+            id: "bx".into(),
+            position: [start[0], start[1]],
+            end: Some([end[0], end[1]]),
+            end_z: Some(end[2]),
+            z: start[2],
+            t: 0,
+            c: 0,
+            author: "alice".into(),
+            kind: crate::scene::AnnotationKind::Box,
+            view: None,
+        };
+        let wire: DocumentCommand =
+            serde_json::from_str(&serde_json::to_string(&cmd).unwrap()).unwrap();
+        let mut doc = crate::scene::DocumentState::default();
+        doc.apply(wire);
+        let stored = serde_json::to_string(&doc).unwrap();
+        let doc: crate::scene::DocumentState = serde_json::from_str(&stored).unwrap();
+        doc.annotations[&dataset_id][0].clone()
+    }
+
+    #[test]
+    fn a_box_drawn_in_each_plane_keeps_its_corners_and_plane() {
+        use crate::slice_plane::SlicePlane;
+        // In XY both corners share their depth, which then goes unstored.
+        let xy = drawn_box([1.0, 2.0, 5.5], [9.0, 6.0, 5.5]);
+        assert_eq!((xy.end_z, xy.end_point()), (None, Some([9.0, 6.0, 5.5])));
+        assert_eq!(
+            crate::scene::box_plane(xy.start(), xy.end_point().unwrap()),
+            SlicePlane::Xy
+        );
+        assert_eq!(
+            xy.vertices(),
+            vec![
+                [1.0, 2.0, 5.5],
+                [9.0, 2.0, 5.5],
+                [9.0, 6.0, 5.5],
+                [1.0, 6.0, 5.5]
+            ]
+        );
+
+        // In XZ they share Y and span depths: X across, Z down.
+        let xz = drawn_box([1.0, 40.5, 2.0], [9.0, 40.5, 7.0]);
+        assert_eq!(xz.end_point(), Some([9.0, 40.5, 7.0]));
+        assert_eq!(
+            crate::scene::box_plane(xz.start(), xz.end_point().unwrap()),
+            SlicePlane::Xz
+        );
+        assert_eq!(
+            xz.vertices(),
+            vec![
+                [1.0, 40.5, 2.0],
+                [9.0, 40.5, 2.0],
+                [9.0, 40.5, 7.0],
+                [1.0, 40.5, 7.0]
+            ]
+        );
+
+        // In YZ they share X: Y across, Z down.
+        let yz = drawn_box([30.5, 2.0, 1.0], [30.5, 8.0, 4.0]);
+        assert_eq!(yz.end_point(), Some([30.5, 8.0, 4.0]));
+        assert_eq!(
+            crate::scene::box_plane(yz.start(), yz.end_point().unwrap()),
+            SlicePlane::Yz
+        );
+        assert_eq!(
+            yz.vertices(),
+            vec![
+                [30.5, 2.0, 1.0],
+                [30.5, 8.0, 1.0],
+                [30.5, 8.0, 4.0],
+                [30.5, 2.0, 4.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shape_moves_whole_with_its_depths_and_reshapes_to_its_own() {
+        let dataset_id = DatasetId("wds-1".into());
+        let mut doc = crate::scene::DocumentState::default();
+        doc.annotations.insert(
+            dataset_id.clone(),
+            vec![drawn_box([1.0, 40.5, 2.0], [9.0, 40.5, 7.0])],
+        );
+        // A whole-shape move carries the second vertex along every axis.
+        doc.move_annotation(&dataset_id, "bx", [3.0, 41.5], (None, None), 4.0);
+        let pin = &doc.annotations[&dataset_id][0];
+        assert_eq!(pin.start(), [3.0, 41.5, 4.0]);
+        assert_eq!(pin.end_point(), Some([11.0, 41.5, 9.0]));
+        // A reshape places both vertices, and a depth equal to `z` goes
+        // unstored again.
+        doc.move_annotation(
+            &dataset_id,
+            "bx",
+            [0.0, 0.0],
+            (Some([5.0, 5.0]), Some(2.0)),
+            2.0,
+        );
+        let pin = &doc.annotations[&dataset_id][0];
+        assert_eq!((pin.end_z, pin.end_point()), (None, Some([5.0, 5.0, 2.0])));
     }
 
     #[test]
@@ -5927,10 +6063,10 @@ mod tests {
         // A malformed/partially-applied line/box (no `end`) must not panic or
         // vanish: the geometry helper degrades to the single anchor point.
         let line = shape_pin("ln", [3.0, 7.0], None, crate::scene::AnnotationKind::Line);
-        assert_eq!(line.vertices(), vec![[3.0, 7.0]]);
+        assert_eq!(line.vertices(), vec![[3.0, 7.0, 0.0]]);
         assert!(!line.is_closed());
         let r#box = shape_pin("bx", [3.0, 7.0], None, crate::scene::AnnotationKind::Box);
-        assert_eq!(r#box.vertices(), vec![[3.0, 7.0]]);
+        assert_eq!(r#box.vertices(), vec![[3.0, 7.0, 0.0]]);
         assert!(!r#box.is_closed());
     }
 

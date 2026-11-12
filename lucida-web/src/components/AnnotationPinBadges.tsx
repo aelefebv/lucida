@@ -5,6 +5,7 @@
  */
 import type { Annotation } from "./annotationDocument.ts";
 import { offContextLabel } from "./annotationContext.ts";
+import type { SpatialAxis } from "../renderer/slicePlane.ts";
 import "./AnnotationOverlay.css";
 
 /** Comment-count pill, shown only when the pin has comments. Clicking toggles
@@ -25,16 +26,17 @@ export function CommentCountBadge({
   );
 }
 
-/** Locator label for a pin on another Z/T/C; the caller gates on
+/** Locator label for a pin on other planes, T or channels, naming its
+ * planes along `axis`, the one the view cuts; the caller gates on
  * `isOffContext`. Informational only: the marker still opens its thread. */
-export function OffContextHelptext({ pin }: { pin: Annotation }) {
+export function OffContextHelptext({ pin, axis = "z" }: { pin: Annotation; axis?: SpatialAxis }) {
   return (
     <div
       className="lc-annotation-locator"
       data-testid={`annot-offcontext-${pin.id}`}
-      title={`This pin lives on ${offContextLabel(pin)} — navigate there to edit it in place`}
+      title={`This pin lives on ${offContextLabel(pin, axis)} — navigate there to edit it in place`}
     >
-      {offContextLabel(pin)}
+      {offContextLabel(pin, axis)}
     </div>
   );
 }

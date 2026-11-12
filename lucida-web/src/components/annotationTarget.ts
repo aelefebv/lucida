@@ -25,6 +25,16 @@ export function annotationTarget(
   return selected !== null && under.includes(selected) ? selected : (under[0] ?? null);
 }
 
+/** Say that a press placed no mark, since this view lays the layer under it
+ * out apart from its frame, as a side view of a collection does. */
+export function sayNoMarksInThisView(): void {
+  toast({
+    title: "Can't annotate this layer here",
+    description: "Marks on a collection go in an XY view.",
+    tone: "warning",
+  });
+}
+
 /** Say that a press placed no mark, since the view draws no layer under it. */
 export function sayNoLayerToAnnotate(): void {
   toast({

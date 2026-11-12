@@ -13,12 +13,20 @@ import { SliceViewer } from "./SliceViewer.tsx";
 const WIDTH = 400;
 const HEIGHT = 300;
 
+/** Where a pick in `view` at device pixel `(x, y)` lands in a dataset's frame. */
+type Pick = (view: number, x: number, y: number) => [number, number, number];
+
+/** XY views at one sample per pixel with the scene's origin at the pane's
+ * corner, cutting Z in the middle of plane 0. */
+const XY_PICK: Pick = (_view, x, y) => [x, y, 0.5];
+
 /**
  * Two views side by side, each over its own element, a 400 by 300 pane at one
  * sample per pixel with the scene's origin at its corner. `drawn` names the
- * layers each view draws under a point, topmost first, as lucida-core answers.
+ * layers each view draws under a point, topmost first, as lucida-core answers,
+ * and `pick` where a point under the pointer lands.
  */
-function makeScene(drawn: (view: number, x: number, y: number) => string[]) {
+function makeScene(drawn: (view: number, x: number, y: number) => string[], pick: Pick = XY_PICK) {
   const applied: Array<Record<string, unknown>> = [];
   const asked: Array<[number, number, number]> = [];
   const scene = {
@@ -30,6 +38,7 @@ function makeScene(drawn: (view: number, x: number, y: number) => string[]) {
       return JSON.stringify(drawn(view, x, y));
     },
     dataset_placement: () => new Float64Array(),
+    pick_annotation_voxel: (view: number, _ds: string, x: number, y: number) => new Float64Array(pick(view, x, y)),
     resolved_layers: () => "[]",
     z: () => 0,
     t: () => 0,
@@ -51,8 +60,8 @@ function makePane(left: number): HTMLElement {
   return element;
 }
 
-function renderViews(opts: { drawn: (view: number, x: number, y: number) => string[]; selected: string | null; tool?: Tool }) {
-  const { scene, applied, asked } = makeScene(opts.drawn);
+function renderViews(opts: { drawn: (view: number, x: number, y: number) => string[]; selected: string | null; tool?: Tool; pick?: Pick }) {
+  const { scene, applied, asked } = makeScene(opts.drawn, opts.pick);
   const selected: string[] = [];
   const panes = [makePane(0), makePane(WIDTH)];
   render(
@@ -117,6 +126,18 @@ describe("SliceViewer annotation targeting", () => {
     const { panes, applied } = renderViews({ drawn: SIDE_BY_SIDE, selected: "right", tool: "box" });
     press(panes[0], [40, 60], [120, 90]);
     expect(added(applied)).toMatchObject([{ dataset_id: "left", kind: "box", position: [40, 60], end: [120, 90] }]);
+    // Drawn in XY, its corners share their depth, which goes unsent.
+    expect(added(applied)[0]).not.toHaveProperty("end_z");
+  });
+
+  it("stores a mark drawn in a side view at every axis of its frame, each corner at its own depth", () => {
+    // View 1 cuts XZ through the middle of plane 40 along Y: X across, Z down.
+    const xz: Pick = (view, x, y) => (view === 1 ? [x, 40.5, y / 10] : [x, y, 0.5]);
+    const { panes, applied } = renderViews({ drawn: SIDE_BY_SIDE, selected: "right", tool: "box", pick: xz });
+    press(panes[1], [WIDTH + 40, 60], [WIDTH + 120, 90]);
+    expect(added(applied)).toMatchObject([
+      { dataset_id: "right", kind: "box", position: [40, 40.5], z: 6, end: [120, 40.5], end_z: 9 },
+    ]);
   });
 
   it("keeps the selected layer where the view draws it under the pointer, over a layer above it", () => {

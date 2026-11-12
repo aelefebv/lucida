@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use lucida_content::{
     ChannelInfo, DatasetId, DatasetKind, DatasetManifest, EntityId, LayoutId, LayoutSpec,
+    SpatialAxis,
 };
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
 use crate::placement::UserTransform;
+use crate::slice_plane::SlicePlane;
 use crate::view::LegacyChannels;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -520,10 +522,11 @@ pub struct Comment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Annotation {
     pub id: String,
-    /// In-plane world-space position `[x, y]`.
+    /// The anchor's `[x, y]` in its dataset's frame: continuous samples, the
+    /// sample `i` spanning `i..i + 1`.
     pub position: [f64; 2],
-    /// Depth in the same world frame as `position`, so the pin's world point
-    /// is `(position[0], position[1], z)`. A separate scalar rather than a
+    /// The anchor's depth in the same frame, so its point is
+    /// `(position[0], position[1], z)`. A separate scalar rather than a
     /// wider `position` keeps the wire compatible: pins without `z` load at
     /// `z = 0.0`.
     #[serde(default)]
@@ -542,10 +545,15 @@ pub struct Annotation {
     pub author: String,
     #[serde(default)]
     pub kind: AnnotationKind,
-    /// The second in-plane world-space vertex: a line's far endpoint, or a
-    /// box's opposite corner. `None` for a `Point`. Both vertices share `z`.
+    /// The second vertex's `[x, y]`: a line's far endpoint, or a box's
+    /// opposite corner. `None` for a `Point`.
     #[serde(default)]
     pub end: Option<[f64; 2]>,
+    /// The second vertex's depth, where it differs from `z`: a shape drawn
+    /// in a side view spans depths. Left out when both vertices share `z`,
+    /// so a shape drawn in XY keeps the wire shape it always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_z: Option<f64>,
     /// Flat, ordered comment thread on this pin. Owns its dedup/order
     /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
     #[serde(default)]
@@ -571,6 +579,22 @@ pub struct Annotation {
     pub view: Option<crate::saved_view::SavedView>,
 }
 
+/// The plane a box with corners `start` and `end` lies in: the one across
+/// the axis both corners share, XY when they share their depth. A box is
+/// drawn in a slice view, so its corners always share the axis that view
+/// cuts.
+pub fn box_plane(start: [f64; 3], end: [f64; 3]) -> SlicePlane {
+    [SpatialAxis::Z, SpatialAxis::Y, SpatialAxis::X]
+        .into_iter()
+        .find(|axis| start[axis.xyz()] == end[axis.xyz()])
+        .map_or(SlicePlane::Xy, SlicePlane::cutting)
+}
+
+/// A second vertex's own depth: `None` when it shares the anchor's `z`.
+fn own_depth(z: f64, end_z: Option<f64>) -> Option<f64> {
+    end_z.filter(|end_z| *end_z != z)
+}
+
 impl Annotation {
     /// The channels the pin's layer showed when it was placed, read from the
     /// layer's entry in the captured view. A pin without one, or whose entry
@@ -587,29 +611,46 @@ impl Annotation {
         }
     }
 
-    /// The in-plane world-space vertices of this annotation's shape, in draw
-    /// order. The 2D and 3D overlays both project these per vertex, so the
-    /// per-kind layout lives here rather than in each renderer.
+    /// The anchor vertex, `(position, z)`.
+    pub fn start(&self) -> [f64; 3] {
+        [self.position[0], self.position[1], self.z]
+    }
+
+    /// The second vertex, `(end, end_z)`, at depth `z` when it has none of
+    /// its own. `None` for a point.
+    pub fn end_point(&self) -> Option<[f64; 3]> {
+        self.end.map(|[x, y]| [x, y, self.end_z.unwrap_or(self.z)])
+    }
+
+    /// The vertices of this annotation's shape in its dataset's frame, in
+    /// draw order. The 2D and 3D overlays both project these per vertex, so
+    /// the per-kind layout lives here rather than in each renderer.
     ///
-    /// - Point: `[position]`.
-    /// - Line: `[position, end]`.
-    /// - Box: the four corners, wound `position → (end.x, position.y) → end →
-    ///   (position.x, end.y)`. Four corners rather than two so each projects
-    ///   through the volume transform in 3D; a screen-space rect built from two
-    ///   projected corners would shear as the camera orbits.
+    /// - Point: `[start]`.
+    /// - Line: `[start, end]`.
+    /// - Box: the four corners of the rectangle its two vertices span in the
+    ///   plane they share ([`box_plane`]), wound `start`, the corner across
+    ///   from it, `end`, the corner down from it. Four corners rather than
+    ///   two so each projects through the volume transform in 3D; a
+    ///   screen-space rect built from two projected corners would shear as
+    ///   the camera orbits.
     ///
-    /// A `Line`/`Box` with no `end` collapses to `position`, so the shape always
+    /// A `Line`/`Box` with no `end` collapses to `start`, so the shape always
     /// has at least one vertex.
-    pub fn vertices(&self) -> Vec<[f64; 2]> {
-        match (self.kind, self.end) {
-            (AnnotationKind::Line, Some(end)) => vec![self.position, end],
+    pub fn vertices(&self) -> Vec<[f64; 3]> {
+        let start = self.start();
+        match (self.kind, self.end_point()) {
+            (AnnotationKind::Line, Some(end)) => vec![start, end],
             (AnnotationKind::Box, Some(end)) => {
-                let [x0, y0] = self.position;
-                let [x1, y1] = end;
-                vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                let across = box_plane(start, end).axes()[0].xyz();
+                let mut second = start;
+                second[across] = end[across];
+                let mut fourth = end;
+                fourth[across] = start[across];
+                vec![start, second, end, fourth]
             }
             // Point, or a line/box missing its second vertex: just the anchor.
-            _ => vec![self.position],
+            _ => vec![start],
         }
     }
 
@@ -645,15 +686,15 @@ impl Annotation {
 
     /// Reposition this pin, moving the whole shape rigidly.
     ///
-    /// `position`/`z` become the anchor vertex, and any `end` moves by the same
-    /// in-plane delta, so a line keeps its length and angle and a box keeps its
-    /// size. Depth `z` is shared by both vertices, so it is a plain overwrite.
-    /// Every other field is left untouched.
+    /// `position`/`z` become the anchor vertex, and the second vertex moves
+    /// by the same delta, so a line keeps its length and angle and a box
+    /// keeps its size. Every other field is left untouched.
     pub fn set_position(&mut self, position: [f64; 2], z: f64) {
         // Read the delta before overwriting `position`, or it is always zero.
-        let [dx, dy] = [
+        let [dx, dy, dz] = [
             position[0] - self.position[0],
             position[1] - self.position[1],
+            z - self.z,
         ];
         self.position = position;
         self.z = z;
@@ -661,23 +702,28 @@ impl Annotation {
             end[0] += dx;
             end[1] += dy;
         }
+        if let Some(end_z) = self.end_z.as_mut() {
+            *end_z += dz;
+        }
     }
 
     /// Reshape this annotation by setting both opposite vertices explicitly,
     /// the resize sibling of [`Self::set_position`].
     ///
-    /// No delta math: `position` and `end` take the given values, so a corner
-    /// or edge handle can grow, shrink, or flip the shape about a held corner.
-    /// A `Point` only moves its anchor and `z`. Every other field is preserved,
+    /// No delta math: both vertices take the given values, so a corner or
+    /// edge handle can grow, shrink, or flip the shape about a held corner.
+    /// `end_z` is the second vertex's depth, `None` when it shares `z`. A
+    /// `Point` only moves its anchor and `z`. Every other field is preserved,
     /// and re-applying the same vertices is a no-op, so a replayed reshape
     /// stays convergent across peers.
-    pub fn set_vertices(&mut self, position: [f64; 2], end: [f64; 2], z: f64) {
+    pub fn set_vertices(&mut self, position: [f64; 2], end: [f64; 2], z: f64, end_z: Option<f64>) {
         self.position = position;
         self.z = z;
         // A resize never mints a second vertex on a point; that would change
         // the pin's kind out from under it.
         if self.end.is_some() {
             self.end = Some(end);
+            self.end_z = own_depth(z, end_z);
         }
     }
 
@@ -888,8 +934,8 @@ impl DocumentState {
     /// - `end: None`: whole-shape drag. The anchor goes to `position`/`z` and
     ///   any second vertex rides the same delta (see
     ///   [`Annotation::set_position`]).
-    /// - `end: Some(end)`: corner or edge resize. `position`, `end`, and `z`
-    ///   are placed exactly (see [`Annotation::set_vertices`]).
+    /// - `end: Some(end)`: corner or edge resize. `position`, `end`, `z` and
+    ///   `end_z` are placed exactly (see [`Annotation::set_vertices`]).
     ///
     /// A missing pin or dataset is a no-op.
     pub fn move_annotation(
@@ -897,12 +943,12 @@ impl DocumentState {
         dataset_id: &DatasetId,
         id: &str,
         position: [f64; 2],
-        end: Option<[f64; 2]>,
+        (end, end_z): (Option<[f64; 2]>, Option<f64>),
         z: f64,
     ) {
         if let Some(annotation) = self.annotation_mut(dataset_id, id) {
             match end {
-                Some(end) => annotation.set_vertices(position, end, z),
+                Some(end) => annotation.set_vertices(position, end, z, end_z),
                 None => annotation.set_position(position, z),
             }
         }
@@ -1092,6 +1138,7 @@ impl DocumentState {
                 id,
                 position,
                 end,
+                end_z,
                 z,
                 t,
                 c,
@@ -1108,6 +1155,7 @@ impl DocumentState {
                     Annotation {
                         id,
                         position,
+                        end_z: end.and(own_depth(z, end_z)),
                         end,
                         z,
                         t,
@@ -1139,9 +1187,10 @@ impl DocumentState {
                 id,
                 position,
                 end,
+                end_z,
                 z,
             } => {
-                self.move_annotation(&dataset_id, &id, position, end, z);
+                self.move_annotation(&dataset_id, &id, position, (end, end_z), z);
             }
             DocumentCommand::AddComment {
                 dataset_id,
@@ -1274,6 +1323,7 @@ mod annotation_view_tests {
             id: "pin-view".into(),
             position: [10.0, 20.0],
             end: None,
+            end_z: None,
             z: 3.0,
             t: 7,
             c: 2,
@@ -1323,6 +1373,7 @@ mod annotation_view_tests {
             id: "pin-1".into(),
             position: [1.0, 2.0],
             end: None,
+            end_z: None,
             z: 0.0,
             t: 7,
             c: 2,
@@ -1372,6 +1423,7 @@ mod annotation_view_tests {
             id: "pin-1".into(),
             position: [1.0, 2.0],
             end: None,
+            end_z: None,
             z: 0.0,
             t: 7,
             c: 2,

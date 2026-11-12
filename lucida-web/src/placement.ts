@@ -41,6 +41,12 @@ export function readPlacement(
   };
 }
 
+/** A frame point where `p` places it in the scene frame. */
+export function placePoint(p: Placement, point: Vec3): [number, number, number] {
+  const row = (r: number) => p.offset[r] + p.linear[r][0] * point[0] + p.linear[r][1] * point[1] + p.linear[r][2] * point[2];
+  return [row(0), row(1), row(2)];
+}
+
 /** Below this an entry off the diagonal counts as none, as lucida-core counts it. */
 const ALIGNED_EPSILON = 1e-12;
 

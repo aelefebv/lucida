@@ -1242,15 +1242,15 @@ impl WasmScene {
         }
     }
 
-    /// Project a pin's stored world point `(x, y, z)` (in-plane voxel position
-    /// plus additive voxel depth) to screen pixels `[sx, sy]` (physical,
-    /// pre-DPR-divide) through the active camera.
+    /// Project a mark's frame point `(x, y, z)` to screen pixels `[sx, sy]`
+    /// (physical, pre-DPR-divide) through `view`'s camera
+    /// ([`Scene::project_annotation`]).
     ///
-    /// Slice mode uses the 2D overlay's in-plane projection. Arcball and fly
-    /// lift the point through the dataset's rendering transform first, so the
-    /// marker tracks the volume. Returns an empty `Vec` when the point is
-    /// behind the camera or the dataset has no anchorable member, which the
-    /// overlay uses to hide a pin that swings behind the volume.
+    /// A slice view draws the point on its plane, whichever plane it cuts.
+    /// Arcball and fly lift the point through the dataset's rendering
+    /// transform first, so the marker tracks the volume. Returns an empty
+    /// `Vec` when the point is behind the camera or the view has no place to
+    /// draw it, which the overlay uses to hide the marker.
     pub fn project_annotation(
         &self,
         view: u32,
@@ -1266,15 +1266,17 @@ impl WasmScene {
         }
     }
 
-    /// Depth pick for dropping a pin in a 3D view: ray-cast from screen
-    /// coordinates into `dataset_id`'s volume and return the hit as an
-    /// in-plane-voxel + voxel-depth point `[x, y, z]` — exactly the triple to
-    /// store as `position = [x, y]`, `z = z`. Returns an empty `Vec` (length 0)
-    /// if the ray misses the volume, so the caller can decline to drop a pin
-    /// into empty space. The returned point re-projects (via
+    /// The frame point `[x, y, z]` of `dataset_id` a mark placed at screen
+    /// pixels `(screen_x, screen_y)` in `view` takes, exactly the triple to
+    /// store as `position = [x, y]`, `z = z`
+    /// ([`Scene::pick_annotation_voxel`]): on a slice view's plane, or where
+    /// a volume view's ray meets the volume. Returns an empty `Vec` (length
+    /// 0) where there is none, such as a ray that misses, so the caller can
+    /// decline to drop a mark into empty space. The point re-projects (via
     /// `project_annotation`) back under the cursor that picked it.
     pub fn pick_annotation_voxel(
         &self,
+        view: u32,
         dataset_id: &str,
         screen_x: f64,
         screen_y: f64,
@@ -1282,11 +1284,27 @@ impl WasmScene {
         let id = DatasetId(dataset_id.into());
         match self
             .inner
-            .pick_annotation_voxel(self.active().id(), &id, screen_x, screen_y)
+            .pick_annotation_voxel(ViewId(view), &id, screen_x, screen_y)
         {
             Some([x, y, z]) => vec![x, y, z],
             None => Vec::new(),
         }
+    }
+
+    /// Whether `view` draws the marks of `dataset_id`
+    /// ([`Scene::draws_annotations`]).
+    pub fn draws_annotations(&self, view: u32, dataset_id: &str) -> bool {
+        self.inner
+            .draws_annotations(ViewId(view), &DatasetId(dataset_id.into()))
+    }
+
+    /// Where `view` stands to cut the plane of `dataset_id` holding the frame
+    /// point `(x, y, z)`, as JSON `{"axis": "z", "position": 3}`
+    /// ([`Scene::annotation_cut`]); `null` for an unknown view or dataset.
+    pub fn annotation_cut(&self, view: u32, dataset_id: &str, x: f64, y: f64, z: f64) -> String {
+        let id = DatasetId(dataset_id.into());
+        serde_json::to_string(&self.inner.annotation_cut(ViewId(view), &id, [x, y, z]))
+            .unwrap_or_default()
     }
 
     pub fn dataset_order(&self) -> String {

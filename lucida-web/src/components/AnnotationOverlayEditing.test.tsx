@@ -28,6 +28,11 @@ function makeScene(initial: Annotation[]) {
     center: () => new Float64Array([0, 0]),
     transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    slice_plane: () => "xy",
+    draws_annotations: () => true,
+    // The inverse of the camera above on the 800 by 600 view, cutting Z
+    // through the middle of plane 3.
+    pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => new Float64Array([x - 400, y - 300, 3.5]),
     export_presence: () => "not json",
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
@@ -75,7 +80,7 @@ function renderOverlay(pins: Annotation[], tool: Tool = "pan") {
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: canvas }}
       version={v}
-      viewContext={{ z: 3, t: 1, channels: [0] }}
+      viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 1, channels: [0] }}
       myId={MY_ID}
       tool={tool}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
@@ -296,7 +301,8 @@ describe("AnnotationOverlay — canvas menu", () => {
     await userEvent.click(screen.getByRole("menuitem", { name: "Drop a point" }));
     const adds = sent.filter((c) => c.type === "add_annotation");
     expect(adds).toHaveLength(1);
-    expect(adds[0]).toMatchObject({ kind: "point", position: [100, 50], end: null, z: 3, t: 1, c: 0, author: MY_ID });
+    // In the middle of the plane the view cuts.
+    expect(adds[0]).toMatchObject({ kind: "point", position: [100, 50], end: null, z: 3.5, t: 1, c: 0, author: MY_ID });
   });
 
   it("Comment here adds a point and opens its thread", async () => {

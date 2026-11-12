@@ -158,8 +158,8 @@ export function releasePointer(target: Element, pointerId: number): void {
 
 /**
  * Apply locally and send one `move_annotation`. With `end` it is a reshape
- * placing both vertices; without, a rigid translate. The backend tells them
- * apart by `end`'s presence.
+ * placing both vertices, `endZ` the second one's depth; without, a rigid
+ * translate. The backend tells them apart by `end`'s presence.
  *
  * The wire goldens lock field presence and values, not key order.
  */
@@ -170,6 +170,7 @@ export function emitMoveAnnotation(
     id: string;
     position: [number, number];
     end?: [number, number];
+    endZ?: number;
     z: number;
   },
   sendCommand: (json: string) => void,
@@ -181,6 +182,8 @@ export function emitMoveAnnotation(
         id: args.id,
         position: args.position,
         end: args.end,
+        // A second vertex at the anchor's depth goes unsent, as it always has.
+        ...(args.endZ !== undefined && args.endZ !== args.z ? { end_z: args.endZ } : {}),
         z: args.z,
       }
     : {

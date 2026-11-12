@@ -26,6 +26,11 @@ function make2DScene(initial: Annotation[]): WasmScene {
     center: () => new Float64Array([0, 0]),
     transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    slice_plane: () => "xy",
+    draws_annotations: () => true,
+    // The inverse of the camera above on the 800 by 600 view, cutting Z
+    // through the middle of plane 3.
+    pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => new Float64Array([x - 400, y - 300, 3.5]),
     apply_command: () => {},
   } as unknown as WasmScene;
 }
@@ -82,7 +87,7 @@ describe("AnnotationOverlay (2D) — visible prop", () => {
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={{ z: 3, t: 0, channels: [0] }}
+        viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -96,7 +101,7 @@ describe("AnnotationOverlay (2D) — visible prop", () => {
           wasmSceneRef={sceneRef}
           surface={{ view: 0, element: canvas }}
           version={0}
-          viewContext={{ z: 3, t: 0, channels: [0] }}
+          viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
@@ -189,7 +194,7 @@ describe("AnnotationOverlay3D — visible prop", () => {
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={{ z: 3, t: 0, channels: [0] }}
+        viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -203,7 +208,7 @@ describe("AnnotationOverlay3D — visible prop", () => {
           wasmSceneRef={sceneRef}
           surface={{ view: 0, element: canvas }}
           version={0}
-          viewContext={{ z: 3, t: 0, channels: [0] }}
+          viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
@@ -263,7 +268,7 @@ describe("toolbar toggle wiring — button flips overlay visibility", () => {
           wasmSceneRef={sceneRef}
           surface={{ view: 0, element: canvas }}
           version={0}
-          viewContext={{ z: 3, t: 0, channels: [0] }}
+          viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}

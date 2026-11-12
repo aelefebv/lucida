@@ -10,6 +10,7 @@ import type { Annotation, AnnotationOverlayHandle } from "../components/annotati
 import { inChannelContext, pinChannels } from "../components/annotationContext.ts";
 import { resolveAnnotationDatasetId } from "../components/currentDatasetAnnotations.ts";
 import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
+import { annotationCutCommand } from "../components/annotationCut.ts";
 import type { Engine } from "../engine.ts";
 import { useAnnotationDeepLink } from "../hooks/useAnnotationDeepLink.ts";
 import { invalidateAfterViewRestore, requestRender } from "../invalidation.ts";
@@ -60,23 +61,23 @@ export function useAnnotationNavigation({
   docVersion,
   onDeepLinkNotFound,
 }: Params) {
-  // The gentle tier: bring the pin on-context by matching its Z/T and showing
-  // a channel it was placed on.
+  // The gentle tier: bring the pin on-context by cutting the plane it lies on,
+  // matching its T, and showing a channel it was placed on.
   const gentleOnContext = useCallback((pin: Annotation) => {
     const scene = engine.scene();
     if (!scene) return;
-    const targetZ = pin.z ?? 0;
+    const datasetId = resolveAnnotationDatasetId(scene, selectedDatasetId);
     const targetT = pin.t ?? 0;
     let contextChanged = false;
-    if (targetZ !== scene.z()) {
-      applyViewportCommand(scene, { type: "set_z", z: targetZ });
+    const cut = datasetId ? annotationCutCommand(scene, datasetId, pin) : null;
+    if (cut) {
+      applyViewportCommand(scene, cut);
       contextChanged = true;
     }
     if (targetT !== scene.t()) {
       applyViewportCommand(scene, { type: "set_t", t: targetT });
       contextChanged = true;
     }
-    const datasetId = resolveAnnotationDatasetId(scene, selectedDatasetId);
     const layer = datasetId ? readResolvedLayers(scene, scene.active_view()).get(datasetId) : undefined;
     const placement = pinChannels(pin);
     if (datasetId && layer && !inChannelContext(placement, shownChannels(layer))) {

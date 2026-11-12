@@ -142,7 +142,7 @@ export function CommentsPanel({
                 const kind = KIND_ICON[pin.kind] ?? KIND_ICON.point;
                 const KindIcon = kind.icon;
                 const where = [
-                  extents && extents.z > 1 ? positionLabel("Z", pin.z ?? 0) : null,
+                  extents && extents.z > 1 ? positionLabel("Z", Math.floor(pin.z ?? 0)) : null,
                   extents && extents.t > 1 ? positionLabel("T", pin.t ?? 0) : null,
                 ].filter(Boolean);
                 const meta = [

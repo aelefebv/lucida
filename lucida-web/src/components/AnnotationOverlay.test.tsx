@@ -7,6 +7,7 @@ import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { AnnotationOverlay } from "./AnnotationOverlay.tsx";
 import type { Annotation } from "./annotationDocument.ts";
+import type { ViewContext } from "./annotationContext.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 
 /**
@@ -26,6 +27,11 @@ function makeScene(initial: Annotation[]): {
     center: () => new Float64Array([0, 0]),
     transposed: () => false,
     dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
+    slice_plane: () => "xy",
+    draws_annotations: () => true,
+    // The inverse of the camera above on the 800 by 600 view, cutting Z
+    // through the middle of plane 3.
+    pick_annotation_voxel: (_view: number, _ds: string, x: number, y: number) => new Float64Array([x - 400, y - 300, 3.5]),
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
       applied.push(cmd);
@@ -77,7 +83,7 @@ function renderOverlay(opts: {
   pins: Annotation[];
   myId?: string;
   /** The view's Z/T/C. Defaults to on-context for the standard pins (z=3). */
-  viewContext?: { z: number; t: number; channels: number[] };
+  viewContext?: ViewContext;
 }) {
   const { scene, applied } = makeScene(opts.pins);
   const sent: Array<Record<string, unknown>> = [];
@@ -93,7 +99,7 @@ function renderOverlay(opts: {
       wasmSceneRef={sceneRef}
       surface={{ view: 0, element: canvas }}
       version={0}
-      viewContext={opts.viewContext ?? { z: 3, t: 0, channels: [0] }}
+      viewContext={opts.viewContext ?? { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {
@@ -105,7 +111,7 @@ function renderOverlay(opts: {
     />,
   );
   /** Re-render with a new view context, to navigate the view. */
-  const setViewContext = (viewContext: { z: number; t: number; channels: number[] }) => {
+  const setViewContext = (viewContext: ViewContext) => {
     rerender(
       <AnnotationOverlay
         datasetId="wds-1"
@@ -1012,7 +1018,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
   it("a pin whose z/t/c all match the view is on-context (no off-context marker)", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
-      viewContext: { z: 5, t: 2, channels: [1] },
+      viewContext: { cut: { axis: "z", start: 5, end: 6 }, t: 2, channels: [1] },
     });
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
@@ -1022,7 +1028,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 12, t: 3, c: 2 })],
       // Same t/c, different z → off-context purely on z.
-      viewContext: { z: 4, t: 3, channels: [2] },
+      viewContext: { cut: { axis: "z", start: 4, end: 5 }, t: 3, channels: [2] },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     // The label names the pin's own z/t/c.
@@ -1035,7 +1041,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 9, c: 1 })],
       // Same z/c, different t.
-      viewContext: { z: 5, t: 0, channels: [1] },
+      viewContext: { cut: { axis: "z", start: 5, end: 6 }, t: 0, channels: [1] },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("Z 6 · T 10 · Channel 2");
@@ -1045,7 +1051,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 7 })],
       // Same z/t, different c.
-      viewContext: { z: 5, t: 2, channels: [0] },
+      viewContext: { cut: { axis: "z", start: 5, end: 6 }, t: 2, channels: [0] },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("Z 6 · T 3 · Channel 8");
@@ -1054,11 +1060,11 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
   it("navigating the view to the pin's Z/T/C returns it to on-context", () => {
     const { setViewContext } = renderOverlay({
       pins: [elsewherePin()],
-      viewContext: { z: 3, t: 0, channels: [0] },
+      viewContext: { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
 
-    setViewContext({ z: 12, t: 3, channels: [2] });
+    setViewContext({ cut: { axis: "z", start: 12, end: 13 }, t: 3, channels: [2] });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
@@ -1066,11 +1072,11 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
   it("navigating AWAY from a matching pin makes it off-context", () => {
     const { setViewContext } = renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
-      viewContext: { z: 5, t: 2, channels: [1] },
+      viewContext: { cut: { axis: "z", start: 5, end: 6 }, t: 2, channels: [1] },
     });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
 
-    setViewContext({ z: 6, t: 2, channels: [1] });
+    setViewContext({ cut: { axis: "z", start: 6, end: 7 }, t: 2, channels: [1] });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("Z 6 · T 3 · Channel 2");
   });
@@ -1087,7 +1093,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
           comments: [{ id: "c1", author: String(MY_ID), text: "still works" }],
         }),
       ],
-      viewContext: { z: 4, t: 0, channels: [0] },
+      viewContext: { cut: { axis: "z", start: 4, end: 5 }, t: 0, channels: [0] },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
     const dot = screen.getByTestId("annot-pin-pin-here");
@@ -1101,7 +1107,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
     // Absent t/c read as 0.
     renderOverlay({
       pins: [{ id: "old", position: [10, 20], z: 8, author: String(MY_ID), kind: "point" }],
-      viewContext: { z: 8, t: 0, channels: [0] },
+      viewContext: { cut: { axis: "z", start: 8, end: 9 }, t: 0, channels: [0] },
     });
     expect(screen.queryByTestId("annot-offcontext-old")).toBeNull();
   });
@@ -1112,7 +1118,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
         ownPin({ id: "pin-on", z: 3, t: 0, c: 0 }),
         ownPin({ id: "pin-off", z: 9, t: 0, c: 0 }),
       ],
-      viewContext: { z: 3, t: 0, channels: [0] },
+      viewContext: { cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] },
     });
     expect(screen.queryByTestId("annot-offcontext-pin-on")).toBeNull();
     expect(screen.getByTestId("annot-offcontext-pin-off")).toBeTruthy();
@@ -1138,6 +1144,8 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       center: () => new Float64Array([0, 0]),
       transposed: () => false,
       dataset_placement: () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]),
+      slice_plane: () => "xy",
+      draws_annotations: () => true,
       apply_command: () => {},
     } as unknown as WasmScene;
     return { scene, setPins: (next) => { pins = next; } };
@@ -1182,7 +1190,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       wasmSceneRef: sceneRef,
       surface: { view: 0, element: canvas },
       version,
-      viewContext: { z: 0, t: 0, channels: [0] },
+      viewContext: { cut: { axis: "z" as const, start: 0, end: 1 }, t: 0, channels: [0] },
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
@@ -1218,7 +1226,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       wasmSceneRef: sceneRef,
       surface: { view: 0, element: canvas },
       version,
-      viewContext: { z: 0, t: 0, channels: [0] },
+      viewContext: { cut: { axis: "z" as const, start: 0, end: 1 }, t: 0, channels: [0] },
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
@@ -1271,7 +1279,7 @@ describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's 
         wasmSceneRef={sceneRef}
         surface={{ view: 0, element: canvas }}
         version={0}
-        viewContext={{ z: 3, t: 0, channels: [0] }}
+        viewContext={{ cut: { axis: "z", start: 3, end: 4 }, t: 0, channels: [0] }}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}

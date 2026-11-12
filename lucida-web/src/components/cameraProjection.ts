@@ -7,15 +7,18 @@
  *
  * 2D: the camera is `zoom` and `center` in physical pixels against the view's
  * midpoint; {@link eventToWorld} and {@link makeWorldToScreen} are exact
- * inverses. The 2D world is the scene frame every dataset is placed in, and a
- * pin is stored in its own dataset's frame, so pins go through the dataset's
- * placement ({@link eventToFrame}, {@link makeFrameToScreen}). 3D: projection
- * lives in WASM (`scene.project_annotation`) so it uses the same transform as
- * the volume pass.
+ * inverses. The 2D world is the scene frame every dataset is placed in, seen
+ * across and down the plane the view cuts. A mark is stored in its own
+ * dataset's frame, so it goes through the dataset's placement onto that plane
+ * ({@link makeFrameToScreen}). Picking a mark's point, in 2D and 3D, and the
+ * 3D projection live in WASM (`scene.pick_annotation_voxel`,
+ * `scene.project_annotation`), so they use the same transforms as the passes
+ * that draw the data.
  */
 import type { WasmScene } from "lucida-core";
-import { frameToScene, readPlaneMap, sceneToFrame } from "../placement.ts";
-import type { ScreenPoint } from "./annotationGeometry.ts";
+import { placePoint, readPlacement } from "../placement.ts";
+import { planeAxes, xyz, type SlicePlane } from "../renderer/slicePlane.ts";
+import type { FramePoint, ScreenPoint } from "./annotationGeometry.ts";
 
 /** The x/y of a pointer event, so plain objects and React events both qualify. */
 export interface ClientPoint {
@@ -85,28 +88,46 @@ export function makeWorldToScreen(
   ];
 }
 
-/** A pointer event in `datasetId`'s frame, where its pins are stored. */
-export function eventToFrame(
-  scene: WasmScene,
-  surface: ViewSurface,
-  e: ClientPoint,
+/**
+ * The point of `datasetId`'s frame a mark placed at `e` in `surface`'s view
+ * takes (`scene.pick_annotation_voxel`): on a slice view's plane, in the
+ * middle of the dataset's plane there, or where a volume view's ray meets the
+ * volume. Null where there is none.
+ */
+export function pickFramePoint(
+  scene: Pick<WasmScene, "pick_annotation_voxel">,
+  { view, element }: ViewSurface,
   datasetId: string,
-): [number, number] {
-  return sceneToFrame(readPlaneMap(scene, datasetId), eventToWorld(scene, surface, e));
+  e: ClientPoint,
+): FramePoint | null {
+  const [x, y] = eventToScreenPx(element, e);
+  const point = scene.pick_annotation_voxel(view, datasetId, x, y);
+  return point.length < 3 ? null : [point[0], point[1], point[2]];
+}
+
+/** The plane `surface`'s slice view cuts. */
+export function viewPlane(scene: Pick<WasmScene, "slice_plane">, { view }: ViewSurface): SlicePlane {
+  return scene.slice_plane(view) as SlicePlane;
 }
 
 /**
- * {@link makeWorldToScreen} for points in `datasetId`'s frame, the inverse of
- * {@link eventToFrame}. Call once per frame, as it snapshots the placement too.
+ * {@link makeWorldToScreen} for points in `datasetId`'s frame, placed as the
+ * dataset is and seen across and down the plane the view cuts, the inverse of
+ * {@link pickFramePoint} there. Call once per frame, as it snapshots the
+ * placement too.
  */
 export function makeFrameToScreen(
   scene: WasmScene,
   surface: ViewSurface,
   datasetId: string,
-): (v: ScreenPoint) => ScreenPoint {
+): (v: FramePoint) => ScreenPoint {
   const project = makeWorldToScreen(scene, surface);
-  const placement = readPlaneMap(scene, datasetId);
-  return (v: ScreenPoint): ScreenPoint => project(frameToScene(placement, v));
+  const placement = readPlacement(scene, datasetId);
+  const [across, down] = planeAxes(viewPlane(scene, surface)).map(xyz);
+  return (v: FramePoint): ScreenPoint => {
+    const point = placePoint(placement, v);
+    return project([point[across], point[down]]);
+  };
 }
 
 /**
@@ -118,10 +139,10 @@ export function makeProjectAnnotationToCss(
   scene: WasmScene,
   view: number,
   datasetId: string,
-): (v: ScreenPoint, z: number) => ScreenPoint | null {
+): (v: FramePoint) => ScreenPoint | null {
   const dpr = devicePixelRatio;
-  return (v: ScreenPoint, z: number): ScreenPoint | null => {
-    const proj = scene.project_annotation(view, datasetId, v[0], v[1], z);
+  return (v: FramePoint): ScreenPoint | null => {
+    const proj = scene.project_annotation(view, datasetId, v[0], v[1], v[2]);
     return proj.length < 2 ? null : [proj[0] / dpr, proj[1] / dpr];
   };
 }

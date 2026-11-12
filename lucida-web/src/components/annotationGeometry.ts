@@ -1,37 +1,58 @@
 /**
- * Annotation geometry, the TS mirror of `Annotation::vertices()` and
- * `Annotation::is_closed()` in lucida-core.
+ * Annotation geometry, the TS mirror of `Annotation::vertices()`,
+ * `Annotation::is_closed()` and `box_plane` in lucida-core.
  *
- * Both overlays get a pin's in-plane world vertices from here, project each with
- * their own camera, then draw a dot, a segment, or a closed polygon. Keep the
- * per-kind vertex layout in step with the Rust twin so a shape renders the same
- * in both views.
+ * A mark's vertices are points of its dataset's frame on all three axes. Both
+ * overlays project each one with their own view's camera, then draw a dot, a
+ * segment, or a closed polygon. A slice view edits a mark through its place on
+ * the view's plane, across and down, which the 2D helpers below work in. Keep
+ * the per-kind vertex layout in step with the Rust twin so a shape renders the
+ * same in every view.
  */
 import type { Annotation } from "./annotationDocument.ts";
+import { cutAxis, fromPlaneFrame, toPlaneFrame, type SlicePlane } from "../renderer/slicePlane.ts";
 
 /** A screen-space point in CSS pixels. */
 export type ScreenPoint = [number, number];
 
-/**
- * The in-plane world vertices of a pin's shape, in draw order. A line or box
- * with no `end` collapses to its anchor `position`, so the result is never
- * empty.
- */
-export function annotationVertices(pin: Annotation): ScreenPoint[] {
-  const p = pin.position;
+/** A point of a dataset's frame, `[x, y, z]` in continuous samples. */
+export type FramePoint = [number, number, number];
+
+/** A pin's anchor vertex, `(position, z)`. */
+export function pinStart(pin: Annotation): FramePoint {
+  return [pin.position[0], pin.position[1], pin.z ?? 0];
+}
+
+/** A pin's second vertex, at its own depth or else the anchor's; null for a point. */
+export function pinEnd(pin: Annotation): FramePoint | null {
   const end = pin.end ?? null;
-  if (end && pin.kind === "line") {
-    return [p, end];
-  }
+  return end ? [end[0], end[1], pin.end_z ?? pin.z ?? 0] : null;
+}
+
+/** The plane a box with these corners lies in: the one across the axis both
+ * share, XY when they share their depth. Mirrors `box_plane` in lucida-core. */
+export function boxPlane(start: FramePoint, end: FramePoint): SlicePlane {
+  if (start[2] === end[2]) return "xy";
+  if (start[1] === end[1]) return "xz";
+  return start[0] === end[0] ? "yz" : "xy";
+}
+
+/**
+ * The frame vertices of a pin's shape, in draw order: a point's anchor, a
+ * line's two ends, or a box's four corners in the plane it lies in. A line or
+ * box with no `end` collapses to its anchor, so the result is never empty.
+ */
+export function annotationVertices(pin: Annotation): FramePoint[] {
+  const start = pinStart(pin);
+  const end = pinEnd(pin);
+  if (end && pin.kind === "line") return [start, end];
   if (end && pin.kind === "box") {
-    return [
-      [p[0], p[1]],
-      [end[0], p[1]],
-      [end[0], end[1]],
-      [p[0], end[1]],
-    ];
+    const plane = boxPlane(start, end);
+    const [s0, s1] = onPlane(start, plane);
+    const [e0, e1] = onPlane(end, plane);
+    return [start, withOnPlane(start, [e0, s1], plane), end, withOnPlane(end, [s0, e1], plane)];
   }
-  return [p];
+  return [start];
 }
 
 /** Whether the drawn shape is a closed ring (a box with an `end`). */
@@ -39,15 +60,50 @@ export function isClosedShape(pin: Annotation): boolean {
   return pin.kind === "box" && (pin.end ?? null) !== null;
 }
 
-/** Opposite in-plane world corners of a box. The reshape command carries both
- * and the backend places them verbatim. */
+/** A frame point's place on `plane`, `[across, down]`. */
+export function onPlane(point: FramePoint, plane: SlicePlane): [number, number] {
+  const [across, down] = toPlaneFrame(point, cutAxis(plane));
+  return [across, down];
+}
+
+/** `point` moved to `at` across and down `plane`, its place along the cut kept. */
+export function withOnPlane(point: FramePoint, at: readonly [number, number], plane: SlicePlane): FramePoint {
+  const axis = cutAxis(plane);
+  return fromPlaneFrame([at[0], at[1], toPlaneFrame(point, axis)[2]], axis);
+}
+
+/** Whether a shape from `start` to `end` lies on one plane of `plane`'s kind,
+ * the one it was drawn on, where its handles can reshape it. */
+export function liesOnPlane(start: FramePoint, end: FramePoint, plane: SlicePlane): boolean {
+  const axis = cutAxis(plane);
+  return toPlaneFrame(start, axis)[2] === toPlaneFrame(end, axis)[2];
+}
+
+/** A shape's two frame vertices, a box's opposite corners or a line's ends. */
+export interface FrameVertices {
+  position: FramePoint;
+  end: FramePoint;
+}
+
+/** Both vertices moved `delta` across and down `plane`, as dragging a whole
+ * shape moves it there; each keeps its own place along the cut. */
+export function translateOnPlane(vertices: FrameVertices, delta: readonly [number, number], plane: SlicePlane): FrameVertices {
+  const move = (p: FramePoint) => {
+    const [across, down] = onPlane(p, plane);
+    return withOnPlane(p, [across + delta[0], down + delta[1]], plane);
+  };
+  return { position: move(vertices.position), end: move(vertices.end) };
+}
+
+/** Opposite corners of a box, as places across and down the plane it lies
+ * on ({@link onPlane}). */
 export interface BoxCorners {
   position: [number, number];
   end: [number, number];
 }
 
-/** In-plane world endpoints of a line. Same shape as {@link BoxCorners} so one
- * reshape gesture can carry either. */
+/** A line's endpoints across and down the plane it lies on. Same shape as
+ * {@link BoxCorners} so one reshape gesture can carry either. */
 export interface LineEndpoints {
   position: [number, number];
   end: [number, number];
@@ -168,18 +224,6 @@ export function reshapeBox(
       break;
   }
   return { position, end };
-}
-
-/** A box's corners or a line's endpoints moved together by `delta`, as dragging
- * a whole shape previews it. */
-export function translateShape(
-  vertices: BoxCorners & LineEndpoints,
-  delta: [number, number],
-): BoxCorners & LineEndpoints {
-  return {
-    position: [vertices.position[0] + delta[0], vertices.position[1] + delta[1]],
-    end: [vertices.end[0] + delta[0], vertices.end[1] + delta[1]],
-  };
 }
 
 /** A shape as drawn on screen, for {@link hitTestShapes}. */

@@ -23,7 +23,8 @@ import { VolumeViewer } from "../components/VolumeViewer.tsx";
 import { useEngine } from "../engine.ts";
 import type { PeerStore } from "../peerStore.ts";
 import { useSceneView } from "../hooks/useSceneView.ts";
-import { shownChannels } from "../resolvedLayers.ts";
+import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
+import { viewCut, type ViewContext } from "../components/annotationContext.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CanvasSize } from "../shell/CanvasStage.tsx";
 import type { DatasetState } from "../types.ts";
@@ -38,7 +39,7 @@ import { FourUpPlanes, useFollowTile } from "./planeLines.ts";
 import { Hover } from "./hover.ts";
 import { comparisonActions, placedByHandNote, readLineUpByHand } from "../comparison.ts";
 import type { ViewPane } from "../sceneStore.ts";
-import type { SpatialAxis } from "../renderer/slicePlane.ts";
+import type { SlicePlane, SpatialAxis } from "../renderer/slicePlane.ts";
 import type { ViewLayoutActions } from "../viewLayout.ts";
 import type { UserTransformActions } from "../hooks/useUserTransforms.ts";
 
@@ -156,14 +157,17 @@ export function CanvasLayers({
   const overlays = hasDatasets && selectedDatasetId && wasmScene && canvas
     ? { datasetId: selectedDatasetId }
     : null;
-  // The overlays draw the selected layer's pins, which sit on its own planes,
-  // so its plane under the cut and its shown channels decide which pins are in
-  // context.
-  const selectedLayer = selectedDatasetId ? layers.get(selectedDatasetId) : undefined;
-  const viewContext = {
-    z: selectedLayer?.z_range.start ?? 0,
-    t,
-    channels: shownChannels(selectedLayer),
+  // The overlays draw the selected layer's pins, which lie on its own planes,
+  // so where each view cuts that layer and the channels it shows there decide
+  // which pins are in context. A volume view cuts none.
+  const viewContextOf = (pane: ViewPane): ViewContext => {
+    const layer = overlays && wasmScene ? readResolvedLayers(wasmScene, pane.id).get(overlays.datasetId) : undefined;
+    const plane = wasmScene?.slice_plane(pane.id) as SlicePlane | undefined;
+    return {
+      cut: pane.cameraMode === "slice" && layer && plane ? viewCut(layer, plane) : null,
+      t,
+      channels: shownChannels(layer),
+    };
   };
   const nameOf = (datasetId: string) => datasets.get(datasetId)?.name ?? datasetId;
 
@@ -237,7 +241,7 @@ export function CanvasLayers({
             wasmSceneRef={scene.wasmSceneRef}
             surface={surface}
             version={remoteDocumentVersion}
-            viewContext={viewContext}
+            viewContext={viewContextOf(pane)}
             myId={annotationAuthor}
             sendCommand={sendCommand}
             onDocumentChanged={onDocumentChanged}
@@ -255,7 +259,7 @@ export function CanvasLayers({
             wasmSceneRef={scene.wasmSceneRef}
             surface={surface}
             version={remoteDocumentVersion}
-            viewContext={viewContext}
+            viewContext={viewContextOf(pane)}
             myId={annotationAuthor}
             sendCommand={sendCommand}
             onDocumentChanged={onDocumentChanged}

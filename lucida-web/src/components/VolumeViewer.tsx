@@ -17,7 +17,7 @@ import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { annotationTarget, sayNoLayerToAnnotate } from "./annotationTarget.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
-import { eventToScreenPx, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { pickFramePoint, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { wheelZoom } from "../input/wheel.ts";
 import { frameClock } from "../frameClock.ts";
@@ -232,17 +232,11 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
     setDragging(false);
   }, [annotationDraftRef]);
 
-  /** Ray-cast a client point into `datasetId`'s volume: `[x, y, z]` as in-plane
-   * voxel position plus voxel depth, or `null` if the ray missed. */
+  /** Where a client point's ray meets `datasetId`'s volume in this view, as
+   * a frame point, or `null` if the ray missed. */
   const pickVoxel = useCallback(
-    (datasetId: string, clientX: number, clientY: number): [number, number, number] | null => {
-      // pick_annotation_voxel takes physical-pixel screen coords (the same space
-      // the WASM viewport uses), matching project_to_screen.
-      const [screenX, screenY] = eventToScreenPx(element, { clientX, clientY });
-      const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
-      return voxel.length < 3 ? null : [voxel[0], voxel[1], voxel[2]];
-    },
-    [element, scene],
+    (datasetId: string, clientX: number, clientY: number) => pickFramePoint(scene, surface, datasetId, { clientX, clientY }),
+    [scene, surface],
   );
 
   /** Draw an annotation from a shift gesture. A line/box depth-picks both
@@ -262,11 +256,7 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
       }
       const anchor = pickVoxel(datasetId, anchorX, anchorY);
       if (!anchor) return; // anchor ray missed → don't draw
-      // The pick can return the far-face depth (339.999 for a 340-deep volume),
-      // which rounds outside [0, depth-1], so the pin would never match a 2D
-      // slice. Clamp so 2D navigation can reach it.
-      const depth = scene.dataset_volume_shape(datasetId)[0];
-      const z = depth > 0 ? Math.max(0, Math.min(anchor[2], depth - 1)) : anchor[2];
+      const z = anchor[2];
       let end: [number, number] | null = null;
       if (shape) {
         const far = pickVoxel(datasetId, endX, endY);
