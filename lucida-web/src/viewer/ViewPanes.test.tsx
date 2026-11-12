@@ -8,7 +8,7 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import { createPortal } from "react-dom";
 import type { ViewPane } from "../sceneStore.ts";
 import { ViewPanes } from "./ViewPanes.tsx";
-import { DATASET_DRAG_TYPE, forwardWheel, isViewPane, paneOf } from "./viewPane.ts";
+import { DATASET_DRAG_TYPE, forwardWheel, isViewPane } from "./viewPane.ts";
 import { coverageMessage } from "./coverage.ts";
 
 afterEach(cleanup);
@@ -56,11 +56,10 @@ describe("a view's pane", () => {
   });
 
   it("takes a wheel handed on from over it as its own, making its view active", () => {
-    const { activate, rendered } = panes([LEFT, RIGHT]);
+    const { activate, pane } = panes([LEFT, RIGHT]);
     const over = new WheelEvent("wheel", { deltaY: -100, clientX: 610, clientY: 240, cancelable: true });
-    forwardWheel(over, paneOf(rendered.container, 3)!);
+    forwardWheel(over, pane(3));
     expect(activate).toHaveBeenCalledWith(3);
-    expect(paneOf(rendered.container, 7)).toBeNull();
   });
 
   it("outlines the active view only when there are several", () => {

@@ -10,7 +10,7 @@ use lucida_content::{
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
-use crate::placement::UserTransform;
+use crate::placement::{UserTransform, tile_holding};
 use crate::slice_plane::SlicePlane;
 use crate::view::LegacyChannels;
 
@@ -558,11 +558,11 @@ pub struct Annotation {
     /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
     #[serde(default)]
     pub comments: Vec<Comment>,
-    /// The collection entity (group or tile) this pin is glued to. Set once in
-    /// [`DocumentState::apply`] for `AddAnnotation`, to the nearest placeable
-    /// entity in the active layout (see [`DocumentState::nearest_anchor`]).
-    /// `None` for a non-collection dataset or when no entity position resolves;
-    /// an unanchored pin stays put on a layout switch.
+    /// The tile of a collection this pin is glued to: the one its first
+    /// vertex lies on in the active layout, set in [`DocumentState::apply`]
+    /// when the pin is added or moved (see [`DocumentState::tile_anchor`]).
+    /// `None` for a non-collection dataset or when no tile is placed; an
+    /// unanchored pin stays put on a layout switch.
     ///
     /// When the active layout changes, an anchored pin's whole shape moves by
     /// this entity's displacement (see [`DocumentState::reanchor_for_layout`]),
@@ -946,11 +946,15 @@ impl DocumentState {
         (end, end_z): (Option<[f64; 2]>, Option<f64>),
         z: f64,
     ) {
+        // Either move puts the first vertex at `position`, and a pin moved
+        // onto another tile follows that tile from then on.
+        let anchor = self.tile_anchor(dataset_id, position);
         if let Some(annotation) = self.annotation_mut(dataset_id, id) {
             match end {
                 Some(end) => annotation.set_vertices(position, end, z, end_z),
                 None => annotation.set_position(position, z),
             }
+            annotation.anchor = anchor;
         }
     }
 
@@ -990,51 +994,40 @@ impl DocumentState {
         }
     }
 
-    /// Pick the collection entity a freshly dropped pin is glued to: the entity
-    /// nearest to `position` in the dataset's active layout.
+    /// The tile a pin whose first vertex is at `position` is glued to: the
+    /// one whose box in the dataset's active layout holds it, or else the
+    /// nearest ([`tile_holding`]), the tile a side view draws the pin on.
     ///
     /// Returns `None` when the dataset is unknown, not a collection, or has no
-    /// placed entity. It uses [`resolve_entity_position`] rather than the
-    /// render-path fallback so an unplaceable entity never counts as sitting at
-    /// the origin.
+    /// placed tile. A tile whose position doesn't resolve is left out rather
+    /// than counted as sitting at the origin.
     ///
-    /// Ties go to the first entity in manifest order. The server and every
-    /// client derive the same anchor from the same synced state, so the anchor
-    /// never travels on the wire.
-    fn nearest_anchor(&self, dataset_id: &DatasetId, position: [f64; 2]) -> Option<EntityId> {
+    /// The server and every client derive the same anchor from the same synced
+    /// state, so the anchor never travels on the wire.
+    fn tile_anchor(&self, dataset_id: &DatasetId, position: [f64; 2]) -> Option<EntityId> {
         let manifest = self.manifests.get(dataset_id)?;
-        // A single-image dataset has no group or tile to glue to, and its lone
-        // image does not move between layouts.
+        // A single-image dataset has no tile to glue to, and its lone image
+        // does not move between layouts.
         if !matches!(manifest.kind, DatasetKind::Collection { .. }) {
             return None;
         }
-
         let layout = crate::scene::resolve_layout(
             manifest,
             self.registered_layouts.get(dataset_id),
             self.active_layout_ids.get(dataset_id),
         );
-
-        let mut best: Option<(EntityId, f64)> = None;
-        for entity in manifest.entities() {
-            let Some(pos) = crate::scene::resolve_entity_position(
-                &entity.id,
-                &layout,
-                manifest.entities(),
-                manifest.transforms(),
-            ) else {
-                continue;
-            };
-            let dx = pos[0] - position[0];
-            let dy = pos[1] - position[1];
-            let dist2 = dx * dx + dy * dy;
-            // Strictly less keeps the first entity on a tie.
-            if best.as_ref().is_none_or(|(_, b)| dist2 < *b) {
-                best = Some((entity.id.clone(), dist2));
-            }
-        }
-
-        best.map(|(id, _)| id)
+        let positions = crate::scene::LayoutPositionIndex::new(
+            &layout,
+            manifest.entities(),
+            manifest.transforms(),
+        );
+        let tiles = manifest.images().iter().filter_map(|image| {
+            let corner = positions.resolve(&image.owner)?;
+            let level0 = image.multiscale.levels.first()?;
+            let size = [level0.shape[4] as f64, level0.shape[3] as f64];
+            Some((&image.owner, corner, size))
+        });
+        tile_holding(tiles, position).cloned()
     }
 
     /// Re-anchor every anchored pin in `dataset_id` for a layout change from
@@ -1149,7 +1142,7 @@ impl DocumentState {
                 // Computed from synced state inside the canonical apply, so the
                 // server and every client derive the same anchor without it
                 // riding the `add_annotation` wire shape.
-                let anchor = self.nearest_anchor(&dataset_id, position);
+                let anchor = self.tile_anchor(&dataset_id, position);
                 self.add_annotation(
                     dataset_id,
                     Annotation {
