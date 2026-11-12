@@ -245,7 +245,11 @@ export function incomingDistSq(
   return dist;
 }
 
-/** Whether a wanted incoming chunk at `incomingDist` may take `victim`'s slot. */
-export function mayEvict(victim: EvictionCandidate, incomingDist: number): boolean {
-  return victim.class !== "wanted" || incomingDist < victim.dist;
+/**
+ * Whether a wanted incoming chunk may take `victim`'s slot. Its distance is
+ * read only against a wanted victim: a full pool asks at each chunk, and the
+ * page's admission leaves it a slot no view wants far more often than not.
+ */
+export function mayEvict(victim: EvictionCandidate, incomingDist: () => number): boolean {
+  return victim.class !== "wanted" || incomingDist() < victim.dist;
 }

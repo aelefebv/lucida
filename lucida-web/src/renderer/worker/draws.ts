@@ -64,8 +64,48 @@ export function anyViewWants(pool: SharedChunkPool, memberId: string, tier: Resi
   return false;
 }
 
+/** A pool's count of wanted chunks, and each view's sections and wanted index it was counted from. */
+interface WantedCount {
+  tier: ResidencyTier;
+  from: unknown[];
+  count: number;
+}
+
+const wantedCounts = new WeakMap<SharedChunkPool, WantedCount>();
+
+/**
+ * How many chunks in `tier` the views drawing from `pool` want between them,
+ * of every member they lay out. A full pool asks at each chunk it can't
+ * place, and with several views the count is a union of their wanted sets, so
+ * it is kept until a view's sections or wanted index change. Both are
+ * replaced rather than changed in place, so comparing them by identity tells.
+ */
+export function wantedCountOf(pool: SharedChunkPool, tier: ResidencyTier): number {
+  const kept = wantedCounts.get(pool);
+  if (kept && kept.tier === tier && countedFrom(pool, kept.from)) return kept.count;
+  const from: unknown[] = [];
+  const members = new Set<string>();
+  for (const view of pool.views.values()) {
+    from.push(view.entityMetas, view.draw.wanted);
+    for (const memberId of view.entityMetas.keys()) members.add(memberId);
+  }
+  let count = 0;
+  for (const memberId of members) count += memberWantedCount(pool, memberId, tier);
+  wantedCounts.set(pool, { tier, from, count });
+  return count;
+}
+
+function countedFrom(pool: SharedChunkPool, from: readonly unknown[]): boolean {
+  if (from.length !== 2 * pool.views.size) return false;
+  let i = 0;
+  for (const view of pool.views.values()) {
+    if (from[i++] !== view.entityMetas || from[i++] !== view.draw.wanted) return false;
+  }
+  return true;
+}
+
 /** How many chunks of one member in `tier` the views drawing from `pool` want between them. */
-export function wantedCountIn(pool: SharedChunkPool, memberId: string, tier: ResidencyTier): number {
+function memberWantedCount(pool: SharedChunkPool, memberId: string, tier: ResidencyTier): number {
   const key = wantedEntryKey(tier, memberId);
   let only: ReadonlySet<string> | undefined;
   let union: Set<string> | undefined;
@@ -84,13 +124,13 @@ export function wantedCountIn(pool: SharedChunkPool, memberId: string, tier: Res
 
 /**
  * What eviction reads of each view drawing from `pool` in `tier`, its camera
- * references read through `cameraFor` at `cameraRevision`.
+ * references read through `cameraFor` from `cameras`.
  */
 export function evictionViewsOf(
   pool: SharedChunkPool,
   tier: ResidencyTier,
   cameraFor: (view: number, memberId: string) => [number, number] | [number, number, number],
-  cameraRevision: number,
+  cameras: { revisionOf(view: number): number },
 ): EvictionView[] {
   return [...pool.views.values()].map((view) => {
     const { wanted, targetLevels } = view.draw;
@@ -106,7 +146,7 @@ export function evictionViewsOf(
       cameraFor: (memberId) => cameraFor(view.draw.view, memberId),
       targetLevelFor: (memberId) => targetLevels.get(memberId),
       isWanted: (memberId, chunkKey) => wantedOf(memberId)?.has(chunkKey) ?? false,
-      sources: [wanted, targetLevels, cameraRevision],
+      sources: [wanted, targetLevels, cameras.revisionOf(view.draw.view)],
     };
   });
 }

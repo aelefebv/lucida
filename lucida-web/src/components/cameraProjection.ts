@@ -20,7 +20,7 @@
 import type { WasmScene } from "lucida-core";
 import { placePoint, readPlacement } from "../placement.ts";
 import { planeAxes, xyz, type SlicePlane } from "../renderer/slicePlane.ts";
-import type { FramePoint, ScreenPoint } from "./annotationGeometry.ts";
+import type { FramePoint, MarkOn, ScreenPoint } from "./annotationGeometry.ts";
 
 /** The x/y of a pointer event, so plain objects and React events both qualify. */
 export interface ClientPoint {
@@ -102,19 +102,19 @@ export function makeWorldToScreen(
  * The point of `datasetId`'s frame a mark placed at `e` in `surface`'s view
  * takes (`scene.pick_annotation_voxel`): on a slice view's plane, in the
  * middle of the dataset's plane there, or where a volume view's ray meets the
- * volume. A point of a mark whose first vertex is `on` goes on that mark's
- * tile in a side view of a collection, and a new mark's on the tile under
- * `e`. Null where there is none.
+ * volume. A point of the mark `on` goes on that mark's tile in a side view of
+ * a collection, and a new mark's on the tile under `e`. Null where there is
+ * none.
  */
 export function pickFramePoint(
   scene: Pick<WasmScene, "pick_annotation_voxel">,
   { view, element }: ViewSurface,
   datasetId: string,
   e: ClientPoint,
-  on?: FramePoint,
+  on?: MarkOn,
 ): FramePoint | null {
   const [x, y] = eventToScreenPx(element, e);
-  const point = scene.pick_annotation_voxel(view, datasetId, x, y, on && new Float64Array(on));
+  const point = scene.pick_annotation_voxel(view, datasetId, x, y, on && new Float64Array(on.start), on?.anchor ?? undefined);
   return point.length < 3 ? null : [point[0], point[1], point[2]];
 }
 
@@ -144,34 +144,34 @@ export function makeFrameToScreen(
 }
 
 /**
- * How far `surface`'s view draws a mark of `datasetId` whose first vertex is
- * `start` from where its dataset's frame puts it (`scene.annotation_shift`):
- * into its tile's cell in a side view of a collection, and nowhere in any
- * other view. Every vertex of the mark moves by it.
+ * How far `surface`'s view draws `mark`, of `datasetId`, from where its
+ * dataset's frame puts it (`scene.annotation_shift`): into its tile's cell in
+ * a side view of a collection, and nowhere in any other view. Every vertex of
+ * the mark moves by it.
  */
 export function markShift(
   scene: Pick<WasmScene, "annotation_shift">,
   { view }: ViewSurface,
   datasetId: string,
-  start: FramePoint,
+  { start, anchor }: MarkOn,
 ): FramePoint {
-  const shift = scene.annotation_shift(view, datasetId, start[0], start[1], start[2]);
+  const shift = scene.annotation_shift(view, datasetId, start[0], start[1], start[2], anchor ?? undefined);
   return shift.length < 3 ? [0, 0, 0] : [shift[0], shift[1], shift[2]];
 }
 
 /**
- * {@link makeFrameToScreen} for the vertices of one mark, of `datasetId` with
- * its first vertex at `start`, each moved by the mark's {@link markShift}, so
- * a whole shape draws in its tile's cell. Call once per frame.
+ * {@link makeFrameToScreen} for the vertices of one mark of `datasetId`, each
+ * moved by the mark's {@link markShift}, so a whole shape draws in its tile's
+ * cell. Call once per frame.
  */
 export function makeMarkToScreen(
   scene: WasmScene,
   surface: ViewSurface,
-): (datasetId: string, start: FramePoint) => (v: FramePoint) => ScreenPoint {
+): (datasetId: string, mark: MarkOn) => (v: FramePoint) => ScreenPoint {
   const frameToScreen = perDataset((datasetId) => makeFrameToScreen(scene, surface, datasetId));
-  return (datasetId, start) => {
+  return (datasetId, mark) => {
     const project = frameToScreen(datasetId);
-    const [dx, dy, dz] = markShift(scene, surface, datasetId, start);
+    const [dx, dy, dz] = markShift(scene, surface, datasetId, mark);
     return (v) => project([v[0] + dx, v[1] + dy, v[2] + dz]);
   };
 }

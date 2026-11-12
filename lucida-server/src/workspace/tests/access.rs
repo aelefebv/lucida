@@ -1474,3 +1474,67 @@ async fn a_detached_socket_is_no_longer_revisited() {
 
     assert!(!member_socket.close_requested());
 }
+
+#[tokio::test]
+async fn a_workspace_stored_with_corner_anchors_glues_its_pins_to_their_tiles_on_load() {
+    use lucida_content::EntityId;
+    use lucida_core::command::DocumentCommand;
+    use lucida_core::scene::AnnotationKind;
+
+    // Twelve tiles 256 square, 288 apart, from the view-properties fixture.
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fixtures/view-properties/datasets.json"
+    )))
+    .unwrap();
+    let collection = fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "collection")
+        .unwrap();
+    let opened: lucida_protocol::DatasetOpened =
+        serde_json::from_value(collection["opened"].clone()).unwrap();
+    let dataset_id = opened.manifest.dataset_id.clone();
+    let mut doc = DocumentState::default();
+    doc.apply(DocumentCommand::DatasetOpened(opened));
+    // On the first tile's far corner, which lies nearer the corner of the
+    // tile diagonally past it, where the rule before glued it.
+    doc.apply(DocumentCommand::AddAnnotation {
+        dataset_id: dataset_id.clone(),
+        id: "far".into(),
+        position: [250.0, 250.0],
+        end: None,
+        end_z: None,
+        z: 0.0,
+        t: 0,
+        c: 0,
+        author: "owner@example.com".into(),
+        kind: AnnotationKind::Point,
+        view: None,
+    });
+    doc.annotations.get_mut(&dataset_id).unwrap()[0].anchor =
+        Some(EntityId("collection-r1c1".into()));
+    doc.anchors_by_tile = false;
+
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Old anchors"))
+        .await
+        .unwrap();
+    store
+        .persist_document(&workspace.id, 3, &doc)
+        .await
+        .unwrap();
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
+    let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+
+    let session = live.session.lock().await;
+    let pin = &session.document.annotations[&dataset_id][0];
+    assert_eq!(pin.anchor, Some(EntityId("collection-r0c0".into())));
+    assert_eq!(pin.position, [250.0, 250.0]);
+    assert!(session.document.anchors_by_tile);
+    // Loading changes no seq: the record rides on the next edit.
+    assert_eq!(session.seq, 3);
+}
