@@ -32,8 +32,7 @@ export interface PoolGroup {
 
 /**
  * Partition `cold.activeSet × cold.visibleChannels` into pool groups,
- * channel outer and entry inner. Callers assign sequential section offsets
- * in this insertion order.
+ * channel outer and entry inner.
  */
 export function groupEntriesByPool(
   cold: ColdStateMessage,

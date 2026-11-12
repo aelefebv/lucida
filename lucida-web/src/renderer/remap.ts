@@ -73,6 +73,12 @@ export interface RemapParams {
    * plane's frame (`parsePlaneChunkKey`). Absent: Z.
    */
   sliceAxis?: SpatialAxis;
+  /**
+   * Map only these sections, by member, and leave every other cell as it is:
+   * the sections a layout just placed, in an indirection whose other cells
+   * already say what a whole remap would write. Never with {@link failed}.
+   */
+  only?: ReadonlyMap<string, readonly LodIndirectionMeta[]>;
 }
 
 /**
@@ -85,10 +91,16 @@ export interface RemapParams {
  * marking them as preferred eviction candidates for the next upload.
  */
 export function remapSharedIndirection(params: RemapParams): void {
-  params.indirectionData.fill(INDIRECTION_MISS);
-  params.slotGridIdx.fill(-1);
+  const { only } = params;
+  if (!only) {
+    params.indirectionData.fill(INDIRECTION_MISS);
+    params.slotGridIdx.fill(-1);
+  }
 
   for (const [compositeKey, slotIndex] of params.slots) {
+    // Most slots are another member's, so the member is looked up before
+    // the key is parsed.
+    if (only && !only.has(compositeKey.substring(0, compositeKey.indexOf("|")))) continue;
     const parsedComp = parseCompositeKey(compositeKey);
     if (!parsedComp) continue;
 
@@ -96,6 +108,7 @@ export function remapSharedIndirection(params: RemapParams): void {
     if (!chunk) continue;
     const meta = currentSection(params, parsedComp.memberId, chunk);
     if (!meta) continue;
+    if (only && !only.get(parsedComp.memberId)!.includes(meta)) continue;
     if (
       params.holdsCurrentPlane &&
       !params.holdsCurrentPlane(parsedComp.memberId, chunk.level, parsedComp.plane)

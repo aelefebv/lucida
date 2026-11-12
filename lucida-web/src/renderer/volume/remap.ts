@@ -7,7 +7,7 @@
 import { remapSharedIndirection, type RemapEntryInfo } from "../remap.ts";
 import type { VisibleRegion } from "../../pipeline/viewport.ts";
 import type { ViewIndirection } from "../viewIndirection.ts";
-import type { AtlasState } from "./atlas.ts";
+import type { AtlasState, LodIndirectionMeta } from "./atlas.ts";
 
 /**
  * Remap one view's indirection over a volume pool to the chunks matching its
@@ -23,6 +23,8 @@ export function remapIndirection(
     renderRadiusView?: number;
     entryByMember?: Map<string, RemapEntryInfo>;
     failed?: ReadonlyMap<string, ReadonlySet<string>>;
+    /** See `RemapParams.only`. */
+    only?: ReadonlyMap<string, readonly LodIndirectionMeta[]>;
   } = {},
 ): void {
   remapSharedIndirection({
@@ -36,6 +38,7 @@ export function remapIndirection(
     renderRadiusView: options.renderRadiusView,
     entryByMember: options.entryByMember,
     failed: options.failed,
+    only: options.only,
     targetChunkZFor: null,
   });
   view.dirty = true;

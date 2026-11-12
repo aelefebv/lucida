@@ -79,6 +79,30 @@ export interface EntityDescriptorIndex {
   colormapLutIndices: Map<string, number>;
   /** memberId → colormap name. Drives per-draw LUT texture binding. */
   colormapNameByMember: Map<string, string>;
+  /** What each member's entry was written from, so the next build copies the entries nothing changed. */
+  written: Map<string, WrittenEntry>;
+  /** The bytes {@link buffer} was last written with. */
+  bytes: ArrayBuffer;
+}
+
+/** The inputs one member's descriptor entry was serialized from, and where it sits. */
+interface WrittenEntry {
+  entry: ColdStateActiveEntry;
+  display: ColdStateDisplayState;
+  sources: readonly EntitySource[];
+  lutIndex: number;
+  sampleFormat: SampleFormat;
+  selection: EntitySourceSelection;
+  index: number;
+}
+
+/** Whether two source lists name the same sections in the same pools, in order. */
+function sameSources(a: readonly EntitySource[], b: readonly EntitySource[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].meta !== b[i].meta || a[i].tier !== b[i].tier || a[i].poolKey !== b[i].poolKey) return false;
+  }
+  return true;
 }
 
 /**
@@ -131,14 +155,18 @@ export function computeMemberIndexMap(
 
 /**
  * Build a per-dataset descriptor buffer from cold state, one entry per
- * member in canonical order, with dense colormap indices. Writes into
- * `reuse` when it is big enough.
+ * member in canonical order, with dense colormap indices. Writes into the
+ * buffer `previous` had when it is big enough, and copies each entry whose
+ * member, display and sections are the ones `previous` wrote it from: a
+ * section keeps its object while its layout keeps it, and a member its entry
+ * while the page leaves it out of a delta, so a view move serializes only
+ * the members it changed.
  */
 export function buildDescriptorBuffer(
   device: GPUDevice,
   cold: ColdStateMessage,
   sourcesByMember: Map<string, EntitySource[]>,
-  reuse?: GPUBuffer,
+  previous?: EntityDescriptorIndex,
 ): EntityDescriptorIndex {
   const indexByMember = new Map<string, number>();
   const sourceBindingByMember = new Map<string, MemberSourceBinding>();
@@ -172,28 +200,45 @@ export function buildDescriptorBuffer(
   const bufferSize = Math.max(entityCount * DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_ENTRY_SIZE);
   const cpuBuffer = new ArrayBuffer(bufferSize);
 
-  // Pass 2: serialize each entity once.
-  const written = new Set<string>();
+  // Pass 2: write each entity once.
+  const written = new Map<string, WrittenEntry>();
+  const target = new Uint8Array(cpuBuffer);
+  const held = previous && new Uint8Array(previous.bytes);
   for (const { entry, channel, memberId } of iterateColdMembers(cold)) {
     if (written.has(memberId)) continue;
-    written.add(memberId);
-    const eIdx = indexByMember.get(memberId)!;
-    const selection = selectEntitySources(entry, sourcesByMember.get(memberId) ?? []);
+    const index = indexByMember.get(memberId)!;
+    const display = displayStateForChannel(entry, channel);
+    const sources = sourcesByMember.get(memberId) ?? [];
+    const lutIndex = colormapLutIndices.get(display.colormapName) ?? 0;
+    const was = previous?.written.get(memberId);
+    let selection: EntitySourceSelection;
+    if (
+      held && was && was.entry === entry && was.display === display && was.lutIndex === lutIndex &&
+      was.sampleFormat === cold.sampleFormat && sameSources(was.sources, sources)
+    ) {
+      selection = was.selection;
+      const from = was.index * DESCRIPTOR_ENTRY_SIZE;
+      target.set(held.subarray(from, from + DESCRIPTOR_ENTRY_SIZE), index * DESCRIPTOR_ENTRY_SIZE);
+    } else {
+      selection = selectEntitySources(entry, sources);
+      serializeEntityDescriptor(
+        cpuBuffer,
+        index * DESCRIPTOR_ENTRY_SIZE,
+        entry,
+        selection,
+        display,
+        colormapLutIndices,
+        cold.sampleFormat,
+      );
+    }
+    written.set(memberId, { entry, display, sources, lutIndex, sampleFormat: cold.sampleFormat, selection, index });
     sourceBindingByMember.set(memberId, {
       levelPoolKeys: selection.levelPoolKeys,
       coarsePoolKey: selection.coarse?.poolKey ?? null,
     });
-    serializeEntityDescriptor(
-      cpuBuffer,
-      eIdx * DESCRIPTOR_ENTRY_SIZE,
-      entry,
-      selection,
-      displayStateForChannel(entry, channel),
-      colormapLutIndices,
-      cold.sampleFormat,
-    );
   }
 
+  const reuse = previous?.buffer;
   const buffer = reuse && reuse.size >= bufferSize
     ? reuse
     : device.createBuffer({
@@ -210,6 +255,8 @@ export function buildDescriptorBuffer(
     entityCount,
     colormapLutIndices,
     colormapNameByMember,
+    written,
+    bytes: cpuBuffer,
   };
 }
 
@@ -262,7 +309,7 @@ export function rebuildDescriptorBuffer(
   cold: ColdStateMessage,
   sourcesByMember: Map<string, EntitySource[]>,
 ): EntityDescriptorIndex {
-  const next = buildDescriptorBuffer(device, cold, sourcesByMember, previous?.buffer);
+  const next = buildDescriptorBuffer(device, cold, sourcesByMember, previous);
   if (previous && previous.buffer !== next.buffer) destroyDescriptorBuffer(previous);
   return next;
 }
@@ -274,6 +321,7 @@ export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
   idx.sourceBindingByMember.clear();
   idx.colormapLutIndices.clear();
   idx.colormapNameByMember.clear();
+  idx.written.clear();
 }
 
 /**

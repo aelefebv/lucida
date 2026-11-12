@@ -8,6 +8,7 @@ import { remapSharedIndirection, type RemapEntryInfo } from "../remap.ts";
 import type { VisibleRegion } from "../../pipeline/viewport.ts";
 import type { ViewIndirection } from "../viewIndirection.ts";
 import type { SliceAtlasState } from "./atlas.ts";
+import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { computeTargetChunkZ, computeTargetPlane } from "./zRetarget.ts";
 
 /**
@@ -25,6 +26,8 @@ export function remapSliceIndirection(
     renderRadiusView?: number;
     entryByMember?: Map<string, RemapEntryInfo>;
     failed?: ReadonlyMap<string, ReadonlySet<string>>;
+    /** See `RemapParams.only`. */
+    only?: ReadonlyMap<string, readonly LodIndirectionMeta[]>;
   } = {},
 ): void {
   remapSharedIndirection({
@@ -38,6 +41,7 @@ export function remapSliceIndirection(
     renderRadiusView: options.renderRadiusView,
     entryByMember: options.entryByMember,
     failed: options.failed,
+    only: options.only,
     sliceAxis: atlas.axis,
     targetChunkZFor: (memberId, level) =>
       computeTargetChunkZ(atlas.entityZInfo.get(memberId)?.get(level), currentZ),

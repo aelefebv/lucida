@@ -58,6 +58,47 @@ export function resizeViewIndirection(device: GPUDevice, view: ViewIndirection, 
   });
 }
 
+/**
+ * Give a view's indirection room for `totalEntries` cells, keeping what its
+ * cells hold. Every draw's bind group names the buffer, so it never shrinks
+ * and grows by half again at least: a zoom that adds sections a few at a
+ * time replaces it a few times, not on every replan.
+ */
+export function growViewIndirection(device: GPUDevice, view: ViewIndirection, totalEntries: number): void {
+  const held = view.indirectionData.length;
+  if (totalEntries <= held) return;
+  const length = Math.max(totalEntries, Math.ceil(held * 1.5));
+  const data = new Uint32Array(length).fill(INDIRECTION_MISS);
+  data.set(view.indirectionData);
+  view.indirectionData = data;
+  view.indirectionBuf.destroy();
+  view.indirectionBuf = device.createBuffer({
+    size: length * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  view.dirty = true;
+}
+
+/**
+ * Empty the cells of sections a view no longer lays out and forget the slots
+ * they mapped, so a section placed there later starts empty and an eviction
+ * of one of those slots leaves it alone. A slice section is one plane of its
+ * grid (`dimArity` 2), a volume section the whole grid.
+ */
+export function clearSections(view: ViewIndirection, sections: readonly LodIndirectionMeta[], dimArity: 2 | 3): void {
+  const data = view.indirectionData;
+  for (const section of sections) {
+    const [gridZ, gridY, gridX] = section.gridDims;
+    const end = Math.min(data.length, section.offset + gridX * gridY * (dimArity === 3 ? gridZ : 1));
+    for (let cell = section.offset; cell < end; cell++) {
+      const slot = data[cell];
+      if (slot < view.slotGridIdx.length && view.slotGridIdx[slot] === cell) view.slotGridIdx[slot] = -1;
+      data[cell] = INDIRECTION_MISS;
+    }
+    view.dirty = true;
+  }
+}
+
 /** Write a view's indirection to the GPU when it changed. */
 export function flushViewIndirection(device: GPUDevice, view: ViewIndirection): void {
   if (!view.dirty) return;
