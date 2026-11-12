@@ -217,7 +217,7 @@ export function handleSliceChunkData(
         ) {
           slotIndex = atlas.freeSlots.pop()!;
         } else {
-          const incomingDist = incomingDistSq(params, memberId, { level, x: chunk.x, y: chunk.y, z: chunk.z });
+          const incomingDist = () => incomingDistSq(params, memberId, { level, x: chunk.x, y: chunk.y, z: chunk.z });
           if (!victim || !mayEvict(victim, incomingDist)) {
             batch.refuse(chunk.key, "atlas-policy");
             continue;
