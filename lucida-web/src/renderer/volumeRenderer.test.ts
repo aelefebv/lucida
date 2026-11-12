@@ -13,7 +13,13 @@ import { describe, expect, it, vi } from "vitest";
 };
 
 import { DESCRIPTOR_ENTRY_SIZE, OFFSET_CONTRAST_MAX } from "./descriptor/layout.ts";
-import { VOLUME_UNIFORM_OFFSETS, VolumeRenderer, type VolumeMemberDraw, type VolumePoolBinding } from "./volumeRenderer.ts";
+import {
+  MEMBER_INSTANCE_SIZE,
+  VOLUME_UNIFORM_OFFSETS,
+  VolumeRenderer,
+  type VolumeMemberDraw,
+  type VolumePoolBinding,
+} from "./volumeRenderer.ts";
 
 function makeDevice() {
   const texture = () => ({ createView: vi.fn(() => ({})), destroy: vi.fn() }) as unknown as GPUTexture;
@@ -112,8 +118,9 @@ describe("the volume renderer's member draws", () => {
 
     expect(encoder.beginRenderPass).toHaveBeenCalledOnce();
     expect(pass.setScissorRect.mock.calls).toEqual([[0, 0, 10, 10], [20, 0, 10, 10], [40, 0, 10, 10]]);
-    const offsets = pass.setBindGroup.mock.calls.map((call) => [call[0], call[2][0]]);
-    expect(offsets).toEqual([[0, 0], [1, 0], [0, 0], [1, 2 * 256], [0, 0], [1, 4 * 256]]);
+    // Group 2, a member batch's, once and with nothing in it.
+    const offsets = pass.setBindGroup.mock.calls.map((call) => [call[0], call[2]?.[0]]);
+    expect(offsets).toEqual([[2, undefined], [0, 0], [1, 0], [0, 0], [1, 2 * 256], [0, 0], [1, 4 * 256]]);
     expect(pass.draw).toHaveBeenCalledTimes(3);
   });
 
@@ -175,5 +182,92 @@ describe("the volume renderer's member draws", () => {
     const f32 = new Float32Array(bytes as ArrayBuffer);
     expect((bytes as ArrayBuffer).byteLength).toBe(2 * DESCRIPTOR_ENTRY_SIZE);
     expect([f32[OFFSET_CONTRAST_MAX / 4], f32[(DESCRIPTOR_ENTRY_SIZE + OFFSET_CONTRAST_MAX) / 4]]).toEqual([10, 20]);
+  });
+});
+
+describe("the volume renderer's member batches", () => {
+  async function setup() {
+    const { device, texture } = makeDevice();
+    const renderer = new VolumeRenderer(device as unknown as GPUDevice);
+    await renderer.compiled;
+    const descriptorBuffer = { destroy: vi.fn() } as unknown as GPUBuffer;
+    const run = (c: number, contrastMax: number): VolumeMemberDraw => ({
+      levels: [pool(texture())], coarse: null, colormap: texture(), descriptorBuffer, entityIndex: 0,
+      memberBatch: { display: { contrastMin: 0, contrastMax, gamma: 0.5, opacity: 1 } },
+      renderMode: c,
+    });
+    return { device, renderer, run };
+  }
+
+  it("writes each draw's index, that it draws a batch, and its members' display into its entity reference", async () => {
+    const { device, renderer, run } = await setup();
+    renderer.prepareMembers("minimap", [run(0, 10), run(0, 20)]);
+
+    // The reference blocks, written after the one uniform block, which is as long.
+    const [, offset, data, start, size] = device.queue.writeBuffer.mock.calls.filter((call) => call[4] === 2 * 256).at(-1)!;
+    expect([offset, start]).toEqual([0, 0]);
+    const words = new Uint32Array(data as ArrayBuffer, 0, size as number / 4);
+    const floats = new Float32Array(data as ArrayBuffer, 0, size as number / 4);
+    expect([words[2], words[3], ...floats.subarray(4, 8)]).toEqual([0, 1, 0, 10, 0.5, 1]);
+    expect([words[64 + 2], words[64 + 3], ...floats.subarray(64 + 4, 64 + 8)]).toEqual([1, 1, 0, 20, 0.5, 1]);
+  });
+
+  it("writes each instance's rect in the target's NDC, with its entity and draw", async () => {
+    const { device, renderer } = await setup();
+    renderer.setMemberInstances("minimap", [{ entityIndex: 7, draw: 1, rect: [10, 20, 30, 40] }], 100, 200);
+
+    const [, , data] = device.queue.writeBuffer.mock.calls.at(-1)!;
+    expect((data as ArrayBuffer).byteLength).toBe(MEMBER_INSTANCE_SIZE);
+    expect([...new Float32Array(data as ArrayBuffer, 0, 4)].map((v) => Math.round(v * 1e6) / 1e6)).toEqual([-0.8, 0.8, -0.2, 0.4]);
+    expect([...new Uint32Array(data as ArrayBuffer, 16, 2)]).toEqual([7, 1]);
+  });
+
+  it("draws a batch as one instanced id pass, then one full-screen draw per draw its members take, over its own members", async () => {
+    const { renderer, run } = await setup();
+    renderer.prepareMembers("minimap", [run(0, 10), run(0, 20)]);
+    renderer.setMemberInstances("minimap", Array.from({ length: 6 }, (_, i) => ({ entityIndex: i, draw: i % 2, rect: [i * 10, 0, 10, 10] as const })), 64, 64);
+    const passes: Array<ReturnType<typeof makeEncoder>["pass"]> = [];
+    const encoder = {
+      beginRenderPass: vi.fn(() => {
+        const { pass } = makeEncoder();
+        passes.push(pass);
+        return pass;
+      }),
+    } as unknown as GPUCommandEncoder;
+    const memberIds = { createView: vi.fn(() => ({})) } as unknown as GPUTexture;
+
+    renderer.renderMemberBatch(
+      "minimap",
+      { first: 2, count: 4, draws: [{ draw: 0, bounds: [20, 0, 30, 10] }, { draw: 1, bounds: [30, 0, 30, 10] }] },
+      {} as GPUTextureView, memberIds,
+      {} as GPUTextureView, true, encoder,
+    );
+
+    const [ids, march] = passes;
+    expect(vi.mocked(encoder.beginRenderPass).mock.calls[0][0].colorAttachments).toMatchObject([
+      { loadOp: "clear", clearValue: { r: 0xffffffff } },
+    ]);
+    expect(ids.draw.mock.calls).toEqual([[6, 4, 0, 2]]);
+    expect(march.setScissorRect.mock.calls).toEqual([[20, 0, 30, 10], [30, 0, 30, 10]]);
+    expect(march.setBindGroup.mock.calls.map((call) => [call[0], call[2]?.[0]])).toEqual([
+      [2, undefined], [0, 0], [1, 0], [0, 0], [1, 256],
+    ]);
+    expect(march.draw.mock.calls).toEqual([[3], [3]]);
+  });
+
+  it("refuses a batch's draw outside a batch, and a draw of one entity inside one", async () => {
+    const { renderer, run } = await setup();
+    const { encoder } = makeEncoder();
+    const memberIds = { createView: vi.fn(() => ({})) } as unknown as GPUTexture;
+    renderer.prepareMembers("minimap", [run(0, 10), { ...run(0, 10), memberBatch: undefined }]);
+    renderer.setMemberInstances("minimap", [{ entityIndex: 0, draw: 1, rect: [0, 0, 10, 10] }], 64, 64);
+
+    // Its shader would read an id target that holds no member, and march entity 0 everywhere.
+    expect(() => renderer.renderMembers("minimap", [0], {} as GPUTextureView, 64, 64, {} as GPUTextureView, true, encoder))
+      .toThrow("renderMemberBatch");
+    expect(() => renderer.renderMemberBatch(
+      "minimap", { first: 0, count: 1, draws: [{ draw: 1, bounds: [0, 0, 10, 10] }] }, {} as GPUTextureView, memberIds,
+      {} as GPUTextureView, true, encoder,
+    )).toThrow("one entity");
   });
 });

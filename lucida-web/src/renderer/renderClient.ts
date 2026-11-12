@@ -8,8 +8,10 @@ import type {
   InitMessage,
   VolumeLayerParams,
   SliceLayerParams,
-  MinimapLayerParams,
+  MinimapLayersMessage,
   MinimapRenderMessage,
+  OverviewDisplay,
+  OverviewLayers,
   ThumbnailRenderMessage,
   WorkerToMainMessage,
   CaptureFailure,
@@ -689,8 +691,13 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage({ type: "minimapInit", canvas: offscreen }, [offscreen]);
   }
 
+  /** The overviews the minimap draws, until the next call. Cloned, so the caller may keep them. */
+  minimapLayers(layers: OverviewLayers) {
+    this.worker.postMessage({ type: "minimapLayers", layers } satisfies MinimapLayersMessage);
+  }
+
   minimapRender(
-    layers: MinimapLayerParams[],
+    displays: Array<OverviewDisplay | null>,
     invViewProj: Float32Array,
     viewProj: Float32Array,
     eye: Float32Array,
@@ -698,17 +705,18 @@ export class RenderClient implements UploadClient {
     canvasH: number,
   ) {
     this.worker.postMessage({
-      type: "minimapRender", layers, invViewProj, viewProj, eye, canvasW, canvasH, pixelRatio: pagePixelRatio(),
+      type: "minimapRender", displays, invViewProj, viewProj, eye, canvasW, canvasH, pixelRatio: pagePixelRatio(),
     } satisfies MinimapRenderMessage);
   }
 
   /**
-   * Render one Explore-panel thumbnail off-screen with the minimap's overview
-   * textures. Resolves `null` when no coarse overview is resident yet, so the
+   * Render one Explore-panel thumbnail off-screen from the minimap's overview
+   * atlases. Resolves `null` when no coarse overview is resident yet, so the
    * caller can fall back to a label-only row. `size` is in device pixels.
    */
   thumbnailRender(
-    layers: MinimapLayerParams[],
+    layers: OverviewLayers,
+    displays: Array<OverviewDisplay | null>,
     invViewProj: Float32Array,
     viewProj: Float32Array,
     eye: Float32Array,
@@ -724,7 +732,7 @@ export class RenderClient implements UploadClient {
     return new Promise<ImageBitmap | null>((resolve) => {
       this.thumbnailPending.set(id, resolve);
       this.worker.postMessage({
-        type: "thumbnailRender", id, layers, invViewProj, viewProj, eye, size, pixelRatio: pagePixelRatio(),
+        type: "thumbnailRender", id, layers, displays, invViewProj, viewProj, eye, size, pixelRatio: pagePixelRatio(),
       } satisfies ThumbnailRenderMessage);
     });
   }
@@ -766,6 +774,7 @@ export class RenderClient implements UploadClient {
   }
 
   minimapUploadOverviewChunksForLayer(
+    overviewKey: string,
     datasetId: string,
     chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     imageId: string,
@@ -790,6 +799,7 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage(
       {
         type: "minimapUploadOverviewChunksForLayer",
+        overviewKey,
         datasetId,
         chunks: workerChunks,
         imageId, level,

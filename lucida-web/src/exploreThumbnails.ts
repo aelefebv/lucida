@@ -7,30 +7,37 @@
 
 import { camera_matrices, type WasmScene } from "lucida-core";
 import type { RenderClient } from "./renderer/renderClient.ts";
-import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
+import type { OverviewDisplay, OverviewLayers } from "./renderer/workerProtocol.ts";
 import type { DatasetState } from "./types.ts";
 import type { SavedView } from "./savedView/types.ts";
 import {
   identityModelMatrix,
+  overviewDisplays,
   overviewKeyFor,
-  overviewLayerParams,
+  packOverviewLayers,
   readMemberRenderMatrices,
   type MinimapRenderLayerGeometry,
 } from "./minimapPath.ts";
 import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 
+/** What a thumbnail render draws: the overviews, and the displays they take. */
+export interface ThumbnailLayers {
+  layers: OverviewLayers;
+  displays: Array<OverviewDisplay | null>;
+}
+
 /**
- * Minimap-style layer params for `datasetId` under `resolved`, one per member
- * and shown channel; empty when the dataset is hidden or unknown.
+ * Minimap-style overviews for `datasetId` under `resolved`, one per member
+ * and shown channel; null when the dataset is hidden or unknown.
  */
 export function buildThumbnailLayers(
   scene: WasmScene,
   ds: DatasetState,
   datasetId: string,
   resolved: ResolvedLayers,
-): MinimapLayerParams[] {
+): ThumbnailLayers | null {
   const layer = resolved.get(datasetId);
-  if (!layer || !layer.visible) return [];
+  if (!layer || !layer.visible) return null;
 
   const memberMatrices = readMemberRenderMatrices(scene, datasetId);
   const geometry: MinimapRenderLayerGeometry[] = [];
@@ -46,7 +53,10 @@ export function buildThumbnailLayers(
       });
     }
   }
-  return overviewLayerParams(geometry, resolved);
+  if (geometry.length === 0) return null;
+  const { layers, groups } = packOverviewLayers(geometry);
+  const displays = overviewDisplays(groups, resolved);
+  return displays.some((display) => display !== null) ? { layers, displays } : null;
 }
 
 /**
@@ -66,7 +76,7 @@ export function makeThumbnailRequester(opts: {
   datasetId: string;
 }): (view: SavedView, size: number) => Promise<ImageBitmap | null> {
   const { getScene, getClient, getDatasets, datasetId } = opts;
-  let cachedLayers: MinimapLayerParams[] | null = null;
+  let cachedLayers: ThumbnailLayers | null = null;
   let cachedLayersKey: string | null = null;
   return async (view, size) => {
     const scene = getScene();
@@ -91,7 +101,7 @@ export function makeThumbnailRequester(opts: {
         : buildThumbnailLayers(scene, ds, datasetId, parseResolvedLayers(resolvedJson));
     cachedLayers = layersKey !== null ? layers : null;
     cachedLayersKey = layersKey;
-    if (layers.length === 0) return null;
+    if (!layers) return null;
 
     // 35 floats: invViewProj[16] + eye[3] + viewProj[16]. Empty means the
     // camera JSON didn't parse.
@@ -101,6 +111,6 @@ export function makeThumbnailRequester(opts: {
     const eye = cam.subarray(16, 19);
     const viewProj = cam.subarray(19, 35);
 
-    return client.thumbnailRender(layers, invViewProj, viewProj, eye, size);
+    return client.thumbnailRender(layers.layers, layers.displays, invViewProj, viewProj, eye, size);
   };
 }

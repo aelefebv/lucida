@@ -2,7 +2,7 @@
 import type { WasmScene } from "lucida-core";
 import { Axis } from "./axes.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
-import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
+import type { OverviewDisplay, OverviewLayers } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_DISPLAY_HOLD_MS, MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS, drawnView } from "./renderLoopTypes.ts";
 import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
@@ -34,7 +34,7 @@ export interface MinimapState {
   failedVersion: number;
   enabled: boolean;
   /**
-   * Keeps the coarse overview textures uploading for Explore-panel thumbnails
+   * Keeps the coarse overviews uploading for Explore-panel thumbnails
    * while the minimap is hidden. It drives `tickMinimapOverview` but not
    * `tickMinimap`: the worker's `thumbnailRender` draws thumbnails on demand.
    */
@@ -103,12 +103,24 @@ export interface MinimapState {
  * this unchanged.
  */
 export interface MinimapRenderLayerGeometry {
-  /** The overview texture's key: the member's id with its channel. */
+  /** The overview's key: the member's id with its channel. */
   memberId: string;
   ownerDatasetId: string;
   channel: number;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
+}
+
+/** One shown channel of a dataset, whose display a set of overviews takes. */
+export interface OverviewGroup {
+  datasetId: string;
+  channel: number;
+}
+
+/** Overviews as the worker draws them, and the shown channels their displays index. */
+export interface PackedOverviews {
+  layers: OverviewLayers;
+  groups: OverviewGroup[];
 }
 
 /**
@@ -119,8 +131,11 @@ export interface MinimapRenderLayerGeometry {
 export interface MinimapOverviewCache {
   /** Minimap camera view-projection, for the overlay draw. */
   viewProj: Float32Array;
-  /** Per-layer geometry for the overview render, in draw order, with no display values baked in. */
-  renderLayers: MinimapRenderLayerGeometry[];
+  /**
+   * The overviews the render draws, in draw order, with no display values
+   * baked in. The worker holds them, so a render sends only the displays.
+   */
+  overviews: PackedOverviews;
   invViewProj: Float32Array;
   eye: Float32Array;
   /** Per-member overlay layers (bounding boxes, slice planes). */
@@ -176,37 +191,50 @@ export function minimapCoarseLevelIndex(multiscale: Pick<MultiscaleInfo, "levels
 }
 
 /**
- * Overview render layers for the geometry cache, one per member and shown
- * channel, in draw order, each with the display the scene resolved for it.
- * Shared by the minimap and explore previews so both draw what the canvas
- * does. A geometry entry whose layer no longer shows its channel is skipped.
+ * Pack overview geometry, in draw order, for the worker, each overview
+ * naming the shown channel whose display it takes.
  */
-export function overviewLayerParams(
-  renderLayers: readonly MinimapRenderLayerGeometry[],
-  layers: ResolvedLayers,
-): MinimapLayerParams[] {
-  const out: MinimapLayerParams[] = [];
-  for (const geom of renderLayers) {
-    const layer = layers.get(geom.ownerDatasetId);
-    const ch = layer?.channels.find((c) => c.channel === geom.channel);
-    if (!ch) continue;
-    out.push({
-      datasetId: geom.memberId,
-      modelMatrix: geom.modelMatrix,
-      invModelMatrix: geom.invModelMatrix,
+export function packOverviewLayers(geometry: readonly MinimapRenderLayerGeometry[]): PackedOverviews {
+  const groups: OverviewGroup[] = [];
+  const groupOf = new Map<string, Map<number, number>>();
+  const matrices = new Float32Array(geometry.length * 32);
+  const displays = new Uint32Array(geometry.length);
+  geometry.forEach((geom, i) => {
+    let byChannel = groupOf.get(geom.ownerDatasetId);
+    if (!byChannel) groupOf.set(geom.ownerDatasetId, (byChannel = new Map()));
+    let group = byChannel.get(geom.channel);
+    if (group === undefined) {
+      group = groups.length;
+      byChannel.set(geom.channel, group);
+      groups.push({ datasetId: geom.ownerDatasetId, channel: geom.channel });
+    }
+    displays[i] = group;
+    matrices.set(geom.modelMatrix, i * 32);
+    matrices.set(geom.invModelMatrix, i * 32 + 16);
+  });
+  return { layers: { keys: geometry.map((geom) => geom.memberId), matrices, displays }, groups };
+}
+
+/**
+ * Each group's display as the scene resolved it, so the minimap and explore
+ * previews draw what the canvas does. A group whose layer no longer shows its
+ * channel is null, and its overviews are not drawn.
+ */
+export function overviewDisplays(groups: readonly OverviewGroup[], layers: ResolvedLayers): Array<OverviewDisplay | null> {
+  return groups.map(({ datasetId, channel }) => {
+    const ch = layers.get(datasetId)?.channels.find((c) => c.channel === channel);
+    if (!ch) return null;
+    return {
       contrastMin: ch.contrast_min,
       contrastMax: ch.contrast_max,
       gamma: ch.gamma,
-      // The shared volume renderer's LUT is only set as a side effect of the
-      // 3D main view, so the minimap binds its own or 2D renders gray.
       colormap: ch.colormap,
       blendMode: ch.blend_mode,
-    });
-  }
-  return out;
+    };
+  });
 }
 
-/** The overview texture key for one member's channel. */
+/** The overview key for one member's channel. */
 export function overviewKeyFor(memberId: string, channel: number): string {
   return compositeKey(memberId, channel);
 }
@@ -344,7 +372,8 @@ function awaitedChunkArrived(ctx: TickContext, state: MinimapState): boolean {
 
 /**
  * Upload explicit coarse-level overview chunks for the minimap: one overview
- * texture per member and channel its layer shows, at the layer's timepoint.
+ * per member and channel its layer shows, at the layer's timepoint, which the
+ * worker keeps in its dataset's overview atlas.
  * Returns true if the next frame has overview work to do (caller should schedule it).
  */
 export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: number): boolean {
@@ -439,7 +468,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
           && !state.overviewOpened.has(overviewKey);
         if (available.length > 0 || open) {
           client.minimapUploadOverviewChunksForLayer(
-            key, available, memberId, coarsestIdx, t, c,
+            key, dsId, available, memberId, coarsestIdx, t, c,
             levelWidth, levelHeight, levelDepth,
             chunkX, chunkY, chunkZ,
             datasetSampleFormat(ds.manifest),
@@ -473,20 +502,19 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
 
 /**
- * Resolve per-layer display params from geometry and the scene's resolved
- * layers, then issue the overview render. The only place layer params are
- * assembled, so a full rebuild and a display-only re-render make the same
- * render call.
+ * Resolve each overview group's display from the scene's resolved layers,
+ * then issue the overview render. The only place displays are assembled, so
+ * a full rebuild and a display-only re-render make the same render call.
  */
 function issueMinimapRender(
   client: TickContext["client"],
-  renderLayers: MinimapRenderLayerGeometry[],
+  overviews: PackedOverviews,
   resolved: ResolvedLayers,
   camera: Pick<MinimapCamera, "invViewProj" | "viewProj" | "eye" | "backingSize">,
 ): void {
-  const layers = overviewLayerParams(renderLayers, resolved);
-  if (layers.length > 0) {
-    client.minimapRender(layers, camera.invViewProj, camera.viewProj, camera.eye, camera.backingSize, camera.backingSize);
+  const displays = overviewDisplays(overviews.groups, resolved);
+  if (overviews.layers.keys.length > 0 && displays.some((display) => display !== null)) {
+    client.minimapRender(displays, camera.invViewProj, camera.viewProj, camera.eye, camera.backingSize, camera.backingSize);
   }
 }
 
@@ -496,12 +524,12 @@ function updateMinimapDisplay(
   cache: MinimapOverviewCache,
   resolved: ResolvedLayers,
 ): void {
-  issueMinimapRender(client, cache.renderLayers, resolved, cache);
+  issueMinimapRender(client, cache.overviews, resolved, cache);
 }
 
 /**
  * Each drawn dataset's visibility, shown channels and timepoint in draw order:
- * what decides which overview textures are drawn. The dataset set and order
+ * what decides which overviews are drawn. The dataset set and order
  * are already in the geometry key.
  */
 function minimapVisibilitySignature(layerOrder: string[], resolved: ResolvedLayers): string {
@@ -570,12 +598,12 @@ function updateMinimapCamera(
   cache.eye = cam.eye;
   cache.backingSize = cam.backingSize;
   cache.topDown = cam.topDown;
-  issueMinimapRender(client, cache.renderLayers, resolved, cache);
+  issueMinimapRender(client, cache.overviews, resolved, cache);
 }
 
 /**
- * Read every member, cache the camera- and display-invariant geometry, and issue
- * the O(N) overview render.
+ * Read every member, cache the camera- and display-invariant geometry, hand
+ * the worker the overviews it draws, and issue the overview render.
  */
 function buildMinimapOverview(
   ctx: TickContext,
@@ -660,7 +688,9 @@ function buildMinimapOverview(
     });
   }
 
-  issueMinimapRender(client, renderLayers, resolved, { invViewProj, viewProj, eye, backingSize });
+  const overviews = packOverviewLayers(renderLayers);
+  client.minimapLayers(overviews.layers);
+  issueMinimapRender(client, overviews, resolved, { invViewProj, viewProj, eye, backingSize });
 
   // All members of a dataset share one tile shape. One pass over the datasets
   // builds the lookup; scanning per overlay layer would be quadratic.
@@ -683,7 +713,7 @@ function buildMinimapOverview(
 
   return {
     viewProj,
-    renderLayers,
+    overviews,
     invViewProj,
     eye,
     overlayLayers,
@@ -864,7 +894,7 @@ export function invalidateMinimapOverview(state: MinimapState): void {
   state.overviewGeometryKey = null;
 }
 
-/** The worker lost every overview texture with its device: upload them all again, starting next tick. */
+/** The worker lost every overview with its device: upload them all again, starting next tick. */
 export function forgetMinimapOverviewUploads(state: MinimapState): void {
   state.overviewKey.clear();
   state.overviewUploaded.clear();
@@ -874,7 +904,7 @@ export function forgetMinimapOverviewUploads(state: MinimapState): void {
   invalidateMinimapOverview(state);
 }
 
-/** The worker lost these members' overview textures: upload them again, starting next tick. */
+/** The worker lost these overviews: upload them again, starting next tick. */
 export function forgetMinimapOverviewsOf(state: MinimapState, memberIds: readonly string[]): void {
   for (const memberId of memberIds) {
     const opened = state.overviewKey.get(memberId);

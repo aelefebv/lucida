@@ -15,7 +15,8 @@ import type { ChunkResidencyMessage, WorkerToMainMessage } from "../workerProtoc
 import { getOrCreateVolumePool, growVolumePoolWithin, volumeLayerBytes, type AtlasState } from "../volume/atlas.ts";
 import { getOrCreateLabelSlicePool, getOrCreateSlicePool, holdSliceSlot, shrinkSliceAtlas } from "../slice/atlas.ts";
 import { handleLabelVolumeChunkData } from "../volume/upload.ts";
-import { handleMinimapUploadOverviewChunks, MINIMAP_OVERVIEW_SHARE, removeMinimapResources } from "../minimapHandlers.ts";
+import { handleMinimapUploadOverviewChunks, removeMinimapResources } from "../minimapHandlers.ts";
+import { MINIMAP_OVERVIEW_SHARE } from "../overviewAtlas.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
 import { createInitialState, type ViewDraw } from "./state.ts";
 import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
@@ -396,13 +397,14 @@ describe("holders outside the pools", () => {
   });
 
   it("leave a minimap overview out once the overviews' share is spent, until its selection changes", () => {
-    // One overview is its 1 MiB texture and a one-cell indirection, and the
-    // share is exactly that.
+    // One overview is a 1 MiB slot and a one-cell indirection, and the share
+    // is exactly that.
     const overview = 512 * 512 * 2 * 2 + 4;
     const { ctx } = makeCtx(overview / MINIMAP_OVERVIEW_SHARE);
     const upload = (memberId: string, t: number) => handleMinimapUploadOverviewChunks(ctx, {
       type: "minimapUploadOverviewChunksForLayer",
-      datasetId: memberId,
+      overviewKey: memberId,
+      datasetId: "ds",
       imageId: memberId,
       level: 0,
       t, c: 0,

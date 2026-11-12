@@ -1,5 +1,6 @@
 /** WebGPU pipeline for volume ray marching. */
 import shaderSource from "./volume.wgsl?raw";
+import memberIdsSource from "./memberIds.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import { LAYER_BLENDS, type BlendMode } from "./layerCompositor.ts";
 import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
@@ -26,8 +27,38 @@ export const VOLUME_UNIFORM_OFFSETS = {
 } as const;
 export const VOLUME_UNIFORM_SIZE = 272;
 
-/** 16-byte uniform with the entity index for the current draw. */
-const ENTITY_REF_SIZE = 16;
+/** The shader's `EntityRef`: the draw's entity, palette count and index, then a member batch draw's display. */
+const ENTITY_REF_SIZE = 32;
+
+/** Byte offsets of the shaders' `MemberInstance` fields (volume.wgsl, memberIds.wgsl). */
+export const MEMBER_INSTANCE_OFFSETS = {
+  ndcRect: 0, // vec4f: left, top, right, bottom in the target's NDC
+  entity: 16, // u32
+  draw: 20,   // u32
+} as const;
+export const MEMBER_INSTANCE_SIZE = 32;
+
+/** A prepared draw of one entity. A member batch's draw marches only in {@link VolumeRenderer.renderMemberBatch}. */
+function entityDraw(set: MemberDrawSet, index: number): PreparedDraw {
+  const draw = set.draws[index];
+  if (draw.memberBatch) throw new Error("a member batch's draw goes through renderMemberBatch");
+  return draw;
+}
+
+/** The format of a member batch's id target: one instance index a texel. */
+export const MEMBER_ID_FORMAT: GPUTextureFormat = "r32uint";
+export const MEMBER_ID_BYTES_PER_TEXEL = 4;
+/** What the id pass leaves where no member's rect lies (`NO_MEMBER` in the shaders). */
+const NO_MEMBER = 0xffffffff;
+
+/** A target for {@link VolumeRenderer.renderMemberBatch}'s id pass, the size of the target it marches into. */
+export function createMemberIdTarget(device: GPUDevice, w: number, h: number): GPUTexture {
+  return device.createTexture({
+    size: [w, h],
+    format: MEMBER_ID_FORMAT,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  });
+}
 
 /**
  * Bytes between two blocks of a member draw set's uniform buffer, and of its
@@ -82,6 +113,44 @@ export interface VolumeMemberDraw {
    * of the camera's inverse view-projection.
    */
   cut?: Float32Array;
+  /**
+   * Makes this a member batch's draw: it marches whichever member the batch's
+   * id pass put under each pixel, each through `display` in place of its
+   * descriptor's. Only {@link VolumeRenderer.renderMemberBatch} draws one, and
+   * only it draws one: elsewhere the shader would read an id target that holds
+   * no member.
+   */
+  memberBatch?: { display: MemberDisplay };
+}
+
+/** The window, gamma and opacity every member of a member batch draw takes. */
+export interface MemberDisplay {
+  contrastMin: number;
+  contrastMax: number;
+  gamma: number;
+  opacity: number;
+}
+
+/** One member of a member batch: its entity, the prepared draw whose pools it reads, and where it lands. */
+export interface MemberInstance {
+  entityIndex: number;
+  /** Index of the prepared draw ({@link VolumeRenderer.prepareMembers}) it takes its pools and display from. */
+  draw: number;
+  /** A device-pixel rect; members of one batch must not meet. */
+  rect: PixelRect;
+}
+
+/** The members {@link VolumeRenderer.renderMemberBatch} draws in one pass. */
+export interface MemberBatch {
+  /** The batch's instances, `count` of them from `first`, as {@link VolumeRenderer.setMemberInstances} wrote them. */
+  first: number;
+  count: number;
+  /**
+   * The prepared draws its members take, each drawn once, and the rect around
+   * that draw's own members. A draw marches every pixel of its scissor, so it
+   * costs its members' corner of the batch, not the whole batch.
+   */
+  draws: ReadonlyArray<{ draw: number; bounds: PixelRect }>;
 }
 
 /** One draw as {@link VolumeRenderer.prepareMembers} left it ready. */
@@ -91,6 +160,7 @@ interface PreparedDraw {
   entity: GPUBindGroup;
   refOffset: number;
   scissor: PixelRect | undefined;
+  memberBatch: boolean;
 }
 
 /**
@@ -104,25 +174,39 @@ interface MemberDrawSet {
   uniformData: Float32Array<ArrayBuffer>;
   refBuffer: GPUBuffer | null;
   refCapacity: number;
+  /** What the reference buffer holds, block by block. */
   refWords: Uint32Array<ArrayBuffer>;
-  /** The entity index each reference block holds, `-1` where none was written. */
-  writtenRefs: Int32Array;
   poolGroups: Map<string, GPUBindGroup>;
   entityGroups: Map<GPUBuffer, GPUBindGroup>;
   descriptorTable: GPUBuffer | null;
   descriptorCapacity: number;
   draws: PreparedDraw[];
+  /** The member batches' instances ({@link VolumeRenderer.setMemberInstances}). */
+  instanceBuffer: GPUBuffer | null;
+  instanceCapacity: number;
+  /** The id pass's bind group over {@link instanceBuffer}. */
+  instanceGroup: GPUBindGroup | null;
+  /** The batch draws' group-2 bind group over the last id target and {@link instanceBuffer}. */
+  memberIdGroup: { target: GPUTexture; group: GPUBindGroup } | null;
 }
 
 export class VolumeRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline | null = null;
-  /** Resolves once the pipeline has compiled. See `pipelineCompile.ts`. */
+  /** Resolves once the main pipeline and the id pass have compiled. See `pipelineCompile.ts`. */
   readonly compiled: Promise<void>;
   /** One pipeline per blend mode for a slice view's tilted cuts ({@link renderCut}). */
   private cutPipelines: Record<BlendMode, GPURenderPipeline> | null = null;
   private cutsCompiled: Promise<void> | null = null;
+  /** The id pass of {@link renderMemberBatch}, whose march is the main pipeline's. */
+  private idPipeline: GPURenderPipeline | null = null;
+  private readonly memberIdsLayout: GPUBindGroupLayout;
+  /** Group 2 of the main pipeline: a member batch's id target and instances. */
+  private readonly memberBatchLayout: GPUBindGroupLayout;
+  /** Group 2 for a draw of one entity, which never reads it. */
+  private readonly noMembersGroup: GPUBindGroup;
   private readonly shaderModule: GPUShaderModule;
+  /** The cut pipelines' layout: the main one's, less group 2, which `fsCut` never reads. */
   private readonly pipelineLayout: GPUPipelineLayout;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
@@ -157,7 +241,7 @@ export class VolumeRenderer {
   private nextResourceId = 1;
 
   get isCompiled(): boolean {
-    return this.pipeline !== null;
+    return this.pipeline !== null && this.idPipeline !== null;
   }
 
   constructor(device: GPUDevice) {
@@ -238,12 +322,29 @@ export class VolumeRenderer {
       ],
     });
 
-    const pipelineLayout = this.pipelineLayout = device.createPipelineLayout({
+    this.pipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
     });
-
-    this.compiled = device.createRenderPipelineAsync({
-      layout: pipelineLayout,
+    this.memberBatchLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "uint", viewDimension: "2d" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+      ],
+    });
+    this.noMembersGroup = device.createBindGroup({
+      layout: this.memberBatchLayout,
+      entries: [
+        { binding: 0, resource: createMemberIdTarget(device, 1, 1).createView() },
+        {
+          binding: 1,
+          resource: { buffer: device.createBuffer({ size: MEMBER_INSTANCE_SIZE, usage: GPUBufferUsage.STORAGE }) },
+        },
+      ],
+    });
+    const main = device.createRenderPipelineAsync({
+      layout: device.createPipelineLayout({
+        bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout, this.memberBatchLayout],
+      }),
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
         module: shaderModule, entryPoint: "fs",
@@ -258,6 +359,20 @@ export class VolumeRenderer {
     }).then((pipeline) => {
       this.pipeline = pipeline;
     });
+    this.memberIdsLayout = device.createBindGroupLayout({
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } }],
+    });
+    const idsModule = device.createShaderModule({ code: memberIdsSource });
+    const ids = device.createRenderPipelineAsync({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.memberIdsLayout] }),
+      vertex: { module: idsModule, entryPoint: "vs" },
+      fragment: { module: idsModule, entryPoint: "fs", targets: [{ format: MEMBER_ID_FORMAT }] },
+      primitive: { topology: "triangle-list" },
+    }).then((pipeline) => {
+      this.idPipeline = pipeline;
+    });
+
+    this.compiled = Promise.all([main, ids]).then(() => {});
 
     this.uniformBuffer = device.createBuffer({
       size: VOLUME_UNIFORM_SIZE,
@@ -381,7 +496,9 @@ export class VolumeRenderer {
         ],
       });
     }
-    const refData = new Uint32Array([entityIndex >>> 0, labelColorCount >>> 0, 0, 0]);
+    const refData = new Uint32Array(ENTITY_REF_SIZE / 4);
+    refData[0] = entityIndex >>> 0;
+    refData[1] = labelColorCount >>> 0;
     this.device.queue.writeBuffer(this.entityRefBuffer, 0, refData);
   }
 
@@ -477,6 +594,7 @@ export class VolumeRenderer {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.bindGroup, [0]);
     pass.setBindGroup(1, this.descriptorBindGroup, [0]);
+    pass.setBindGroup(2, this.noMembersGroup);
     pass.draw(3); // full-screen triangle
     pass.end();
   }
@@ -522,12 +640,15 @@ export class VolumeRenderer {
         refBuffer: null,
         refCapacity: 0,
         refWords: new Uint32Array(0),
-        writtenRefs: new Int32Array(0),
         poolGroups: new Map(),
         entityGroups: new Map(),
         descriptorTable: null,
         descriptorCapacity: 0,
         draws: [],
+        instanceBuffer: null,
+        instanceCapacity: 0,
+        instanceGroup: null,
+        memberIdGroup: null,
       };
       this.memberDrawSets.set(name, set);
     }
@@ -572,6 +693,8 @@ export class VolumeRenderer {
     const blockByKey = new Map<string, number>();
     const poolGroupsUsed = new Map<string, GPUBindGroup>();
     const entityGroupsUsed = new Map<GPUBuffer, GPUBindGroup>();
+    const ref = new Uint32Array(ENTITY_REF_SIZE / 4);
+    const refDisplay = new Float32Array(ref.buffer, 16, 4);
     let lowRef = draws.length;
     let highRef = -1;
     set.draws = draws.map((draw, i) => {
@@ -588,9 +711,22 @@ export class VolumeRenderer {
         this.writeUniformBlock(f32, u32, block * words, renderMode, draw.levels, draw.coarse, draw.cut);
       }
 
-      set.refWords[i * (DRAW_REF_STRIDE / 4)] = draw.entityIndex >>> 0;
-      if (set.writtenRefs[i] !== draw.entityIndex) {
-        set.writtenRefs[i] = draw.entityIndex;
+      ref.fill(0);
+      ref[0] = draw.entityIndex >>> 0;
+      ref[2] = i;
+      if (draw.memberBatch) {
+        const { display } = draw.memberBatch;
+        ref[3] = 1;
+        refDisplay[0] = display.contrastMin;
+        refDisplay[1] = display.contrastMax;
+        refDisplay[2] = display.gamma;
+        refDisplay[3] = display.opacity;
+      }
+      const base = i * (DRAW_REF_STRIDE / 4);
+      let changed = false;
+      for (let w = 0; w < ref.length && !changed; w++) changed = set.refWords[base + w] !== ref[w];
+      if (changed) {
+        set.refWords.set(ref, base);
         lowRef = Math.min(lowRef, i);
         highRef = i;
       }
@@ -627,6 +763,7 @@ export class VolumeRenderer {
         entity,
         refOffset: i * DRAW_REF_STRIDE,
         scissor: draw.scissor,
+        memberBatch: draw.memberBatch !== undefined,
       };
     });
     // A group this frame left out names pools or a descriptor buffer that
@@ -676,8 +813,9 @@ export class VolumeRenderer {
       timestampWrites: timing?.nextPass(),
     });
     pass.setPipeline(pipeline);
+    pass.setBindGroup(2, this.noMembersGroup);
     for (const index of indices) {
-      const draw = set.draws[index];
+      const draw = entityDraw(set, index);
       const rect = clipToBand(draw.scissor ?? [0, 0, targetWidth, targetHeight], band);
       if (!rect) continue;
       const [x, y, w, h] = rect;
@@ -733,7 +871,7 @@ export class VolumeRenderer {
     });
     pass.setPipeline(pipeline);
     for (const index of indices) {
-      const draw = set.draws[index];
+      const draw = entityDraw(set, index);
       const [x, y, w, h] = draw.scissor ?? [0, 0, targetWidth, targetHeight];
       pass.setScissorRect(x, y, w, h);
       pass.setBindGroup(0, draw.pools, [draw.uniformOffset]);
@@ -741,6 +879,124 @@ export class VolumeRenderer {
       pass.draw(3); // full-screen triangle
     }
     pass.end();
+  }
+
+  /**
+   * Write the instances member batches draw, in batch order, for a target of
+   * `width` by `height`. They hold until the next call, so a frame whose
+   * members and camera held can draw its batches without writing them again.
+   */
+  setMemberInstances(setName: string, instances: readonly MemberInstance[], width: number, height: number): void {
+    const set = this.memberDrawSet(setName);
+    const count = Math.max(1, instances.length);
+    if (!set.instanceBuffer || count > set.instanceCapacity) {
+      set.instanceBuffer?.destroy();
+      set.instanceCapacity = Math.max(count, set.instanceCapacity * 2, 64);
+      set.instanceBuffer = this.device.createBuffer({
+        size: set.instanceCapacity * MEMBER_INSTANCE_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      set.instanceGroup = null;
+      set.memberIdGroup = null;
+    }
+    if (instances.length === 0) return;
+    const bytes = new ArrayBuffer(instances.length * MEMBER_INSTANCE_SIZE);
+    const f32 = new Float32Array(bytes);
+    const u32 = new Uint32Array(bytes);
+    const words = MEMBER_INSTANCE_SIZE / 4;
+    const O = MEMBER_INSTANCE_OFFSETS;
+    instances.forEach(({ entityIndex, draw, rect: [x, y, w, h] }, i) => {
+      const at = i * words;
+      f32[at + O.ndcRect / 4] = (2 * x) / width - 1;
+      f32[at + O.ndcRect / 4 + 1] = 1 - (2 * y) / height;
+      f32[at + O.ndcRect / 4 + 2] = (2 * (x + w)) / width - 1;
+      f32[at + O.ndcRect / 4 + 3] = 1 - (2 * (y + h)) / height;
+      u32[at + O.entity / 4] = entityIndex >>> 0;
+      u32[at + O.draw / 4] = draw >>> 0;
+    });
+    this.device.queue.writeBuffer(set.instanceBuffer, 0, bytes);
+  }
+
+  /**
+   * Draw one batch of members into `target`, clearing it, in two passes and
+   * one draw per prepared draw its members take, however many members it
+   * holds. An id pass marks each pixel with the member whose rect holds it,
+   * in `memberIds`, a {@link createMemberIdTarget} the size of `target`. Then
+   * each prepared draw marches the full-screen triangle, through a scissor of
+   * its own members' bounds, and keeps the pixels of its own members, so
+   * every pixel's ray is the one a draw of its member alone, through a
+   * scissor of its rect, marches. The depth is cleared or kept.
+   */
+  renderMemberBatch(
+    setName: string,
+    batch: MemberBatch,
+    target: GPUTextureView,
+    memberIds: GPUTexture,
+    depthView: GPUTextureView,
+    clearDepth: boolean,
+    encoder: GPUCommandEncoder,
+  ): void {
+    const set = this.memberDrawSet(setName);
+    const idPipeline = requireCompiled(this.idPipeline, "member batch");
+    const pipeline = requireCompiled(this.pipeline, "volume renderer");
+    const draws = batch.draws.filter(({ bounds: [, , w, h] }) => w > 0 && h > 0);
+
+    const ids = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: this.viewOf(memberIds), loadOp: "clear", storeOp: "store", clearValue: { r: NO_MEMBER, g: 0, b: 0, a: 0 },
+      }],
+    });
+    if (batch.count > 0) {
+      ids.setPipeline(idPipeline);
+      ids.setBindGroup(0, this.instanceGroupOf(set));
+      ids.draw(6, batch.count, 0, batch.first);
+    }
+    ids.end();
+
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }],
+      depthStencilAttachment: {
+        view: depthView,
+        depthLoadOp: clearDepth ? "clear" : "load",
+        depthStoreOp: "store",
+        depthClearValue: 1.0,
+      },
+    });
+    if (batch.count > 0 && draws.length > 0) {
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(2, this.memberIdGroupOf(set, memberIds));
+      for (const { draw: index, bounds: [x, y, w, h] } of draws) {
+        const draw = set.draws[index];
+        if (!draw.memberBatch) throw new Error("renderMemberBatch drew a draw that marches one entity");
+        pass.setScissorRect(x, y, w, h);
+        pass.setBindGroup(0, draw.pools, [draw.uniformOffset]);
+        pass.setBindGroup(1, draw.entity, [draw.refOffset]);
+        pass.draw(3); // full-screen triangle
+      }
+    }
+    pass.end();
+  }
+
+  private instanceGroupOf(set: MemberDrawSet): GPUBindGroup {
+    set.instanceGroup ??= this.device.createBindGroup({
+      layout: this.memberIdsLayout,
+      entries: [{ binding: 0, resource: { buffer: set.instanceBuffer! } }],
+    });
+    return set.instanceGroup;
+  }
+
+  private memberIdGroupOf(set: MemberDrawSet, memberIds: GPUTexture): GPUBindGroup {
+    if (set.memberIdGroup?.target !== memberIds) {
+      const group = this.device.createBindGroup({
+        layout: this.memberBatchLayout,
+        entries: [
+          { binding: 0, resource: this.viewOf(memberIds) },
+          { binding: 1, resource: { buffer: set.instanceBuffer! } },
+        ],
+      });
+      set.memberIdGroup = { target: memberIds, group };
+    }
+    return set.memberIdGroup.group;
   }
 
   /** Grow the set's buffers to hold `count` draws. Bind groups name the old buffers, so they go too. */
@@ -757,8 +1013,8 @@ export class VolumeRenderer {
       set.refBuffer?.destroy();
       set.refCapacity = Math.max(count, set.refCapacity * 2, 64);
       set.refBuffer = this.device.createBuffer({ size: set.refCapacity * DRAW_REF_STRIDE, usage });
+      // Zeros, as the new buffer is, so a block reads as written until it differs.
       set.refWords = new Uint32Array(set.refCapacity * DRAW_REF_STRIDE / 4);
-      set.writtenRefs = new Int32Array(set.refCapacity).fill(-1);
       set.entityGroups.clear();
     }
   }

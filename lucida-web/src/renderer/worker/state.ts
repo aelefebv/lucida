@@ -83,6 +83,15 @@ export interface ViewDraw {
  * view that draws it in that mode; what each view draws through them is a
  * {@link ViewDraw}, kept by `datasetViewKey` (`poolKeys.ts`).
  */
+/** A minimap overview refused for want of room. */
+export interface RefusedOverview {
+  /** The level, timepoint, channel and format refused (`overviewSelection`): another is tried again. */
+  selection: string;
+  /** Its dataset and member, whose removal forgets it, as a dataset reopened under its id is new. */
+  datasetId: string;
+  imageId: string;
+}
+
 export interface RendererState {
   /** memberId → datasetId (canonical: imageId or imageId:chN). */
   memberToDataset: Map<string, string>;
@@ -157,11 +166,10 @@ export interface RendererState {
   /** The capacity report the page last heard, serialized, so only a change is posted. */
   gpuCapacityPosted: string | null;
   /**
-   * Minimap overviews the GPU total had no room for: member → the selection
-   * (`t/c/format`) refused. Refused until the selection changes or the
-   * member is removed.
+   * Minimap overviews the GPU total had no room for, by overview key. Refused
+   * until the selection changes or their dataset or member is removed.
    */
-  overviewsRefused: Map<string, string>;
+  overviewsRefused: Map<string, RefusedOverview>;
 
   /** The last canvas colors and cursors the page sent, which a replacement device's renderers start from. */
   canvasColors: CanvasColors | null;

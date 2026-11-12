@@ -43,7 +43,7 @@ function frameOf(scene: WasmScene, f: ViewFixture, mode: "slice" | "volume", z =
   const ctx = {
     scene,
     datasets: new Map([[datasetId(f), { manifest: manifest(f) }]]),
-    client: { minimapRender: () => {} } as unknown as RenderClient,
+    client: { minimapLayers: () => {}, minimapRender: () => {} } as unknown as RenderClient,
     canvas: mainCanvas(),
     views: [{ id: scene.active_view(), mode, rect: [0, 0, CANVAS_CSS[0] * devicePixelRatio, CANVAS_CSS[1] * devicePixelRatio] }],
   } as unknown as TickContext;

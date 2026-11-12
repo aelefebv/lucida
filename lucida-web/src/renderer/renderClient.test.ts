@@ -52,6 +52,7 @@ function makeReadyClient(): { client: RenderClient; worker: FakeWorker } {
 }
 
 const noLayers: never[] = [];
+const noOverviews = { keys: [], matrices: new Float32Array(0), displays: new Uint32Array(0) };
 const invViewProj = new Float32Array(16);
 const eye = new Float32Array(3);
 
@@ -167,7 +168,7 @@ describe("RenderClient destroy", () => {
 
   it("destroy settles in-flight thumbnail requests with null", async () => {
     const { client } = makeReadyClient();
-    const pending = client.thumbnailRender(noLayers, invViewProj, invViewProj, eye, 64);
+    const pending = client.thumbnailRender(noOverviews, [], invViewProj, invViewProj, eye, 64);
     client.destroy();
     await expect(pending).resolves.toBeNull();
   });
@@ -272,7 +273,7 @@ describe("RenderClient destroy", () => {
     const postedBefore = worker.posted.length;
 
     await expect(
-      client.thumbnailRender(noLayers, invViewProj, invViewProj, eye, 64),
+      client.thumbnailRender(noOverviews, [], invViewProj, invViewProj, eye, 64),
     ).resolves.toBeNull();
     expect(worker.posted.length).toBe(postedBefore);
   });
