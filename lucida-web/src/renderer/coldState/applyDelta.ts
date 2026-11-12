@@ -2,9 +2,10 @@
  * View-move cold-state delta: patch the view's retained cold state in place
  * (remove, upsert, reorder to `activeSetOrder`) and re-ingest it through
  * {@link applyColdState}, so departed entities release exactly as in a full
- * rebuild. A delta that changed no entry, order or selection re-ingests
- * nothing: only the wanted chunks moved, and nothing laid out reads them
- * unless a render radius or failed chunks are in play.
+ * rebuild. A delta that kept the order and the selection lays out again only
+ * the members it replaced, and one that replaced none re-ingests nothing:
+ * only the wanted chunks moved, and nothing laid out reads them unless a
+ * render radius or failed chunks are in play.
  *
  * The reorder keeps descriptor-buffer entity indices in agreement with the main
  * thread, which computes them from the same order. No-op when no cold state
