@@ -104,7 +104,7 @@ function heldPool(
 }
 
 function want(ctx: WorkerCtx, member: string, keys: string[], draw: ViewDraw = testDraw(ctx)): void {
-  (draw.wanted as Map<string, ReadonlySet<string>>).set(wantedEntryKey("detail", member), new Set(keys));
+  draw.wanted = new Map([...draw.wanted, [wantedEntryKey("detail", member), new Set(keys)]]);
 }
 
 function lost(posts: WorkerToMainMessage[]): ChunkResidencyMessage[] {

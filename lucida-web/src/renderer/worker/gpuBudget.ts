@@ -56,9 +56,8 @@ import { sliceEvictionParams } from "../slice/eviction.ts";
 import { rankSlotsToKeep } from "../eviction.ts";
 import { postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier, datasetModeKey } from "../poolKeys.ts";
-import { parseCompositeKey } from "../chunkKeys.ts";
 import { viewIndirectionBytes } from "../viewIndirection.ts";
-import { anyViewWants, wantedCountIn } from "./draws.ts";
+import { wantedCountIn } from "./draws.ts";
 import { gpuLedgerLine } from "./gpuLedger.ts";
 
 
@@ -309,12 +308,12 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
   const spares: Spare[] = [...unplannedLabelPools(state)];
   for (const [poolKey, atlas] of state.volumeAtlases) {
     if (atlas === except) continue;
-    const spare = spareOf(poolKey, atlas, "volume");
+    const spare = spareOf(state, poolKey, atlas, "volume");
     if (spare) spares.push(spare);
   }
   for (const [poolKey, atlas] of state.sliceAtlases) {
     if (atlas === except) continue;
-    const spare = spareOf(poolKey, atlas, "slice");
+    const spare = spareOf(state, poolKey, atlas, "slice");
     if (spare) spares.push(spare);
   }
   const unplanned = (spare: Spare) => (state.unplannedDatasets.has(spareDataset(spare)) ? 1 : 0);
@@ -357,20 +356,20 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
 }
 
 function spareOf(
+  state: RendererState,
   poolKey: string,
   atlas: AtlasState | SliceAtlasState,
   kind: "volume" | "slice",
 ): PoolSpare | null {
   const tier = chunkPoolTier(poolKey);
-  let wanted = 0;
-  for (const key of atlas.slots.keys()) {
-    const parsed = parseCompositeKey(key);
-    if (parsed && anyViewWants(atlas, parsed.memberId, tier, parsed.chunkKey)) wanted++;
-  }
   // Both kinds give back rows: a slice pool's, and a volume pool's in its
   // first layer and whole layers past it.
   const volume = kind === "volume" ? (atlas as AtlasState) : null;
   const slice = kind === "slice" ? (atlas as SliceAtlasState) : null;
+  // A full pool asks for room on every chunk it can't place, so the count
+  // comes from the order rather than from reading every slot.
+  const params = volume ? volumeEvictionParams(state, volume, tier) : sliceEvictionParams(state, slice!, tier);
+  const wanted = atlas.order.wantedHeld(params);
   const steps = volume ? volumeRows(volume) : slice!.slotsY;
   const stepSlots = volume ? volume.slotsX : slice!.slotsX;
   const wantedSteps = Math.max(1, Math.ceil(wanted / stepSlots));

@@ -19,10 +19,11 @@ import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { AtlasState, LabelVolumePool, LodIndirectionMeta } from "../volume/atlas.ts";
 import { INDIRECTION_FAILED } from "../remap.ts";
 import { identityIndirection } from "../failedCells.ts";
-import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
+import { attachView, fakeDraw, layOut, viewOf } from "../viewIndirectionFixtures.ts";
 import { labelSlicePoolKey, labelVolumePoolKey } from "../labelPools.ts";
 import type { ViewDraw } from "./state.ts";
 import { createInitialState } from "./state.ts";
+import { EvictionOrder } from "../evictionOrder.ts";
 import { dispatchMessage } from "./dispatch.ts";
 
 const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
@@ -54,6 +55,7 @@ function fakePool(datasetId: string, chunk: number, cells: number): FakePool {
     texels,
     format: "u16",
     slots: new Map(),
+    order: new EvictionOrder(),
     planesByChunk: new Map(),
     views: new Map(),
     freeSlots: [],
@@ -121,7 +123,7 @@ function drewImage(levels: Level[], fullDims: [number, number], chunk: number) {
     offset: 0,
   }));
   levels.forEach(({ pool }, i) => {
-    viewOf(pool).entityMetas.set(memberId, [metas[i]]);
+    layOut(viewOf(pool), memberId, [metas[i]]);
     state.sliceAtlases.set(`pool${i}`, pool);
   });
   const sources = new Map([[

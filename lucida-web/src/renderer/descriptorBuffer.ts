@@ -229,7 +229,7 @@ export interface ResolvedMemberPools<A> {
  * section for the member resolves to `null`, so the draw binds a dummy there
  * and the shader reads a miss.
  */
-export function resolveMemberPools<A extends { views: Map<number, { entityMetas: Map<string, unknown[]> }> }>(
+export function resolveMemberPools<A extends { views: Map<number, { entityMetas: ReadonlyMap<string, readonly unknown[]> }> }>(
   atlasMap: Map<string, A>,
   descIndex: EntityDescriptorIndex,
   memberId: string,

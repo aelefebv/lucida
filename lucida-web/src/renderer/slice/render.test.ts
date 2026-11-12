@@ -17,6 +17,7 @@ import type { SliceAtlasState } from "./atlas.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { handleSliceRenderMultiPass, memberScissor } from "./render.ts";
 import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
+import { EvictionOrder } from "../evictionOrder.ts";
 
 vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 
@@ -41,6 +42,7 @@ function makeAtlas(entityMetas: Map<string, LodIndirectionMeta[]>): SliceAtlasSt
     texture: {} as GPUTexture,
     format: "u16",
     slots: new Map(),
+    order: new EvictionOrder(),
     planesByChunk: new Map(),
     views: new Map(),
     freeSlots: [],
@@ -486,8 +488,8 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     // View center (cx=1124, cy=712) in each member's own UV space:
     // img-0 spans [100..1124]×[200..712], img-1 spans [1124..2148]×[712..1224].
-    expect(state.cameraUVs.get(0)?.get("img-0")).toEqual([1, 1]);
-    expect(state.cameraUVs.get(0)?.get("img-1")).toEqual([0, 0]);
+    expect(state.cameraUVs.get(0, "img-0")).toEqual([1, 1]);
+    expect(state.cameraUVs.get(0, "img-1")).toEqual([0, 0]);
   });
 
   it("skips the whole layer when no batched member has resident content", async () => {
@@ -533,8 +535,8 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(params.quadData.byteLength).toBe(32);
     expect(new Uint32Array(params.quadData)[4]).toBe(0);
     // The dead member contributes no eviction-recency update either.
-    expect(state.cameraUVs.get(0)?.has("img-0")).toBe(true);
-    expect(state.cameraUVs.get(0)?.has("img-1")).toBe(false);
+    expect(state.cameraUVs.get(0, "img-0")).toBeDefined();
+    expect(state.cameraUVs.get(0, "img-1")).toBeUndefined();
   });
 
   it("sub-batches by pool-binding set so members never sample another pool", async () => {
@@ -672,6 +674,6 @@ describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () 
     await handleSliceRenderMultiPass(ctx, msg);
 
     expect(renderer.renderLayerGroup).not.toHaveBeenCalled();
-    expect(ctx.state.cameraUVs.get(0)?.has("img-0:ch0")).toBe(true);
+    expect(ctx.state.cameraUVs.get(0, "img-0:ch0")).toBeDefined();
   });
 });
