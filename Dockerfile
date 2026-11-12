@@ -113,9 +113,10 @@ RUN cargo build --locked --release -p lucida-server
 RUN cd lucida-core && wasm-pack build --target web --out-dir pkg -- --locked
 
 # Stage 2: node + pnpm SPA build.
-# node:22-slim matches CI's `lts/*` (node 22 is the active LTS) and
-# stays close to debian:bookworm-slim so the eventual runtime layer
-# shares a libc family with the build layers.
+# Node 22 rather than CI's `lts/*` (26), because Node 25 and later ship
+# without Corepack, which the next step needs. The slim image stays close
+# to debian:bookworm-slim so the eventual runtime layer shares a libc
+# family with the build layers.
 FROM node:22-slim AS web-builder
 
 # Corepack ships with node, and its pnpm shim runs the version
