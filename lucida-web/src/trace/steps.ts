@@ -377,26 +377,19 @@ export function layOutViews(
   shown: readonly (readonly string[])[],
   keep: boolean,
 ): StepOutcome {
-  if (layout === "four_up") {
-    const set = [...new Set(shown.flat())];
-    // Entering four-up gives every view what the active one shows and fits
-    // them together, so the set goes in first. Already four-up, the layout
-    // shows every view again before each takes the set.
-    const entering = viewLayout.layout() !== layout;
-    if (!entering) viewLayout.setLayout(layout);
-    if (set.length > 0) {
-      for (const view of viewLayout.views()) {
-        if (keep) viewLayout.add(view, set);
-        else viewLayout.show(view, set);
-      }
-    }
-    if (entering) viewLayout.setLayout(layout);
-    return { applied: true, reason: null };
-  }
   viewLayout.setLayout(layout);
   const views = viewLayout.views();
   if (shown.length > views.length) {
     return { applied: false, reason: `a ${layout} layout has ${views.length} view(s), not ${shown.length}` };
+  }
+  if (layout === "four_up") {
+    const set = [...new Set(shown.flat())];
+    if (set.length === 0) return { applied: true, reason: null };
+    for (const view of views) {
+      if (keep) viewLayout.add(view, set);
+      else viewLayout.show(view, set);
+    }
+    return { applied: true, reason: null };
   }
   shown.forEach((ids, at) => {
     if (!keep) ids.forEach((id) => viewLayout.move(views[at], id));

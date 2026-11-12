@@ -22,6 +22,7 @@ beforeAll(async () => {
 
 const FIRST = singleImage({ id: "first", pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 128, 128], levels: 2 } });
 const SECOND = singleImage({ id: "second", pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 128, 128], levels: 2 } });
+const LARGE = singleImage({ id: "large", pyramid: { shape: [1, 1, 64, 1024, 1024], chunk: [32, 128, 128], levels: 2 } });
 
 function openScene(...datasets: (typeof FIRST)[]) {
   const scene = new WasmScene(1200, 800);
@@ -94,13 +95,15 @@ describe("a scripted four-up layout", () => {
     expect(shown()).toEqual([both, both, both, both]);
   });
 
-  it("shows only the named set when the page is four-up already, with every view shown again", () => {
-    const { actions, shown } = openScene(FIRST, SECOND);
+  it("shows only the named set when the page is four-up already, every view shown and fitted to it at one zoom", () => {
+    const { actions, shown, view } = openScene(FIRST, LARGE);
     actions.setLayout("four_up");
     actions.maximize(actions.views()[0]);
-    layOutViews(actions, "four_up", [["second"]], false);
-    const second = { only: ["second"] };
-    expect(shown()).toEqual([second, second, second, second]);
+    layOutViews(actions, "four_up", [["first"]], false);
+    const first = { only: ["first"] };
+    expect(shown()).toEqual([first, first, first, first]);
+    const zooms = view().views!.views.slice(0, 3).map((shown) => (shown.camera as SliceCamera).zoom);
+    expect(zooms).toEqual([zooms[0], zooms[0], zooms[0]]);
   });
 
   it("adds the set to what every view shows with keep, and with no lists shows every dataset", () => {
