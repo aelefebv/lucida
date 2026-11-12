@@ -1,7 +1,7 @@
-/* A pin's comment thread. It has the popover surface, but it is anchored to a
-   point on the canvas that moves every frame, so it lives in the annotation
-   layer beside its pin rather than in a portal. Script places it beside the
-   pin and reports the room on screen (threadPlacement.ts). */
+/* A pin's comment thread. It has the popover surface, anchored to a point on
+   the canvas that moves every frame. It draws over the floating controls, and
+   script places it beside the pin and reports the room on screen
+   (threadPlacement.ts). */
 .lc-thread {
   position: absolute;
   top: 12px;
