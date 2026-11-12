@@ -7,7 +7,7 @@ import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { drawsOnPress, isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
-import { eventToWorld as sceneEventToWorld, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
+import { eventToViewFraction, eventToWorld as sceneEventToWorld, type ClientPoint, type ViewSurface } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { wheelZoom } from "../input/wheel.ts";
 import { useCommand } from "../ui/commands.ts";
@@ -281,28 +281,12 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
       e.preventDefault();
       const factor = wheelZoom(e);
       if (factor === 1) return;
-
-      const dpr = devicePixelRatio;
-      const rect = element.getBoundingClientRect();
-      const cursorX = (e.clientX - rect.left) * dpr;
-      const cursorY = (e.clientY - rect.top) * dpr;
-      const canvasW = element.clientWidth * dpr;
-      const canvasH = element.clientHeight * dpr;
-
-      // The zoom anchor, read before the zoom changes the camera.
-      const [worldX, worldY] = sceneEventToWorld(scene, surface, e);
-
       breakFollow();
-      applyViewportCommand(scene, { type: "zoom_by", factor });
-      const newZoom = scene.zoom(scene.active_view());
-
-      const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
-      const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
-      applyViewportCommand(scene, { type: "set_center", x: newCx, y: newCy });
+      applyViewportCommand(scene, { type: "zoom_at", factor, at: eventToViewFraction(element, e) });
       emitPresence();
       loopRef.current?.markInput("zoom", e.timeStamp);
     },
-    [loopRef, scene, surface, element, emitPresence, breakFollow],
+    [loopRef, scene, element, emitPresence, breakFollow],
   );
 
   // The keyboard moves the view about its center, as the toolbar would.
@@ -316,14 +300,10 @@ function SliceViewerBody({ scene, surface, active, emitPresence, breakFollow, se
   /** Zoom by `factor`, moving the world point under `from` to `to`: the wheel's
    * anchoring, with room for the fingers to travel while they pinch. */
   const zoomBetween = (from: ClientPoint, to: ClientPoint, factor: number) => {
+    applyViewportCommand(scene, { type: "zoom_at", factor, at: eventToViewFraction(element, from) });
     const dpr = devicePixelRatio;
-    const rect = element.getBoundingClientRect();
-    const [worldX, worldY] = sceneEventToWorld(scene, surface, from);
-    applyViewportCommand(scene, { type: "zoom_by", factor });
-    const zoom = scene.zoom(scene.active_view());
-    const offsetX = (to.clientX - rect.left) * dpr - (element.clientWidth * dpr) / 2;
-    const offsetY = (to.clientY - rect.top) * dpr - (element.clientHeight * dpr) / 2;
-    applyViewportCommand(scene, { type: "set_center", x: worldX - offsetX / zoom, y: worldY - offsetY / zoom });
+    const [dx, dy] = [(from.clientX - to.clientX) * dpr, (from.clientY - to.clientY) * dpr];
+    if (dx !== 0 || dy !== 0) applyViewportCommand(scene, { type: "pan", dx, dy });
   };
 
   // One finger pans, or draws with a tool; two pinch and pan in one move.

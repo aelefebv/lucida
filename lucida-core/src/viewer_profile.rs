@@ -308,6 +308,7 @@ impl ProfileScene {
             command,
             ViewportCommand::Pan { .. }
                 | ViewportCommand::ZoomBy { .. }
+                | ViewportCommand::ZoomAt { .. }
                 | ViewportCommand::SetCenter { .. }
                 | ViewportCommand::SetZoom { .. }
         );
@@ -321,7 +322,9 @@ impl ProfileScene {
             return Err(E::InvalidValue("every number must be finite".into()));
         }
         match command {
-            ViewportCommand::ZoomBy { factor } if *factor <= 0.0 => {
+            ViewportCommand::ZoomBy { factor } | ViewportCommand::ZoomAt { factor, .. }
+                if *factor <= 0.0 =>
+            {
                 return Err(E::InvalidValue("zoom factor must be positive".into()));
             }
             ViewportCommand::SetZoom { value } if *value <= 0.0 => {
