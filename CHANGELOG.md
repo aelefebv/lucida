@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.37.1](https://github.com/aelefebv/lucida/compare/v0.37.0...v0.37.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* a zoom at the pointer holds what is under it in a transposed view ([#1579](https://github.com/aelefebv/lucida/issues/1579)) ([bbd3090](https://github.com/aelefebv/lucida/commit/bbd309066ee3f47748e097ea0a960336024831de))
+* **web:** a mark lands on the layer its own view draws under the pointer ([#1576](https://github.com/aelefebv/lucida/issues/1576)) ([b4c5cef](https://github.com/aelefebv/lucida/commit/b4c5cefd61930fdfab0f8ebf8504849ad066f364))
+
 ## [0.37.0](https://github.com/aelefebv/lucida/compare/v0.36.0...v0.37.0) (2026-11-11)
 
 
