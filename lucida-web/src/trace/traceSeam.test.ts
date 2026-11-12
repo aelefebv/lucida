@@ -664,6 +664,7 @@ describe("the trace seam", () => {
       expect(seam.viewSignature()).toEqual({
         camera: { mode: "slice", center: [0, 0], zoom: 1 },
         view: null,
+        views: null,
         visibility: {},
         contrast: {},
         comparison: null,

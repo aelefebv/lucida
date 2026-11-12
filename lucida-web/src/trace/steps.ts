@@ -13,8 +13,9 @@
 
 import type { LinkMode, LinkProperty, ViewLayoutName } from "../commands.ts";
 import type { Comparison } from "../comparison.ts";
-import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";
+import type { Camera, DatasetId, SavedView, ViewRecord, ViewState } from "../savedView/types.ts";
 import { cutAxis, type SlicePlane } from "../renderer/slicePlane.ts";
+import type { ViewLayoutActions } from "../viewLayout.ts";
 
 /** The selectors a scrub moves. `y` and `x` are the cuts of an XZ and a YZ view. */
 export type ScrubAxis = "z" | "y" | "x" | "t" | "c";
@@ -71,6 +72,7 @@ export interface ScriptControls {
    * Divide the canvas as `layout` does, then move into each view, in order,
    * the open datasets whose source URLs `show` lists for it, as a layer
    * dropped on a view moves there; with `keep`, show them there as well.
+   * Four-up shows every dataset the lists name in all four views.
    */
   views(layout: ViewLayoutName, show: readonly (readonly string[])[], keep: boolean): Promise<StepOutcome>;
   /** Link `property` between the two views in `mode`, as the link popover does. */
@@ -267,10 +269,20 @@ function invalidCount(count: number): string | null {
  * would make a hold look like a change of view. The driver reads this before
  * and after each step and compares the two; the rule lives here so the page,
  * not the driver, says what counts as the view.
+ *
+ * With several views each is judged by its own camera, axis positions, what
+ * it shows and its comparison, and which one is active is left out. A
+ * gesture aimed at another view makes it active as it lands, so the active
+ * view's camera before and after a step can be two views' cameras, and a
+ * press that only changes which view commands steer changes nothing drawn.
  */
 export interface ViewSignature {
+  /** The view's camera less its viewport; null when `views` holds each view's. */
   camera: Record<string, unknown> | null;
+  /** The view's axis positions; null when `views` holds each view's. */
   view: ViewState | null;
+  /** Every view, when the page records them: several, or one that shows some datasets. */
+  views: ViewsSignature | null;
   visibility: Record<DatasetId, {
     visible: boolean;
     channels: boolean[] | null;
@@ -279,13 +291,44 @@ export interface ViewSignature {
   }>;
   /** Each channel's `[min, max]`, for the datasets whose contrast a hand set. */
   contrast: Record<DatasetId, [number, number][]>;
+  /** The view's comparison; null when `views` holds each view's. */
   comparison: Comparison | null;
+}
+
+export interface ViewsSignature {
+  layout: ViewLayoutName;
+  maximized: number | null;
+  /** In the layout's order. */
+  views: {
+    camera: Record<string, unknown> | null;
+    axes: ViewState;
+    datasets: ViewRecord["datasets"];
+    comparison: Comparison | null;
+  }[];
+}
+
+/** A camera less its viewport, which a resize moves without changing what the camera shows. */
+function placedCamera(camera: Camera | undefined): Record<string, unknown> | null {
+  const { viewport: _viewport, ...placed } = camera ?? {};
+  void _viewport;
+  return Object.keys(placed).length > 0 ? placed : null;
 }
 
 export function viewSignature(view: SavedView | null, comparison: Comparison | null = null): ViewSignature | null {
   if (!view) return null;
-  const { viewport: _viewport, ...camera } = view.camera ?? {};
-  void _viewport;
+  const record = view.views;
+  const views: ViewsSignature | null = record
+    ? {
+      layout: record.layout,
+      maximized: record.maximized ?? null,
+      views: record.views.map((shown) => ({
+        camera: placedCamera(shown.camera),
+        axes: shown.axes,
+        datasets: shown.datasets,
+        comparison: shown.comparison ?? null,
+      })),
+    }
+    : null;
   const visibility: ViewSignature["visibility"] = {};
   const contrast: ViewSignature["contrast"] = {};
   for (const [id, settings] of Object.entries(view.dataset_settings ?? {})) {
@@ -300,11 +343,12 @@ export function viewSignature(view: SavedView | null, comparison: Comparison | n
     }
   }
   return {
-    camera: Object.keys(camera).length > 0 ? camera : null,
-    view: view.view ?? null,
+    camera: views ? null : placedCamera(view.camera),
+    view: views ? null : view.view ?? null,
+    views,
     visibility,
     contrast,
-    comparison,
+    comparison: views ? null : comparison,
   };
 }
 
@@ -317,4 +361,46 @@ export function viewSignature(view: SavedView | null, comparison: Comparison | n
 export function selectDataset(selectedId: string | null, openIds: readonly string[]): string | null {
   if (selectedId !== null) return openIds.includes(selectedId) ? selectedId : null;
   return openIds.length === 1 ? openIds[0] : null;
+}
+
+/**
+ * A scripted layout: divide the canvas as `layout` does, then show the
+ * datasets each of `shown` lists in the view at its place, moved there as a
+ * layer dropped on a view moves, or with `keep` as well as wherever they
+ * show. Four-up shows one set of datasets in all four views, so there the
+ * lists together name that set, and a move into one view would take it out
+ * of the other three.
+ */
+export function layOutViews(
+  viewLayout: ViewLayoutActions,
+  layout: ViewLayoutName,
+  shown: readonly (readonly string[])[],
+  keep: boolean,
+): StepOutcome {
+  if (layout === "four_up") {
+    const set = [...new Set(shown.flat())];
+    // Entering four-up gives every view what the active one shows and fits
+    // them together, so the set goes in first. Already four-up, the layout
+    // shows every view again before each takes the set.
+    const entering = viewLayout.layout() !== layout;
+    if (!entering) viewLayout.setLayout(layout);
+    if (set.length > 0) {
+      for (const view of viewLayout.views()) {
+        if (keep) viewLayout.add(view, set);
+        else viewLayout.show(view, set);
+      }
+    }
+    if (entering) viewLayout.setLayout(layout);
+    return { applied: true, reason: null };
+  }
+  viewLayout.setLayout(layout);
+  const views = viewLayout.views();
+  if (shown.length > views.length) {
+    return { applied: false, reason: `a ${layout} layout has ${views.length} view(s), not ${shown.length}` };
+  }
+  shown.forEach((ids, at) => {
+    if (!keep) ids.forEach((id) => viewLayout.move(views[at], id));
+    else if (ids.length > 0) viewLayout.add(views[at], ids);
+  });
+  return { applied: true, reason: null };
 }
