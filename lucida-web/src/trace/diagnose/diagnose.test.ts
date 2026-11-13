@@ -26,6 +26,7 @@ import {
   makeReading,
   makeRow,
   makeRun,
+  makeServerRow,
   makeTick,
   quietRun,
   refetchLoopSteadyState,
@@ -80,6 +81,25 @@ describe("thresholds", () => {
     expect(shareFinding).toBeDefined();
     expect(shareFinding!.observed.sharePct).toBeGreaterThanOrEqual(RULESET.share.minPct);
     expect(shareFinding!.observed.ms).toBeGreaterThanOrEqual(RULESET.share.floorMs);
+  });
+
+  it("fails the server's chunk bookkeeping on a delay a person sees, not on a busy machine's stall", () => {
+    // A stall on a busy machine holds every request in flight at once, so it
+    // is the p95 itself rather than a tail the p95 leaves out. CI's software
+    // rasterizer has held one for about 60 ms.
+    const stalledFor = (us: number) => {
+      const run = healthyLocalOpen();
+      for (let rid = 0; rid < 40; rid += 1) {
+        run.serverRows.push(makeServerRow({ rid, phases: { dispatch: us, "cache-lookup": us } }));
+      }
+      return diagnoseRun(run);
+    };
+    for (const phase of ["server.dispatch", "server.cache-lookup"]) {
+      const ceilMs = RULESET.absolute.find((rule) => rule.phase === phase)!.ceilMs;
+      expect(stalledFor(60 * MS).findings.some((f) => f.subject === phase)).toBe(false);
+      const slow = stalledFor((ceilMs + 20) * MS).findings.find((f) => f.subject === phase);
+      expect(slow?.severity).toBe("fail");
+    }
   });
 
   it("keeps every absolute ceiling above the worst p95 the research runs observed", () => {
