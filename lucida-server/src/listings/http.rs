@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
@@ -15,20 +16,48 @@ use lucida_core::auth_principal::AuthPrincipal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::index::{Cursor, ListingsIndex, ResultGroup};
+use super::index::{Cursor, ListingsIndex, ResultGroup, SearchQuery};
 use super::{Listing, ListingField, ListingGroup, ListingKind};
 
-pub fn router(index: Arc<ListingsIndex>) -> Router<()> {
+/// The listings routes over `index`. `people_signed_in` says whether each
+/// principal's email is the address of the person signed in. Where it
+/// isn't, as with auth disabled, a principal owns nothing, so a search
+/// never narrows to the caller's own listings.
+pub fn router(index: Arc<ListingsIndex>, people_signed_in: bool) -> Router<()> {
     Router::new()
         .route("/api/listings", get(search_listings))
         .route("/api/listings/resolve", get(resolve_listing))
-        .with_state(index)
+        .with_state(ListingsState {
+            index,
+            people_signed_in,
+        })
+}
+
+#[derive(Clone)]
+struct ListingsState {
+    index: Arc<ListingsIndex>,
+    people_signed_in: bool,
+}
+
+/// Whose listings a search keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// Those the caller owns.
+    Mine,
+    #[default]
+    Everyone,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SearchListingsQuery {
     pub q: Option<String>,
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub scope: Scope,
+    pub kind: Option<ListingKind>,
+    /// Only listings dated at or after this RFC 3339 time.
+    pub since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -40,6 +69,14 @@ pub struct ResolveListingQuery {
 struct SearchListingsResponse {
     results: Vec<ListingResultResponse>,
     next_cursor: Option<String>,
+    /// Whose listings the results hold: `everyone` when `mine` was asked
+    /// but isn't available.
+    scope: Scope,
+    /// Whether `mine` narrows anything: the caller is signed in as a person
+    /// and some listing has an owner.
+    mine_available: bool,
+    /// Listings that matched but the scope left out, over all pages.
+    outside_scope: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,13 +150,15 @@ impl ListingResultResponse {
     }
 }
 
-// The principal is unused until search scopes by owner, but requiring it
-// keeps these routes off the router half the auth middleware doesn't wrap.
 async fn search_listings(
-    State(index): State<Arc<ListingsIndex>>,
-    Extension(_principal): Extension<AuthPrincipal>,
-    Query(query): Query<SearchListingsQuery>,
+    State(state): State<ListingsState>,
+    Extension(principal): Extension<AuthPrincipal>,
+    query: Result<Query<SearchListingsQuery>, QueryRejection>,
 ) -> Response {
+    let query = match query {
+        Ok(Query(query)) => query,
+        Err(rejection) => return bad_request(&rejection.body_text()),
+    };
     let cursor = match query.cursor.as_deref().filter(|c| !c.is_empty()) {
         None => None,
         Some(text) => match Cursor::decode(text) {
@@ -127,7 +166,16 @@ async fn search_listings(
             None => return bad_request("cursor is not one this server returned"),
         },
     };
-    let page = index.search(query.q.as_deref().unwrap_or(""), cursor.as_ref());
+    let mine = query.scope == Scope::Mine && state.people_signed_in;
+    let page = state.index.search(
+        &SearchQuery {
+            words: query.q.unwrap_or_default(),
+            kind: query.kind,
+            since: query.since,
+            owner: mine.then_some(principal.email),
+        },
+        cursor.as_ref(),
+    );
     let body = SearchListingsResponse {
         results: page
             .results
@@ -135,19 +183,28 @@ async fn search_listings(
             .map(ListingResultResponse::new)
             .collect(),
         next_cursor: page.next.map(|cursor| cursor.encode()),
+        scope: if mine && page.owned {
+            Scope::Mine
+        } else {
+            Scope::Everyone
+        },
+        mine_available: state.people_signed_in && page.owned,
+        outside_scope: page.outside_scope,
     };
     (StatusCode::OK, Json(body)).into_response()
 }
 
+// The principal is unused, but requiring it keeps this route off the
+// router half the auth middleware doesn't wrap.
 async fn resolve_listing(
-    State(index): State<Arc<ListingsIndex>>,
+    State(state): State<ListingsState>,
     Extension(_principal): Extension<AuthPrincipal>,
     Query(query): Query<ResolveListingQuery>,
 ) -> Response {
     let Some(url) = query.url else {
         return bad_request("url is required");
     };
-    let listing = index.resolve(&url).map(|resolved| {
+    let listing = state.index.resolve(&url).map(|resolved| {
         let group = ListingGroupResponse::new(resolved.listing.group.clone(), &resolved.noun);
         ListingResponse::new(resolved.listing, group)
     });

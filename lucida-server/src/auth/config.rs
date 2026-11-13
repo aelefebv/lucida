@@ -210,6 +210,20 @@ impl AuthMode {
             Self::Iap => Some(IAP_CLEAR_LOGIN_COOKIE_URL),
         }
     }
+
+    /// Whether a principal's email is the address of the person signed
+    /// in, so the server can tell what is theirs. `Disabled` has no
+    /// sign-in: its principals are stand-ins such as `dev@local`, an
+    /// anonymous session, or a name the dev switcher chose, and none of
+    /// them owns anything.
+    ///
+    /// Exhaustive for the reason [`Self::sign_out_url`] is.
+    pub fn signs_people_in(self) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Google | Self::Iap => true,
+        }
+    }
 }
 
 /// `LUCIDA_AUTH` was set to a value `AuthMode::parse` doesn't recognize.

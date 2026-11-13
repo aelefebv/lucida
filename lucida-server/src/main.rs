@@ -746,7 +746,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .merge(authed_auth_router)
         .merge(inbox_router)
         .merge(workspaces_router)
-        .merge(listings::router(listings_index))
+        .merge(listings::router(
+            listings_index,
+            auth_config.mode.signs_people_in(),
+        ))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             auth::middleware::auth_middleware,
