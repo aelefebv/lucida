@@ -2,13 +2,14 @@
 //! grouped by the folder it sits in. It records no owner.
 //!
 //! Each root is walked through the object store it opens as, so a root in
-//! a bucket would walk the way a local directory does.
+//! a bucket walks the way a local directory does.
 
 use std::sync::Arc;
 
 use futures_util::future::join_all;
 use lucida_content::url::DatasetLocation;
 use lucida_store::backend;
+use lucida_store::source_policy::SourcePolicy;
 use lucida_store::zarr_roots::{self, RootKind, WalkLimits, ZarrRoot};
 use object_store::ObjectStore;
 
@@ -30,30 +31,38 @@ impl ObjectStoreSource {
     }
 
     /// The source over the configured data roots, or `None` without any.
-    /// A root that does not open is logged and left out.
     pub async fn configured(context: &SourceContext) -> Option<Arc<dyn DatasetSource>> {
-        let policy = &context.policy;
-        let mut roots = Vec::new();
-        for path in policy.data_roots() {
-            let Some(location) = path
-                .to_str()
-                .and_then(|text| DatasetLocation::parse(text).ok())
-            else {
-                tracing::warn!(root = %path.display(), "listings.data_root_unparsed");
-                continue;
-            };
-            match backend::open_permitted(&location, policy).await {
-                Ok(store) => roots.push(DataRoot { location, store }),
-                Err(error) => {
-                    tracing::warn!(root = %location, error = %error, "listings.data_root_unopened");
-                }
-            }
-        }
+        let roots = open_roots(&context.policy).await;
         if roots.is_empty() {
             return None;
         }
         Some(Arc::new(Self::new(roots)))
     }
+}
+
+/// Every data root `policy` holds, on this machine and in buckets, opened
+/// as the store it walks. A root that does not open is logged and left out.
+async fn open_roots(policy: &SourcePolicy) -> Vec<DataRoot> {
+    let local = policy.data_roots().filter_map(|path| {
+        let location = path
+            .to_str()
+            .and_then(|text| DatasetLocation::parse(text).ok());
+        if location.is_none() {
+            tracing::warn!(root = %path.display(), "listings.data_root_unparsed");
+        }
+        location
+    });
+    let locations: Vec<DatasetLocation> = local.chain(policy.bucket_roots().cloned()).collect();
+    let mut roots = Vec::new();
+    for location in locations {
+        match backend::open_permitted(&location, policy).await {
+            Ok(store) => roots.push(DataRoot { location, store }),
+            Err(error) => {
+                tracing::warn!(root = %location, error = %error, "listings.data_root_unopened");
+            }
+        }
+    }
+    roots
 }
 
 #[async_trait::async_trait]
@@ -121,8 +130,10 @@ fn parent_folder(url: &str) -> Option<ListingGroup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lucida_store::source_policy::SourcePolicyConfig;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use object_store::prefix::PrefixStore;
     use object_store::{ObjectStoreExt, PutPayload};
 
     async fn put(store: &InMemory, path: &str, document: serde_json::Value) {
@@ -187,6 +198,68 @@ mod tests {
         assert!(listings.iter().all(|l| l.owner.is_none()));
         assert!(listings.iter().all(|l| l.date.is_some()));
         assert_eq!(source.group_noun(), "Folder");
+    }
+
+    #[tokio::test]
+    async fn a_bucket_root_lists_its_datasets_under_their_parent_prefixes() {
+        let image = serde_json::json!({"zarr_format": 3, "node_type": "group",
+            "attributes": {"ome": {"multiscales": [{}]}}});
+        let shared = InMemory::new();
+        put(&shared, "images/a.zarr/zarr.json", image.clone()).await;
+        put(&shared, "images/runs/b.zarr/zarr.json", image.clone()).await;
+        put(&shared, "other/c.zarr/zarr.json", image.clone()).await;
+        let top = InMemory::new();
+        put(&top, "d.zarr/zarr.json", image).await;
+        let source = ObjectStoreSource::new(vec![
+            DataRoot {
+                location: DatasetLocation::parse("gs://shared/images").unwrap(),
+                store: Arc::new(PrefixStore::new(shared, "images")),
+            },
+            DataRoot {
+                location: DatasetLocation::parse("s3://top").unwrap(),
+                store: Arc::new(top),
+            },
+        ]);
+
+        let listings = source.listings().await.unwrap();
+        let summary: Vec<_> = listings
+            .iter()
+            .map(|l| (l.url.as_str(), l.group.clone()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "gs://shared/images/a.zarr",
+                    group("gs://shared/images", "images")
+                ),
+                (
+                    "gs://shared/images/runs/b.zarr",
+                    group("gs://shared/images/runs", "runs")
+                ),
+                ("s3://top/d.zarr", group("s3://top", "top")),
+            ]
+        );
+    }
+
+    /// The bucket allowlist leaves the root's bucket out, so only the root
+    /// itself lets it open.
+    #[tokio::test]
+    async fn bucket_roots_are_opened_beside_local_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let policy = SourcePolicy::new(SourcePolicyConfig {
+            restricted: true,
+            data_roots: vec![tmp.path().to_path_buf()],
+            bucket_roots: vec!["gs://shared/images".into()],
+            allowed_buckets: vec!["gs://team-data".into()],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let roots = open_roots(&policy).await;
+        let locations: Vec<_> = roots.iter().map(|root| root.location.as_str()).collect();
+        let local = DatasetLocation::parse(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(locations, [local.as_str(), "gs://shared/images"]);
     }
 
     #[test]

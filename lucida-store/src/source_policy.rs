@@ -3,7 +3,8 @@
 //! An unrestricted policy opens any location. A restricted one opens local
 //! paths only under the configured data roots, `http(s)` only from hosts
 //! that resolve to public addresses unless allowlisted, and `gs://` and
-//! `s3://` from any bucket unless a bucket allowlist is configured.
+//! `s3://` from any bucket unless a bucket allowlist is configured. What is
+//! under a data root in a bucket opens either way.
 //!
 //! Addresses are judged twice: once when a location is opened, so a refusal
 //! names its reason, and again by the resolver of every HTTP connection the
@@ -32,6 +33,10 @@ pub struct SourcePolicyConfig {
     pub restricted: bool,
     /// Directories local datasets may be opened from.
     pub data_roots: Vec<PathBuf>,
+    /// Data roots in buckets: `gs://bucket` or `s3://bucket` URLs, each
+    /// with an optional prefix. What is under one opens even when the
+    /// bucket allowlist leaves its bucket out.
+    pub bucket_roots: Vec<String>,
     /// Hosts, IP addresses, or CIDR ranges an `http(s)` location may reach
     /// even when they are loopback, private, or link-local.
     pub allowed_hosts: Vec<String>,
@@ -51,7 +56,7 @@ impl fmt::Display for SourcePolicyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SourcePolicyError::DataRoot { root, reason } => {
-                write!(f, "data directory {root}: {reason}")
+                write!(f, "data root {root}: {reason}")
             }
             SourcePolicyError::AllowedHost { entry } => write!(
                 f,
@@ -120,6 +125,7 @@ impl std::error::Error for SourceDenied {}
 pub struct SourcePolicy {
     restricted: bool,
     data_roots: Vec<DataRoot>,
+    bucket_roots: Vec<BucketRoot>,
     addresses: Arc<AddressRules>,
     allowed_buckets: Vec<(LocationScheme, String)>,
 }
@@ -139,6 +145,12 @@ impl SourcePolicy {
             .filter(|root| !root.as_os_str().is_empty())
             .map(|root| DataRoot::new(root))
             .collect::<Result<_, _>>()?;
+        let bucket_roots = config
+            .bucket_roots
+            .iter()
+            .filter(|entry| !entry.trim().is_empty())
+            .map(|entry| BucketRoot::new(entry))
+            .collect::<Result<_, _>>()?;
         let mut addresses = AddressRules::default();
         for entry in config.allowed_hosts.iter().filter(|e| !e.trim().is_empty()) {
             addresses.allow(entry)?;
@@ -152,6 +164,7 @@ impl SourcePolicy {
         Ok(Self {
             restricted: config.restricted,
             data_roots,
+            bucket_roots,
             addresses: Arc::new(addresses),
             allowed_buckets,
         })
@@ -161,7 +174,12 @@ impl SourcePolicy {
         self.restricted
     }
 
-    /// The data roots as configured, made absolute.
+    /// The data roots in buckets, in canonical form.
+    pub fn bucket_roots(&self) -> impl Iterator<Item = &DatasetLocation> {
+        self.bucket_roots.iter().map(|root| &root.location)
+    }
+
+    /// The data roots on this machine, as configured and made absolute.
     pub fn data_roots(&self) -> impl Iterator<Item = &Path> {
         self.data_roots.iter().map(|root| root.configured.as_path())
     }
@@ -231,6 +249,7 @@ impl SourcePolicy {
             .allowed_buckets
             .iter()
             .any(|(s, b)| *s == scheme && b == bucket)
+            || self.bucket_roots.iter().any(|root| root.holds(location))
         {
             return Ok(());
         }
@@ -371,6 +390,62 @@ fn parse_bucket(entry: &str) -> Result<(LocationScheme, String), SourcePolicyErr
         }
         _ => Err(error()),
     }
+}
+
+/// A data root in a bucket: its bucket and the key segments it holds.
+#[derive(Debug, Clone)]
+struct BucketRoot {
+    location: DatasetLocation,
+    scheme: LocationScheme,
+    bucket: String,
+    prefix: Vec<String>,
+}
+
+impl BucketRoot {
+    fn new(entry: &str) -> Result<Self, SourcePolicyError> {
+        let error = |reason: &str| SourcePolicyError::DataRoot {
+            root: entry.to_string(),
+            reason: reason.to_string(),
+        };
+        let location = DatasetLocation::parse(entry.trim()).map_err(|e| error(&e.to_string()))?;
+        let (scheme @ (LocationScheme::Gcs | LocationScheme::S3), Some(bucket)) =
+            (location.scheme(), location.bucket_name())
+        else {
+            return Err(error("it is not a gs:// or s3:// URL"));
+        };
+        let bucket = bucket.to_string();
+        let prefix = key_segments(location.object_prefix())
+            .ok_or_else(|| error("its prefix has a . or .. segment"))?;
+        Ok(Self {
+            location,
+            scheme,
+            bucket,
+            prefix,
+        })
+    }
+
+    fn holds(&self, location: &DatasetLocation) -> bool {
+        location.scheme() == self.scheme
+            && location.bucket_name() == Some(self.bucket.as_str())
+            && key_segments(location.object_prefix())
+                .is_some_and(|key| key.starts_with(&self.prefix))
+    }
+}
+
+/// An object key's segments without the empty ones, which a store drops
+/// too. `None` when one is `.` or `..`: a store reads those as literal
+/// keys, but a reader of the URL takes them to leave the prefix, so no
+/// bucket root holds such a key.
+fn key_segments(key: Option<&str>) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    for segment in key.unwrap_or_default().split('/') {
+        match segment {
+            "" => {}
+            "." | ".." => return None,
+            other => segments.push(other.to_string()),
+        }
+    }
+    Some(segments)
 }
 
 /// The hosts and address ranges an HTTP source may reach although they are
@@ -819,6 +894,92 @@ mod tests {
             assert!(
                 matches!(err, SourceDenied::BucketNotAllowed { .. }),
                 "{raw}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn what_is_under_a_bucket_root_opens_past_the_bucket_allowlist() {
+        let policy = restricted(SourcePolicyConfig {
+            allowed_buckets: vec!["gs://team-data".into()],
+            bucket_roots: vec!["gs://shared/images".into(), "S3://archive".into()],
+            ..Default::default()
+        });
+        for raw in [
+            "gs://shared/images",
+            "gs://shared/images/",
+            "gs://shared/images/runs/a.zarr",
+            "gs://shared//images/a.zarr",
+            "s3://archive/any/b.zarr",
+            "gs://team-data/c.zarr",
+        ] {
+            assert_eq!(policy.check(&location(raw)).await, Ok(()), "{raw}");
+        }
+        for raw in [
+            "gs://shared",
+            "gs://shared/other/a.zarr",
+            "gs://shared/images2/a.zarr",
+            "gs://shared/images/../other/a.zarr",
+            "s3://shared/images/a.zarr",
+            "gs://archive/b.zarr",
+            "gs://elsewhere/a.zarr",
+        ] {
+            let err = policy.check(&location(raw)).await.unwrap_err();
+            assert!(
+                matches!(err, SourceDenied::BucketNotAllowed { .. }),
+                "{raw}: {err:?}"
+            );
+        }
+        let store = open_permitted(&location("gs://shared/images/a.zarr"), &policy).await;
+        assert!(store.is_ok(), "{:?}", store.err());
+    }
+
+    /// Without an allowlist every bucket opens, so a bucket root must not
+    /// start refusing the buckets outside it.
+    #[tokio::test]
+    async fn bucket_roots_leave_other_buckets_to_the_allowlist() {
+        let policy = restricted(SourcePolicyConfig {
+            bucket_roots: vec!["gs://shared/images".into()],
+            ..Default::default()
+        });
+        for raw in [
+            "gs://shared/other/a.zarr",
+            "gs://elsewhere/a.zarr",
+            "s3://any/a.zarr",
+        ] {
+            assert_eq!(policy.check(&location(raw)).await, Ok(()), "{raw}");
+        }
+    }
+
+    #[test]
+    fn bucket_roots_are_canonical_and_bad_ones_are_named() {
+        let policy = SourcePolicy::new(SourcePolicyConfig {
+            bucket_roots: vec![
+                "GS://shared/images".into(),
+                " ".into(),
+                "s3://archive".into(),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        let roots: Vec<_> = policy.bucket_roots().map(DatasetLocation::as_str).collect();
+        assert_eq!(roots, ["gs://shared/images", "s3://archive"]);
+        assert_eq!(policy.data_roots().count(), 0);
+
+        for entry in [
+            "gs://",
+            "https://host/data",
+            "/srv/data",
+            "gs://shared/a/../b",
+        ] {
+            let err = SourcePolicy::new(SourcePolicyConfig {
+                bucket_roots: vec![entry.into()],
+                ..Default::default()
+            })
+            .unwrap_err();
+            assert!(
+                matches!(&err, SourcePolicyError::DataRoot { root, .. } if root == entry),
+                "{entry}: {err:?}"
             );
         }
     }

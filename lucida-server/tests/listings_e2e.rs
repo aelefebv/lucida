@@ -435,6 +435,37 @@ async fn a_listing_the_source_policy_refuses_never_appears() {
 }
 
 #[tokio::test]
+async fn a_bucket_root_admits_its_listings_past_the_bucket_allowlist() {
+    let policy = SourcePolicy::new(SourcePolicyConfig {
+        restricted: true,
+        bucket_roots: vec!["gs://shared/images".into()],
+        allowed_buckets: vec!["gs://team-data".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let rig = Rig::start(
+        vec![FakeSource::new(vec![
+            listing("gs://shared/images/runs/a.zarr", "under the root", None, 1),
+            listing("gs://shared/other/b.zarr", "beside the root", None, 2),
+            listing("gs://team-data/c.zarr", "allowlisted", None, 3),
+            listing("gs://elsewhere/d.zarr", "elsewhere", None, 4),
+        ])],
+        policy,
+    )
+    .await;
+
+    assert_eq!(
+        titles(&rig.search("").await),
+        ["allowlisted", "under the root"]
+    );
+    assert_eq!(
+        rig.resolve("GS://shared/images/runs/a.zarr/").await["title"],
+        "under the root"
+    );
+    assert_eq!(rig.resolve("gs://shared/other/b.zarr").await, Value::Null);
+}
+
+#[tokio::test]
 async fn a_failed_refresh_keeps_what_the_source_offered_last() {
     let source = FakeSource::new(vec![listing("/data/a.zarr", "a", None, 1)]);
     let rig = Rig::with(Arc::clone(&source)).await;

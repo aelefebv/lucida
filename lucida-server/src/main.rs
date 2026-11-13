@@ -96,11 +96,16 @@ struct SourceArgs {
     /// A directory `/api/browse` may list and, when auth is enabled, the
     /// only place local datasets open from. Repeat for several.
     ///
-    /// Also readable from `LUCIDA_DATA_DIR`, several separated as in
-    /// `PATH`. CLI flags win over the env var when both are set (clap's
-    /// default behavior).
-    #[arg(long, env = "LUCIDA_DATA_DIR", value_delimiter = PATH_LIST_SEPARATOR)]
-    data_dir: Vec<PathBuf>,
+    /// A `gs://` or `s3://` URL, with an optional prefix, is a data root in
+    /// a bucket: search lists the datasets under it, and they open even when
+    /// the bucket allowlist leaves the bucket out.
+    ///
+    /// Also readable from `LUCIDA_DATA_DIR`. Several are separated as in
+    /// `PATH`, by `:` (`;` on Windows), except the colon of a leading
+    /// `gs://` or `s3://`. CLI flags win over the env var when both are set
+    /// (clap's default behavior).
+    #[arg(long, env = "LUCIDA_DATA_DIR")]
+    data_dir: Vec<String>,
     /// A host, IP address, or CIDR range an `http(s)` dataset may reach
     /// when auth is enabled, although it is not a public address. Repeat
     /// for several.
@@ -176,16 +181,46 @@ impl LinkThrottleArgs {
     }
 }
 
-/// What separates several directories in `LUCIDA_DATA_DIR`, as in `PATH`.
+/// What separates several data roots in `LUCIDA_DATA_DIR`, as in `PATH`.
 const PATH_LIST_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+/// The data roots in one `--data-dir` value. A `separator` of `:` would cut
+/// a bucket URL after its scheme, so a piece that starts with `//` rejoins
+/// a bare `gs` or `s3` before it.
+fn split_data_roots(list: &str, separator: char) -> Vec<String> {
+    let mut roots: Vec<String> = Vec::new();
+    for piece in list.split(separator) {
+        match roots.last_mut() {
+            Some(last) if separator == ':' && is_bucket_scheme(last) && piece.starts_with("//") => {
+                last.push(':');
+                last.push_str(piece);
+            }
+            _ => roots.push(piece.to_string()),
+        }
+    }
+    roots
+}
+
+fn is_bucket_scheme(text: &str) -> bool {
+    text.eq_ignore_ascii_case("gs") || text.eq_ignore_ascii_case("s3")
+}
 
 /// Where datasets may be opened from. Auth disabled means one person on
 /// their own machine, or a network the operator declared trusted with
 /// `LUCIDA_INSECURE`, so only an enabled auth mode restricts sources.
 fn source_policy_config(mode: auth::AuthMode, args: &SourceArgs) -> SourcePolicyConfig {
+    let (bucket_roots, directories): (Vec<String>, Vec<String>) = args
+        .data_dir
+        .iter()
+        .flat_map(|list| split_data_roots(list, PATH_LIST_SEPARATOR))
+        .partition(|root| {
+            root.split_once("://")
+                .is_some_and(|(scheme, _)| is_bucket_scheme(scheme))
+        });
     SourcePolicyConfig {
         restricted: mode != auth::AuthMode::Disabled,
-        data_roots: args.data_dir.clone(),
+        data_roots: directories.into_iter().map(PathBuf::from).collect(),
+        bucket_roots,
         allowed_hosts: args.source_allow_host.clone(),
         allowed_buckets: args.source_allow_bucket.clone(),
     }
@@ -433,6 +468,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     tracing::info!(
         restricted = source_policy.is_restricted(),
         data_roots = ?source_policy.data_roots().collect::<Vec<_>>(),
+        bucket_roots = ?source_policy
+            .bucket_roots()
+            .map(|root| root.as_str())
+            .collect::<Vec<_>>(),
         allowed_hosts = args.sources.source_allow_host.len(),
         allowed_buckets = args.sources.source_allow_bucket.len(),
         "source_policy.config",
@@ -875,10 +914,7 @@ mod cli_tests {
     fn legacy_data_dir_at_top_level_parses() {
         let cli = parse(&["--data-dir", "/tmp/foo"]);
         assert!(cli.command.is_none(), "no explicit subcommand");
-        assert_eq!(
-            cli.serve_args.sources.data_dir,
-            vec![PathBuf::from("/tmp/foo")]
-        );
+        assert_eq!(cli.serve_args.sources.data_dir, ["/tmp/foo"]);
     }
 
     #[test]
@@ -887,7 +923,7 @@ mod cli_tests {
         let Some(Commands::Serve(args)) = cli.command else {
             panic!("serve subcommand");
         };
-        assert_eq!(args.sources.data_dir, vec![PathBuf::from("/tmp/foo")]);
+        assert_eq!(args.sources.data_dir, ["/tmp/foo"]);
     }
 
     #[test]
@@ -906,15 +942,40 @@ mod cli_tests {
         let Some(Commands::Serve(args)) = cli.command else {
             panic!("serve subcommand");
         };
-        assert_eq!(
-            args.sources.data_dir,
-            vec![PathBuf::from("/srv/a"), PathBuf::from("/srv/b")]
-        );
+        assert_eq!(args.sources.data_dir, ["/srv/a", "/srv/b"]);
         assert_eq!(
             args.sources.source_allow_host,
             ["10.0.0.0/8", "files.internal"]
         );
         assert_eq!(args.sources.source_allow_bucket, ["gs://team-data"]);
+    }
+
+    #[test]
+    fn a_data_root_list_keeps_the_colon_of_a_bucket_url() {
+        assert_eq!(
+            split_data_roots("/srv/a:gs://bucket/images:/srv/b:S3://archive:", ':'),
+            ["/srv/a", "gs://bucket/images", "/srv/b", "S3://archive", ""]
+        );
+        assert_eq!(
+            split_data_roots("/srv/gs://x:http://host", ':'),
+            ["/srv/gs", "//x", "http", "//host"]
+        );
+        assert_eq!(
+            split_data_roots(r"C:\data;gs://bucket/images", ';'),
+            [r"C:\data", "gs://bucket/images"]
+        );
+    }
+
+    #[test]
+    fn bucket_urls_among_the_data_roots_become_bucket_roots() {
+        let list = format!("/srv/a{PATH_LIST_SEPARATOR}gs://bucket/images");
+        let cli = parse(&["serve", "--data-dir", &list, "--data-dir", "s3://archive"]);
+        let Some(Commands::Serve(args)) = cli.command else {
+            panic!("serve subcommand");
+        };
+        let config = source_policy_config(auth::AuthMode::Iap, &args.sources);
+        assert_eq!(config.data_roots, [PathBuf::from("/srv/a")]);
+        assert_eq!(config.bucket_roots, ["gs://bucket/images", "s3://archive"]);
     }
 
     /// An enabled auth mode, as behind an authenticating perimeter, is
