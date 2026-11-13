@@ -36,6 +36,8 @@ export interface ListingResult {
   group: ListingGroup | null;
   /** The group's label matched, so the whole group came back. */
   collapsed: boolean;
+  /** How many listings the group holds, matched or not. */
+  size: number;
   listings: Listing[];
 }
 

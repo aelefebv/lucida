@@ -1,4 +1,4 @@
-import type { Listing, ListingResult } from "./listingsApi.ts";
+import type { Listing, ListingGroup, ListingResult } from "./listingsApi.ts";
 
 /** A dataset someone chose to open. */
 export interface OpenChoice {
@@ -6,6 +6,8 @@ export interface OpenChoice {
   url: string;
   /** What a new workspace is named after; null to name it after the URL. */
   title: string | null;
+  /** The group its listing sits in, which names a workspace opened from several of one group. */
+  group: ListingGroup | null;
 }
 
 /** A typed or pasted location, checked, and resolved when it checks out. */
@@ -34,6 +36,8 @@ export interface GroupRow {
   noun: string | null;
   /** The group's full id, for a tooltip that tells like labels apart. */
   id: string | null;
+  /** How many listings the group holds, matched or not; null for the recent list. */
+  size: number | null;
   expanded: boolean;
   children: readonly OpenRow[];
 }
@@ -69,6 +73,7 @@ export function buildRows({ location, recents, results, toggled, hasMore }: RowI
       label: "Recent",
       noun: null,
       id: null,
+      size: null,
       expanded: toggled.get(RECENT_GROUP_KEY) ?? true,
       children: recents.map((url) => ({ type: "recent", key: `recent:${url}`, url, parent: RECENT_GROUP_KEY })),
     });
@@ -88,6 +93,7 @@ export function buildRows({ location, recents, results, toggled, hasMore }: RowI
       label: result.group.label,
       noun: result.group.noun,
       id: result.group.id,
+      size: result.size,
       expanded: toggled.get(key) ?? !result.collapsed,
       children: listings,
     });
@@ -110,14 +116,18 @@ export function parentOf(row: OpenRow): string | null {
 export function choiceOf(row: OpenRow): OpenChoice | null {
   switch (row.type) {
     case "location":
-      return row.url && !row.problem ? { url: row.url, title: row.title } : null;
+      return row.url && !row.problem ? { url: row.url, title: row.title, group: null } : null;
     case "listing":
-      return { url: row.listing.url, title: row.listing.title };
+      return listingChoice(row.listing);
     case "recent":
-      return { url: row.url, title: null };
+      return { url: row.url, title: null, group: null };
     default:
       return null;
   }
+}
+
+export function listingChoice(listing: Listing): OpenChoice {
+  return { url: listing.url, title: listing.title, group: listing.group };
 }
 
 /** How many datasets the rows hold, the recent list aside. */

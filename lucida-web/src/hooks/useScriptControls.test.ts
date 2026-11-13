@@ -86,7 +86,7 @@ function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInpu
     comparison: fakeComparison().actions,
     viewLayout: {
       layout: () => "single", views: () => [0], setLayout: vi.fn(), activate: vi.fn(),
-      show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
+      show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), layOutEmpty: vi.fn(), maximize: vi.fn(),
       links: () => null, link: vi.fn(), linkAll: vi.fn(),
     },
     selectedDatasetId: null,
@@ -256,7 +256,7 @@ describe("useScriptControls", () => {
     const datasets = new Map<string, DatasetState>([["wds-a", dataset("wds-a")], ["wds-b", dataset("wds-b")]]);
     const viewLayout = {
       layout: () => "columns" as const, views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(),
-      show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
+      show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), layOutEmpty: vi.fn(), maximize: vi.fn(),
       links: () => null, link: vi.fn(), linkAll: vi.fn(),
     };
     const given = inputs({
@@ -289,7 +289,7 @@ describe("useScriptControls", () => {
     const given = inputs({
       viewLayout: {
         layout: () => "columns", views: () => [0, 1], setLayout: vi.fn(), activate: vi.fn(),
-        show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), maximize: vi.fn(),
+        show: vi.fn(), move: vi.fn(), showEverywhere: vi.fn(), add: vi.fn(), layOutEmpty: vi.fn(), maximize: vi.fn(),
         links: () => links, link, linkAll: vi.fn(),
       },
     });

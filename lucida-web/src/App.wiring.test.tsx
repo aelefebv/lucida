@@ -620,7 +620,7 @@ describe("App wiring: channels", () => {
   it("adds a dataset chosen in the open dialog to the workspace, or opens it in a new one", async () => {
     const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]));
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-      new Response(JSON.stringify({ results: [{ group: null, collapsed: false, listings: [OTHER_LISTING] }], next_cursor: null })),
+      new Response(JSON.stringify({ results: [{ group: null, collapsed: false, size: 1, listings: [OTHER_LISTING] }], next_cursor: null })),
     );
     const openFromPanel = async () => {
       const panel = screen.getByRole("complementary", { name: "Layers" });
@@ -635,7 +635,7 @@ describe("App wiring: channels", () => {
     const dialog = await openFromPanel();
     const row = await within(dialog).findAllByText("Other volume");
     fireEvent.click(row.at(-1) as HTMLElement, { ctrlKey: true, metaKey: true });
-    expect(onOpenInNewWorkspace).toHaveBeenCalledWith({ url: "/data/other.ome.zarr", title: "Other volume" });
+    expect(onOpenInNewWorkspace).toHaveBeenCalledWith([{ url: "/data/other.ome.zarr", title: "Other volume", group: null }]);
     expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledTimes(1);
     fetchSpy.mockRestore();
   });
