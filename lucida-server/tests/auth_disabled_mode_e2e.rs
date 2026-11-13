@@ -144,63 +144,23 @@ async fn explicit_disabled_non_loopback_with_insecure_whoami_returns_dev_princip
     assert_whoami_returns_dev_principal(&server).await;
 }
 
-// GET /api/browse without a cookie must not 401 — verifies the
-// principal flows through middleware to non-auth handlers in disabled
-// mode.
+// GET /api/listings without a cookie must not 401: the principal flows
+// through the middleware to the app routes in disabled mode.
 #[tokio::test]
-async fn browse_works_without_cookie_in_disabled_mode() {
-    // Tempdir scoped to the test; seed one file so the listing isn't
-    // entirely empty (catches a bug where the handler returned 200 on
-    // an empty dir but 500 on a real one). We seed a regular file
-    // rather than a directory so the test doesn't depend on canonical
-    // sub-path resolution semantics.
-    let data_tmp = tempfile::tempdir().unwrap();
-    std::fs::write(data_tmp.path().join("seed.txt"), b"hello").unwrap();
-    let data_dir_str = data_tmp.path().to_str().unwrap().to_string();
-
-    let server = spawn_server("127.0.0.1", &[("LUCIDA_DATA_DIR", &data_dir_str)]);
-    let client = http_client();
-    // The browse handler canonicalizes its `path` arg and constrains
-    // it to LUCIDA_DATA_DIR; pointing at the same directory we set
-    // LUCIDA_DATA_DIR to is the simplest happy path.
-    let url = format!(
-        "{}/api/browse?path={}",
-        server.base_url,
-        urlencoding::encode(&data_dir_str),
-    );
-    let res = client.get(&url).send().await.expect("GET /api/browse");
-    assert_ne!(
-        res.status(),
-        reqwest::StatusCode::UNAUTHORIZED,
-        "/api/browse must NOT 401 in disabled mode (the principal flows from the stub)",
-    );
+async fn listings_answer_without_cookie_in_disabled_mode() {
+    let server = spawn_server("127.0.0.1", &[]);
+    let res = http_client()
+        .get(format!("{}/api/listings", server.base_url))
+        .send()
+        .await
+        .expect("GET /api/listings");
     assert_eq!(
         res.status(),
         reqwest::StatusCode::OK,
-        "/api/browse should answer 200 against the seeded data dir",
+        "/api/listings must answer in disabled mode (the principal flows from the stub)",
     );
     let body: Value = res.json().await.expect("json body");
-    let entries = body["entries"].as_array().expect("entries array");
-    assert!(
-        entries.iter().any(|e| e["name"] == "seed.txt"),
-        "seeded file should appear in the listing; got {body}",
-    );
-
-    // The response's `path` field must be in canonical-display form:
-    // forward slashes throughout, no `\\?\` verbatim-UNC prefix, and
-    // (on Windows) a lowercase drive letter. On Linux the canonical
-    // form of an absolute Unix path is identical to its raw string, so
-    // the assertion reduces to "no backslashes and no `\\?\` prefix"
-    // — both trivially true on Linux but load-bearing on Windows.
-    let response_path = body["path"].as_str().expect("path string");
-    assert!(
-        !response_path.contains('\\'),
-        "browse response path must use forward slashes only; got {response_path:?}",
-    );
-    assert!(
-        !response_path.starts_with(r"\\?\"),
-        "browse response path must strip the Windows verbatim-UNC prefix; got {response_path:?}",
-    );
+    assert!(body["results"].is_array(), "got {body}");
 }
 
 // Both directions of the loopback gate need a test: an always-off

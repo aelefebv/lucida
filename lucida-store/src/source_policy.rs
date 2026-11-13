@@ -29,7 +29,7 @@ const MAX_REDIRECTS: usize = 10;
 #[derive(Debug, Clone, Default)]
 pub struct SourcePolicyConfig {
     /// Apply the rules. When `false`, every location opens and the data
-    /// roots only bound browsing.
+    /// roots only say where search lists datasets from.
     pub restricted: bool,
     /// Directories local datasets may be opened from.
     pub data_roots: Vec<PathBuf>,
@@ -182,18 +182,6 @@ impl SourcePolicy {
     /// The data roots on this machine, as configured and made absolute.
     pub fn data_roots(&self) -> impl Iterator<Item = &Path> {
         self.data_roots.iter().map(|root| root.configured.as_path())
-    }
-
-    /// Whether `/api/browse` may list `canonical`, a canonicalized
-    /// directory. Configured data roots bound browsing in either mode; a
-    /// restricted policy with none lists nothing.
-    pub fn permits_browse(&self, canonical: &Path) -> bool {
-        if self.data_roots.is_empty() {
-            return !self.restricted;
-        }
-        self.data_roots
-            .iter()
-            .any(|root| root.holds_real(canonical))
     }
 
     /// Check `location` before it is opened.
@@ -1000,29 +988,6 @@ mod tests {
         }
         let local = open_permitted(&location("/srv/a.zarr"), &policy).await;
         assert!(matches!(local, Err(StoreError::Denied(_))));
-    }
-
-    #[test]
-    fn browsing_follows_the_data_roots() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("data");
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        let real_root = std::fs::canonicalize(&root).unwrap();
-        let real_tmp = std::fs::canonicalize(tmp.path()).unwrap();
-
-        assert!(SourcePolicy::unrestricted().permits_browse(&real_tmp));
-        assert!(!restricted(SourcePolicyConfig::default()).permits_browse(&real_tmp));
-        for policy in [
-            rooted(&root),
-            SourcePolicy::new(SourcePolicyConfig {
-                data_roots: vec![root.clone()],
-                ..Default::default()
-            })
-            .unwrap(),
-        ] {
-            assert!(policy.permits_browse(&real_root.join("sub")));
-            assert!(!policy.permits_browse(&real_tmp));
-        }
     }
 
     #[test]

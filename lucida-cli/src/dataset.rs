@@ -12,73 +12,16 @@ use lucida_protocol::{
     DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic,
     DatasetSourceHealth, LinkThrottleReport, SourceThrottleReport,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::config::EffectiveServer;
 use crate::credentials::EffectiveToken;
 use crate::error::{CliError, ErrorKind};
-use crate::http::{api_url, send_json};
 use crate::session::{
     IncomingSessionMessage, SessionWait, connect_workspace_socket, incoming_messages,
     observe_until, send_client_message, wait_for_workspace_snapshot,
 };
 use crate::workspace::{WorkspaceRecord, WorkspaceRole, WorkspaceTarget};
-
-#[derive(Debug, Serialize)]
-pub struct DatasetBrowseOutput {
-    pub server: EffectiveServer,
-    pub path: String,
-    pub entries: Vec<BrowseEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DatasetBrowseResult {
-    pub path: String,
-    pub entries: Vec<BrowseEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrowseEntry {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub entry_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct BrowseResponse {
-    path: String,
-    entries: Vec<BrowseEntry>,
-}
-
-pub struct DatasetHttpClient {
-    base_url: String,
-    token: Option<String>,
-    http: reqwest::Client,
-}
-
-impl DatasetHttpClient {
-    pub fn new(base_url: impl Into<String>, token: Option<EffectiveToken>) -> Self {
-        Self {
-            base_url: base_url.into(),
-            token: token.map(|effective| effective.token),
-            http: reqwest::Client::new(),
-        }
-    }
-
-    pub async fn browse(&self, path: Option<&str>) -> Result<DatasetBrowseResult, CliError> {
-        let mut request = self.http.get(api_url(&self.base_url, &["api", "browse"])?);
-        if let Some(path) = path {
-            request = request.query(&[("path", path)]);
-        }
-
-        let response = send_json(request, self.token.as_deref(), map_browse_error).await?;
-        let body = response.json::<BrowseResponse>().await?;
-        Ok(DatasetBrowseResult {
-            path: body.path,
-            entries: body.entries,
-        })
-    }
-}
 
 #[derive(Debug, Serialize)]
 pub struct DatasetOpenOutput {
@@ -428,26 +371,6 @@ fn format_dataset_open_warning_lines(progress: &[DatasetOpenProgressDiagnostic])
         .filter(|diagnostic| diagnostic.warning)
         .map(|diagnostic| format!("\nwarning: {}", diagnostic.message))
         .collect()
-}
-
-pub fn format_dataset_browse_human(output: &DatasetBrowseOutput) -> String {
-    if output.entries.is_empty() {
-        return format!("{}\nNo entries", output.path);
-    }
-    let entries = output
-        .entries
-        .iter()
-        .map(|entry| {
-            let suffix = if entry.entry_type == "directory" {
-                "/"
-            } else {
-                ""
-            };
-            format!("{:<9} {}{}", entry.entry_type, entry.name, suffix)
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{}\n{}", output.path, entries)
 }
 
 fn dataset_open_stage_label(stage: DatasetOpenStage) -> &'static str {
@@ -1102,39 +1025,6 @@ fn error_kind_for_open_failure(kind: DatasetOpenFailureKind) -> ErrorKind {
         | DatasetOpenFailureKind::UnsupportedScheme
         | DatasetOpenFailureKind::InvalidLocation => ErrorKind::Config,
         _ => ErrorKind::DatasetOpenFailure,
-    }
-}
-
-fn map_browse_error(status: reqwest::StatusCode, body: &str) -> CliError {
-    let body = body.trim();
-    match status {
-        reqwest::StatusCode::UNAUTHORIZED => CliError::new(
-            ErrorKind::Unauthenticated,
-            "not authenticated; run `lucida auth login`",
-        ),
-        reqwest::StatusCode::FORBIDDEN => CliError::new(
-            ErrorKind::Unauthorized,
-            "browse request was forbidden by the server data directory policy",
-        ),
-        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND => CliError::new(
-            ErrorKind::MissingResource,
-            if body.is_empty() {
-                format!("browse request failed with HTTP {}", status.as_u16())
-            } else {
-                body.to_string()
-            },
-        ),
-        _ => CliError::new(
-            ErrorKind::Protocol,
-            if body.is_empty() {
-                format!("unexpected browse response: HTTP {}", status.as_u16())
-            } else {
-                format!(
-                    "unexpected browse response HTTP {}: {body}",
-                    status.as_u16()
-                )
-            },
-        ),
     }
 }
 
@@ -1862,33 +1752,6 @@ mod tests {
             ),
             "{human}"
         );
-    }
-
-    #[test]
-    fn browse_human_output_marks_directories() {
-        let output = DatasetBrowseOutput {
-            server: EffectiveServer {
-                url: "http://localhost:9876".into(),
-                source: crate::config::ServerSource::Default,
-            },
-            path: "/data".into(),
-            entries: vec![
-                BrowseEntry {
-                    name: "collection.zarr".into(),
-                    entry_type: "directory".into(),
-                },
-                BrowseEntry {
-                    name: "notes.txt".into(),
-                    entry_type: "file".into(),
-                },
-            ],
-        };
-
-        let human = format_dataset_browse_human(&output);
-
-        assert!(human.contains("/data"));
-        assert!(human.contains("directory collection.zarr/"));
-        assert!(human.contains("file      notes.txt"));
     }
 
     #[tokio::test]

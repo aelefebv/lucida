@@ -16,7 +16,7 @@ use lucida_server::origin::{self, OriginPolicy};
 use lucida_server::static_serve;
 use lucida_server::status;
 use lucida_server::storage;
-use lucida_server::{AppState, GeneratedConfig, browse, workspace};
+use lucida_server::{GeneratedConfig, workspace};
 use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 use lucida_store::source_throttle::{SourceThrottleConfig, SourceThrottleProfile};
 
@@ -93,8 +93,8 @@ struct ServeArgs {
 /// Where datasets may be opened from.
 #[derive(Args, Debug, Default)]
 struct SourceArgs {
-    /// A directory `/api/browse` may list and, when auth is enabled, the
-    /// only place local datasets open from. Repeat for several.
+    /// A directory search lists datasets from and, when auth is enabled,
+    /// the only place local datasets open from. Repeat for several.
     ///
     /// A `gs://` or `s3://` URL, with an optional prefix, is a data root in
     /// a bucket: search lists the datasets under it, and they open even when
@@ -518,9 +518,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             return Err(std::io::Error::other(e.to_string()));
         }
     }
-    let state = AppState {
-        source_policy: Arc::clone(&source_policy),
-    };
     let listings_index = Arc::new(listings::ListingsIndex::new(
         listings::configured(&listings::SourceContext {
             policy: Arc::clone(&source_policy),
@@ -744,9 +741,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // `/` falls through to the SPA so a browser hitting `:9876` sees the
     // app. A WebSocket client connects to one workspace, at
     // `/ws/workspaces/{id}`.
-    let app_state_router = Router::new()
-        .route("/api/browse", get(browse::browse_handler))
-        .with_state(state)
+    let app_router = Router::new()
         .merge(authed_auth_router)
         .merge(inbox_router)
         .merge(workspaces_router)
@@ -756,7 +751,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             auth::middleware::auth_middleware,
         ));
 
-    let mut app = app_state_router
+    let mut app = app_router
         .merge(public_auth_router)
         // SPA catch-all. Merged last so the fallback only fires for paths
         // no other route claimed.

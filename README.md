@@ -44,7 +44,7 @@ The RUNBOOK's [environment reference](extras/deploy/RUNBOOK.md#environment-varia
 Add these to any `docker run` above:
 
 ```bash
-# Mount datasets and confine the file picker to them. Unset, it lists from /.
+# Mount datasets so search lists them. Unset, search lists nothing.
 # With sign-in on, local datasets open only from these directories.
 -v /path/on/host:/var/lib/lucida/data -e LUCIDA_DATA_DIR=/var/lib/lucida/data
 # Keep state across restarts. The default lucida.db lands in the working
@@ -95,6 +95,7 @@ cargo install --locked --path lucida-cli    # or: cargo run -p lucida-cli -- <ar
 lucida config set server https://lucida.example.org   # default: http://localhost:9876
 lucida auth login                           # protected deployments only
 lucida workspace create demo && lucida workspace use demo
+lucida dataset search sample                # datasets the server lists, by words
 lucida dataset open /var/lib/lucida/data/sample.ome.zarr
 lucida viewer screenshot view.png           # renders through a local Chrome or Chromium
 ```

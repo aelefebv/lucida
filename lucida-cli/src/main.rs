@@ -5,6 +5,7 @@ mod capture;
 mod config;
 mod credentials;
 mod dataset;
+mod dataset_search;
 mod dataset_transform;
 mod error;
 mod http;
@@ -54,13 +55,13 @@ use crate::config::{
 };
 use crate::credentials::{EffectiveToken, clear_local_token, resolve_token, store_local_token};
 use crate::dataset::{
-    DatasetBrowseOutput, DatasetHealthOutput, DatasetHttpClient, DatasetInfoOutput,
-    DatasetListOutput, DatasetOpenClient, DatasetOpenOutput, DatasetRemoveOutput,
-    DatasetRetryOutput, DatasetWorkspaceClient, absolute_dataset_source,
-    format_dataset_browse_human, format_dataset_health_human, format_dataset_info_human,
+    DatasetHealthOutput, DatasetInfoOutput, DatasetListOutput, DatasetOpenClient,
+    DatasetOpenOutput, DatasetRemoveOutput, DatasetRetryOutput, DatasetWorkspaceClient,
+    absolute_dataset_source, format_dataset_health_human, format_dataset_info_human,
     format_dataset_list_human, format_dataset_open_human, format_dataset_remove_human,
     format_dataset_retry_human,
 };
+use crate::dataset_search::{DatasetSearchClient, format_dataset_search_human};
 use crate::dataset_transform::{
     DatasetTransformClient, DatasetTransformOutput, TransformChange,
     format_dataset_transform_human, parse_scale, parse_triple,
@@ -148,7 +149,8 @@ enum Command {
         #[command(subcommand)]
         command: WorkspaceCommand,
     },
-    /// Open and inspect datasets in the selected workspace
+    /// Find the datasets the server lists, and open and inspect datasets in
+    /// the selected workspace
     Dataset {
         #[command(subcommand)]
         command: DatasetCommand,
@@ -548,10 +550,18 @@ enum AdminWorkspaceOwnerCommand {
 
 #[derive(Subcommand, Debug)]
 enum DatasetCommand {
-    /// Browse server-visible filesystem paths
-    Browse {
-        /// Directory path to browse. Omit for the server root.
-        path: Option<String>,
+    /// Search the datasets the server lists, as the Open dialog does
+    ///
+    /// Prints one page of results, grouped as the server groups them. With
+    /// --json, prints the server's response unchanged.
+    Search {
+        /// Words every result contains, ignoring case, in its title, its
+        /// group, the end of its URL, or a field. Omit to list every dataset.
+        words: Vec<String>,
+        /// Fetch the page after the one that returned this `next_cursor`.
+        /// Pass the same words.
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// Open a dataset path or URL in the selected workspace
     Open {
@@ -2548,19 +2558,18 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             },
         },
         Command::Dataset { command } => match command {
-            DatasetCommand::Browse { path } => {
+            DatasetCommand::Search { words, cursor } => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
                 let token = resolve_token(&server.url, &config);
-                let client = DatasetHttpClient::new(server.url.clone(), token);
-                let browse = client.browse(path.as_deref()).await?;
-                let output_payload = DatasetBrowseOutput {
-                    server,
-                    path: browse.path,
-                    entries: browse.entries,
-                };
-                output.print_either(&output_payload, || {
-                    format_dataset_browse_human(&output_payload)
-                })?;
+                let words = words.join(" ");
+                let found = DatasetSearchClient::new(server.url, token)
+                    .search(&words, cursor.as_deref())
+                    .await?;
+                if output.json() {
+                    output.print_json_text(&found.body);
+                } else {
+                    output.print_human(format_dataset_search_human(&found.page, &words));
+                }
             }
             DatasetCommand::Open {
                 source,
@@ -5884,14 +5893,21 @@ mod tests {
     }
 
     #[test]
-    fn dataset_browse_parses_optional_path() {
-        let cli = parse(&["dataset", "browse", "/data"]);
-
-        match cli.command {
+    fn dataset_search_takes_words_and_a_cursor() {
+        match parse(&["dataset", "search", "two", "words", "--cursor", "abc"]).command {
             Command::Dataset {
-                command: DatasetCommand::Browse { path },
-            } => assert_eq!(path.as_deref(), Some("/data")),
-            _ => panic!("expected dataset browse"),
+                command: DatasetCommand::Search { words, cursor },
+            } => {
+                assert_eq!(words, ["two", "words"]);
+                assert_eq!(cursor.as_deref(), Some("abc"));
+            }
+            _ => panic!("expected dataset search"),
+        }
+        match parse(&["dataset", "search"]).command {
+            Command::Dataset {
+                command: DatasetCommand::Search { words, cursor },
+            } => assert!(words.is_empty() && cursor.is_none()),
+            _ => panic!("expected dataset search"),
         }
     }
 
