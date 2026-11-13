@@ -113,17 +113,26 @@ RUN cargo build --locked --release -p lucida-server
 RUN cd lucida-core && wasm-pack build --target web --out-dir pkg -- --locked
 
 # Stage 2: node + pnpm SPA build.
-# Node 22 rather than CI's `lts/*` (26), because Node 25 and later ship
-# without Corepack, which the next step needs. The slim image stays close
-# to debian:bookworm-slim so the eventual runtime layer shares a libc
-# family with the build layers.
-FROM node:22-slim AS web-builder
-
-# Corepack ships with node, and its pnpm shim runs the version
-# lucida-web pins in `packageManager`, the one CI runs.
-RUN corepack enable
+# Node 26 is the LTS that CI's `lts/*` resolves to. Only static files leave
+# this stage, so unlike stage 1 it need not share the runtime's Debian.
+FROM node:26-slim AS web-builder
 
 WORKDIR /web
+
+# pnpm at the version lucida-web's `packageManager` pins, the one CI runs.
+# Node 25 and later ship without Corepack, so npm installs it from the pin,
+# and `--allow-scripts` lets its install script swap in the native binary.
+# package.json goes in alone so this layer outlives source changes. A pin
+# with an integrity hash fails the parse, since nothing here would check it.
+COPY lucida-web/package.json ./lucida-web/package.json
+RUN set -eu; \
+    version="$(node -p '/^pnpm@([^+]+)$/.exec(require("./lucida-web/package.json").packageManager)?.[1] ?? ""')"; \
+    if [ -z "$version" ]; then \
+      echo "packageManager in lucida-web/package.json must be pnpm@<version>, without a hash" >&2; \
+      exit 1; \
+    fi; \
+    npm install -g --allow-scripts=pnpm "pnpm@$version"; \
+    test "$(pnpm --version)" = "$version"
 
 # The SPA package files. We need lucida-web/ AND the lucida-core/pkg/
 # artifact from stage 1 (the package.json's
