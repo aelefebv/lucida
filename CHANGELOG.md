@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/aelefebv/lucida/compare/v0.39.3...v0.40.0) (2026-11-13)
+
+
+### Features
+
+* **server:** search data roots for datasets over HTTP ([#1646](https://github.com/aelefebv/lucida/issues/1646)) ([479466a](https://github.com/aelefebv/lucida/commit/479466adfb5e0d9332e62ea321dcd2b779bc6962))
+
 ## [0.39.3](https://github.com/aelefebv/lucida/compare/v0.39.2...v0.39.3) (2026-11-12)
 
 
