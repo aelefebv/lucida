@@ -19,6 +19,7 @@ pub mod source_throttle;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod unwritten;
+pub mod zarr_roots;
 pub(crate) mod zarr_v2;
 
 use lucida_content::ChunkKey;

@@ -72,6 +72,24 @@ A level the metadata declares but no chunks were written for. Every read returns
 the fill value, so it draws all zero. An empty region is real data that is zero.
 _Avoid_: empty level
 
+## Finding datasets
+
+**Dataset source**:
+Where the server learns which datasets exist before anyone opens them,
+configured at startup. lucida ships one, which lists the datasets under the
+data roots, grouped by the folder each sits in.
+_Avoid_: catalog (the perf runner's dataset list)
+
+**Listing**:
+One dataset a source offers: a URL, a title, a kind (image or collection),
+an optional owner email, an optional date, an optional group, and named
+fields shown with it and searched. Opening a listing makes it a dataset.
+
+**Group**:
+A named set of listings from one source. The source names what its groups
+are, such as "Folder".
+_Avoid_: collection (a dataset tiled as a grid)
+
 ## Residency and delivery
 
 **Residency tier**:

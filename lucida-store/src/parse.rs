@@ -348,6 +348,26 @@ pub(crate) fn resolve_ome_block<'a>(
     ome_scope(root_json)?.map.get(block)
 }
 
+/// Which kind of dataset a root holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootKind {
+    Image,
+    Collection,
+}
+
+/// What a dataset root's group metadata says it holds: a collection when it
+/// lays out tiles (OME `plate`), else an image when it carries multiscales.
+/// `None` for a group with neither, which does not open as a dataset.
+pub(crate) fn root_kind(root_json: &serde_json::Value) -> Option<RootKind> {
+    if resolve_ome_block(root_json, "plate").is_some() {
+        Some(RootKind::Collection)
+    } else if resolve_ome_block(root_json, "multiscales").is_some() {
+        Some(RootKind::Image)
+    } else {
+        None
+    }
+}
+
 /// Explain a missing OME metadata block in terms a user can act on: which
 /// placements were checked, and what the group actually carries instead.
 ///

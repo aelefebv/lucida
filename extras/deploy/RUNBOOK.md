@@ -208,7 +208,7 @@ variables.
 | --- | --- | --- |
 | `LUCIDA_BIND` | `127.0.0.1:9876`; the image sets `0.0.0.0:9876` | Listen address |
 | `LUCIDA_DB_URL` | `sqlite://lucida.db` | Storage backend. See step 1. |
-| `LUCIDA_DATA_DIR` | unset: lists from `/` | Directories the file picker is confined to, separated by `:` (`;` on Windows). See [Dataset sources](#dataset-sources). |
+| `LUCIDA_DATA_DIR` | unset: lists from `/` | Directories the file picker is confined to and search lists datasets from, separated by `:` (`;` on Windows). See [Where datasets open from](#where-datasets-open-from). |
 | `LUCIDA_GENERATED_COARSE_CACHE_DIR` | `<user cache dir>/lucida/generated-coarse` | Cache of generated coarse levels |
 | `LUCIDA_LOG_FORMAT` | `text` | `json` for structured logs |
 | `LUCIDA_WEB_DIST` | `./lucida-web/dist`; set in the image | Web UI bundle |
@@ -225,7 +225,7 @@ variables.
 | `LUCIDA_SESSION_IDLE_TIMEOUT_HOURS` | `168` | Idle session lifetime |
 | `LUCIDA_SESSION_HARD_CAP_HOURS` | `720` | Maximum session lifetime |
 
-### Dataset sources
+### Where datasets open from
 
 With `google` or `iap` auth, datasets open only from:
 

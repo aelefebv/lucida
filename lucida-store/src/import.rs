@@ -23,7 +23,7 @@ use crate::collection_geometry::{
 use crate::fill::FillValue;
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
-use crate::parse::{self, ZarrFormat};
+use crate::parse::{self, RootKind, ZarrFormat};
 use crate::shard::ShardLayout;
 use crate::unwritten;
 
@@ -53,18 +53,23 @@ async fn import_dataset_with_label_discovery(
 ) -> Result<ImportResult, StoreError> {
     let (format, root_json) = parse::read_root(store).await?;
 
-    if parse::resolve_ome_block(&root_json, "plate").is_some() {
-        import_collection(
-            store,
-            &format,
-            id,
-            name,
-            &root_json,
-            force_exhaustive_label_discovery,
-        )
-        .await
-    } else {
-        import_single_image(store, &format, id, name, &root_json).await
+    match parse::root_kind(&root_json) {
+        Some(RootKind::Collection) => {
+            import_collection(
+                store,
+                &format,
+                id,
+                name,
+                &root_json,
+                force_exhaustive_label_discovery,
+            )
+            .await
+        }
+        // A root with neither kind fails as an image, which names the
+        // multiscales it lacks.
+        Some(RootKind::Image) | None => {
+            import_single_image(store, &format, id, name, &root_json).await
+        }
     }
 }
 
