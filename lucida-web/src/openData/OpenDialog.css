@@ -9,10 +9,78 @@
   min-height: 0;
 }
 
+.lc-open-field-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--lc-space-2);
+}
+
 /* Taller than a form field: it is the one control the dialog is about. */
 .lc-open-field {
-  flex: none;
+  flex: 1 1 auto;
+  min-width: 0;
   height: max(36px, var(--lc-control-h));
+}
+
+.lc-open-scope {
+  flex: none;
+}
+
+/* One row that scrolls sideways when the chips outrun a narrow dialog. The
+   padding keeps a focus ring inside the scroller's clip. */
+.lc-open-chips {
+  display: flex;
+  flex: none;
+  gap: var(--lc-space-3);
+  padding: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.lc-open-chip-set {
+  display: flex;
+  flex: none;
+  gap: var(--lc-space-1);
+}
+
+.lc-open-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  box-sizing: border-box;
+  height: max(var(--lc-control-h-sm), var(--lc-target-min));
+  margin: 0;
+  padding: 0 var(--lc-space-3);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-full);
+  outline: none;
+  background: transparent;
+  color: var(--lc-text-muted);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+  white-space: nowrap;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color var(--lc-motion-fast) var(--lc-ease),
+    border-color var(--lc-motion-fast) var(--lc-ease),
+    color var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-open-chip[data-hovered] {
+  color: var(--lc-text);
+}
+
+.lc-open-chip[data-selected] {
+  border-color: var(--lc-accent);
+  background: var(--lc-accent-subtle);
+  color: var(--lc-text);
+}
+
+.lc-open-chip[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 0;
 }
 
 .lc-open-list {

@@ -407,6 +407,152 @@ describe("OpenDialog", () => {
   });
 });
 
+describe("OpenDialog scope and filters", () => {
+  const now = Date.now();
+  const daysAgo = (days: number) => new Date(now - days * 86_400_000).toISOString();
+  const shared = folder("/srv/data/shared");
+  const OWNED = [
+    listing("/srv/data/shared/mine-new.ome.zarr", { group: shared, owner: "Viewer@Example.com", date: daysAgo(2) }),
+    listing("/srv/data/shared/theirs-new.ome.zarr", { group: shared, owner: "someone@example.com", date: daysAgo(3) }),
+    listing("/srv/data/shared/mine-grid.ome.zarr", {
+      group: shared,
+      owner: "viewer@example.com",
+      kind: "collection",
+      tiles: 4,
+      date: daysAgo(20),
+    }),
+    listing("/srv/data/shared/theirs-old.ome.zarr", { group: shared, owner: "someone@example.com", date: daysAgo(200) }),
+    listing("/srv/data/loose.ome.zarr"),
+  ];
+
+  function scopeToggle(dialog: HTMLElement): HTMLElement | null {
+    return within(dialog).queryByRole("radiogroup", { name: "Whose datasets" });
+  }
+
+  function useOwned(options: Parameters<typeof fakeListingsApi>[1] = {}) {
+    api = fakeListingsApi(OWNED, options);
+    globalThis.fetch = api.fetch;
+  }
+
+  it("hides the scope toggle while no listing has an owner", async () => {
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    expect(scopeToggle(dialog)).toBeNull();
+    // It asked for the caller's own, and the server answered with everyone's.
+    expect(api.searches.at(-1)?.get("scope")).toBe("mine");
+    expect(outline(dialog)).toContain("loose.ome.zarr");
+  });
+
+  it("hides the scope toggle when callers aren't signed in", async () => {
+    useOwned({ me: null });
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    expect(scopeToggle(dialog)).toBeNull();
+    expect(outline(dialog)).toHaveLength(6);
+    expect(outline(dialog).join("\n")).not.toContain("everyone's");
+  });
+
+  it("starts on Mine, offers the rest once Mine runs out, and shows everyone's on Everyone", async () => {
+    useOwned();
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    const toggle = scopeToggle(dialog) as HTMLElement;
+    expect(within(toggle).getByRole("radio", { name: "Mine" }).getAttribute("aria-checked")).toBe("true");
+    expect(outline(dialog)).toEqual([
+      "shared",
+      "  mine-new.ome.zarr",
+      "  mine-grid.ome.zarr",
+      "3 more in everyone's",
+    ]);
+
+    await user.click(within(toggle).getByRole("radio", { name: "Everyone" }));
+    await settled(dialog);
+    expect(api.searches.at(-1)?.get("scope")).toBe("everyone");
+    expect(outline(dialog)).toEqual([
+      "shared",
+      "  mine-new.ome.zarr",
+      "  theirs-new.ome.zarr",
+      "  mine-grid.ome.zarr",
+      "  theirs-old.ome.zarr",
+      "loose.ome.zarr",
+    ]);
+    // Pressing the toggle leaves the field in charge of the list.
+    expect(document.activeElement).toBe(within(dialog).getByRole("combobox"));
+  });
+
+  it("switches to Everyone from the line that offers the rest", async () => {
+    useOwned();
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await user.keyboard("theirs");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("theirs"));
+    await settled(dialog);
+    expect(outline(dialog)).toEqual(["2 in everyone's"]);
+    expect(within(tree(dialog)).getByText("None of the matches are yours")).toBeTruthy();
+    expect(status(dialog)).toBe("");
+
+    await user.keyboard("{Enter}");
+    await settled(dialog);
+    expect(outline(dialog)).toEqual(["shared", "  theirs-new.ome.zarr", "  theirs-old.ome.zarr"]);
+    const toggle = scopeToggle(dialog) as HTMLElement;
+    expect(within(toggle).getByRole("radio", { name: "Everyone" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("shows no line for the rest when every match is the caller's own", async () => {
+    useOwned();
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await user.keyboard("mine");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("mine"));
+    await settled(dialog);
+    expect(outline(dialog)).toEqual(["shared", "  mine-new.ome.zarr", "  mine-grid.ome.zarr"]);
+  });
+
+  it("narrows by kind and date with chips, along with the words and the scope", async () => {
+    useOwned();
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    const chip = (name: string) => within(dialog).getByRole("radio", { name });
+
+    await user.click(chip("Collections"));
+    await settled(dialog);
+    expect(api.searches.at(-1)?.get("kind")).toBe("collection");
+    expect(outline(dialog)).toEqual(["shared", "  mine-grid.ome.zarr"]);
+    // Pressed again, a chip turns off.
+    await user.click(chip("Collections"));
+    await settled(dialog);
+    expect(api.searches.at(-1)?.has("kind")).toBe(false);
+
+    await user.click(chip("Last 7 days"));
+    await settled(dialog);
+    const since = Date.parse(api.searches.at(-1)?.get("since") ?? "");
+    expect(Math.abs(since - (Date.now() - 7 * 86_400_000))).toBeLessThan(60_000);
+    expect(outline(dialog)).toEqual(["shared", "  mine-new.ome.zarr", "1 more in everyone's"]);
+
+    await user.click(chip("Last 30 days"));
+    await user.keyboard("grid");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("grid"));
+    await settled(dialog);
+    expect(api.searches.at(-1)?.get("scope")).toBe("mine");
+    expect(outline(dialog)).toEqual(["shared", "  mine-grid.ome.zarr"]);
+
+    await user.click(chip("Images"));
+    await settled(dialog);
+    expect(outline(dialog)).toEqual([]);
+    expect(status(dialog)).toContain("No datasets of that kind or date match “grid”");
+  });
+});
+
 describe("AddDataPrompt", () => {
   it("offers the dialog from an empty workspace", async () => {
     const user = userEvent.setup();

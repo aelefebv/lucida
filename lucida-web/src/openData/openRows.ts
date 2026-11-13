@@ -24,7 +24,9 @@ export type OpenRow =
   | GroupRow
   | { type: "listing"; key: string; listing: Listing; parent: string | null }
   | { type: "recent"; key: string; url: string; parent: string }
-  | { type: "more"; key: string };
+  | { type: "more"; key: string }
+  // Offers the matches the scope left out, once the caller's own run out.
+  | { type: "everyone"; key: string; count: number; mineAbove: boolean };
 
 export interface GroupRow {
   type: "group";
@@ -45,10 +47,13 @@ export interface RowInputs {
   /** Groups someone expanded or collapsed, by key, over what the server said. */
   toggled: ReadonlyMap<string, boolean>;
   hasMore: boolean;
+  /** Matches the scope left out. */
+  outsideScope: number;
 }
 
 export const RECENT_GROUP_KEY = "recent";
 export const MORE_KEY = "more";
+export const EVERYONE_KEY = "everyone";
 
 function groupKey(result: ListingResult): string | null {
   // A group id is unique within its source only, and the noun tells sources apart.
@@ -59,7 +64,7 @@ function groupKey(result: ListingResult): string | null {
  * The rows, top level first, each group holding its children. The order is
  * the server's: the dialog neither filters nor ranks.
  */
-export function buildRows({ location, recents, results, toggled, hasMore }: RowInputs): OpenRow[] {
+export function buildRows({ location, recents, results, toggled, hasMore, outsideScope }: RowInputs): OpenRow[] {
   const rows: OpenRow[] = [];
   if (location) rows.push({ type: "location", key: "location", ...location });
   if (recents.length > 0) {
@@ -93,6 +98,9 @@ export function buildRows({ location, recents, results, toggled, hasMore }: RowI
     });
   }
   if (hasMore) rows.push({ type: "more", key: MORE_KEY });
+  else if (outsideScope > 0) {
+    rows.push({ type: "everyone", key: EVERYONE_KEY, count: outsideScope, mineAbove: results.length > 0 });
+  }
   return rows;
 }
 
