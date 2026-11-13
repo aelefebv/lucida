@@ -737,7 +737,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // `/` falls through to the SPA so a browser hitting `:9876` sees the
     // app. A WebSocket client connects to one workspace, at
     // `/ws/workspaces/{id}`.
-    let app_state_router = Router::new()
+    let app_router = Router::new()
         .merge(authed_auth_router)
         .merge(inbox_router)
         .merge(workspaces_router)
@@ -747,7 +747,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             auth::middleware::auth_middleware,
         ));
 
-    let mut app = app_state_router
+    let mut app = app_router
         .merge(public_auth_router)
         // SPA catch-all. Merged last so the fallback only fires for paths
         // no other route claimed.
