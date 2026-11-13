@@ -13,6 +13,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde_json::{Value, json};
 
 use lucida_content::url::DatasetLocation;
+use lucida_server::GeneratedConfig;
 use lucida_server::auth::{
     AuthConfig, AuthMode, BearerToken, BearerTokenStore, DualCredentialExtractor,
     LoginSessionStore, MemoryBearerTokenStore, MemorySessionStore, PrincipalExtractor,
@@ -22,6 +23,8 @@ use lucida_server::listings::{
     self, DatasetSource, Listing, ListingField, ListingGroup, ListingKind, ListingsIndex,
     SourceContext, SourceError,
 };
+use lucida_server::storage::{self, DatabaseUrl};
+use lucida_server::workspace::WorkspaceManager;
 use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 
 const RAW_TOKEN: &str = "lucida_pat_listings_e2e";
@@ -92,11 +95,17 @@ impl Rig {
     async fn start(sources: Vec<Arc<dyn DatasetSource>>, policy: SourcePolicy) -> Self {
         let index = Arc::new(ListingsIndex::new(sources, Arc::new(policy)));
         index.refresh().await;
-        let app: Router =
-            listings::router(Arc::clone(&index)).layer(axum::middleware::from_fn_with_state(
+        let storage = storage::open(&DatabaseUrl::in_memory()).await.unwrap();
+        let workspaces = Arc::new(WorkspaceManager::new(
+            storage.workspaces(),
+            GeneratedConfig::defaults(),
+        ));
+        let app: Router = listings::router(Arc::clone(&index), workspaces).layer(
+            axum::middleware::from_fn_with_state(
                 bearer_extractor().await,
                 lucida_server::auth::middleware::auth_middleware,
-            ));
+            ),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {

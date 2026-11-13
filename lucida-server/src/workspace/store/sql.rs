@@ -695,6 +695,46 @@ pub(crate) const SET_USER_LAST_VIEW: &str = r#"
         last_view_json = excluded.last_view_json
 "#;
 
+/// The datasets in the workspaces one member opened, the most recently
+/// opened workspace first and, within one, the latest added dataset first.
+/// A source in several of them counts once, where it ranks highest.
+///
+/// A member removed from a workspace keeps their state row, and so does a
+/// workspace no longer shared by link, so the access test is
+/// `LIST_WORKSPACES`' over again. `$3` is the caller's administrator
+/// right, bound as a Rust `bool` as in `LIST_SAVED_VIEWS`.
+///
+/// `ROW_NUMBER` picks each source's highest row because no aggregate both
+/// engines share keeps the rest of the row it picked.
+pub(crate) const RECENT_DATASETS: &str = r#"
+    SELECT canonical_url, default_name
+    FROM (
+        SELECT
+            ds.canonical_url,
+            ds.default_name,
+            uws.last_opened_at,
+            wd.added_at,
+            ROW_NUMBER() OVER (
+                PARTITION BY ds.id
+                ORDER BY uws.last_opened_at DESC, wd.added_at DESC
+            ) AS place
+        FROM user_workspace_state uws
+        INNER JOIN workspaces w ON w.id = uws.workspace_id
+        INNER JOIN workspace_datasets wd ON wd.workspace_id = w.id
+        INNER JOIN dataset_sources ds ON ds.id = wd.dataset_source_id
+        LEFT JOIN workspace_members wm
+            ON wm.workspace_id = w.id AND wm.email = $1
+        WHERE
+            uws.user_email = $2
+            AND uws.last_opened_at IS NOT NULL
+            AND w.archived_at IS NULL
+            AND ($3 OR wm.email IS NOT NULL OR w.link_access = 'anyone_with_link')
+    ) ranked
+    WHERE place = 1
+    ORDER BY last_opened_at DESC, added_at DESC, canonical_url ASC
+    LIMIT $4
+"#;
+
 /// Write a workspace's one preview, replacing the existing one only if it
 /// was written at or before `$7`.
 ///

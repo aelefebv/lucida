@@ -634,6 +634,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         manager: Arc::clone(&workspace_manager),
         store: inbox_store,
     });
+    // Recent datasets come from per-member workspace state, so the
+    // listings routes read the workspaces too.
+    let listings_router: Router<()> =
+        listings::router(listings_index, Arc::clone(&workspace_manager));
     let workspaces_router: Router<()> = workspace::router(workspace_manager);
 
     // /auth/error is available regardless of auth mode — if the user
@@ -746,7 +750,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .merge(authed_auth_router)
         .merge(inbox_router)
         .merge(workspaces_router)
-        .merge(listings::router(listings_index))
+        .merge(listings_router)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             auth::middleware::auth_middleware,
