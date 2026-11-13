@@ -9,11 +9,7 @@ import initWasm from "lucida-core";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import { fakeListingsApi, folder, listing } from "./openData/fakeListingsApi.ts";
-import {
-  __resetRecentSourcesForTesting,
-  recentSourcesPreference,
-} from "./openData/recentSources.ts";
-import { __resetPreferencesForTesting, getPreference } from "./theme/preferences.ts";
+import { __resetPreferencesForTesting } from "./theme/preferences.ts";
 import { __resetCommandsForTesting, runCommand } from "./ui/commands.ts";
 import { __resetShortcutsForTesting } from "./ui/shortcuts.ts";
 import { toastQueue } from "./ui/toastQueue.ts";
@@ -124,7 +120,6 @@ let originalFetch: typeof globalThis.fetch;
 beforeEach(() => {
   localStorage.clear();
   __resetPreferencesForTesting();
-  __resetRecentSourcesForTesting();
   originalFetch = globalThis.fetch;
   globalThis.fetch = fakeListingsApi([
     listing("/srv/data/runs/one.ome.zarr", { title: "First volume", group: folder("/srv/data/runs") }),
@@ -288,7 +283,6 @@ describe("WorkspaceDashboard", () => {
       // The canonical URL, carried into the viewer to open there.
       expect(onOpenWorkspace).toHaveBeenCalledWith("ws-ds", ["gs://bucket/scans/sample.ome.zarr"]);
     });
-    expect(getPreference(recentSourcesPreference)).toEqual(["gs://bucket/scans/sample.ome.zarr"]);
   });
 
   it("opens a listing into a new workspace named after its title", async () => {

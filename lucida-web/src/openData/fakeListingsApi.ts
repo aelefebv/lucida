@@ -1,10 +1,11 @@
-import type { Listing, ListingGroup, ListingResult, ListingsPage } from "./listingsApi.ts";
+import type { Listing, ListingGroup, ListingResult, ListingsPage, RecentDataset } from "./listingsApi.ts";
 
 /**
  * A stand-in for the server's listings routes, for tests. It keeps the
  * contract's shape: every word must appear, a group whose label holds every
- * word comes back whole and collapsed, groups keep the order given, and a
- * page ends after `pageSize` results with a cursor for the next.
+ * word comes back whole and collapsed, groups keep the order given, a page
+ * ends after `pageSize` results with a cursor for the next, and a recent
+ * dataset a listing names comes back with that listing.
  */
 export interface FakeListingsApi {
   fetch: typeof globalThis.fetch;
@@ -27,9 +28,21 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-export function fakeListingsApi(listings: readonly Listing[], { pageSize = 50 } = {}): FakeListingsApi {
+export interface FakeListingsOptions {
+  pageSize?: number;
+  /** The caller's recent datasets, newest first. */
+  recent?: readonly Omit<RecentDataset, "listing">[];
+}
+
+export function fakeListingsApi(
+  listings: readonly Listing[],
+  { pageSize = 50, recent = [] }: FakeListingsOptions = {},
+): FakeListingsApi {
   const queries: string[] = [];
   let held: Promise<void> | null = null;
+  // The server looks a URL up without its trailing slashes.
+  const lookUp = (url: string | null | undefined): Listing | null =>
+    listings.find((item) => item.url === url?.replace(/\/+$/, "")) ?? null;
 
   const search = (q: string): ListingResult[] => {
     const words = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -56,9 +69,10 @@ export function fakeListingsApi(listings: readonly Listing[], { pageSize = 50 } 
     const url = new URL(String(input), "http://localhost");
     if (held) await held;
     if (url.pathname === "/api/listings/resolve") {
-      // The server looks a URL up without its trailing slashes.
-      const wanted = url.searchParams.get("url")?.replace(/\/+$/, "");
-      return json({ listing: listings.find((item) => item.url === wanted) ?? null });
+      return json({ listing: lookUp(url.searchParams.get("url")) });
+    }
+    if (url.pathname === "/api/listings/recent") {
+      return json({ recent: recent.map((item): RecentDataset => ({ ...item, listing: lookUp(item.url) })) });
     }
     if (url.pathname === "/api/listings") {
       const q = url.searchParams.get("q") ?? "";

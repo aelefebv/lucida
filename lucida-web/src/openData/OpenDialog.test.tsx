@@ -7,18 +7,13 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import initWasm from "lucida-core";
 import { useState } from "react";
-import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
+import { __resetPreferencesForTesting, PREFERENCES_STORAGE_KEY } from "../theme/preferences.ts";
 import { Button } from "../ui/Button.tsx";
 import { __resetCommandsForTesting, listCommands, runCommand } from "../ui/commands.ts";
 import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
 import { AddDataPrompt } from "./AddDataPrompt.tsx";
 import { fakeListingsApi, folder, listing, type FakeListingsApi } from "./fakeListingsApi.ts";
 import { OpenDialog, type OpenAction } from "./OpenDialog.tsx";
-import {
-  __resetRecentSourcesForTesting,
-  recentSourcesPreference,
-  rememberRecentSource,
-} from "./recentSources.ts";
 import { OPEN_DATA_SHORTCUT } from "./shortcut.ts";
 
 // The test loads the wasm build itself, from bytes, in beforeAll.
@@ -48,7 +43,6 @@ beforeAll(async () => {
 beforeEach(() => {
   localStorage.clear();
   __resetPreferencesForTesting();
-  __resetRecentSourcesForTesting();
   originalFetch = globalThis.fetch;
   api = fakeListingsApi(LISTINGS);
   globalThis.fetch = api.fetch;
@@ -218,7 +212,7 @@ describe("OpenDialog", () => {
     expect(activeRow(dialog).getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("adds the chosen dataset on Enter inside a workspace, and remembers it", async () => {
+  it("adds the chosen dataset on Enter inside a workspace", async () => {
     const user = userEvent.setup();
     const { add, elsewhere } = inWorkspace();
     const dialog = await openDialog(user);
@@ -228,7 +222,6 @@ describe("OpenDialog", () => {
     await user.keyboard("{ArrowDown}{Enter}");
     expect(add).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
     expect(elsewhere).not.toHaveBeenCalled();
-    expect(getPreference(recentSourcesPreference)).toEqual(["/srv/data/archive/old-volume.ome.zarr"]);
   });
 
   it("opens a new workspace on Mod+Enter inside a workspace", async () => {
@@ -273,8 +266,7 @@ describe("OpenDialog", () => {
     dialog = await openDialog(user);
     await settled(dialog);
     await user.keyboard(`{${MOD}>}`);
-    // The first open put it among the recent datasets too, above the listings.
-    await user.click(within(tree(dialog)).getAllByText("loose.ome.zarr").at(-1) as HTMLElement);
+    await user.click(within(tree(dialog)).getByText("loose.ome.zarr"));
     await user.keyboard(`{/${MOD}}`);
     expect(elsewhere).toHaveBeenCalledWith({ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr" });
   });
@@ -310,25 +302,79 @@ describe("OpenDialog", () => {
     await user.keyboard("{Enter}");
     expect(open).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog")).toBeTruthy();
-    expect(getPreference(recentSourcesPreference)).toEqual([]);
   });
 
-  it("shows recent datasets above the listings while the field is empty, and forgets one", async () => {
-    rememberRecentSource("/data/earlier.zarr");
+  it("shows the person's recent datasets above the listings while the field is empty", async () => {
+    globalThis.fetch = fakeListingsApi(LISTINGS, {
+      recent: [
+        { url: "/data/earlier.zarr", name: "earlier.zarr" },
+        { url: "/srv/data/archive/old-volume.ome.zarr", name: "old-volume.ome.zarr" },
+      ],
+    }).fetch;
     const user = userEvent.setup();
     const { open } = onDashboard();
     const dialog = await openDialog(user);
+    await waitFor(() => expect(outline(dialog)[0]).toBe("Recent"));
+    await settled(dialog);
+    expect(outline(dialog).slice(0, 4)).toEqual(["Recent", "  earlier.zarr", "  Old volume", "runs"]);
+    // One no source lists shows where it lives; a listed one shows its listing and group.
+    const [recents] = within(tree(dialog)).getAllByRole("group");
+    expect(within(recents).getByText("/data/earlier.zarr")).toBeTruthy();
+    expect(within(recents).getByText("Folder: archive · Image")).toBeTruthy();
+
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
+    expect(open).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+
+    const again = await openDialog(user);
+    await waitFor(() => expect(outline(again)[0]).toBe("Recent"));
+    await user.click(within(tree(again)).getByText("earlier.zarr"));
+    expect(open).toHaveBeenLastCalledWith({ url: "/data/earlier.zarr", title: "earlier.zarr" });
+  });
+
+  it("hides the recent datasets once something is typed", async () => {
+    globalThis.fetch = fakeListingsApi(LISTINGS, {
+      recent: [{ url: "/data/earlier.zarr", name: "earlier.zarr" }],
+    }).fetch;
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await waitFor(() => expect(outline(dialog)[0]).toBe("Recent"));
+    await user.keyboard("runs");
+    await settled(dialog);
+    expect(outline(dialog)).not.toContain("Recent");
+  });
+
+  it("ignores the recent list an older build kept in this browser", async () => {
+    localStorage.setItem(
+      PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ version: 1, values: { "addData.recent": ["/data/kept-here.zarr"] } }),
+    );
+    __resetPreferencesForTesting();
+    globalThis.fetch = fakeListingsApi(LISTINGS, {
+      recent: [{ url: "/data/earlier.zarr", name: "earlier.zarr" }],
+    }).fetch;
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await waitFor(() => expect(outline(dialog)[0]).toBe("Recent"));
     await settled(dialog);
     expect(outline(dialog).slice(0, 3)).toEqual(["Recent", "  earlier.zarr", "runs"]);
+    expect(within(dialog).queryByText(/kept-here/)).toBeNull();
+  });
 
-    await user.click(within(dialog).getByRole("button", { name: "Remove earlier.zarr from recent" }));
-    expect(outline(dialog)[0]).toBe("runs");
-    expect(open).not.toHaveBeenCalled();
-
-    rememberRecentSource("/data/earlier.zarr");
-    await waitFor(() => expect(outline(dialog)[0]).toBe("Recent"));
-    await user.click(within(tree(dialog)).getByText("earlier.zarr"));
-    expect(open).toHaveBeenCalledWith({ url: "/data/earlier.zarr", title: null });
+  it("searches as usual when the recent datasets can't be read", async () => {
+    const listingsOnly = fakeListingsApi(LISTINGS).fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).startsWith("/api/listings/recent")
+        ? new Response(JSON.stringify({ error: "workspace_store_error" }), { status: 500 })
+        : listingsOnly(input, init)) as typeof globalThis.fetch;
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    await waitFor(() => expect(outline(dialog)[0]).toBe("runs"));
+    expect(outline(dialog)).not.toContain("Recent");
+    expect(within(dialog).queryByRole("alert")).toBeNull();
   });
 
   it("says plainly when nothing is listed yet, and when nothing matches", async () => {
