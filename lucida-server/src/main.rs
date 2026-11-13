@@ -11,6 +11,7 @@ use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
 use lucida_server::inbox;
 use lucida_server::link_throttle::{LinkThrottleConfig, LinkThrottleProfile};
+use lucida_server::listings;
 use lucida_server::origin::{self, OriginPolicy};
 use lucida_server::static_serve;
 use lucida_server::status;
@@ -78,6 +79,10 @@ struct ServeArgs {
     /// How often the server checks for idle live workspaces.
     #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_SWEEP_SECS", default_value_t = 60)]
     workspace_idle_sweep_secs: u64,
+    /// How often the server asks its dataset sources what they list, such
+    /// as by walking the data directories.
+    #[arg(long, env = "LUCIDA_LISTINGS_REFRESH_SECS", default_value_t = 300)]
+    listings_refresh_secs: u64,
     /// When a page that declares the codecs it decodes is sent chunks still
     /// encoded: `auto` (a page on another machine, or any page under a link
     /// throttle), `always`, or `never`.
@@ -477,6 +482,22 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let state = AppState {
         source_policy: Arc::clone(&source_policy),
     };
+    let listings_index = Arc::new(listings::ListingsIndex::new(
+        listings::configured(&listings::SourceContext {
+            policy: Arc::clone(&source_policy),
+        })
+        .await,
+        Arc::clone(&source_policy),
+    ));
+    let listings_refresh = Duration::from_secs(args.listings_refresh_secs.max(1));
+    tracing::info!(
+        sources = listings_index.source_count(),
+        refresh_secs = listings_refresh.as_secs(),
+        "listings.config",
+    );
+    // The first refresh runs in the background, so a slow walk never holds
+    // up the boot; search answers from what the index holds meanwhile.
+    let _listings_refresh_handle = listings_index.spawn_refresh_loop(listings_refresh);
 
     // The only place the server picks a database. Nothing downstream
     // knows which one it got.
@@ -686,6 +707,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .merge(authed_auth_router)
         .merge(inbox_router)
         .merge(workspaces_router)
+        .merge(listings::router(listings_index))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             auth::middleware::auth_middleware,

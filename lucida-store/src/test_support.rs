@@ -1,7 +1,7 @@
 //! Test doubles shared by this crate's unit tests.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -27,6 +27,8 @@ pub(crate) struct CountingStore {
     pub(crate) max_active: Arc<AtomicUsize>,
     delay_ms: u64,
     pub(crate) fail: Arc<AtomicBool>,
+    /// The prefix of every one-level listing, `""` for the store's root.
+    pub(crate) listed: Arc<Mutex<Vec<String>>>,
 }
 
 impl CountingStore {
@@ -39,6 +41,7 @@ impl CountingStore {
             max_active: Arc::new(AtomicUsize::new(0)),
             delay_ms,
             fail: Arc::new(AtomicBool::new(false)),
+            listed: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -114,6 +117,10 @@ impl ObjectStore for CountingStore {
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.listed
+            .lock()
+            .unwrap()
+            .push(prefix.map(Path::to_string).unwrap_or_default());
         self.inner.list_with_delimiter(prefix).await
     }
 
