@@ -52,7 +52,7 @@ export interface ScriptControls {
   /** Set a channel's contrast window through the handler the layer panel's limits call. */
   contrast(channel: number, min: number, max: number): StepOutcome;
   /**
-   * Add a dataset by source URL through the handler the add-data dialog
+   * Add a dataset by source URL through the handler the open dialog
    * calls. Answers once the dataset has opened or failed to, or when
    * `timeoutMs` passes first.
    */

@@ -85,18 +85,49 @@
   color: var(--lc-text-muted);
 }
 
-/* Browse sits beside the field's input row, above its help line. */
-.lc-dashboard-open-row {
+/* Drawn as the field it opens, so it reads as the place to start typing. */
+.lc-dashboard-open-trigger {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--lc-space-2);
+  box-sizing: border-box;
   width: min(100%, 760px);
+  height: max(36px, var(--lc-control-h));
+  margin: 0;
+  padding: 0 var(--lc-space-3);
+  border: 1px solid var(--lc-border-strong);
+  border-radius: var(--lc-radius);
+  background: var(--lc-field-bg);
+  color: var(--lc-text-subtle);
+  font: inherit;
   text-align: left;
+  cursor: text;
 }
 
-.lc-dashboard-source {
+.lc-dashboard-open-trigger:hover {
+  border-color: color-mix(in srgb, var(--lc-border-strong), var(--lc-text) 12%);
+}
+
+.lc-dashboard-open-trigger:focus-visible {
+  border-color: var(--lc-focus-ring);
+  outline: none;
+  box-shadow: 0 0 0 1px var(--lc-focus-ring);
+}
+
+.lc-dashboard-open-trigger:disabled {
+  opacity: 0.5;
+}
+
+.lc-dashboard-open-trigger-icon {
+  flex: none;
+}
+
+.lc-dashboard-open-trigger-text {
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lc-dashboard-toolbar {
@@ -332,15 +363,8 @@
   color: var(--lc-text-muted);
 }
 
-/* The dialog body sets no height, so the pane takes one that holds still
-   while folders of different lengths load. */
-.lc-dashboard-browse {
-  height: min(480px, calc(85vh - 96px));
-}
-
-/* On a phone the page keeps its width for content: tighter margins, the Open
-   data field over its Browse button, and search across the full width with
-   New workspace beside it. */
+/* On a phone the page keeps its width for content: tighter margins, and
+   search across the full width with New workspace beside it. */
 @media (width < 640px) {
   .lc-dashboard-main {
     padding: var(--lc-space-5) calc(var(--lc-space-4) + var(--lc-safe-right))
@@ -350,11 +374,6 @@
   .lc-dashboard-open {
     margin-bottom: var(--lc-space-6);
     padding: var(--lc-space-5) var(--lc-space-4) var(--lc-space-4);
-  }
-
-  .lc-dashboard-open-row {
-    flex-direction: column;
-    align-items: stretch;
   }
 
   .lc-dashboard-toolbar-end {

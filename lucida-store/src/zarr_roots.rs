@@ -24,6 +24,8 @@ pub struct ZarrRoot {
     /// store is itself a Zarr root.
     pub path: Path,
     pub kind: RootKind,
+    /// How many tiles a collection lays out; `None` for an image.
+    pub tiles: Option<usize>,
     /// When its root metadata was last written.
     pub modified: DateTime<Utc>,
 }
@@ -186,6 +188,7 @@ async fn read_root(
         Ok((_, root)) => parse::root_kind(&root).map(|kind| ZarrRoot {
             path,
             kind,
+            tiles: parse::collection_tiles(&root),
             modified,
         }),
         Err(StoreError::Metadata {
@@ -331,6 +334,28 @@ mod tests {
             .last_modified;
         let found = find(Arc::new(store), WalkLimits::default()).await.unwrap();
         assert_eq!(found[0].modified, written);
+    }
+
+    #[tokio::test]
+    async fn a_collection_counts_the_tiles_its_root_lays_out() {
+        let store = CountingStore::new(0);
+        seed(&store, "a.zarr/zarr.json", v3_image()).await;
+        let wells = [
+            json!({"path": "A/1", "rowIndex": 0, "columnIndex": 0}),
+            json!({"path": "A/2", "rowIndex": 0, "columnIndex": 1}),
+            json!({"path": "B/1", "rowIndex": 1, "columnIndex": 0}),
+        ];
+        seed(
+            &store,
+            "b.zarr/zarr.json",
+            json!({"zarr_format": 3, "node_type": "group",
+                "attributes": {"ome": {"version": "0.5", "plate": {"wells": wells}}}}),
+        )
+        .await;
+        seed(&store, "c.zarr/.zattrs", json!({"plate": {"wells": wells}})).await;
+        let found = find(Arc::new(store), WalkLimits::default()).await.unwrap();
+        let tiles: Vec<_> = found.iter().map(|root| root.tiles).collect();
+        assert_eq!(tiles, [None, Some(3), Some(3)]);
     }
 
     #[tokio::test]

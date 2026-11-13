@@ -368,6 +368,16 @@ pub(crate) fn root_kind(root_json: &serde_json::Value) -> Option<RootKind> {
     }
 }
 
+/// How many tiles a collection root lays out, read from its group list
+/// alone, so counting opens none of the tiles. `None` when the root lays
+/// out no tiles.
+pub(crate) fn collection_tiles(root_json: &serde_json::Value) -> Option<usize> {
+    resolve_ome_block(root_json, "plate")?
+        .get("wells")?
+        .as_array()
+        .map(Vec::len)
+}
+
 /// Explain a missing OME metadata block in terms a user can act on: which
 /// placements were checked, and what the group actually carries instead.
 ///

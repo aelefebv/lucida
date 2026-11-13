@@ -1,6 +1,6 @@
 import { dataset_location_error, normalize_dataset_url } from "lucida-core";
 
-/** What the add-data field makes of what was typed. */
+/** What the open dialog makes of a typed or pasted location. */
 export type SourceCheck =
   | { readonly kind: "empty" }
   /** `url` is the canonical form, ready to open. */
@@ -45,4 +45,16 @@ export function checkSource(raw: string): SourceCheck {
     return rejected(`The server doesn't expand ~. Enter the full path from the root, like ${EXAMPLE_PATHS}.`);
   }
   return rejected(`This path is relative. Enter the full path from the root, like ${EXAMPLE_PATHS}.`);
+}
+
+/**
+ * Whether typed text reads as a dataset location rather than search words:
+ * a scheme (`gs://`, or one missing its slashes), a drive, the root, a UNC
+ * share, or `~`. A relative path stays search words, since a search matches
+ * the last segments of each dataset's URL.
+ */
+export function looksLikeLocation(raw: string): boolean {
+  const trimmed = raw.trim();
+  // Two or more letters before the colon, so a drive letter is left to the next test.
+  return /^[a-z][a-z0-9+.-]+:/i.test(trimmed) || /^[a-z]:[\\/]/i.test(trimmed) || /^[\\/~]/.test(trimmed);
 }

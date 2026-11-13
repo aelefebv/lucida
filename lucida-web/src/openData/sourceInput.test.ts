@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import initWasm from "lucida-core";
-import { checkSource } from "./sourceInput.ts";
+import { checkSource, looksLikeLocation } from "./sourceInput.ts";
 
 beforeAll(async () => {
   const bytes = readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm"));
@@ -65,5 +65,24 @@ describe("checkSource", () => {
   it("points out a URL missing the slashes after its scheme", () => {
     const check = checkSource("gs:bucket/sample.zarr");
     expect(check.kind === "rejected" && check.message).toMatch(/needs :\/\//);
+  });
+});
+
+describe("looksLikeLocation", () => {
+  it.each([
+    "/data/sample.zarr",
+    "  gs://bucket/sample.zarr",
+    "gs:bucket/sample.zarr",
+    "ftp://host/sample.zarr",
+    "C:\\data\\sample.zarr",
+    "c:/data/sample.zarr",
+    "\\\\server\\share\\sample.zarr",
+    "~/data/sample.zarr",
+  ])("reads %s as a location", (raw) => {
+    expect(looksLikeLocation(raw)).toBe(true);
+  });
+
+  it.each(["", "sample", "bright volume", "data/sample.zarr", "c:"])("reads %j as search words", (raw) => {
+    expect(looksLikeLocation(raw)).toBe(false);
   });
 });

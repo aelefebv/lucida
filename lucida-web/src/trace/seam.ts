@@ -325,7 +325,7 @@ export interface LucidaTraceSeam {
   contrast(channel: number, min: number, max: number): StepOutcome;
   /**
    * A scripted add: open a dataset in this workspace by source URL through
-   * the handler the add-data dialog calls, which the capture surface does
+   * the handler the open dialog calls, which the capture surface does
    * not mount. Answers once the dataset has opened or failed to, or after
    * `timeoutMs`, sixty seconds unless given.
    */
