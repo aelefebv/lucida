@@ -208,7 +208,8 @@ variables.
 | --- | --- | --- |
 | `LUCIDA_BIND` | `127.0.0.1:9876`; the image sets `0.0.0.0:9876` | Listen address |
 | `LUCIDA_DB_URL` | `sqlite://lucida.db` | Storage backend. See step 1. |
-| `LUCIDA_DATA_DIR` | unset: lists from `/` | Data roots search lists datasets from: directories, which also confine the file picker, and `gs://` or `s3://` URLs with an optional prefix. Separated by `:` (`;` on Windows), except the colon of a leading `gs://` or `s3://`. See [Where datasets open from](#where-datasets-open-from). |
+| `LUCIDA_DATA_DIR` | unset: search lists nothing | Data roots search lists datasets from: directories, and `gs://` or `s3://` URLs with an optional prefix. Separated by `:` (`;` on Windows), except the colon of a leading `gs://` or `s3://`. See [Where datasets open from](#where-datasets-open-from). |
+| `LUCIDA_LISTINGS_REFRESH_SECS` | `300` | Seconds between refreshes of what search lists, such as the walk of the data roots. A new dataset shows up in search within this long. |
 | `LUCIDA_GENERATED_COARSE_CACHE_DIR` | `<user cache dir>/lucida/generated-coarse` | Cache of generated coarse levels |
 | `LUCIDA_LOG_FORMAT` | `text` | `json` for structured logs |
 | `LUCIDA_WEB_DIST` | `./lucida-web/dist`; set in the image | Web UI bundle |

@@ -7,7 +7,6 @@
 pub mod auth;
 pub mod binding;
 pub mod binding_restore;
-pub mod browse;
 pub mod chunk_read;
 pub mod chunk_serves;
 pub mod connection;
@@ -41,7 +40,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lucida_core::protocol::ClientId;
-use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::Mutex;
 
 use connection::ClientSender;
@@ -76,13 +74,6 @@ pub enum BroadcastItem {
 
 /// Per-client targeted message queues for unicast (chunk routing).
 pub type UnicastRoutes = Arc<Mutex<HashMap<ClientId, ClientSender>>>;
-
-#[derive(Clone)]
-pub struct AppState {
-    /// Where datasets may be opened from, and the data roots that bound
-    /// `/api/browse`.
-    pub source_policy: Arc<SourcePolicy>,
-}
 
 /// Server-wide configuration for generated coarse levels. Loaded once at
 /// boot from CLI args and env defaults; each opened dataset's derived-chunk
