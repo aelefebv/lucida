@@ -29,6 +29,13 @@ impl Output {
         Ok(())
     }
 
+    /// Print JSON the server wrote, as it wrote it.
+    pub fn print_json_text(self, text: &str) {
+        if !self.quiet {
+            println!("{}", text.trim_end());
+        }
+    }
+
     pub fn print_human(self, text: impl AsRef<str>) {
         if !self.quiet {
             println!("{}", text.as_ref());
