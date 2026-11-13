@@ -282,6 +282,46 @@ mod tests {
         assert_eq!(listed, ["", "a.zarr", "array"]);
     }
 
+    /// A bucket root walks the store its location opens as: the bucket
+    /// narrowed to the root's prefix.
+    #[tokio::test]
+    async fn a_bucket_prefix_walks_only_the_keys_under_it() {
+        let bucket = CountingStore::new(0);
+        let listed = Arc::clone(&bucket.listed);
+        seed(&bucket, "images/a.zarr/zarr.json", v3_image()).await;
+        bucket.seed("images/a.zarr/0/c/0/0/0", [0u8; 4]).await;
+        seed(&bucket, "images/runs/b.zarr/.zattrs", json!({"plate": {}})).await;
+        seed(&bucket, "images2/c.zarr/zarr.json", v3_image()).await;
+        seed(&bucket, "other/d.zarr/zarr.json", v3_image()).await;
+        let root = lucida_content::url::DatasetLocation::parse("gs://bucket/images").unwrap();
+        let store = crate::backend::with_prefix(bucket, root.object_prefix());
+
+        let found: Vec<_> = find(store, WalkLimits::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|root| (root.path.to_string(), root.kind))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("a.zarr".to_string(), RootKind::Image),
+                ("runs/b.zarr".to_string(), RootKind::Collection),
+            ]
+        );
+        let mut listed = listed.lock().unwrap().clone();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                "images",
+                "images/a.zarr",
+                "images/runs",
+                "images/runs/b.zarr"
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn groups_that_open_as_no_dataset_are_passed_over() {
         let store = CountingStore::new(0);

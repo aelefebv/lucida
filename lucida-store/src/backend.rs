@@ -269,7 +269,9 @@ pub(crate) fn http_store(
     ))
 }
 
-fn with_prefix<S: ObjectStore>(store: S, prefix: Option<&str>) -> Arc<dyn ObjectStore> {
+/// `store` narrowed to the keys under `prefix`, as a bucket location's
+/// object prefix narrows its bucket.
+pub(crate) fn with_prefix<S: ObjectStore>(store: S, prefix: Option<&str>) -> Arc<dyn ObjectStore> {
     match prefix {
         Some(prefix) => Arc::new(PrefixStore::new(store, prefix)),
         None => Arc::new(store),
