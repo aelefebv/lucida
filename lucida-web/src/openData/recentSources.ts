@@ -6,15 +6,16 @@ import {
   usePreference,
 } from "../theme/preferences.ts";
 
-/** How many recent sources the add-data dialog keeps, newest first. */
+/** How many recent sources the open dialog keeps, newest first. */
 export const RECENT_SOURCES_LIMIT = 5;
 
 const NONE: readonly string[] = [];
 
 /**
- * Sources this browser opened through Add data, as canonical URLs, newest
- * first. Per browser because a local path only means something on the
- * machine whose server reads it.
+ * Sources this browser opened through the open dialog, as canonical URLs,
+ * newest first. Per browser because a local path only means something on
+ * the machine whose server reads it. Browsers hold the list under this key,
+ * so a new key would empty every one of them.
  */
 export const recentSourcesPreference = definePreference<readonly string[]>(
   "addData.recent",

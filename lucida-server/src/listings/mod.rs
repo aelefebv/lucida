@@ -25,6 +25,8 @@ pub struct Listing {
     pub url: String,
     pub title: String,
     pub kind: ListingKind,
+    /// How many tiles a collection lays out, when the source knows.
+    pub tiles: Option<usize>,
     /// The email address of whoever owns it, when the source knows.
     pub owner: Option<String>,
     pub date: Option<DateTime<Utc>>,

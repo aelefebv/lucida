@@ -8,10 +8,11 @@ import userEvent from "@testing-library/user-event";
 import initWasm from "lucida-core";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
+import { fakeListingsApi, folder, listing } from "./openData/fakeListingsApi.ts";
 import {
   __resetRecentSourcesForTesting,
   recentSourcesPreference,
-} from "./addData/recentSources.ts";
+} from "./openData/recentSources.ts";
 import { __resetPreferencesForTesting, getPreference } from "./theme/preferences.ts";
 import { __resetCommandsForTesting, runCommand } from "./ui/commands.ts";
 import { __resetShortcutsForTesting } from "./ui/shortcuts.ts";
@@ -41,27 +42,6 @@ vi.mock("./auth/ProfileMenu.tsx", () => ({
 // The test loads the wasm build itself, from bytes, in beforeAll.
 vi.mock("./wasmInit.ts", () => ({
   initWasmOnce: () => Promise.resolve(),
-}));
-
-// The real pane lists the server's folders. These buttons drive its two
-// callbacks, which is all the dashboard hands it.
-vi.mock("./addData/BrowsePane.tsx", () => ({
-  BrowsePane: ({
-    onOpen,
-    onCreateWorkspace,
-  }: {
-    onOpen?: (path: string) => void;
-    onCreateWorkspace?: (paths: string[]) => void;
-  }) => (
-    <div data-testid="fake-browse-pane">
-      <button type="button" onClick={() => onOpen?.("/data/one.zarr")}>
-        fake-open
-      </button>
-      <button type="button" onClick={() => onCreateWorkspace?.(["/data/a.zarr", "/data/b.zarr"])}>
-        fake-create-from-selection
-      </button>
-    </div>
-  ),
 }));
 
 vi.mock("./workspaceApi.ts", () => ({
@@ -139,13 +119,29 @@ beforeAll(async () => {
   await initWasm({ module_or_path: bytes });
 });
 
+let originalFetch: typeof globalThis.fetch;
+
 beforeEach(() => {
   localStorage.clear();
   __resetPreferencesForTesting();
   __resetRecentSourcesForTesting();
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = fakeListingsApi([
+    listing("/srv/data/runs/one.ome.zarr", { title: "First volume", group: folder("/srv/data/runs") }),
+  ]).fetch;
 });
 
+/** Open the open dialog from the dashboard's field, and put focus in its field. */
+async function openDataDialog(user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
+  await user.click(screen.getByTestId("new-workspace-from-dataset"));
+  const dialog = await screen.findByRole("dialog", { name: "Open data" });
+  // happy-dom leaves focus on the dialog; a browser puts it in the field.
+  await user.click(within(dialog).getByRole("combobox"));
+  return dialog;
+}
+
 afterEach(() => {
+  globalThis.fetch = originalFetch;
   cleanup();
   vi.resetAllMocks();
   toastQueue.clear();
@@ -272,7 +268,7 @@ describe("WorkspaceDashboard", () => {
     });
   });
 
-  it("opens data from the field into a new workspace named after it", async () => {
+  it("opens a pasted URL into a new workspace named after it", async () => {
     // Only a name is sent, so the workspace keeps the server's owner-only
     // default sharing.
     createWorkspaceMock.mockResolvedValue(record({ id: "ws-ds", name: "sample.ome.zarr" }));
@@ -281,10 +277,10 @@ describe("WorkspaceDashboard", () => {
     const user = userEvent.setup();
 
     render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
-    const field = screen.getByRole("textbox", { name: "Dataset path or URL" });
-    await waitFor(() => expect((field as HTMLInputElement).disabled).toBe(false));
-    await user.type(field, "GS://bucket/scans/sample.ome.zarr");
-    await user.click(screen.getByRole("button", { name: "Open" }));
+    const dialog = await openDataDialog(user);
+    await user.paste("GS://bucket/scans/sample.ome.zarr");
+    await within(dialog).findByText("Open gs://bucket/scans/sample.ome.zarr");
+    await user.keyboard("{Enter}");
 
     await waitFor(() => {
       expect(createWorkspaceMock).toHaveBeenCalledWith("sample.ome.zarr");
@@ -295,16 +291,32 @@ describe("WorkspaceDashboard", () => {
     expect(getPreference(recentSourcesPreference)).toEqual(["gs://bucket/scans/sample.ome.zarr"]);
   });
 
-  it("explains a path that cannot open and creates nothing", async () => {
+  it("opens a listing into a new workspace named after its title", async () => {
+    createWorkspaceMock.mockResolvedValue(record({ id: "ws-one", name: "First volume" }));
+    listWorkspacesMock.mockResolvedValue([]);
+    const onOpenWorkspace = vi.fn();
+    const user = userEvent.setup();
+
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+    const dialog = await openDataDialog(user);
+    await user.click(await within(dialog).findByText("First volume"));
+
+    await waitFor(() => {
+      expect(createWorkspaceMock).toHaveBeenCalledWith("First volume");
+      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-one", ["/srv/data/runs/one.ome.zarr"]);
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("explains a location that cannot open and creates nothing", async () => {
     listWorkspacesMock.mockResolvedValue([]);
     const user = userEvent.setup();
 
     render(<WorkspaceDashboard onOpenWorkspace={() => {}} />);
-    const field = screen.getByRole("textbox", { name: "Dataset path or URL" });
-    await waitFor(() => expect((field as HTMLInputElement).disabled).toBe(false));
-    await user.type(field, "data/sample.zarr{Enter}");
-
-    expect(await screen.findByText(/This path is relative/)).toBeTruthy();
+    await openDataDialog(user);
+    await user.paste("~/data/sample.zarr");
+    expect(await screen.findByText(/doesn't expand ~/)).toBeTruthy();
+    await user.keyboard("{Enter}");
     expect(createWorkspaceMock).not.toHaveBeenCalled();
   });
 
@@ -315,42 +327,22 @@ describe("WorkspaceDashboard", () => {
     const user = userEvent.setup();
 
     render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
-    const field = screen.getByRole("textbox", { name: "Dataset path or URL" });
-    await waitFor(() => expect((field as HTMLInputElement).disabled).toBe(false));
-    await user.type(field, "/data/sample.ome.zarr{Enter}");
+    const dialog = await openDataDialog(user);
+    await user.paste("/data/sample.ome.zarr");
+    await within(dialog).findByText("Open /data/sample.ome.zarr");
+    await user.keyboard("{Enter}");
 
     expect((await screen.findByRole("alert")).textContent).toContain("quota exceeded");
     expect(onOpenWorkspace).not.toHaveBeenCalled();
   });
 
-  it("opens one browsed dataset, or several collected ones, into a new workspace", async () => {
-    createWorkspaceMock
-      .mockResolvedValueOnce(record({ id: "ws-one", name: "one.zarr" }))
-      .mockResolvedValueOnce(record({ id: "ws-multi", name: "a.zarr (+1)" }));
+  it("offers the open dialog from the empty dashboard", async () => {
     listWorkspacesMock.mockResolvedValue([]);
-    const onOpenWorkspace = vi.fn();
     const user = userEvent.setup();
 
-    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
-    const [browse] = screen.getAllByRole("button", { name: "Browse files…" });
-    await user.click(browse);
-    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "fake-open" }));
-
-    await waitFor(() => {
-      expect(createWorkspaceMock).toHaveBeenCalledWith("one.zarr");
-      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-one", ["/data/one.zarr"]);
-    });
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-
-    await user.click(browse);
-    await user.click(
-      within(await screen.findByRole("dialog")).getByRole("button", { name: "fake-create-from-selection" }),
-    );
-
-    await waitFor(() => {
-      expect(createWorkspaceMock).toHaveBeenLastCalledWith("a.zarr (+1)");
-      expect(onOpenWorkspace).toHaveBeenLastCalledWith("ws-multi", ["/data/a.zarr", "/data/b.zarr"]);
-    });
+    render(<WorkspaceDashboard onOpenWorkspace={() => {}} />);
+    await user.click(await screen.findByRole("button", { name: "Open data…" }));
+    expect(await screen.findByRole("dialog", { name: "Open data" })).toBeTruthy();
   });
 
   it("duplicates a workspace the user only views and opens the copy", async () => {
@@ -493,16 +485,13 @@ describe("WorkspaceDashboard", () => {
     });
   });
 
-  it("offers Open data as a command that focuses the field", async () => {
+  it("offers Open data as a command that opens the dialog", async () => {
     listWorkspacesMock.mockResolvedValue([]);
 
     render(<WorkspaceDashboard onOpenWorkspace={() => {}} />);
-    const field = screen.getByRole("textbox", { name: "Dataset path or URL" });
-    await waitFor(() => expect((field as HTMLInputElement).disabled).toBe(false));
-
     act(() => {
-      expect(runCommand("dashboard.openData")).toBe(true);
+      expect(runCommand("data.open")).toBe(true);
     });
-    expect(document.activeElement).toBe(field);
+    expect(await screen.findByRole("dialog", { name: "Open data" })).toBeTruthy();
   });
 });

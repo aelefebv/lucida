@@ -446,6 +446,7 @@ const MockedBridge = Bridge as unknown as {
     sendFollow: ReturnType<typeof vi.fn>;
     sendPresence: ReturnType<typeof vi.fn>;
     sendDatasetPresence: ReturnType<typeof vi.fn>;
+    sendOpenRemoteDataset: ReturnType<typeof vi.fn>;
   }>;
 };
 type FakeSceneInstance = {
@@ -545,6 +546,19 @@ const authSession = {
   signOut: async () => {},
 };
 
+const onOpenInNewWorkspace = vi.fn();
+
+const OTHER_LISTING = {
+  url: "/data/other.ome.zarr",
+  title: "Other volume",
+  kind: "image",
+  tiles: null,
+  owner: null,
+  date: null,
+  group: null,
+  fields: [],
+};
+
 function renderApp() {
   return render(
     <AuthSessionContext.Provider value={authSession}>
@@ -557,6 +571,7 @@ function renderApp() {
         onBackToDashboard={() => {}}
         onRenameWorkspace={async () => {}}
         onSetDefaultSavedView={async () => {}}
+        onOpenInNewWorkspace={onOpenInNewWorkspace}
       />
     </AuthSessionContext.Provider>,
   );
@@ -602,15 +617,26 @@ describe("App wiring: channels", () => {
     expect(scene.commands.some((cmd) => cmd.type === "set_channel_solo")).toBe(false);
   });
 
-  it("opens Add data from the layer panel's header", async () => {
-    await mountWithSnapshot(documentJson(["wds-1"]));
-    // The dialog's file browser lists a folder as it opens.
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
-    const panel = screen.getByRole("complementary", { name: "Layers" });
-    await userEvent.click(within(panel).getByRole("button", { name: "Add data" }));
-    expect(await screen.findByRole("dialog", { name: "Add data" })).toBeTruthy();
+  it("adds a dataset chosen in the open dialog to the workspace, or opens it in a new one", async () => {
+    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ results: [{ group: null, collapsed: false, listings: [OTHER_LISTING] }], next_cursor: null })),
+    );
+    const openFromPanel = async () => {
+      const panel = screen.getByRole("complementary", { name: "Layers" });
+      await userEvent.click(within(panel).getByRole("button", { name: "Add data" }));
+      return screen.findByRole("dialog", { name: "Open data" });
+    };
+
+    await userEvent.click(await within(await openFromPanel()).findByText("Other volume"));
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledWith("/data/other.ome.zarr");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const dialog = await openFromPanel();
+    const row = await within(dialog).findAllByText("Other volume");
+    fireEvent.click(row.at(-1) as HTMLElement, { ctrlKey: true, metaKey: true });
+    expect(onOpenInNewWorkspace).toHaveBeenCalledWith({ url: "/data/other.ome.zarr", title: "Other volume" });
+    expect(bridge.sendOpenRemoteDataset).toHaveBeenCalledTimes(1);
     fetchSpy.mockRestore();
   });
 });
@@ -1260,15 +1286,15 @@ describe("App wiring: tools and keyboard help", () => {
 
   it("ignores keys typed into a field", async () => {
     await mountWithSnapshot(documentJson(["wds-1"]));
-    // The dialog's file browser lists a folder as it opens.
+    // The dialog searches the listings as it opens.
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+      .mockImplementation(async () => new Response(JSON.stringify({ results: [], next_cursor: null })));
     await act(async () => {
       fireEvent.keyDown(window, { key: "o", code: "KeyO", ctrlKey: true });
     });
-    const dialog = await screen.findByRole("dialog", { name: "Add data" });
-    const field = within(dialog).getByRole("textbox", { name: "Dataset path or URL" });
+    const dialog = await screen.findByRole("dialog", { name: "Open data" });
+    const field = within(dialog).getByRole("combobox");
     await act(async () => {
       fireEvent.keyDown(field, { key: "p", code: "KeyP" });
     });

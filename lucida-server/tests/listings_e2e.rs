@@ -63,6 +63,7 @@ fn listing(url: &str, title: &str, group: Option<&str>, date: i64) -> Listing {
         url: url.to_string(),
         title: title.to_string(),
         kind: ListingKind::Image,
+        tiles: None,
         owner: None,
         date: Some(day(date)),
         group: group.map(|label| ListingGroup {
@@ -206,6 +207,7 @@ fn owned(rows: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
 async fn a_search_with_no_query_returns_every_listing_grouped_newest_first() {
     let mut tiles = listing("/data/beta/tiles.zarr", "tiles", Some("beta"), 5);
     tiles.kind = ListingKind::Collection;
+    tiles.tiles = Some(12);
     tiles.owner = Some("someone@example.com".into());
     tiles.fields = vec![ListingField {
         name: "Size".into(),
@@ -241,6 +243,7 @@ async fn a_search_with_no_query_returns_every_listing_grouped_newest_first() {
             "url": "/data/beta/tiles.zarr",
             "title": "tiles",
             "kind": "collection",
+            "tiles": 12,
             "owner": "someone@example.com",
             "date": "2026-01-06T00:00:00Z",
             "group": {"id": "shelf:beta", "label": "beta", "noun": "Shelf"},

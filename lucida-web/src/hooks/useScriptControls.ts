@@ -3,7 +3,7 @@
  *
  * A script's scrub, select, contrast, and remove land on the handlers the
  * dimension controls and the layer panel call, its add on the one the
- * add-data dialog calls, its swipe and blink on the comparison controls,
+ * open dialog calls, its swipe and blink on the comparison controls,
  * and its view read is the share button's capture.
  * The capture surface hides those controls, so a synthesized click has
  * nothing to reach. From the handler on this is the same path a person's
@@ -53,7 +53,7 @@ export interface ScriptControlInputs {
   setLabelVisible(datasetId: string, label: number, visible: boolean): void;
   /** The handler the layer panel's contrast limits call. */
   setChannelContrast(datasetId: string, channel: number, min: number, max: number): void;
-  /** The handler the add-data dialog calls with a source URL. */
+  /** The handler the open dialog calls with a source URL. */
   openDataset(url: string): void;
   /** The handler the layer panel's remove calls once a person has confirmed. */
   removeDataset(datasetId: string): void;

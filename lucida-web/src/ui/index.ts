@@ -68,8 +68,10 @@ export { ShortcutSheet, type ShortcutSheetProps } from "./ShortcutSheet.tsx";
 export { Slider, type SliderProps, type SliderValue } from "./Slider.tsx";
 export { Switch, type SwitchProps } from "./Switch.tsx";
 export {
+  ComboboxField,
   SearchField,
   TextField,
+  type ComboboxFieldProps,
   type SearchFieldProps,
   type TextFieldProps,
 } from "./TextField.tsx";

@@ -222,7 +222,7 @@ export function useSavedViewSync({
   });
   const captureBuilder = bundle.capture;
 
-  // Every local open goes through here (browse pane, URL bar, applier) so the
+  // Every local open goes through here (open dialog, URL bar, applier) so the
   // URL to DatasetId map stays complete.
   const trackedSendOpen = useCallback((url: string) => {
     if (datasetReferenceMode === "source-url") {

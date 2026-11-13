@@ -1,0 +1,419 @@
+// @vitest-environment happy-dom
+
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import initWasm from "lucida-core";
+import { useState } from "react";
+import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
+import { Button } from "../ui/Button.tsx";
+import { __resetCommandsForTesting, listCommands, runCommand } from "../ui/commands.ts";
+import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
+import { AddDataPrompt } from "./AddDataPrompt.tsx";
+import { fakeListingsApi, folder, listing, type FakeListingsApi } from "./fakeListingsApi.ts";
+import { OpenDialog, type OpenAction } from "./OpenDialog.tsx";
+import {
+  __resetRecentSourcesForTesting,
+  recentSourcesPreference,
+  rememberRecentSource,
+} from "./recentSources.ts";
+import { OPEN_DATA_SHORTCUT } from "./shortcut.ts";
+
+// The test loads the wasm build itself, from bytes, in beforeAll.
+vi.mock("../wasmInit.ts", () => ({
+  initWasmOnce: () => Promise.resolve(),
+}));
+
+const runs = folder("/srv/data/runs");
+const archive = folder("/srv/data/archive");
+const LISTINGS = [
+  listing("/srv/data/runs/volume.ome.zarr", { group: runs, date: "2026-11-06T00:00:00Z" }),
+  listing("/srv/data/runs/tiles.ome.zarr", { group: runs, kind: "collection", tiles: 12 }),
+  listing("/srv/data/archive/old-volume.ome.zarr", { title: "Old volume", group: archive }),
+  listing("/srv/data/loose.ome.zarr"),
+];
+
+const MOD = /mac/i.test(navigator.platform) ? "Meta" : "Control";
+
+let api: FakeListingsApi;
+let originalFetch: typeof globalThis.fetch;
+
+beforeAll(async () => {
+  const bytes = readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm"));
+  await initWasm({ module_or_path: bytes });
+});
+
+beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
+  __resetRecentSourcesForTesting();
+  originalFetch = globalThis.fetch;
+  api = fakeListingsApi(LISTINGS);
+  globalThis.fetch = api.fetch;
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  cleanup();
+  __resetShortcutsForTesting();
+  __resetCommandsForTesting();
+});
+
+function Harness({ primary, secondary }: { primary: OpenAction; secondary?: OpenAction }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button onPress={() => setOpen(true)}>Open</Button>
+      <OpenDialog isOpen={open} onOpenChange={setOpen} primary={primary} secondary={secondary} />
+    </>
+  );
+}
+
+/** The two actions inside a workspace: add, or open in a new workspace. */
+function inWorkspace() {
+  const add = vi.fn();
+  const elsewhere = vi.fn();
+  render(
+    <Harness
+      primary={{ label: "Add to this workspace", run: add }}
+      secondary={{ label: "Open in a new workspace", run: elsewhere }}
+    />,
+  );
+  return { add, elsewhere };
+}
+
+/** The one action on the dashboard: open in a new workspace. */
+function onDashboard() {
+  const open = vi.fn();
+  render(<Harness primary={{ label: "Open in a new workspace", run: open }} />);
+  return { open };
+}
+
+async function openDialog(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole("button", { name: "Open" }));
+  const dialog = await screen.findByRole("dialog", { name: "Open data" });
+  // happy-dom leaves focus on the dialog; a browser puts it in the field.
+  await user.click(within(dialog).getByRole("combobox"));
+  return dialog;
+}
+
+function tree(dialog: HTMLElement): HTMLElement {
+  return within(dialog).getByRole("tree", { name: "Datasets" });
+}
+
+function activeRow(dialog: HTMLElement): HTMLElement {
+  const id = within(dialog).getByRole("combobox").getAttribute("aria-activedescendant");
+  const row = id ? document.getElementById(id) : null;
+  if (!row) throw new Error("no active row");
+  return row;
+}
+
+/** The visible text of each top-level row, and of each child under its group. */
+function outline(dialog: HTMLElement): string[] {
+  const lines: string[] = [];
+  const walk = (list: HTMLElement, depth: number) => {
+    for (const item of list.querySelectorAll<HTMLElement>(":scope > [role=treeitem]")) {
+      const row = item.firstElementChild as HTMLElement;
+      const title = row.querySelector(".lc-open-title")?.textContent ?? "";
+      lines.push(`${"  ".repeat(depth)}${title}`);
+      const group = item.querySelector<HTMLElement>(":scope > [role=group]");
+      if (group) walk(group, depth + 1);
+    }
+  };
+  walk(tree(dialog), 0);
+  return lines;
+}
+
+function status(dialog: HTMLElement): string {
+  return dialog.querySelector(".lc-open-status")?.textContent ?? "";
+}
+
+async function settled(dialog: HTMLElement) {
+  await waitFor(() => expect(tree(dialog).getAttribute("aria-busy")).toBeNull());
+}
+
+describe("OpenDialog", () => {
+  it("shows every listing grouped, with each one's kind and a collection's tile count", async () => {
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    expect(outline(dialog)).toEqual([
+      "runs",
+      "  volume.ome.zarr",
+      "  tiles.ome.zarr",
+      "archive",
+      "  Old volume",
+      "loose.ome.zarr",
+    ]);
+    expect(within(tree(dialog)).getByText("Collection · 12 tiles")).toBeTruthy();
+    expect(within(tree(dialog)).getAllByText("Image")).toHaveLength(3);
+    expect(within(tree(dialog)).getByText("Folder · 2 datasets")).toBeTruthy();
+  });
+
+  it("searches as you type and shows the server's groups", async () => {
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await user.keyboard("volume");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("volume"));
+    await settled(dialog);
+    expect(outline(dialog)).toEqual(["runs", "  volume.ome.zarr", "archive", "  Old volume"]);
+  });
+
+  it("starts a group whose label matched collapsed, and expands and collapses it", async () => {
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await user.keyboard("runs");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("runs"));
+    await settled(dialog);
+    expect(outline(dialog)).toEqual(["runs"]);
+    const group = within(tree(dialog)).getByRole("treeitem", { name: "Folder runs" });
+    expect(group.getAttribute("aria-expanded")).toBe("false");
+
+    await user.click(group.firstElementChild as HTMLElement);
+    expect(outline(dialog)).toEqual(["runs", "  volume.ome.zarr", "  tiles.ome.zarr"]);
+    await user.click(group.firstElementChild as HTMLElement);
+    expect(outline(dialog)).toEqual(["runs"]);
+  });
+
+  it("moves, expands and collapses from the keyboard alone", async () => {
+    const user = userEvent.setup();
+    const { add } = inWorkspace();
+    const dialog = await openDialog(user);
+    await user.keyboard("runs");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("runs"));
+    await settled(dialog);
+
+    // The caret sits at the end of what was typed, so Right is free to expand.
+    expect(activeRow(dialog).getAttribute("aria-label")).toBe("Folder runs");
+    await user.keyboard("{ArrowRight}");
+    expect(activeRow(dialog).getAttribute("aria-expanded")).toBe("true");
+    await user.keyboard("{ArrowRight}");
+    expect(activeRow(dialog).textContent).toContain("volume.ome.zarr");
+    await user.keyboard("{ArrowDown}");
+    expect(activeRow(dialog).textContent).toContain("tiles.ome.zarr");
+    await user.keyboard("{ArrowLeft}");
+    expect(activeRow(dialog).getAttribute("aria-label")).toBe("Folder runs");
+    await user.keyboard("{ArrowLeft}");
+    expect(activeRow(dialog).getAttribute("aria-expanded")).toBe("false");
+    expect(outline(dialog)).toEqual(["runs"]);
+
+    await user.keyboard("{ArrowRight}{ArrowDown}{ArrowDown}{Enter}");
+    expect(add).toHaveBeenCalledWith({ url: "/srv/data/runs/tiles.ome.zarr", title: "tiles.ome.zarr" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("leaves Left and Right to the caret while you type", async () => {
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await user.keyboard("runs");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("runs"));
+    await settled(dialog);
+    await user.keyboard("{ArrowLeft}{ArrowRight}");
+    expect(activeRow(dialog).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("adds the chosen dataset on Enter inside a workspace, and remembers it", async () => {
+    const user = userEvent.setup();
+    const { add, elsewhere } = inWorkspace();
+    const dialog = await openDialog(user);
+    await user.keyboard("old");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("old"));
+    await settled(dialog);
+    await user.keyboard("{ArrowDown}{Enter}");
+    expect(add).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+    expect(elsewhere).not.toHaveBeenCalled();
+    expect(getPreference(recentSourcesPreference)).toEqual(["/srv/data/archive/old-volume.ome.zarr"]);
+  });
+
+  it("opens a new workspace on Mod+Enter inside a workspace", async () => {
+    const user = userEvent.setup();
+    const { add, elsewhere } = inWorkspace();
+    const dialog = await openDialog(user);
+    await user.keyboard("old");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("old"));
+    await settled(dialog);
+    await user.keyboard(`{ArrowDown}{${MOD}>}{Enter}{/${MOD}}`);
+    expect(elsewhere).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("opens a new workspace on Enter and on Mod+Enter from the dashboard", async () => {
+    const user = userEvent.setup();
+    const { open } = onDashboard();
+    let dialog = await openDialog(user);
+    await user.keyboard("loose");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("loose"));
+    await settled(dialog);
+    await user.keyboard("{Enter}");
+    expect(open).toHaveBeenLastCalledWith({ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    dialog = await openDialog(user);
+    await user.keyboard("loose");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("loose"));
+    await settled(dialog);
+    await user.keyboard(`{${MOD}>}{Enter}{/${MOD}}`);
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens a listing on a click, and in a new workspace on a Mod-click", async () => {
+    const user = userEvent.setup();
+    const { add, elsewhere } = inWorkspace();
+    let dialog = await openDialog(user);
+    await settled(dialog);
+    await user.click(within(tree(dialog)).getByText("loose.ome.zarr"));
+    expect(add).toHaveBeenCalledWith({ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr" });
+
+    dialog = await openDialog(user);
+    await settled(dialog);
+    await user.keyboard(`{${MOD}>}`);
+    // The first open put it among the recent datasets too, above the listings.
+    await user.click(within(tree(dialog)).getAllByText("loose.ome.zarr").at(-1) as HTMLElement);
+    await user.keyboard(`{/${MOD}}`);
+    expect(elsewhere).toHaveBeenCalledWith({ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr" });
+  });
+
+  it("turns the top row into Open <url> for a pasted URL, with the title a source gives it", async () => {
+    const user = userEvent.setup();
+    const { open } = onDashboard();
+    const dialog = await openDialog(user);
+    await user.paste("/srv/data/archive/old-volume.ome.zarr/");
+    await waitFor(() => expect(outline(dialog)[0]).toBe("Open Old volume"));
+    expect(activeRow(dialog).textContent).toContain("/srv/data/archive/old-volume.ome.zarr");
+    await user.keyboard("{Enter}");
+    expect(open).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+  });
+
+  it("opens a pasted URL no source lists, in its canonical form", async () => {
+    const user = userEvent.setup();
+    const { open } = onDashboard();
+    const dialog = await openDialog(user);
+    await user.paste("GS://bucket/scans/sample.ome.zarr");
+    await waitFor(() => expect(outline(dialog)[0]).toBe("Open gs://bucket/scans/sample.ome.zarr"));
+    await user.keyboard("{Enter}");
+    expect(open).toHaveBeenCalledWith({ url: "gs://bucket/scans/sample.ome.zarr", title: null });
+  });
+
+  it("explains a malformed URL and opens nothing", async () => {
+    const user = userEvent.setup();
+    const { open } = onDashboard();
+    const dialog = await openDialog(user);
+    await user.paste("gs:bucket/sample.zarr");
+    const top = await within(tree(dialog)).findByText(/needs :\/\/ after its scheme/);
+    expect(top.closest("[role=treeitem]")?.getAttribute("aria-disabled")).toBe("true");
+    await user.keyboard("{Enter}");
+    expect(open).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(getPreference(recentSourcesPreference)).toEqual([]);
+  });
+
+  it("shows recent datasets above the listings while the field is empty, and forgets one", async () => {
+    rememberRecentSource("/data/earlier.zarr");
+    const user = userEvent.setup();
+    const { open } = onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    expect(outline(dialog).slice(0, 3)).toEqual(["Recent", "  earlier.zarr", "runs"]);
+
+    await user.click(within(dialog).getByRole("button", { name: "Remove earlier.zarr from recent" }));
+    expect(outline(dialog)[0]).toBe("runs");
+    expect(open).not.toHaveBeenCalled();
+
+    rememberRecentSource("/data/earlier.zarr");
+    await waitFor(() => expect(outline(dialog)[0]).toBe("Recent"));
+    await user.click(within(tree(dialog)).getByText("earlier.zarr"));
+    expect(open).toHaveBeenCalledWith({ url: "/data/earlier.zarr", title: null });
+  });
+
+  it("says plainly when nothing is listed yet, and when nothing matches", async () => {
+    globalThis.fetch = fakeListingsApi([]).fetch;
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await waitFor(() => expect(status(dialog)).toContain("No datasets are listed yet"));
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+
+    await user.keyboard("nothing");
+    await waitFor(() => expect(status(dialog)).toContain("No datasets match “nothing”"));
+  });
+
+  it("never opens results that answer an earlier query", async () => {
+    const user = userEvent.setup();
+    const { open } = onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    const release = api.hold();
+    await user.keyboard("archive");
+    await user.keyboard("{Enter}");
+    expect(open).not.toHaveBeenCalled();
+    expect(tree(dialog).getAttribute("aria-busy")).toBe("true");
+    release();
+    await settled(dialog);
+  });
+
+  it("loads the next page on Show more", async () => {
+    globalThis.fetch = fakeListingsApi(LISTINGS, { pageSize: 2 }).fetch;
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    expect(outline(dialog).filter((line) => !line.startsWith(" "))).toEqual(["runs", "archive", "Show more"]);
+    await user.click(within(tree(dialog)).getByText("Show more"));
+    await waitFor(() =>
+      expect(outline(dialog).filter((line) => !line.startsWith(" "))).toEqual(["runs", "archive", "loose.ome.zarr"]),
+    );
+  });
+
+  it("shows why a search failed", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "internal", detail: "the index is unavailable" }), {
+        status: 500,
+      })) as typeof globalThis.fetch;
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("the index is unavailable");
+  });
+
+  it("closes on Escape and returns focus to the control that opened it", async () => {
+    const user = userEvent.setup();
+    onDashboard();
+    await openDialog(user);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open" }));
+  });
+
+  it("opens from Mod+O and from a palette command that carries the same key", async () => {
+    const user = userEvent.setup();
+    onDashboard();
+    expect(listCommands().find((c) => c.id === "data.open")?.label).toBe("Open data…");
+    expect(listShortcuts().find((s) => s.id === "data.open")?.keys).toEqual([OPEN_DATA_SHORTCUT]);
+    await user.keyboard(`{${MOD}>}o{/${MOD}}`);
+    expect(await screen.findByRole("dialog", { name: "Open data" })).toBeTruthy();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    act(() => {
+      runCommand("data.open");
+    });
+    expect(await screen.findByRole("dialog", { name: "Open data" })).toBeTruthy();
+  });
+});
+
+describe("AddDataPrompt", () => {
+  it("offers the dialog from an empty workspace", async () => {
+    const user = userEvent.setup();
+    const onAddData = vi.fn();
+    render(<AddDataPrompt onAddData={onAddData} />);
+    expect(screen.getByText("Add data to get started")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Add data" }));
+    expect(onAddData).toHaveBeenCalled();
+  });
+});
