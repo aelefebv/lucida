@@ -106,6 +106,7 @@ fn listing(root: &DataRoot, found: ZarrRoot) -> Option<Listing> {
             RootKind::Image => ListingKind::Image,
             RootKind::Collection => ListingKind::Collection,
         },
+        tiles: found.tiles,
         owner: None,
         date: Some(found.modified),
         fields: Vec::new(),
@@ -162,7 +163,7 @@ mod tests {
         put(
             &store,
             "runs/b.ome.zarr/.zattrs",
-            serde_json::json!({"plate": {}}),
+            serde_json::json!({"plate": {"wells": [{"path": "A/1"}, {"path": "A/2"}]}}),
         )
         .await;
         let source = ObjectStoreSource::new(vec![DataRoot {
@@ -192,6 +193,8 @@ mod tests {
                 ),
             ]
         );
+        let tiles: Vec<_> = listings.iter().map(|l| l.tiles).collect();
+        assert_eq!(tiles, [None, Some(2)]);
         assert!(listings.iter().all(|l| l.owner.is_none()));
         assert!(listings.iter().all(|l| l.date.is_some()));
         assert_eq!(source.group_noun(), "Folder");

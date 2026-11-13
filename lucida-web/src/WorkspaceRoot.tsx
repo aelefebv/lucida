@@ -4,6 +4,7 @@ import "./auth/auth.css";
 import { WatchStreamBanner } from "./monitor/WatchToggle.tsx";
 import { parseSavedViewHash } from "./savedView/urlSync.ts";
 import { Banner } from "./shell/Banner.tsx";
+import type { OpenChoice } from "./openData/index.ts";
 import { Button } from "./ui/Button.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
@@ -94,14 +95,12 @@ export function WorkspaceRoot() {
     [navigate],
   );
 
-  // In-viewer "create workspace from selection". Failures go to the caller's
+  // The viewer's "open in a new workspace". Failures go to the caller's
   // catch; the dataset open happens in the destination viewer.
-  const createWorkspaceFrom = useCallback(
-    async (paths: string[]) => {
-      const cleaned = paths.map((p) => p.trim()).filter((p) => p.length > 0);
-      if (cleaned.length === 0) return;
-      const workspace = await createWorkspaceFromDatasets(cleaned);
-      openWorkspaceById(workspace.id, cleaned);
+  const openInNewWorkspace = useCallback(
+    async ({ url, title }: OpenChoice) => {
+      const workspace = await createWorkspaceFromDatasets([url], title ?? undefined);
+      openWorkspaceById(workspace.id, [url]);
     },
     [openWorkspaceById],
   );
@@ -140,7 +139,7 @@ export function WorkspaceRoot() {
           workspaceId={workspaceId}
           initialDatasetUrls={seedForThisWorkspace}
           onBackToDashboard={() => navigate("/")}
-          onCreateWorkspaceFromDatasets={createWorkspaceFrom}
+          onOpenInNewWorkspace={openInNewWorkspace}
         />
       ) : (
         <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
@@ -227,21 +226,21 @@ interface WorkspaceViewerRouteProps {
   /** Seed dataset URLs to auto-open, forwarded to <App>. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
-  /** Create a new workspace from datasets chosen in the viewer. */
-  onCreateWorkspaceFromDatasets: (paths: string[]) => Promise<void>;
+  /** Create a new workspace around a dataset chosen in the viewer. */
+  onOpenInNewWorkspace: (choice: OpenChoice) => Promise<void>;
 }
 
 function WorkspaceViewerRoute({
   workspaceId,
   initialDatasetUrls,
   onBackToDashboard,
-  onCreateWorkspaceFromDatasets,
+  onOpenInNewWorkspace,
 }: WorkspaceViewerRouteProps) {
   const [workspace, setWorkspace] = useState<WorkspaceRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Separate from `error`, which replaces the route with the access-denied
-  // page. A failed create-from-selection must leave the current workspace in
-  // place, so it renders as a dismissible notice beside <App>.
+  // page. A new workspace that fails to be created must leave the current
+  // one in place, so it renders as a dismissible notice beside <App>.
   const [createError, setCreateError] = useState<string | null>(null);
   // Set when the server closes the viewer's connection because this person's
   // access was removed. Unmounting <App> ends its connection for good.
@@ -345,12 +344,12 @@ function WorkspaceViewerRoute({
         onAccessRevoked={handleAccessRevoked}
         onRenameWorkspace={handleRename}
         onSetDefaultSavedView={handleSetDefaultSavedView}
-        onCreateWorkspaceFromDatasets={(paths) => {
+        onOpenInNewWorkspace={(choice) => {
           // Clear a stale notice when re-attempting.
           setCreateError(null);
-          void onCreateWorkspaceFromDatasets(paths).catch((e) => {
+          void onOpenInNewWorkspace(choice).catch((e) => {
             // Only the create step can fail here; keep the current workspace.
-            console.warn("[WorkspaceRoot] create workspace from datasets failed", e);
+            console.warn("[WorkspaceRoot] create workspace from a dataset failed", e);
             setCreateError(e instanceof Error ? e.message : String(e));
           });
         }}

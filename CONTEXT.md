@@ -86,8 +86,9 @@ _Avoid_: catalog (the perf runner's dataset list)
 
 **Listing**:
 One dataset a source offers: a URL, a title, a kind (image or collection),
-an optional owner email, an optional date, an optional group, and named
-fields shown with it and searched. Opening a listing makes it a dataset.
+a collection's tile count when the source knows it, an optional owner
+email, an optional date, an optional group, and named fields shown with it
+and searched. Opening a listing makes it a dataset.
 
 **Group**:
 A named set of listings from one source. The source names what its groups

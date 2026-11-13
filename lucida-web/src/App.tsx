@@ -79,7 +79,7 @@ import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
 import { noteDatasetOpened, noteDatasetOpenFailed } from "./trace/steps.ts";
-import { AddDataDialog, AddDataPrompt, noteSourceOpenFailed } from "./addData/index.ts";
+import { AddDataPrompt, noteSourceOpenFailed, OpenDialog, type OpenChoice } from "./openData/index.ts";
 import { Banner } from "./shell/Banner.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
 import { WebGpuUnavailable } from "./shell/WebGpuUnavailable.tsx";
@@ -124,9 +124,9 @@ interface AppProps {
   onAccessRevoked?: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
-  /** Create a new workspace from file-browser selections and navigate into
-   *  it, as the dashboard does. */
-  onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
+  /** Create a new workspace around a dataset and navigate into it, as the
+   *  dashboard does. */
+  onOpenInNewWorkspace?: (choice: OpenChoice) => void;
 }
 
 /** The viewer for one workspace, inside the engine it drives. */
@@ -149,7 +149,7 @@ function Viewer({
   onAccessRevoked,
   onRenameWorkspace,
   onSetDefaultSavedView,
-  onCreateWorkspaceFromDatasets,
+  onOpenInNewWorkspace,
 }: AppProps) {
   // Provided by <AuthGate>; throws when unauthenticated. The email feeds the
   // saved-view "Mine only" filter.
@@ -381,7 +381,7 @@ function Viewer({
 
   const datasets = useDatasets({
     // Wrap so URL→DatasetId tracking is populated for every local open
-    // (browse-pane-driven, URL-bar-driven, applier-driven).
+    // (open-dialog-driven, URL-bar-driven, applier-driven).
     sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
   });
 
@@ -649,7 +649,7 @@ function Viewer({
     runCommand("camera.toggleFly");
   }, []);
 
-  const [addDataOpen, setAddDataOpen] = useState(false);
+  const [openDataOpen, setOpenDataOpen] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // the `debug.overlays` preference, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
@@ -941,7 +941,7 @@ function Viewer({
       onShowAllChannels={layers.handleShowAllChannels}
       onLabelSetVisible={layers.handleLabelSetVisible}
       onLabelSetOpacity={layers.handleLabelSetOpacity}
-      onAddData={() => setAddDataOpen(true)}
+      onAddData={() => setOpenDataOpen(true)}
       comparisonBlocker={comparison.blocker}
       comparisonNote={comparison.byHand}
       onCompare={comparison.compareWith}
@@ -1139,7 +1139,7 @@ function Viewer({
               render.gpuUnavailable ? (
                 <WebGpuUnavailable reason={render.gpuUnavailable} />
               ) : !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
-                <AddDataPrompt onAddData={() => setAddDataOpen(true)} />
+                <AddDataPrompt onAddData={() => setOpenDataOpen(true)} />
               ) : null
             }
             // Without a renderer the controls over the canvas have nothing to drive.
@@ -1270,11 +1270,11 @@ function Viewer({
         {chrome.right}
       </div>
       {!captureSurface && (
-        <AddDataDialog
-          isOpen={addDataOpen}
-          onOpenChange={setAddDataOpen}
-          onOpen={datasets.handleUrlSubmit}
-          onCreateWorkspace={onCreateWorkspaceFromDatasets}
+        <OpenDialog
+          isOpen={openDataOpen}
+          onOpenChange={setOpenDataOpen}
+          primary={{ label: "Add to this workspace", run: (choice) => datasets.handleUrlSubmit(choice.url) }}
+          secondary={onOpenInNewWorkspace && { label: "Open in a new workspace", run: onOpenInNewWorkspace }}
         />
       )}
       {!captureSurface && <KeyboardHelp />}

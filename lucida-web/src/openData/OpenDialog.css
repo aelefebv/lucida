@@ -1,0 +1,215 @@
+/* A fixed height, so the dialog holds its size while results of different
+   lengths arrive; the list takes what the field and the key hints leave. */
+.lc-open-data {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+  height: min(520px, calc(85vh - 96px));
+  height: min(520px, calc(85dvh - 96px));
+  min-height: 0;
+}
+
+/* Taller than a form field: it is the one control the dialog is about. */
+.lc-open-field {
+  flex: none;
+  height: max(36px, var(--lc-control-h));
+}
+
+.lc-open-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+/* Out of date while the next answer is on its way: still readable, plainly not current. */
+.lc-open-list[data-stale] {
+  opacity: 0.6;
+}
+
+.lc-open-children {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lc-open-row {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  box-sizing: border-box;
+  min-height: var(--lc-control-h);
+  padding: var(--lc-space-1) var(--lc-space-2);
+  border-radius: var(--lc-radius);
+  color: var(--lc-text);
+  cursor: default;
+  user-select: none;
+}
+
+[role="treeitem"][data-active] > .lc-open-row {
+  background: var(--lc-surface-3);
+}
+
+[role="treeitem"][aria-disabled="true"] > .lc-open-row {
+  color: var(--lc-text-muted);
+}
+
+/* Children sit under their group's label, past its caret. */
+.lc-open-children .lc-open-row {
+  padding-left: calc(var(--lc-space-2) + 12px + var(--lc-space-2));
+}
+
+.lc-open-caret {
+  flex: none;
+  color: var(--lc-text-subtle);
+  transition: rotate var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-open-caret[data-expanded] {
+  rotate: 90deg;
+}
+
+.lc-open-icon {
+  flex: none;
+  color: var(--lc-text-subtle);
+}
+
+.lc-open-icon[data-tone="danger"] {
+  color: var(--lc-danger);
+}
+
+.lc-open-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.lc-open-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-open-row[data-type="group"] > .lc-open-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.lc-open-meta {
+  overflow: hidden;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-open-meta[data-tone="danger"] {
+  color: var(--lc-danger);
+  white-space: normal;
+}
+
+/* A path clips at its start, so the end that tells datasets apart shows. */
+.lc-open-url {
+  direction: rtl;
+  text-align: left;
+}
+
+.lc-open-aside {
+  flex: none;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+  white-space: nowrap;
+}
+
+.lc-open-more {
+  color: var(--lc-accent-text);
+}
+
+.lc-open-remove {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--lc-control-h-sm);
+  height: var(--lc-control-h-sm);
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--lc-radius-sm);
+  background: transparent;
+  color: var(--lc-text-subtle);
+}
+
+.lc-open-remove:hover {
+  background: var(--lc-surface-3);
+  color: var(--lc-text);
+}
+
+.lc-open-remove:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
+}
+
+.lc-open-status {
+  flex: none;
+  padding: var(--lc-space-3) var(--lc-space-2);
+  color: var(--lc-text-muted);
+  text-align: center;
+}
+
+.lc-open-status p {
+  margin: 0;
+}
+
+.lc-open-status-title {
+  color: var(--lc-text);
+  font-weight: 500;
+}
+
+.lc-open-status[data-tone="danger"] .lc-open-status-title {
+  color: var(--lc-danger);
+}
+
+.lc-open-status-text {
+  margin-top: var(--lc-space-1);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-open-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.lc-open-keys {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: var(--lc-space-1) var(--lc-space-4);
+  padding-top: var(--lc-space-2);
+  border-top: 1px solid var(--lc-border);
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-open-keys > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lc-space-1);
+}
+
+/* A phone gives the list every row it can. */
+@media (width < 640px) {
+  .lc-open-data {
+    height: calc(85vh - 96px);
+    height: calc(85dvh - 96px);
+  }
+}

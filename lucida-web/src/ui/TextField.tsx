@@ -108,3 +108,57 @@ export function SearchField({
     </AriaSearchField>
   );
 }
+
+export interface ComboboxFieldProps {
+  /** The accessible name, also shown as the placeholder. */
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  /** Moves through the list and acts on it; the field keeps focus throughout. */
+  onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void;
+  /** The id of the list the field drives. */
+  controls: string;
+  /** The id of the list's active row, or undefined with none. */
+  activeDescendant?: string;
+  autoFocus?: boolean;
+  className?: string;
+}
+
+/**
+ * A search field that drives a list below it, as a combobox: focus stays in
+ * the field while the caller's keys move an active row through the list,
+ * which `activeDescendant` names to assistive tech. The list is always
+ * shown, so the field never opens or closes it.
+ */
+export function ComboboxField({
+  label,
+  onChange,
+  onKeyDown,
+  controls,
+  activeDescendant,
+  className,
+  ...rest
+}: ComboboxFieldProps) {
+  return (
+    <div className={className ? `lc-input-group ${className}` : "lc-input-group"}>
+      <MagnifyingGlassIcon className="lc-input-adornment" size={14} aria-hidden />
+      <input
+        {...rest}
+        className="lc-input"
+        role="combobox"
+        aria-label={label}
+        aria-expanded
+        aria-controls={controls}
+        aria-autocomplete="list"
+        aria-activedescendant={activeDescendant}
+        placeholder={label}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={onKeyDown}
+        autoComplete="off"
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
+      />
+    </div>
+  );
+}

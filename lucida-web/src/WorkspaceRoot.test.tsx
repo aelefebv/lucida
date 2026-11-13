@@ -17,11 +17,11 @@ import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 // App pulls in the WASM viewer; stub it so the route renders without a GPU/WASM
 // runtime. The stub records the props it was last rendered with so we can assert
 // the seed dataset URLs reach the viewer, and exposes a button to drive
-// the in-viewer "create workspace from datasets" callback.
+// the in-viewer "open in a new workspace" callback.
 interface CapturedAppProps {
   workspaceId: string;
   initialDatasetUrls?: readonly string[];
-  onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
+  onOpenInNewWorkspace?: (choice: { url: string; title: string | null }) => void;
   onAccessRevoked?: () => void;
 }
 const lastAppProps: { current: CapturedAppProps | null } = { current: null };
@@ -37,10 +37,10 @@ vi.mock("./App.tsx", () => ({
         <button
           type="button"
           onClick={() =>
-            props.onCreateWorkspaceFromDatasets?.(["/data/new.zarr"])
+            props.onOpenInNewWorkspace?.({ url: "/data/new.zarr", title: "New volume" })
           }
         >
-          in-viewer-create-from-datasets
+          in-viewer-open-in-new-workspace
         </button>
         <button type="button" onClick={() => props.onAccessRevoked?.()}>
           server-revokes-access
@@ -50,7 +50,7 @@ vi.mock("./App.tsx", () => ({
   },
 }));
 
-// Stub the dashboard (it needs <AuthGate> context + the file browser fetch).
+// Stub the dashboard (it needs <AuthGate> context and the listings fetch).
 // We only care that WorkspaceRoot wires `onOpenWorkspace(id, urls)` correctly,
 // so expose a button that drives it with a seed.
 vi.mock("./WorkspaceDashboard.tsx", () => ({
@@ -293,7 +293,7 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     expect(seededRenders).toEqual([["/data/sample.ome.zarr"]]);
   });
 
-  it("in-viewer 'create from datasets' creates a new workspace and navigates in with the seed", async () => {
+  it("in-viewer 'open in a new workspace' creates one named after the dataset and navigates in with the seed", async () => {
     // Start inside an existing workspace.
     window.history.replaceState({}, "", "/w/ws-old");
     openWorkspaceMock.mockResolvedValue(record({ id: "ws-old", name: "Old" }));
@@ -308,11 +308,11 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     openWorkspaceMock.mockResolvedValue(record({ id: "ws-fresh" }));
 
     fireEvent.click(
-      screen.getByRole("button", { name: "in-viewer-create-from-datasets" }),
+      screen.getByRole("button", { name: "in-viewer-open-in-new-workspace" }),
     );
 
     await waitFor(() => {
-      expect(createFromDatasetsMock).toHaveBeenCalledWith(["/data/new.zarr"]);
+      expect(createFromDatasetsMock).toHaveBeenCalledWith(["/data/new.zarr"], "New volume");
       expect(lastAppProps.current?.workspaceId).toBe("ws-fresh");
       expect(lastAppProps.current?.initialDatasetUrls).toEqual([
         "/data/new.zarr",
@@ -320,7 +320,7 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     });
   });
 
-  it("SURFACES an in-viewer create-from-selection failure to the user and keeps the workspace mounted", async () => {
+  it("SURFACES an in-viewer create failure to the user and keeps the workspace mounted", async () => {
     // Start inside an existing workspace.
     window.history.replaceState({}, "", "/w/ws-old");
     openWorkspaceMock.mockResolvedValue(record({ id: "ws-old", name: "Old" }));
@@ -333,7 +333,7 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
 
     await screen.findByTestId("app-mounted");
     fireEvent.click(
-      screen.getByRole("button", { name: "in-viewer-create-from-datasets" }),
+      screen.getByRole("button", { name: "in-viewer-open-in-new-workspace" }),
     );
 
     // The failure is surfaced to the user (not just console.warn'd), mirroring
@@ -354,7 +354,7 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     render(<WorkspaceRoot />);
     await screen.findByTestId("app-mounted");
     fireEvent.click(
-      screen.getByRole("button", { name: "in-viewer-create-from-datasets" }),
+      screen.getByRole("button", { name: "in-viewer-open-in-new-workspace" }),
     );
 
     await screen.findByTestId("workspace-create-error");

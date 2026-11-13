@@ -5,7 +5,6 @@ import {
   CopyIcon,
   DotsThreeIcon,
   FolderIcon,
-  FolderOpenIcon,
   LinkIcon,
   MagnifyingGlassIcon,
   PlusIcon,
@@ -20,29 +19,26 @@ import {
   useEffect,
   useId,
   useMemo,
-  useRef,
   useState,
   type MouseEvent,
 } from "react";
-import { BrowsePane } from "./addData/BrowsePane.tsx";
-import { rememberRecentSource } from "./addData/recentSources.ts";
-import { ADD_DATA_SHORTCUT } from "./addData/shortcut.ts";
-import { SourceField } from "./addData/SourceField.tsx";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { isRemoteDatasetUrl, shortDatasetLocations } from "./datasetLocation.ts";
+import { OPEN_DATA_SHORTCUT, OpenDialog, type OpenChoice } from "./openData/index.ts";
 import { relativeTimeFromIso } from "./relativeTime.ts";
 import { LucidaMark } from "./shell/LucidaMark.tsx";
 import { SettingsMenu } from "./shell/SettingsMenu.tsx";
+import { usePointerCoarse } from "./theme/viewport.ts";
 import { Badge } from "./ui/Badge.tsx";
 import { Button, IconButton } from "./ui/Button.tsx";
 import { useCommand } from "./ui/commands.ts";
-import { Dialog } from "./ui/Dialog.tsx";
+import { Kbd } from "./ui/Kbd.tsx";
 import { KeyboardHelp } from "./ui/KeyboardHelp.tsx";
 import { Menu, MenuItem } from "./ui/Menu.tsx";
 import { SegmentedControl } from "./ui/SegmentedControl.tsx";
 import { SearchField } from "./ui/TextField.tsx";
 import { toast } from "./ui/toastQueue.ts";
-import { initWasmOnce } from "./wasmInit.ts";
+import { UnstyledButton } from "./ui/UnstyledButton.tsx";
 import {
   archiveWorkspace,
   createWorkspace,
@@ -93,32 +89,15 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   const [reloads, setReloads] = useState(0);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // One flag for every create (blank, typed path, browsed files), so a second
-  // create cannot start while the first is in flight.
+  // One flag for every create (blank or around a dataset), so a second create
+  // cannot start while the first is in flight.
   const [creating, setCreating] = useState(false);
   // Cards with a pin, archive, restore, or duplicate in flight.
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [browseOpen, setBrowseOpen] = useState(false);
-  // The path field checks input with the wasm build, which the viewer would
-  // otherwise load only once a workspace opens.
-  const [wasmReady, setWasmReady] = useState(false);
-  const openDataRef = useRef<HTMLDivElement>(null);
+  const [openDataOpen, setOpenDataOpen] = useState(false);
   const headingId = useId();
-
-  useEffect(() => {
-    let cancelled = false;
-    initWasmOnce().then(
-      () => {
-        if (!cancelled) setWasmReady(true);
-      },
-      (e: unknown) => {
-        if (!cancelled) setError(`Couldn't load the path checker: ${messageOf(e)}`);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // A finger has no keyboard to press the shortcut on.
+  const coarse = usePointerCoarse();
 
   useEffect(() => {
     let cancelled = false;
@@ -200,14 +179,12 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   // Only the create step can fail here, and it stays on the dashboard. A failed
   // dataset open surfaces in the viewer and keeps the workspace.
   const handleOpenData = useCallback(
-    async (urls: readonly string[]) => {
-      const cleaned = urls.map((u) => u.trim()).filter((u) => u.length > 0);
-      if (cleaned.length === 0) return;
+    async ({ url, title }: OpenChoice) => {
       setCreating(true);
       setError(null);
       try {
-        const workspace = await createWorkspaceFromDatasets(cleaned);
-        onOpenWorkspace(workspace.id, cleaned);
+        const workspace = await createWorkspaceFromDatasets([url], title ?? undefined);
+        onOpenWorkspace(workspace.id, [url]);
       } catch (e) {
         setError(messageOf(e));
       } finally {
@@ -277,23 +254,6 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
     }
   };
 
-  const focusOpenData = () => openDataRef.current?.querySelector("input")?.focus();
-
-  useCommand({
-    id: "dashboard.openData",
-    label: "Open data…",
-    group: "General",
-    keywords: ["dataset", "path", "url", "add", "new workspace"],
-    keys: [ADD_DATA_SHORTCUT],
-    run: focusOpenData,
-  });
-  useCommand({
-    id: "dashboard.browseFiles",
-    label: "Browse files…",
-    group: "General",
-    keywords: ["open", "dataset", "folder"],
-    run: () => setBrowseOpen(true),
-  });
   useCommand({
     id: "dashboard.newWorkspace",
     label: "New empty workspace",
@@ -342,20 +302,22 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
             Open data
           </h2>
           <p className="lc-dashboard-lede">Each dataset you open starts a new workspace.</p>
-          <div ref={openDataRef} className="lc-dashboard-open-row" data-testid="new-workspace-from-dataset">
-            <SourceField
-              className="lc-dashboard-source"
-              submitLabel={creating ? "Opening…" : "Open"}
-              isDisabled={creating || !wasmReady}
-              onSubmit={(url) => {
-                rememberRecentSource(url);
-                void handleOpenData([url]);
-              }}
-            />
-            <Button icon={FolderOpenIcon} onPress={() => setBrowseOpen(true)} isDisabled={creating}>
-              Browse files…
-            </Button>
-          </div>
+          <UnstyledButton
+            className="lc-dashboard-open-trigger"
+            data-testid="new-workspace-from-dataset"
+            onPress={() => setOpenDataOpen(true)}
+            isDisabled={creating}
+          >
+            <MagnifyingGlassIcon className="lc-dashboard-open-trigger-icon" size={16} aria-hidden />
+            <span className="lc-dashboard-open-trigger-text">
+              {creating ? "Opening…" : "Search datasets, or paste a path or URL"}
+            </span>
+            {!coarse && (
+              <span aria-hidden>
+                <Kbd keys={OPEN_DATA_SHORTCUT} />
+              </span>
+            )}
+          </UnstyledButton>
         </section>
 
         <section className="lc-dashboard-workspaces" aria-labelledby={`${headingId}-workspaces`}>
@@ -407,7 +369,7 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
               kind={query.trim() ? "search" : shelf}
               query={query.trim()}
               onClearSearch={() => setQuery("")}
-              onBrowse={() => setBrowseOpen(true)}
+              onOpenData={() => setOpenDataOpen(true)}
             />
           ) : (
             <>
@@ -437,21 +399,11 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
         </section>
       </main>
 
-      <Dialog title="Browse files" size="lg" isOpen={browseOpen} onOpenChange={setBrowseOpen}>
-        {(close) => (
-          <BrowsePane
-            className="lc-dashboard-browse"
-            onOpen={(path) => {
-              close();
-              void handleOpenData([path]);
-            }}
-            onCreateWorkspace={(paths) => {
-              close();
-              void handleOpenData(paths);
-            }}
-          />
-        )}
-      </Dialog>
+      <OpenDialog
+        isOpen={openDataOpen}
+        onOpenChange={setOpenDataOpen}
+        primary={{ label: "Open in a new workspace", run: (choice) => void handleOpenData(choice) }}
+      />
       <KeyboardHelp />
     </div>
   );
@@ -587,12 +539,12 @@ function EmptyState({
   kind,
   query,
   onClearSearch,
-  onBrowse,
+  onOpenData,
 }: {
   kind: Shelf | "search";
   query: string;
   onClearSearch: () => void;
-  onBrowse: () => void;
+  onOpenData: () => void;
 }) {
   if (kind === "search") {
     return (
@@ -625,8 +577,8 @@ function EmptyState({
         Open a dataset above to start one. A workspace keeps its datasets, saved views, and
         annotations together, and you can share it.
       </p>
-      <Button icon={FolderOpenIcon} onPress={onBrowse}>
-        Browse files…
+      <Button icon={MagnifyingGlassIcon} onPress={onOpenData}>
+        Open data…
       </Button>
     </div>
   );
