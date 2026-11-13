@@ -700,9 +700,9 @@ pub(crate) const SET_USER_LAST_VIEW: &str = r#"
 /// A source in several of them counts once, where it ranks highest.
 ///
 /// A member removed from a workspace keeps their state row, and so does a
-/// workspace no longer shared by link, so the access test is
-/// `LIST_WORKSPACES`' over again. `$3` is the caller's administrator
-/// right, bound as a Rust `bool` as in `LIST_SAVED_VIEWS`.
+/// workspace no longer shared by link, so this repeats the access test in
+/// `LIST_WORKSPACES`. `$3` is the caller's administrator right, bound as a
+/// Rust `bool` as in `LIST_SAVED_VIEWS`.
 ///
 /// `ROW_NUMBER` picks each source's highest row because no aggregate both
 /// engines share keeps the rest of the row it picked.
