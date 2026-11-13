@@ -3,7 +3,8 @@
 //! A [`DatasetSource`] says which datasets exist. [`sources::configured`]
 //! builds every source a server lists from, in one place. The
 //! [`ListingsIndex`] holds what they offer in memory and searches it, and
-//! [`http`] serves that search over HTTP.
+//! [`http`] serves that search over HTTP, beside each caller's recent
+//! datasets.
 
 pub mod http;
 pub mod index;

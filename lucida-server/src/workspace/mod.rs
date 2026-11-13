@@ -27,7 +27,7 @@ pub use manager::{
 };
 pub use store::{PostgresWorkspaceStore, SqliteWorkspaceStore, StoreError, WorkspaceStore};
 pub use types::{
-    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    NewWorkspacePreview, PreviewWrite, RecentDataset, SavedViewVisibility, WorkspaceAdminDetails,
     WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
     WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,

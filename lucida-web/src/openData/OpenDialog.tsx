@@ -8,7 +8,6 @@ import {
   SquaresFourIcon,
   UsersThreeIcon,
   WarningCircleIcon,
-  XIcon,
 } from "@phosphor-icons/react";
 import {
   useEffect,
@@ -29,7 +28,6 @@ import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { useCommand } from "../ui/commands.ts";
 import { isApplePlatform } from "../ui/shortcuts.ts";
 import { ComboboxField } from "../ui/TextField.tsx";
-import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import { FilterChips, type DatePreset } from "./FilterChips.tsx";
 import type { Listing, ListingKind, ListingScope } from "./listingsApi.ts";
 import {
@@ -42,9 +40,9 @@ import {
   type OpenChoice,
   type OpenRow,
 } from "./openRows.ts";
-import { forgetRecentSource, rememberRecentSource, sourceName, useRecentSources } from "./recentSources.ts";
 import { OPEN_DATA_SHORTCUT } from "./shortcut.ts";
 import { useListingSearch } from "./useListingSearch.ts";
+import { useRecentDatasets } from "./useRecentDatasets.ts";
 import { useTypedLocation } from "./useTypedLocation.ts";
 import "./OpenDialog.css";
 
@@ -132,7 +130,7 @@ function OpenDialogBody({
   const within = dateBound?.within ?? null;
   const search = useListingSearch({ q: query, scope, kind, since: dateBound?.since ?? null });
   const location = useTypedLocation(text);
-  const recents = useRecentSources();
+  const recent = useRecentDatasets();
   // Results from an earlier request stay up while the next one is asked, but
   // never open: they don't answer what is asked now.
   const { stale } = search;
@@ -141,13 +139,13 @@ function OpenDialogBody({
     () =>
       buildRows({
         location,
-        recents: query ? [] : recents,
+        recents: query ? [] : recent.recents,
         results: search.results,
         toggled,
         hasMore: search.hasMore,
         outsideScope: search.outsideScope,
       }),
-    [location, query, recents, search.results, search.hasMore, search.outsideScope, toggled],
+    [location, query, recent.recents, search.results, search.hasMore, search.outsideScope, toggled],
   );
   const visible = useMemo(() => visibleRows(rows), [rows]);
   const indexOf = useMemo(() => new Map(visible.map((row, index) => [row, index])), [visible]);
@@ -189,7 +187,6 @@ function OpenDialogBody({
     if (stale && row.type === "listing") return;
     const choice = choiceOf(row);
     if (!choice) return;
-    rememberRecentSource(choice.url);
     (elsewhere && secondary ? secondary : primary).run(choice);
     close();
   };
@@ -245,7 +242,8 @@ function OpenDialogBody({
     stale,
     error: search.error,
     listingCount,
-    hasRecents: !query && recents.length > 0,
+    // Until the recent datasets arrive, the empty field may yet show some.
+    hasRecents: !query && (!recent.answered || recent.recents.length > 0),
     location: location !== null,
     outside: search.outsideScope > 0,
     filtered: kind !== null || within !== null,
@@ -391,8 +389,11 @@ function rowDisabled(row: OpenRow, stale: boolean): boolean {
   return stale && row.type === "listing";
 }
 
-function listingMeta(listing: Listing): string {
-  const parts = [listing.kind === "collection" ? "Collection" : "Image"];
+/** What a listing is; `withGroup` names its group too, for a row outside it. */
+function listingMeta(listing: Listing, withGroup: boolean): string {
+  const parts: string[] = [];
+  if (withGroup && listing.group) parts.push(`${listing.group.noun}: ${listing.group.label}`);
+  parts.push(listing.kind === "collection" ? "Collection" : "Image");
   if (listing.kind === "collection" && listing.tiles !== null) parts.push(plural(listing.tiles, "tile"));
   for (const field of listing.fields) parts.push(`${field.name}: ${field.value}`);
   return parts.join(" · ");
@@ -425,47 +426,22 @@ function rowContent(row: Exclude<OpenRow, GroupRow>, loadingMore: boolean): Reac
         </>
       );
     }
-    case "listing": {
-      const { listing } = row;
-      const Icon = listing.kind === "collection" ? SquaresFourIcon : ImageSquareIcon;
-      return (
-        <>
-          <Icon className="lc-open-icon" size={16} aria-hidden />
-          <span className="lc-open-text">
-            <span className="lc-open-title" title={listing.url}>
-              {listing.title}
-            </span>
-            <span className="lc-open-meta">{listingMeta(listing)}</span>
-          </span>
-          {listing.date && (
-            <time className="lc-open-aside" dateTime={listing.date} title={new Date(listing.date).toLocaleString()}>
-              {relativeTimeFromIso(listing.date)}
-            </time>
-          )}
-        </>
-      );
-    }
+    case "listing":
+      return listingContent(row.listing, false);
     case "recent": {
-      const Icon = isRemoteDatasetUrl(row.url) ? CloudIcon : FolderIcon;
-      const name = sourceName(row.url);
+      const { recent } = row;
+      // Out of its group here, so a listed one says which group it is from.
+      if (recent.listing) return listingContent(recent.listing, true);
+      const Icon = isRemoteDatasetUrl(recent.url) ? CloudIcon : FolderIcon;
       return (
         <>
           <Icon className="lc-open-icon" size={16} aria-hidden />
           <span className="lc-open-text">
-            <span className="lc-open-title">{name}</span>
-            <span className="lc-open-meta lc-open-url" title={row.url}>
-              <span dir="ltr">{row.url}</span>
+            <span className="lc-open-title">{recent.name}</span>
+            <span className="lc-open-meta lc-open-url" title={recent.url}>
+              <span dir="ltr">{recent.url}</span>
             </span>
           </span>
-          {/* A press here stays here: it neither opens the row nor takes focus from the field. */}
-          <UnstyledButton
-            className="lc-open-remove"
-            aria-label={`Remove ${name} from recent`}
-            preventFocusOnPress
-            onPress={() => forgetRecentSource(row.url)}
-          >
-            <XIcon size={12} aria-hidden />
-          </UnstyledButton>
         </>
       );
     }
@@ -484,6 +460,26 @@ function rowContent(row: Exclude<OpenRow, GroupRow>, loadingMore: boolean): Reac
         </>
       );
   }
+}
+
+function listingContent(listing: Listing, withGroup: boolean): ReactNode {
+  const Icon = listing.kind === "collection" ? SquaresFourIcon : ImageSquareIcon;
+  return (
+    <>
+      <Icon className="lc-open-icon" size={16} aria-hidden />
+      <span className="lc-open-text">
+        <span className="lc-open-title" title={listing.url}>
+          {listing.title}
+        </span>
+        <span className="lc-open-meta">{listingMeta(listing, withGroup)}</span>
+      </span>
+      {listing.date && (
+        <time className="lc-open-aside" dateTime={listing.date} title={new Date(listing.date).toLocaleString()}>
+          {relativeTimeFromIso(listing.date)}
+        </time>
+      )}
+    </>
+  );
 }
 
 interface Status {

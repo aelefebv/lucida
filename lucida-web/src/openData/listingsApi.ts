@@ -1,7 +1,8 @@
 /**
- * The listings routes: search the datasets the server's sources offer, and
- * resolve a pasted URL to the listing it names. The server searches and
- * orders; a caller shows what comes back as it comes back.
+ * The listings routes: search the datasets the server's sources offer,
+ * resolve a pasted URL to the listing it names, and list the datasets the
+ * caller opened recently. The server searches and orders; a caller shows
+ * what comes back as it comes back.
  */
 
 export type ListingKind = "image" | "collection";
@@ -54,6 +55,16 @@ export interface ListingsPage {
   outside_scope: number;
 }
 
+/** A dataset in a workspace the caller opened recently. */
+export interface RecentDataset {
+  /** Canonical, ready to open. */
+  url: string;
+  /** The dataset's own name. */
+  name: string;
+  /** What a source offers at `url`, when one does. */
+  listing: Listing | null;
+}
+
 export interface ListingsQuery {
   /** Words that must each appear; empty matches every listing. */
   q: string;
@@ -99,4 +110,10 @@ export async function resolveListing(url: string, signal?: AbortSignal): Promise
     signal,
   );
   return body.listing;
+}
+
+/** The datasets in the workspaces the caller opened most recently, newest first. */
+export async function recentDatasets(signal?: AbortSignal): Promise<RecentDataset[]> {
+  const body = await requestJson<{ recent: RecentDataset[] }>("/api/listings/recent", signal);
+  return body.recent;
 }

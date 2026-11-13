@@ -1,4 +1,4 @@
-import type { Listing, ListingResult } from "./listingsApi.ts";
+import type { Listing, ListingResult, RecentDataset } from "./listingsApi.ts";
 
 /** A dataset someone chose to open. */
 export interface OpenChoice {
@@ -23,7 +23,7 @@ export type OpenRow =
   | ({ type: "location"; key: string } & TypedLocation)
   | GroupRow
   | { type: "listing"; key: string; listing: Listing; parent: string | null }
-  | { type: "recent"; key: string; url: string; parent: string }
+  | { type: "recent"; key: string; recent: RecentDataset; parent: string }
   | { type: "more"; key: string }
   // Offers the matches the scope left out, once the caller's own run out.
   | { type: "everyone"; key: string; count: number; mineAbove: boolean };
@@ -42,7 +42,7 @@ export interface GroupRow {
 
 export interface RowInputs {
   location: TypedLocation | null;
-  recents: readonly string[];
+  recents: readonly RecentDataset[];
   results: readonly ListingResult[];
   /** Groups someone expanded or collapsed, by key, over what the server said. */
   toggled: ReadonlyMap<string, boolean>;
@@ -75,7 +75,12 @@ export function buildRows({ location, recents, results, toggled, hasMore, outsid
       noun: null,
       id: null,
       expanded: toggled.get(RECENT_GROUP_KEY) ?? true,
-      children: recents.map((url) => ({ type: "recent", key: `recent:${url}`, url, parent: RECENT_GROUP_KEY })),
+      children: recents.map((recent) => ({
+        type: "recent",
+        key: `recent:${recent.url}`,
+        recent,
+        parent: RECENT_GROUP_KEY,
+      })),
     });
   }
   for (const result of results) {
@@ -122,7 +127,7 @@ export function choiceOf(row: OpenRow): OpenChoice | null {
     case "listing":
       return { url: row.listing.url, title: row.listing.title };
     case "recent":
-      return { url: row.url, title: null };
+      return { url: row.recent.url, title: row.recent.listing?.title ?? row.recent.name };
     default:
       return null;
   }

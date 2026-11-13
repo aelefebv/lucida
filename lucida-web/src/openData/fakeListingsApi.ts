@@ -1,12 +1,13 @@
-import type { Listing, ListingGroup, ListingResult, ListingsPage } from "./listingsApi.ts";
+import type { Listing, ListingGroup, ListingResult, ListingsPage, RecentDataset } from "./listingsApi.ts";
 
 /**
  * A stand-in for the server's listings routes, for tests. It keeps the
  * contract's shape: every word must appear, a group whose label holds every
- * word comes back whole and collapsed, groups keep the order given, and a
- * page ends after `pageSize` results with a cursor for the next. Kind, date
- * and scope narrow before the words match, and mine answers for everyone
- * unless the caller has an email and some listing has an owner.
+ * word comes back whole and collapsed, groups keep the order given, a page
+ * ends after `pageSize` results with a cursor for the next, and a recent
+ * dataset a listing names comes back with that listing. Kind, date and scope
+ * narrow before the words match, and mine answers for everyone unless the
+ * caller has an email and some listing has an owner.
  */
 export interface FakeListingsApi {
   fetch: typeof globalThis.fetch;
@@ -16,12 +17,6 @@ export interface FakeListingsApi {
   searches: URLSearchParams[];
   /** Answer nothing until released, as a server still on its first refresh would. */
   hold(): () => void;
-}
-
-export interface FakeListingsOptions {
-  pageSize?: number;
-  /** The caller's email, or null for a server whose callers aren't signed in. */
-  me?: string | null;
 }
 
 export function folder(id: string, label = id.split("/").pop() ?? id): ListingGroup {
@@ -37,14 +32,25 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+export interface FakeListingsOptions {
+  pageSize?: number;
+  /** The caller's recent datasets, newest first. */
+  recent?: readonly Omit<RecentDataset, "listing">[];
+  /** The caller's email, or null for a server whose callers aren't signed in. */
+  me?: string | null;
+}
+
 export function fakeListingsApi(
   listings: readonly Listing[],
-  { pageSize = 50, me = "viewer@example.com" }: FakeListingsOptions = {},
+  { pageSize = 50, recent = [], me = "viewer@example.com" }: FakeListingsOptions = {},
 ): FakeListingsApi {
   const queries: string[] = [];
   const searches: URLSearchParams[] = [];
   let held: Promise<void> | null = null;
   const mineAvailable = me !== null && listings.some((item) => item.owner);
+  // The server looks a URL up without its trailing slashes.
+  const lookUp = (url: string | null | undefined): Listing | null =>
+    listings.find((item) => item.url === url?.replace(/\/+$/, "")) ?? null;
 
   const search = (params: URLSearchParams): { results: ListingResult[]; outside: number } => {
     const words = (params.get("q") ?? "").toLowerCase().split(/\s+/).filter(Boolean);
@@ -81,9 +87,10 @@ export function fakeListingsApi(
     const url = new URL(String(input), "http://localhost");
     if (held) await held;
     if (url.pathname === "/api/listings/resolve") {
-      // The server looks a URL up without its trailing slashes.
-      const wanted = url.searchParams.get("url")?.replace(/\/+$/, "");
-      return json({ listing: listings.find((item) => item.url === wanted) ?? null });
+      return json({ listing: lookUp(url.searchParams.get("url")) });
+    }
+    if (url.pathname === "/api/listings/recent") {
+      return json({ recent: recent.map((item): RecentDataset => ({ ...item, listing: lookUp(item.url) })) });
     }
     if (url.pathname === "/api/listings") {
       queries.push(url.searchParams.get("q") ?? "");
