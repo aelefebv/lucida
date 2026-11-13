@@ -80,6 +80,8 @@ docker run --rm -p 127.0.0.1:9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
+To have search list the datasets in a bucket, add its URL to `LUCIDA_DATA_DIR`, with or without a prefix: `LUCIDA_DATA_DIR=/var/lib/lucida/data:gs://bucket/images` holds two data roots, since the colon after `gs` or `s3` separates nothing. With sign-in on, datasets under a bucket root open even when `LUCIDA_SOURCE_ALLOW_BUCKETS` leaves its bucket out.
+
 ## Writing data for lucida
 
 lucida reads OME-Zarr stores (0.5 on Zarr v3, or 0.4 on Zarr v2) lazily, one chunk at a time, so the chunk, shard, and pyramid layout a writer chooses decides how many reads a view costs. The [data layout guide](docs/data-layout.md) recommends a layout and says which viewer behavior each choice serves.

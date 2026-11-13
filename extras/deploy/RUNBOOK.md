@@ -208,7 +208,7 @@ variables.
 | --- | --- | --- |
 | `LUCIDA_BIND` | `127.0.0.1:9876`; the image sets `0.0.0.0:9876` | Listen address |
 | `LUCIDA_DB_URL` | `sqlite://lucida.db` | Storage backend. See step 1. |
-| `LUCIDA_DATA_DIR` | unset: lists from `/` | Directories the file picker is confined to and search lists datasets from, separated by `:` (`;` on Windows). See [Where datasets open from](#where-datasets-open-from). |
+| `LUCIDA_DATA_DIR` | unset: lists from `/` | Data roots search lists datasets from: directories, which also confine the file picker, and `gs://` or `s3://` URLs with an optional prefix. Separated by `:` (`;` on Windows), except the colon of a leading `gs://` or `s3://`. See [Where datasets open from](#where-datasets-open-from). |
 | `LUCIDA_GENERATED_COARSE_CACHE_DIR` | `<user cache dir>/lucida/generated-coarse` | Cache of generated coarse levels |
 | `LUCIDA_LOG_FORMAT` | `text` | `json` for structured logs |
 | `LUCIDA_WEB_DIST` | `./lucida-web/dist`; set in the image | Web UI bundle |
@@ -234,7 +234,8 @@ With `google` or `iap` auth, datasets open only from:
 - `http` and `https` hosts on public addresses, checked when a dataset opens
   and again on every connection and redirect. These reads ignore proxy
   variables.
-- any `gs://` or `s3://` bucket, or only the listed ones.
+- any `gs://` or `s3://` bucket, or only the listed ones and anything
+  under a `LUCIDA_DATA_DIR` bucket URL.
 
 With auth `disabled`, every location opens. A refused open fails with the
 `source_not_allowed` kind.
@@ -242,7 +243,7 @@ With auth `disabled`, every location opens. A refused open fails with the
 | Variable | Default | What it sets |
 | --- | --- | --- |
 | `LUCIDA_SOURCE_ALLOW_HOSTS` | unset | Comma-separated hosts, IP addresses, or CIDR ranges that `http(s)` datasets may reach though they are not public |
-| `LUCIDA_SOURCE_ALLOW_BUCKETS` | unset: any bucket | Comma-separated `gs://bucket` or `s3://bucket` entries, the only buckets datasets open from |
+| `LUCIDA_SOURCE_ALLOW_BUCKETS` | unset: any bucket | Comma-separated `gs://bucket` or `s3://bucket` entries, the only buckets datasets open from outside the data roots |
 
 ### Profile directory
 

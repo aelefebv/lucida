@@ -74,6 +74,10 @@ _Avoid_: empty level
 
 ## Finding datasets
 
+**Data root**:
+A folder on the server's disk, or a bucket with an optional prefix, whose
+datasets the server lists and may always open.
+
 **Dataset source**:
 Where the server learns which datasets exist before anyone opens them,
 configured at startup. lucida ships one, which lists the datasets under the
