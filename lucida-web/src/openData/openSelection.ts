@@ -1,6 +1,6 @@
 import { useViewportClass } from "../theme/viewport.ts";
 import { layoutsFor, mostViews } from "../viewLayout.ts";
-import { listingChoice, type GroupRow, type OpenChoice } from "./openRows.ts";
+import { choiceOf, listingChoice, type GroupRow, type OpenChoice, type OpenRow } from "./openRows.ts";
 
 /**
  * The most datasets that open together on this screen. A new workspace
@@ -9,6 +9,11 @@ import { listingChoice, type GroupRow, type OpenChoice } from "./openRows.ts";
  */
 export function useOpenTogetherLimit(): number {
   return mostViews(layoutsFor(useViewportClass() === "phone"));
+}
+
+/** What ticking `row` ticks: a listing or a recent dataset. Null for a row without a tick box. */
+export function tickChoice(row: OpenRow): OpenChoice | null {
+  return row.type === "listing" || row.type === "recent" ? choiceOf(row) : null;
 }
 
 /**

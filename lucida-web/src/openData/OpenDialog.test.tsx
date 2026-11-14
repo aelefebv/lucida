@@ -634,6 +634,111 @@ describe("OpenDialog ticks", () => {
     await user.click(within(bar(dialog) as HTMLElement).getByRole("button", { name: "Add to this workspace" }));
     expect(add).toHaveBeenCalledExactlyOnceWith([TILES]);
   });
+
+  describe("on recent datasets", () => {
+    const EARLIER = { url: "/data/earlier.zarr", title: "earlier.zarr", group: null };
+    const LOOSE = { url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr", group: null };
+
+    async function withRecents(user: ReturnType<typeof userEvent.setup>) {
+      api = fakeListingsApi(LISTINGS, {
+        recent: [
+          { url: "/data/earlier.zarr", name: "earlier.zarr" },
+          // Opened under a spelling its listing drops.
+          { url: "/srv/data/archive/old-volume.ome.zarr/", name: "old-volume.ome.zarr" },
+        ],
+      });
+      globalThis.fetch = api.fetch;
+      const dialog = await openDialog(user);
+      await waitFor(() => expect(outline(dialog)[0]).toBe("Recent"));
+      await settled(dialog);
+      return dialog;
+    }
+
+    /** Whether each "Old volume" row is ticked: the recent one first, then its listing below. */
+    function oldVolumeTicks(dialog: HTMLElement): (string | null)[] {
+      return within(tree(dialog))
+        .getAllByRole("button", { name: "Tick Old volume" })
+        .map((box) => box.getAttribute("aria-pressed"));
+    }
+
+    it("ticks a recent, listed or not, by Space or a click, as one tick with its listing", async () => {
+      const user = userEvent.setup();
+      const { add } = inWorkspace();
+      const dialog = await withRecents(user);
+
+      await user.keyboard("{ArrowDown}{ArrowDown}");
+      expect(activeRow(dialog).textContent).toContain("Old volume");
+      await user.keyboard(" ");
+      expect(activeRow(dialog).getAttribute("aria-checked")).toBe("true");
+      expect(oldVolumeTicks(dialog)).toEqual(["true", "true"]);
+
+      await user.click(tickBox(dialog, "earlier.zarr"));
+      expect(tickBox(dialog, "earlier.zarr").getAttribute("aria-pressed")).toBe("true");
+      expect(bar(dialog)?.textContent).toContain("2 datasets ticked");
+      expect(add).not.toHaveBeenCalled();
+
+      // Unticking the listing unticks the recent, since they are one dataset.
+      await user.click(within(tree(dialog)).getAllByRole("button", { name: "Tick Old volume" })[1]);
+      expect(oldVolumeTicks(dialog)).toEqual(["false", "false"]);
+      expect(bar(dialog)?.textContent).toContain("1 dataset ticked");
+    });
+
+    it("counts ticked recents and ticked listings against one limit", async () => {
+      const user = userEvent.setup();
+      onDashboard();
+      const dialog = await withRecents(user);
+
+      await user.click(tickBox(dialog, "earlier.zarr"));
+      for (const title of ["volume.ome.zarr", "tiles.ome.zarr", "loose.ome.zarr"]) {
+        await user.click(tickBox(dialog, title));
+      }
+      expect(bar(dialog)?.textContent).toContain("4 datasets ticked");
+
+      await user.click(within(tree(dialog)).getAllByRole("button", { name: "Tick Old volume" })[0]);
+      expect(oldVolumeTicks(dialog)).toEqual(["false", "false"]);
+      expect(within(dialog).getByRole("alert").textContent).toBe("4 at most: no view layout holds more");
+
+      await user.click(tickBox(dialog, "earlier.zarr"));
+      await user.click(within(tree(dialog)).getAllByRole("button", { name: "Tick Old volume" })[0]);
+      expect(oldVolumeTicks(dialog)).toEqual(["true", "true"]);
+      expect(bar(dialog)?.textContent).toContain("4 datasets ticked");
+    });
+
+    it("keeps ticked recents through a search, and opens them with the listings ticked there", async () => {
+      const user = userEvent.setup();
+      const { add, elsewhere } = inWorkspace();
+      const dialog = await withRecents(user);
+      const field = within(dialog).getByRole("combobox");
+
+      await user.click(tickBox(dialog, "earlier.zarr"));
+      await user.click(within(tree(dialog)).getAllByRole("button", { name: "Tick Old volume" })[0]);
+
+      // A search finds the ticked recent already ticked.
+      await user.keyboard("old");
+      await waitFor(() => expect(api.queries.at(-1)).toBe("old"));
+      await settled(dialog);
+      expect(outline(dialog)).toEqual(["archive", "  Old volume"]);
+      expect(oldVolumeTicks(dialog)).toEqual(["true"]);
+
+      await user.clear(field);
+      await user.keyboard("loose");
+      await waitFor(() => expect(api.queries.at(-1)).toBe("loose"));
+      await settled(dialog);
+      await user.click(tickBox(dialog, "loose.ome.zarr"));
+      expect(bar(dialog)?.textContent).toContain("3 datasets ticked");
+
+      await user.clear(field);
+      await waitFor(() => expect(api.queries.at(-1)).toBe(""));
+      await settled(dialog);
+      expect(outline(dialog).slice(0, 3)).toEqual(["Recent", "  earlier.zarr", "  Old volume"]);
+      expect(tickBox(dialog, "earlier.zarr").getAttribute("aria-pressed")).toBe("true");
+      expect(oldVolumeTicks(dialog)).toEqual(["true", "true"]);
+
+      await user.keyboard("{Enter}");
+      expect(add).toHaveBeenCalledExactlyOnceWith([EARLIER, OLD, LOOSE]);
+      expect(elsewhere).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("OpenDialog scope and filters", () => {
