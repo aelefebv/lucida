@@ -85,7 +85,11 @@ impl Rig {
         ));
         index.refresh().await;
         let app: Router = lucida_server::workspace::router(Arc::clone(&workspaces))
-            .merge(listings::router(index, workspaces))
+            .merge(listings::router(
+                index,
+                workspaces,
+                AuthMode::Google.signs_people_in(),
+            ))
             .layer(axum::middleware::from_fn_with_state(
                 bearer_extractor().await,
                 lucida_server::auth::middleware::auth_middleware,

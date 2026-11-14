@@ -26,6 +26,8 @@ export interface SegmentedControlProps<V extends string> {
   /** Default `md`. */
   size?: "md" | "sm";
   isDisabled?: boolean;
+  /** Leave focus where it is when an option is pressed, as beside a field that keeps it. Tab still reaches the control. */
+  preventFocusOnPress?: boolean;
   className?: string;
 }
 
@@ -39,6 +41,7 @@ export function SegmentedControl<V extends string>({
   iconOnly,
   size = "md",
   isDisabled,
+  preventFocusOnPress,
   className,
 }: SegmentedControlProps<V>) {
   const labelId = useId();
@@ -69,6 +72,7 @@ export function SegmentedControl<V extends string>({
             className="lc-segment"
             data-icon-only={iconOnly || undefined}
             aria-label={iconOnly ? option.label : undefined}
+            preventFocusOnPress={preventFocusOnPress}
           >
             <SelectionIndicator className="lc-segment-indicator" />
             {OptionIcon && <OptionIcon className="lc-segment-icon" size={16} aria-hidden />}

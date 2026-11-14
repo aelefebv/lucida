@@ -20,7 +20,7 @@ use lucida_store::source_policy::SourcePolicy;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
-use super::{DatasetSource, Listing, ListingGroup};
+use super::{DatasetSource, Listing, ListingGroup, ListingKind};
 
 /// Listings a page of results holds before it ends, unless its first
 /// group alone holds more. A group is never split across pages, so a
@@ -51,6 +51,21 @@ pub struct ListingsIndex {
     snapshot: RwLock<Arc<Snapshot>>,
 }
 
+/// What a search asks for: the words every listing must hold, and what
+/// narrows the listings that hold them.
+#[derive(Debug, Clone, Default)]
+pub struct SearchQuery {
+    /// Whitespace-separated words that must each appear, ignoring case.
+    pub words: String,
+    pub kind: Option<ListingKind>,
+    /// The earliest date a listing may have. An undated listing never passes.
+    pub since: Option<DateTime<Utc>>,
+    /// Keep only the listings this email owns, ignoring case. While no
+    /// listing has an owner it narrows nothing, because it would hide every
+    /// listing and tell none apart.
+    pub owner: Option<String>,
+}
+
 /// One page of search results.
 #[derive(Debug)]
 pub struct SearchPage {
@@ -58,6 +73,12 @@ pub struct SearchPage {
     pub results: Vec<ResultGroup>,
     /// Where the next page starts, when there is one.
     pub next: Option<Cursor>,
+    /// Whether any listing the index holds has an owner, which is when an
+    /// owner narrows a search.
+    pub owned: bool,
+    /// Listings that matched everything but the owner, over all pages
+    /// rather than this one.
+    pub outside_scope: usize,
 }
 
 /// One group's matching listings, or one listing that has no group.
@@ -66,7 +87,8 @@ pub struct ResultGroup {
     pub group: Option<ListingGroup>,
     /// What the group's source calls a group.
     pub noun: Arc<str>,
-    /// The group's label matched, so every listing in it came back.
+    /// The group's label matched, so every listing in it that passes the
+    /// kind, date and owner came back.
     pub collapsed: bool,
     /// How many listings the group holds, matched or not.
     pub size: usize,
@@ -167,20 +189,20 @@ impl ListingsIndex {
         })
     }
 
-    /// The listings matching every word of `query`, grouped, starting after
-    /// `cursor`.
-    pub fn search(&self, query: &str, cursor: Option<&Cursor>) -> SearchPage {
-        let words: Vec<String> = query
-            .to_lowercase()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+    /// The listings matching `query`, grouped, starting after `cursor`.
+    pub fn search(&self, query: &SearchQuery, cursor: Option<&Cursor>) -> SearchPage {
         let snapshot = self.snapshot();
+        let filter = Filter::new(query, snapshot.owned);
+        let mut outside_scope = 0;
         let mut matches: Vec<Match> = snapshot
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(at, entry)| entry.matching(at, &words))
+            .filter_map(|(at, entry)| {
+                let (found, outside) = entry.matching(at, &filter);
+                outside_scope += outside;
+                found
+            })
             .collect();
         matches.sort_by(|a, b| a.key.cmp(&b.key));
         let start = cursor.map_or(0, |cursor| matches.partition_point(|m| m.key <= cursor.0));
@@ -195,7 +217,12 @@ impl ListingsIndex {
         }
         let end = start + results.len();
         let next = (end < matches.len()).then(|| Cursor(matches[end - 1].key.clone()));
-        SearchPage { results, next }
+        SearchPage {
+            results,
+            next,
+            owned: snapshot.owned,
+            outside_scope,
+        }
     }
 
     /// The listing at `url`, in any spelling of it, if a source offers one.
@@ -277,6 +304,8 @@ struct Snapshot {
     /// Each source's group noun, by source.
     nouns: Vec<Arc<str>>,
     listings: usize,
+    /// Whether any listing has an owner.
+    owned: bool,
 }
 
 impl Snapshot {
@@ -322,8 +351,13 @@ impl Snapshot {
                     .map(move |(i, indexed)| (indexed.listing.url.clone(), (at, i)))
             })
             .collect();
+        let owned = entries
+            .iter()
+            .flat_map(|entry| &entry.listings)
+            .any(|indexed| indexed.owner.is_some());
         Self {
             listings: by_url.len(),
+            owned,
             entries,
             by_url,
             nouns: sources
@@ -382,20 +416,32 @@ impl Entry {
         }
     }
 
-    /// What of this entry matches `words`: the whole group when its label
-    /// holds every word, else each listing that does.
-    fn matching(&self, at: usize, words: &[String]) -> Option<Match> {
-        let holds_all = |text: &str| words.iter().all(|word| text.contains(word.as_str()));
-        let collapsed = !words.is_empty() && self.label.as_deref().is_some_and(holds_all);
-        let listings: Vec<usize> = if collapsed {
-            (0..self.listings.len()).collect()
-        } else {
-            (0..self.listings.len())
-                .filter(|&i| holds_all(&self.listings[i].text))
-                .collect()
+    /// What of this entry matches `filter`: of the listings it admits, the
+    /// whole group when its label holds every word, else each listing that
+    /// does. Also how many matched but belong to someone else.
+    fn matching(&self, at: usize, filter: &Filter) -> (Option<Match>, usize) {
+        let collapsed = !filter.words.is_empty()
+            && self
+                .label
+                .as_deref()
+                .is_some_and(|label| filter.holds_all(label));
+        let mut listings = Vec::new();
+        let mut outside = 0;
+        for (i, indexed) in self.listings.iter().enumerate() {
+            if !filter.admits(&indexed.listing) || !(collapsed || filter.holds_all(&indexed.text)) {
+                continue;
+            }
+            if filter.in_scope(indexed) {
+                listings.push(i);
+            } else {
+                outside += 1;
+            }
+        }
+        let Some(&first) = listings.first() else {
+            return (None, outside);
         };
-        let newest = &self.listings[*listings.first()?].listing;
-        Some(Match {
+        let newest = &self.listings[first].listing;
+        let found = Match {
             entry: at,
             collapsed,
             key: SortKey {
@@ -409,7 +455,8 @@ impl Entry {
                 id: self.id.clone(),
             },
             listings,
-        })
+        };
+        (Some(found), outside)
     }
 }
 
@@ -417,6 +464,8 @@ struct Indexed {
     listing: Listing,
     /// Everything a search word may match, lowercased.
     text: String,
+    /// The owner's email as [`owner_key`] compares it.
+    owner: Option<String>,
 }
 
 impl Indexed {
@@ -430,7 +479,63 @@ impl Indexed {
         // Joined by a line break, which no search word holds, so a word
         // never matches across two parts.
         let text = parts.join("\n").to_lowercase();
-        Self { listing, text }
+        let owner = listing.owner.as_deref().and_then(owner_key);
+        Self {
+            listing,
+            text,
+            owner,
+        }
+    }
+}
+
+/// An email as owners are compared: trimmed and lowercased, because a
+/// source may spell an address in any case and the principal's is
+/// lowercase. `None` for a blank one, which names nobody.
+fn owner_key(email: &str) -> Option<String> {
+    let email = email.trim();
+    (!email.is_empty()).then(|| email.to_lowercase())
+}
+
+/// A [`SearchQuery`], ready to test listings against.
+struct Filter {
+    /// Lowercased.
+    words: Vec<String>,
+    kind: Option<ListingKind>,
+    since: Option<DateTime<Utc>>,
+    /// As [`owner_key`] compares it; `None` when the search keeps every
+    /// owner's listings.
+    owner: Option<String>,
+}
+
+impl Filter {
+    fn new(query: &SearchQuery, owned: bool) -> Self {
+        Self {
+            words: query
+                .words
+                .to_lowercase()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            kind: query.kind,
+            since: query.since,
+            owner: query.owner.as_deref().filter(|_| owned).and_then(owner_key),
+        }
+    }
+
+    fn holds_all(&self, text: &str) -> bool {
+        self.words.iter().all(|word| text.contains(word.as_str()))
+    }
+
+    /// Whether the kind and date let `listing` through.
+    fn admits(&self, listing: &Listing) -> bool {
+        self.kind.is_none_or(|kind| listing.kind == kind)
+            && self
+                .since
+                .is_none_or(|since| listing.date.is_some_and(|date| date >= since))
+    }
+
+    fn in_scope(&self, indexed: &Indexed) -> bool {
+        self.owner.is_none() || indexed.owner == self.owner
     }
 }
 

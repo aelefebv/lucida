@@ -6,6 +6,7 @@ import {
   FolderIcon,
   ImageSquareIcon,
   SquaresFourIcon,
+  UsersThreeIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import {
@@ -25,11 +26,13 @@ import { Button } from "../ui/Button.tsx";
 import { CheckBox } from "../ui/Checkbox.tsx";
 import { Dialog } from "../ui/Dialog.tsx";
 import { Kbd } from "../ui/Kbd.tsx";
+import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { useCommand } from "../ui/commands.ts";
 import { isApplePlatform } from "../ui/shortcuts.ts";
 import { ComboboxField } from "../ui/TextField.tsx";
 import { UnstyledButton } from "../ui/UnstyledButton.tsx";
-import type { Listing } from "./listingsApi.ts";
+import { FilterChips, type DatePreset } from "./FilterChips.tsx";
+import type { Listing, ListingKind, ListingScope } from "./listingsApi.ts";
 import {
   buildRows,
   choiceOf,
@@ -66,6 +69,13 @@ export interface OpenDialogProps {
 }
 
 const PLACEHOLDER = "Search datasets, or paste a path or URL";
+
+const SCOPES = [
+  { value: "mine", label: "Mine" },
+  { value: "everyone", label: "Everyone" },
+] as const;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The one way to open data: a field that searches every dataset the server's
@@ -114,6 +124,12 @@ function OpenDialogBody({
   // Arrowing into the list hands Left and Right to it; typing takes them back.
   const [navigating, setNavigating] = useState(false);
   const [toggled, setToggled] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  // Starts on the caller's own datasets; the server answers for everyone's
+  // until it can tell them apart.
+  const [scope, setScope] = useState<ListingScope>("mine");
+  const [kind, setKind] = useState<ListingKind | null>(null);
+  // The bound is fixed when its chip is chosen, so every page of one search asks the same one.
+  const [dateBound, setDateBound] = useState<{ within: DatePreset; since: string } | null>(null);
   // Kept while the text changes, so datasets found by different searches open together.
   const [ticked, setTicked] = useState<readonly OpenChoice[]>([]);
   const [refused, setRefused] = useState(false);
@@ -121,12 +137,13 @@ function OpenDialogBody({
   const coarse = usePointerCoarse();
 
   const query = text.trim();
-  const search = useListingSearch(query);
+  const within = dateBound?.within ?? null;
+  const search = useListingSearch({ q: query, scope, kind, since: dateBound?.since ?? null });
   const location = useTypedLocation(text);
   const recent = useRecentDatasets();
-  // Results from an earlier query stay up while the next one is asked, but
-  // never open: they don't answer what is typed.
-  const stale = search.answered !== query;
+  // Results from an earlier request stay up while the next one is asked, but
+  // never open: they don't answer what is asked now.
+  const { stale } = search;
 
   const rows = useMemo(
     () =>
@@ -136,8 +153,9 @@ function OpenDialogBody({
         results: search.results,
         toggled,
         hasMore: search.hasMore,
+        outsideScope: search.outsideScope,
       }),
-    [location, query, recent.recents, search.results, search.hasMore, toggled],
+    [location, query, recent.recents, search.results, search.hasMore, search.outsideScope, toggled],
   );
   const visible = useMemo(() => visibleRows(rows), [rows]);
   const indexOf = useMemo(() => new Map(visible.map((row, index) => [row, index])), [visible]);
@@ -152,6 +170,16 @@ function OpenDialogBody({
 
   const toggle = (group: GroupRow, expanded: boolean) =>
     setToggled((map) => new Map(map).set(group.key, expanded));
+
+  // A new request lists new rows, so nothing chosen among the old ones carries over.
+  const restartWith = <T,>(set: (value: T) => void, value: T) => {
+    set(value);
+    setActiveKey(null);
+    setNavigating(false);
+    setToggled(new Map());
+  };
+  const setWithin = (days: DatePreset | null) =>
+    setDateBound(days && { within: days, since: new Date(Date.now() - days * DAY_MS).toISOString() });
 
   const isTicked = (listing: Listing) => ticked.some((choice) => choice.url === listing.url);
 
@@ -177,6 +205,10 @@ function OpenDialogBody({
     }
     if (row.type === "more") {
       search.loadMore();
+      return;
+    }
+    if (row.type === "everyone") {
+      restartWith(setScope, "everyone");
       return;
     }
     if (stale && row.type === "listing") return;
@@ -246,6 +278,8 @@ function OpenDialogBody({
     // Until the recent datasets arrive, the empty field may yet show some.
     hasRecents: !query && (!recent.answered || recent.recents.length > 0),
     location: location !== null,
+    outside: search.outsideScope > 0,
+    filtered: kind !== null || within !== null,
   });
 
   const renderRow = (row: OpenRow, level: number, position: number, siblings: number): ReactNode => {
@@ -341,21 +375,34 @@ function OpenDialogBody({
 
   return (
     <div className="lc-open-data">
-      <ComboboxField
-        className="lc-open-field"
-        label={PLACEHOLDER}
-        value={text}
-        onChange={(next) => {
-          setText(next);
-          setActiveKey(null);
-          setNavigating(false);
-          setToggled(new Map());
-        }}
-        onKeyDown={onKeyDown}
-        controls={`${baseId}-tree`}
-        activeDescendant={activeId}
-        autoFocus
-      />
+      <div className="lc-open-controls" data-scoped={search.mineAvailable || undefined}>
+        <ComboboxField
+          className="lc-open-field"
+          label={PLACEHOLDER}
+          value={text}
+          onChange={(next) => restartWith(setText, next)}
+          onKeyDown={onKeyDown}
+          controls={`${baseId}-tree`}
+          activeDescendant={activeId}
+          autoFocus
+        />
+        {search.mineAvailable && (
+          <SegmentedControl
+            label="Whose datasets"
+            options={SCOPES}
+            value={scope}
+            onChange={(next) => restartWith(setScope, next)}
+            preventFocusOnPress
+            className="lc-open-scope"
+          />
+        )}
+        <FilterChips
+          kind={kind}
+          onKindChange={(next) => restartWith(setKind, next)}
+          within={within}
+          onWithinChange={(next) => restartWith(setWithin, next)}
+        />
+      </div>
       <ul
         id={`${baseId}-tree`}
         className="lc-open-list"
@@ -377,7 +424,7 @@ function OpenDialogBody({
         </div>
       )}
       <p className="lc-open-announce" role="status">
-        {stale ? "" : status ? status.title : plural(listingCount, "dataset")}
+        {stale ? "" : status ? status.title : announce(listingCount, search.outsideScope)}
       </p>
       {ticked.length > 0 && (
         <div className="lc-open-selection" role="group" aria-label="Ticked datasets">
@@ -434,6 +481,11 @@ function OpenDialogBody({
       )}
     </div>
   );
+}
+
+function announce(listingCount: number, outsideScope: number): string {
+  const listed = plural(listingCount, "dataset");
+  return outsideScope > 0 ? `${listed}, ${formatCount(outsideScope)} more in everyone's` : listed;
 }
 
 function rowDisabled(row: OpenRow, stale: boolean): boolean {
@@ -499,6 +551,18 @@ function rowContent(row: Exclude<OpenRow, GroupRow>, loadingMore: boolean): Reac
     }
     case "more":
       return <span className="lc-open-title lc-open-more">{loadingMore ? "Loading more…" : "Show more"}</span>;
+    case "everyone":
+      return (
+        <>
+          <UsersThreeIcon className="lc-open-icon" size={16} aria-hidden />
+          <span className="lc-open-text">
+            <span className="lc-open-title lc-open-more">
+              {formatCount(row.count)} {row.mineAbove ? "more " : ""}in everyone's
+            </span>
+            {!row.mineAbove && <span className="lc-open-meta">None of the matches are yours</span>}
+          </span>
+        </>
+      );
   }
 }
 
@@ -536,6 +600,8 @@ function describeStatus({
   listingCount,
   hasRecents,
   location,
+  outside,
+  filtered,
 }: {
   query: string;
   stale: boolean;
@@ -543,10 +609,20 @@ function describeStatus({
   listingCount: number;
   hasRecents: boolean;
   location: boolean;
+  /** Some matches are someone else's, and a row offers them. */
+  outside: boolean;
+  /** A kind or date chip is on. */
+  filtered: boolean;
 }): Status | null {
   if (stale) return null;
   if (error) return { title: "Couldn't search the datasets", text: error, tone: "danger" };
-  if (listingCount > 0 || location) return null;
+  if (listingCount > 0 || location || outside) return null;
+  if (filtered) {
+    return {
+      title: query ? `No datasets of that kind or date match “${query}”` : "No datasets of that kind or date",
+      text: "Turn a filter off to see more.",
+    };
+  }
   if (query) {
     return {
       title: `No datasets match “${query}”`,

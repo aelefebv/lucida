@@ -17,7 +17,7 @@ use lucida_server::GeneratedConfig;
 use lucida_server::auth::{
     AuthConfig, AuthMode, BearerToken, BearerTokenStore, DualCredentialExtractor,
     LoginSessionStore, MemoryBearerTokenStore, MemorySessionStore, PrincipalExtractor,
-    hash_bearer_token,
+    StubPrincipalExtractor, hash_bearer_token,
 };
 use lucida_server::listings::{
     self, DatasetSource, Listing, ListingField, ListingGroup, ListingKind, ListingsIndex,
@@ -91,8 +91,17 @@ impl Drop for Rig {
 }
 
 impl Rig {
-    /// A server over `sources`, refreshed once.
+    /// A server over `sources`, refreshed once, whose callers sign in.
     async fn start(sources: Vec<Arc<dyn DatasetSource>>, policy: SourcePolicy) -> Self {
+        Self::start_in(AuthMode::Google, sources, policy).await
+    }
+
+    /// A server over `sources`, refreshed once, in auth `mode`.
+    async fn start_in(
+        mode: AuthMode,
+        sources: Vec<Arc<dyn DatasetSource>>,
+        policy: SourcePolicy,
+    ) -> Self {
         let index = Arc::new(ListingsIndex::new(sources, Arc::new(policy)));
         index.refresh().await;
         let storage = storage::open(&DatabaseUrl::in_memory()).await.unwrap();
@@ -100,12 +109,11 @@ impl Rig {
             storage.workspaces(),
             GeneratedConfig::defaults(),
         ));
-        let app: Router = listings::router(Arc::clone(&index), workspaces).layer(
-            axum::middleware::from_fn_with_state(
-                bearer_extractor().await,
+        let app: Router = listings::router(Arc::clone(&index), workspaces, mode.signs_people_in())
+            .layer(axum::middleware::from_fn_with_state(
+                extractor(mode).await,
                 lucida_server::auth::middleware::auth_middleware,
-            ),
-        );
+            ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -145,13 +153,27 @@ impl Rig {
         self.ok("/api/listings", &[("q", q)]).await
     }
 
+    async fn search_with(&self, query: &[(&str, &str)]) -> Value {
+        self.ok("/api/listings", query).await
+    }
+
     async fn resolve(&self, url: &str) -> Value {
         self.ok("/api/listings/resolve", &[("url", url)]).await["listing"].clone()
     }
 }
 
-/// The principal extractor the real server runs, holding one token.
-async fn bearer_extractor() -> Arc<dyn PrincipalExtractor> {
+/// The principal extractor the real server runs in `mode`. Signed in, it
+/// holds one token for `viewer@example.com`; with auth disabled every
+/// caller is the local dev principal.
+async fn extractor(mode: AuthMode) -> Arc<dyn PrincipalExtractor> {
+    let mut config = AuthConfig::for_tests();
+    config.mode = mode;
+    if mode == AuthMode::Disabled {
+        return Arc::new(StubPrincipalExtractor::new(
+            Arc::new(config),
+            Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
+        ));
+    }
     let now = Utc::now();
     let tokens = Arc::new(MemoryBearerTokenStore::new());
     tokens
@@ -169,8 +191,6 @@ async fn bearer_extractor() -> Arc<dyn PrincipalExtractor> {
         })
         .await
         .unwrap();
-    let mut config = AuthConfig::for_tests();
-    config.mode = AuthMode::Google;
     Arc::new(DualCredentialExtractor::new(
         Arc::new(config),
         Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
@@ -506,6 +526,236 @@ async fn a_request_without_a_principal_is_refused() {
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
+fn owned_by(listing: Listing, owner: &str) -> Listing {
+    Listing {
+        owner: Some(owner.to_string()),
+        ..listing
+    }
+}
+
+fn collection(listing: Listing) -> Listing {
+    Listing {
+        kind: ListingKind::Collection,
+        ..listing
+    }
+}
+
+#[tokio::test]
+async fn mine_keeps_the_listings_the_caller_owns_whatever_their_case() {
+    let rig = Rig::with(FakeSource::new(vec![
+        owned_by(
+            listing("/data/a/upper.zarr", "upper", Some("a"), 4),
+            "Viewer@Example.COM",
+        ),
+        owned_by(
+            listing("/data/a/padded.zarr", "padded", Some("a"), 3),
+            " viewer@example.com ",
+        ),
+        owned_by(
+            listing("/data/b/theirs.zarr", "theirs", Some("b"), 2),
+            "Someone@Example.com",
+        ),
+        listing("/data/b/nobody.zarr", "nobody", Some("b"), 1),
+    ]))
+    .await;
+
+    let mine = rig.search_with(&[("scope", "mine")]).await;
+    assert_eq!(shape(&mine), owned(&[("a", &["upper", "padded"])]));
+    assert_eq!(mine["scope"], "mine");
+    assert_eq!(mine["mine_available"], true);
+    assert_eq!(mine["outside_scope"], 2);
+
+    for query in [&[("scope", "everyone")][..], &[]] {
+        let everyone = rig.search_with(query).await;
+        assert_eq!(titles(&everyone), ["upper", "padded", "theirs", "nobody"]);
+        assert_eq!(everyone["scope"], "everyone");
+        assert_eq!(everyone["mine_available"], true);
+        assert_eq!(everyone["outside_scope"], 0);
+    }
+
+    // The count holds only what the words matched.
+    let theirs = rig.search_with(&[("q", "theirs"), ("scope", "mine")]).await;
+    assert!(titles(&theirs).is_empty());
+    assert_eq!(theirs["outside_scope"], 1);
+}
+
+#[tokio::test]
+async fn a_collapsed_group_under_mine_holds_only_the_callers_listings() {
+    let rig = Rig::with(FakeSource::new(vec![
+        owned_by(
+            listing("/data/night/a.zarr", "a", Some("Night runs"), 1),
+            "viewer@example.com",
+        ),
+        owned_by(
+            listing("/data/night/b.zarr", "b", Some("Night runs"), 2),
+            "someone@example.com",
+        ),
+    ]))
+    .await;
+
+    let page = rig.search_with(&[("q", "night"), ("scope", "mine")]).await;
+    assert_eq!(shape(&page), owned(&[("Night runs", &["a"])]));
+    assert_eq!(page["results"][0]["collapsed"], true);
+    assert_eq!(page["outside_scope"], 1);
+}
+
+#[tokio::test]
+async fn kind_and_date_narrow_alongside_the_words_and_the_scope() {
+    let me = "VIEWER@example.com";
+    let undated = Listing {
+        date: None,
+        ..owned_by(
+            collection(listing("/data/undated.zarr", "run undated", None, 0)),
+            me,
+        )
+    };
+    let rig = Rig::with(FakeSource::new(vec![
+        owned_by(
+            collection(listing("/data/new-grid.zarr", "run new grid", None, 9)),
+            me,
+        ),
+        owned_by(
+            collection(listing("/data/old-grid.zarr", "run old grid", None, 2)),
+            me,
+        ),
+        owned_by(
+            listing("/data/new-image.zarr", "run new image", None, 8),
+            me,
+        ),
+        owned_by(
+            collection(listing("/data/their-grid.zarr", "run their grid", None, 7)),
+            "other@example.com",
+        ),
+        owned_by(
+            collection(listing("/data/walk-grid.zarr", "walk grid", None, 6)),
+            me,
+        ),
+        undated,
+    ]))
+    .await;
+    let since = day(5).to_rfc3339();
+
+    let narrowed = [
+        ("q", "run"),
+        ("kind", "collection"),
+        ("since", since.as_str()),
+    ];
+    let mine = rig
+        .search_with(&[&narrowed[..], &[("scope", "mine")]].concat())
+        .await;
+    assert_eq!(titles(&mine), ["run new grid"]);
+    assert_eq!(mine["outside_scope"], 1);
+    assert_eq!(
+        titles(&rig.search_with(&narrowed).await),
+        ["run new grid", "run their grid"]
+    );
+
+    assert_eq!(
+        titles(&rig.search_with(&[("kind", "image")]).await),
+        ["run new image"]
+    );
+    // The bound keeps a listing dated exactly at it, and never an undated one.
+    assert_eq!(
+        titles(
+            &rig.search_with(&[("since", day(8).to_rfc3339().as_str())])
+                .await
+        ),
+        ["run new grid", "run new image"]
+    );
+}
+
+#[tokio::test]
+async fn the_outside_scope_count_is_the_same_on_every_page() {
+    // Five groups of 50 of the caller's listings fill two pages.
+    let mut offered: Vec<Listing> = (0..250)
+        .map(|i| {
+            let label = format!("g{}", i / 50);
+            owned_by(
+                listing(
+                    &format!("/data/{label}/{i}.zarr"),
+                    "x",
+                    Some(&label),
+                    100 - i / 50,
+                ),
+                "viewer@example.com",
+            )
+        })
+        .collect();
+    offered.extend((0..3).map(|i| {
+        owned_by(
+            listing(&format!("/data/theirs/{i}.zarr"), "x", Some("theirs"), 1),
+            "someone@example.com",
+        )
+    }));
+    let rig = Rig::with(FakeSource::new(offered)).await;
+
+    let first = rig.search_with(&[("scope", "mine")]).await;
+    assert_eq!(shape(&first).len(), 4);
+    assert_eq!(first["outside_scope"], 3);
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let second = rig
+        .search_with(&[("scope", "mine"), ("cursor", cursor)])
+        .await;
+    assert_eq!(shape(&second).len(), 1);
+    assert_eq!(second["next_cursor"], Value::Null);
+    assert_eq!(second["outside_scope"], 3);
+}
+
+#[tokio::test]
+async fn with_no_owner_anywhere_mine_answers_for_everyone() {
+    let rig = Rig::with(FakeSource::new(vec![
+        listing("/data/a.zarr", "a", None, 1),
+        listing("/data/b.zarr", "b", None, 2),
+    ]))
+    .await;
+
+    let page = rig.search_with(&[("scope", "mine")]).await;
+    assert_eq!(titles(&page), ["b", "a"]);
+    assert_eq!(page["scope"], "everyone");
+    assert_eq!(page["mine_available"], false);
+    assert_eq!(page["outside_scope"], 0);
+}
+
+#[tokio::test]
+async fn with_auth_disabled_mine_answers_for_everyone() {
+    // The local dev principal stands in for whoever reaches the server, so
+    // even a listing owned by its email is not its own.
+    let rig = Rig::start_in(
+        AuthMode::Disabled,
+        vec![FakeSource::new(vec![
+            owned_by(listing("/data/a.zarr", "a", None, 1), "DEV@local"),
+            owned_by(listing("/data/b.zarr", "b", None, 2), "someone@example.com"),
+        ])],
+        SourcePolicy::unrestricted(),
+    )
+    .await;
+
+    let page = rig.search_with(&[("scope", "mine")]).await;
+    assert_eq!(titles(&page), ["b", "a"]);
+    assert_eq!(page["scope"], "everyone");
+    assert_eq!(page["mine_available"], false);
+    assert_eq!(page["outside_scope"], 0);
+}
+
+#[tokio::test]
+async fn a_scope_kind_or_date_the_server_does_not_know_is_refused() {
+    let rig = Rig::with(FakeSource::new(Vec::new())).await;
+    for query in [
+        ("scope", "theirs"),
+        ("kind", "folder"),
+        ("since", "last week"),
+    ] {
+        let response = rig.get("/api/listings", &[query]).await;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{query:?}"
+        );
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["error"], "bad_request", "{query:?}");
+    }
+}
+
 /// The source a server builds from its configuration, over the data roots
 /// `policy` holds.
 async fn configured_rig(policy: SourcePolicy) -> Rig {
@@ -531,7 +781,13 @@ async fn with_no_data_roots_search_returns_nothing() {
         assert_eq!(rig.index.source_count(), 0);
         assert_eq!(
             rig.search("").await,
-            json!({"results": [], "next_cursor": null})
+            json!({
+                "results": [],
+                "next_cursor": null,
+                "scope": "everyone",
+                "mine_available": false,
+                "outside_scope": 0,
+            })
         );
     }
 }

@@ -7,6 +7,9 @@
 
 export type ListingKind = "image" | "collection";
 
+/** Whose listings a search keeps: the caller's own, or everyone's. */
+export type ListingScope = "mine" | "everyone";
+
 export interface ListingGroup {
   id: string;
   label: string;
@@ -46,6 +49,12 @@ export interface ListingsPage {
   results: ListingResult[];
   /** Send back with the same query for the next page; null on the last. */
   next_cursor: string | null;
+  /** Whose listings `results` hold: everyone's when mine isn't available. */
+  scope: ListingScope;
+  /** Whether mine narrows anything: the caller signed in as a person, and some listing has an owner. */
+  mine_available: boolean;
+  /** Listings that matched but the scope left out, over all pages. */
+  outside_scope: number;
 }
 
 /** A dataset in a workspace the caller opened recently. */
@@ -61,6 +70,11 @@ export interface RecentDataset {
 export interface ListingsQuery {
   /** Words that must each appear; empty matches every listing. */
   q: string;
+  /** Everyone's when absent. */
+  scope?: ListingScope;
+  kind?: ListingKind | null;
+  /** ISO-8601: only listings dated at or after it. An undated listing never passes. */
+  since?: string | null;
   cursor?: string | null;
 }
 
@@ -77,9 +91,15 @@ async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   throw new Error(detail);
 }
 
-export function searchListings({ q, cursor }: ListingsQuery, signal?: AbortSignal): Promise<ListingsPage> {
+export function searchListings(
+  { q, scope, kind, since, cursor }: ListingsQuery,
+  signal?: AbortSignal,
+): Promise<ListingsPage> {
   const params = new URLSearchParams();
   if (q.trim()) params.set("q", q.trim());
+  if (scope) params.set("scope", scope);
+  if (kind) params.set("kind", kind);
+  if (since) params.set("since", since);
   if (cursor) params.set("cursor", cursor);
   const query = params.toString();
   return requestJson<ListingsPage>(query ? `/api/listings?${query}` : "/api/listings", signal);

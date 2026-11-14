@@ -12,10 +12,10 @@ pub mod object_store_source;
 pub mod sources;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use http::router;
-pub use index::{Cursor, ListingsIndex, ResolvedListing, ResultGroup, SearchPage};
+pub use index::{Cursor, ListingsIndex, ResolvedListing, ResultGroup, SearchPage, SearchQuery};
 pub use object_store_source::{DataRoot, ObjectStoreSource};
 pub use sources::{SourceContext, configured};
 
@@ -36,7 +36,7 @@ pub struct Listing {
     pub fields: Vec<ListingField>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListingKind {
     Image,
