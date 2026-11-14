@@ -44,11 +44,21 @@ const CHECK_CONCURRENCY: usize = 16;
 pub struct ListingsIndex {
     sources: Vec<Arc<dyn DatasetSource>>,
     policy: Arc<SourcePolicy>,
-    /// What each source offered at its last good refresh, as the policy
-    /// admitted it, so a failed refresh keeps it. The lock also keeps two
-    /// refreshes from interleaving.
-    offered: tokio::sync::Mutex<Vec<Arc<Vec<Listing>>>>,
+    /// What the index keeps of each source between refreshes. The lock
+    /// also keeps two refreshes from interleaving.
+    states: tokio::sync::Mutex<Vec<SourceState>>,
     snapshot: RwLock<Arc<Snapshot>>,
+}
+
+#[derive(Default)]
+struct SourceState {
+    /// What the source offered at its last good refresh, as the policy
+    /// admitted it, so a failed refresh keeps it.
+    offered: Arc<Vec<Listing>>,
+    /// Refreshes that failed since the last good one. Only the first of a
+    /// streak warns, so a source that stays down does not warn on every
+    /// refresh.
+    failed: u64,
 }
 
 /// What a search asks for: the words every listing must hold, and what
@@ -125,11 +135,11 @@ impl Cursor {
 impl ListingsIndex {
     /// An index over `sources`, empty until its first refresh.
     pub fn new(sources: Vec<Arc<dyn DatasetSource>>, policy: Arc<SourcePolicy>) -> Self {
-        let offered = sources.iter().map(|_| Arc::new(Vec::new())).collect();
+        let states = sources.iter().map(|_| SourceState::default()).collect();
         Self {
             sources,
             policy,
-            offered: tokio::sync::Mutex::new(offered),
+            states: tokio::sync::Mutex::new(states),
             snapshot: RwLock::new(Arc::new(Snapshot::default())),
         }
     }
@@ -141,20 +151,41 @@ impl ListingsIndex {
     /// Ask every source for its listings and swap in what they offer. A
     /// source that fails keeps what it offered last.
     pub async fn refresh(&self) {
-        let mut offered = self.offered.lock().await;
+        let mut states = self.states.lock().await;
         let results = join_all(self.sources.iter().map(|source| source.listings())).await;
         for (at, result) in results.into_iter().enumerate() {
+            let state = &mut states[at];
+            let noun = self.sources[at].group_noun();
             match result {
-                Ok(listings) => offered[at] = Arc::new(self.admit(listings).await),
-                Err(error) => tracing::warn!(
-                    source = at,
-                    noun = self.sources[at].group_noun(),
-                    error = %error,
-                    "listings.source_failed"
-                ),
+                Ok(listings) => {
+                    state.offered = Arc::new(self.admit(listings).await);
+                    if state.failed > 0 {
+                        tracing::info!(
+                            source = at,
+                            noun,
+                            failed = state.failed,
+                            "listings.source_recovered"
+                        );
+                        state.failed = 0;
+                    }
+                }
+                Err(error) => {
+                    state.failed += 1;
+                    if state.failed == 1 {
+                        tracing::warn!(source = at, noun, error = %error, "listings.source_failed");
+                    } else {
+                        tracing::debug!(
+                            source = at,
+                            noun,
+                            failed = state.failed,
+                            error = %error,
+                            "listings.source_failed"
+                        );
+                    }
+                }
             }
         }
-        let snapshot = Arc::new(Snapshot::build(&self.sources, &offered));
+        let snapshot = Arc::new(Snapshot::build(&self.sources, &states));
         let previous = std::mem::replace(
             &mut *self.snapshot.write().expect("listings snapshot lock"),
             Arc::clone(&snapshot),
@@ -309,12 +340,12 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn build(sources: &[Arc<dyn DatasetSource>], offered: &[Arc<Vec<Listing>>]) -> Self {
+    fn build(sources: &[Arc<dyn DatasetSource>], states: &[SourceState]) -> Self {
         let mut entries: Vec<Entry> = Vec::new();
         let mut groups: HashMap<(usize, &str), usize> = HashMap::new();
         let mut seen: HashSet<&str> = HashSet::new();
-        for (source, listings) in offered.iter().enumerate() {
-            for listing in listings.iter() {
+        for (source, state) in states.iter().enumerate() {
+            for listing in state.offered.iter() {
                 // The first source to list a URL keeps it, so search and
                 // resolve agree on one listing per URL.
                 if !seen.insert(listing.url.as_str()) {
@@ -580,5 +611,140 @@ impl Ord for SortKey {
 impl PartialOrd for SortKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tracing::Level;
+
+    use super::*;
+    use crate::listings::SourceError;
+    use crate::log_capture::{CapturedEvent, capture_async};
+
+    /// A source that offers one listing, or fails while told to.
+    #[derive(Default)]
+    struct FlakySource {
+        failing: AtomicBool,
+    }
+
+    impl FlakySource {
+        fn fail(&self, failing: bool) {
+            self.failing.store(failing, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DatasetSource for FlakySource {
+        fn group_noun(&self) -> &str {
+            "Shelf"
+        }
+
+        async fn listings(&self) -> Result<Vec<Listing>, SourceError> {
+            if self.failing.load(Ordering::SeqCst) {
+                return Err("unreachable".into());
+            }
+            Ok(vec![Listing {
+                url: "/data/a.zarr".into(),
+                title: "a".into(),
+                kind: ListingKind::Image,
+                tiles: None,
+                owner: None,
+                date: None,
+                group: None,
+                fields: Vec::new(),
+            }])
+        }
+    }
+
+    fn index_over(source: &Arc<FlakySource>) -> ListingsIndex {
+        let source: Arc<dyn DatasetSource> = source.clone();
+        ListingsIndex::new(vec![source], Arc::new(SourcePolicy::unrestricted()))
+    }
+
+    /// Refresh `index` and return what it logged about its sources.
+    async fn refresh_logging(index: &ListingsIndex) -> Vec<CapturedEvent> {
+        let (events, ()) = capture_async(|| index.refresh()).await;
+        events
+            .into_iter()
+            .filter(|event| event.name.starts_with("listings.source_"))
+            .collect()
+    }
+
+    /// Each event as its name, level, and failure count.
+    fn shape(events: &[CapturedEvent]) -> Vec<(&str, Level, Option<&str>)> {
+        events
+            .iter()
+            .map(|event| (event.name.as_str(), event.level, event.field("failed")))
+            .collect()
+    }
+
+    fn titles(index: &ListingsIndex) -> Vec<String> {
+        index
+            .search(&SearchQuery::default(), None)
+            .results
+            .into_iter()
+            .flat_map(|result| result.listings)
+            .map(|listing| listing.title)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_source_failing_from_startup_warns_once_then_notes_its_recovery() {
+        let source = Arc::new(FlakySource::default());
+        let index = index_over(&source);
+        source.fail(true);
+
+        let first = refresh_logging(&index).await;
+        assert_eq!(
+            shape(&first),
+            [("listings.source_failed", Level::WARN, None)]
+        );
+        assert_eq!(first[0].field("source"), Some("0"));
+        assert_eq!(first[0].field("noun"), Some("Shelf"));
+        assert_eq!(first[0].field("error"), Some("unreachable"));
+
+        for failed in ["2", "3"] {
+            assert_eq!(
+                shape(&refresh_logging(&index).await),
+                [("listings.source_failed", Level::DEBUG, Some(failed))]
+            );
+        }
+
+        source.fail(false);
+        let recovered = refresh_logging(&index).await;
+        assert_eq!(
+            shape(&recovered),
+            [("listings.source_recovered", Level::INFO, Some("3"))]
+        );
+        assert_eq!(recovered[0].field("noun"), Some("Shelf"));
+        assert_eq!(titles(&index), ["a"]);
+
+        assert!(refresh_logging(&index).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_streak_after_a_good_refresh_warns_again_and_keeps_the_last_listings() {
+        let source = Arc::new(FlakySource::default());
+        let index = index_over(&source);
+        index.refresh().await;
+        source.fail(true);
+        refresh_logging(&index).await;
+        source.fail(false);
+        refresh_logging(&index).await;
+
+        source.fail(true);
+        assert_eq!(
+            shape(&refresh_logging(&index).await),
+            [("listings.source_failed", Level::WARN, None)]
+        );
+        assert_eq!(titles(&index), ["a"]);
+        assert_eq!(
+            shape(&refresh_logging(&index).await),
+            [("listings.source_failed", Level::DEBUG, Some("2"))]
+        );
+        assert_eq!(titles(&index), ["a"]);
     }
 }
