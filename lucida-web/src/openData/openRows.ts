@@ -133,11 +133,11 @@ export function choiceOf(row: OpenRow): OpenChoice | null {
     case "listing":
       return listingChoice(row.listing);
     case "recent":
-      return {
-        url: row.recent.url,
-        title: row.recent.listing?.title ?? row.recent.name,
-        group: row.recent.listing?.group ?? null,
-      };
+      // A listed one opens as its listing, whose URL is the spelling a search
+      // returns, so it is one tick wherever the dataset shows.
+      return row.recent.listing
+        ? listingChoice(row.recent.listing)
+        : { url: row.recent.url, title: row.recent.name, group: null };
     default:
       return null;
   }
