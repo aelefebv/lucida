@@ -61,7 +61,7 @@ use crate::dataset::{
     format_dataset_list_human, format_dataset_open_human, format_dataset_remove_human,
     format_dataset_retry_human,
 };
-use crate::dataset_search::{DatasetSearchClient, format_dataset_search_human};
+use crate::dataset_search::{DatasetSearchArgs, DatasetSearchClient, format_dataset_search_human};
 use crate::dataset_transform::{
     DatasetTransformClient, DatasetTransformOutput, TransformChange,
     format_dataset_transform_human, parse_scale, parse_triple,
@@ -554,15 +554,7 @@ enum DatasetCommand {
     ///
     /// Prints one page of results, grouped as the server groups them. With
     /// --json, prints the server's response unchanged.
-    Search {
-        /// Words every result contains, ignoring case, in its title, its
-        /// group, the end of its URL, or a field. Omit to list every dataset.
-        words: Vec<String>,
-        /// Fetch the page after the one that returned this `next_cursor`.
-        /// Pass the same words.
-        #[arg(long)]
-        cursor: Option<String>,
-    },
+    Search(DatasetSearchArgs),
     /// Open a dataset path or URL in the selected workspace
     Open {
         /// Dataset path or URL visible to the Lucida server
@@ -2558,17 +2550,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             },
         },
         Command::Dataset { command } => match command {
-            DatasetCommand::Search { words, cursor } => {
+            DatasetCommand::Search(args) => {
                 let server = resolve_server(cli.server.as_deref(), &config)?;
                 let token = resolve_token(&server.url, &config);
-                let words = words.join(" ");
+                let search = args.request();
                 let found = DatasetSearchClient::new(server.url, token)
-                    .search(&words, cursor.as_deref())
+                    .search(&search)
                     .await?;
                 if output.json() {
                     output.print_json_text(&found.body);
                 } else {
-                    output.print_human(format_dataset_search_human(&found.page, &words));
+                    output.print_human(format_dataset_search_human(&found.page, &search));
                 }
             }
             DatasetCommand::Open {
@@ -5893,20 +5885,19 @@ mod tests {
     }
 
     #[test]
-    fn dataset_search_takes_words_and_a_cursor() {
-        match parse(&["dataset", "search", "two", "words", "--cursor", "abc"]).command {
+    fn dataset_search_takes_words_and_flags() {
+        let argv = [
+            "dataset", "search", "two", "words", "--cursor", "abc", "--mine",
+        ];
+        match parse(&argv).command {
             Command::Dataset {
-                command: DatasetCommand::Search { words, cursor },
+                command: DatasetCommand::Search(args),
             } => {
-                assert_eq!(words, ["two", "words"]);
-                assert_eq!(cursor.as_deref(), Some("abc"));
+                let search = args.request();
+                assert_eq!(search.words, "two words");
+                assert_eq!(search.cursor.as_deref(), Some("abc"));
+                assert_eq!(search.scope, Some(dataset_search::Scope::Mine));
             }
-            _ => panic!("expected dataset search"),
-        }
-        match parse(&["dataset", "search"]).command {
-            Command::Dataset {
-                command: DatasetCommand::Search { words, cursor },
-            } => assert!(words.is_empty() && cursor.is_none()),
             _ => panic!("expected dataset search"),
         }
     }

@@ -26,6 +26,8 @@ base64 = "0.23"
 image = { version = "0.25", default-features = false, features = ["png"] }
 font8x8 = "0.3"
 rand = "0.10"
+# Reads and writes the RFC 3339 times `dataset search --since` takes.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 lucida-core = { path = "../lucida-core", features = ["test-support"] }
