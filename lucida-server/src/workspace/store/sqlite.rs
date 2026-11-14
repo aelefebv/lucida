@@ -16,7 +16,7 @@ use lucida_core::scene::DocumentState;
 use sqlx::{Row, Sqlite, SqlitePool};
 
 use crate::workspace::types::{
-    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    NewWorkspacePreview, PreviewWrite, RecentDataset, SavedViewVisibility, WorkspaceAdminDetails,
     WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
     WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
@@ -1287,6 +1287,30 @@ impl WorkspaceStore for SqliteWorkspaceStore {
     ) -> Result<WorkspaceUserState, StoreError> {
         let email = normalize_email(&principal.email);
         self.get_user_workspace_state(workspace_id, &email).await
+    }
+
+    async fn recent_datasets(
+        &self,
+        principal: &AuthPrincipal,
+        limit: usize,
+    ) -> Result<Vec<RecentDataset>, StoreError> {
+        let email = normalize_email(&principal.email);
+        let rows = sqlx::query(sql::RECENT_DATASETS)
+            .bind(&email)
+            .bind(&email)
+            .bind(principal.is_admin)
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sql)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| RecentDataset {
+                canonical_url: row.get("canonical_url"),
+                name: row.get("default_name"),
+            })
+            .collect())
     }
 
     async fn put_preview(

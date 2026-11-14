@@ -81,7 +81,7 @@ import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
 import { noteDatasetOpened, noteDatasetOpenFailed } from "./trace/steps.ts";
-import { AddDataPrompt, noteSourceOpenFailed, OpenDialog, type OpenChoice } from "./openData/index.ts";
+import { AddDataPrompt, OpenDialog, type OpenChoice } from "./openData/index.ts";
 import { Banner } from "./shell/Banner.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
 import { WebGpuUnavailable } from "./shell/WebGpuUnavailable.tsx";
@@ -593,7 +593,6 @@ function Viewer({
     },
     onOpenDatasetFailed: (url, err) => {
       savedViewSync.applier.notifyOpenFailed(url, err);
-      noteSourceOpenFailed(url);
       noteDatasetOpenFailed(url, err);
       targets.failed(url);
     },

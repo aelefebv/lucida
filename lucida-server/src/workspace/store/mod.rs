@@ -15,7 +15,7 @@ use lucida_core::scene::DocumentState;
 use thiserror::Error;
 
 use super::types::{
-    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    NewWorkspacePreview, PreviewWrite, RecentDataset, SavedViewVisibility, WorkspaceAdminDetails,
     WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
     WorkspacePreview, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView, WorkspaceSharingSettings,
     WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
@@ -394,6 +394,15 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceUserState, StoreError>;
+
+    /// Up to `limit` datasets from the live workspaces `principal` opened
+    /// and may still see: the most recently opened workspace's first, the
+    /// latest added first within one, and each source once.
+    async fn recent_datasets(
+        &self,
+        principal: &AuthPrincipal,
+        limit: usize,
+    ) -> Result<Vec<RecentDataset>, StoreError>;
 
     /// Store a live workspace's one preview image, replacing the existing
     /// one unless it was written after `preview.replaces_up_to`.

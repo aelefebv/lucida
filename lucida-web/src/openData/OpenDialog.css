@@ -130,31 +130,6 @@
   color: var(--lc-accent-text);
 }
 
-.lc-open-remove {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: var(--lc-control-h-sm);
-  height: var(--lc-control-h-sm);
-  margin: 0;
-  padding: 0;
-  border: none;
-  border-radius: var(--lc-radius-sm);
-  background: transparent;
-  color: var(--lc-text-subtle);
-}
-
-.lc-open-remove:hover {
-  background: var(--lc-surface-3);
-  color: var(--lc-text);
-}
-
-.lc-open-remove:focus-visible {
-  outline: 2px solid var(--lc-focus-ring);
-  outline-offset: -2px;
-}
-
 /* The tick box's target is the row's height, wider than the box it draws. */
 .lc-open-tick {
   display: inline-flex;

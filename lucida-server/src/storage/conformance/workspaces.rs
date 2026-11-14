@@ -68,6 +68,8 @@ conformance_suite! {
         opening_and_pinning_are_recorded_per_member,
         each_write_of_one_members_state_leaves_the_rest_of_it_alone,
         recording_a_last_view_leaves_the_shared_default_alone,
+        recent_datasets_come_newest_first_and_once_each,
+        recent_datasets_are_the_members_own_from_workspaces_they_may_view,
         duplicating_copies_the_content_and_none_of_the_sharing,
         duplicating_an_absent_workspace_is_none,
         a_preview_reads_back_byte_for_byte,
@@ -1820,6 +1822,189 @@ async fn each_write_of_one_members_state_leaves_the_rest_of_it_alone(
     assert!(unpinned.pinned_at.is_none());
     assert!(unpinned.last_opened_at.is_some());
     assert_eq!(unpinned.last_view.as_ref(), Some(&second));
+}
+
+/// Attach `url` to `workspace_id` under a workspace-local id of its own,
+/// so one source can sit in several workspaces.
+async fn attach(
+    store: &Arc<dyn WorkspaceStore>,
+    workspace_id: &str,
+    owner: &AuthPrincipal,
+    url: &str,
+    name: &str,
+    seq: u64,
+) {
+    let source_id = format!("source-{name}");
+    let dataset_id = DatasetId(format!("wds-{workspace_id}-{name}"));
+    store
+        .persist_dataset_opened(
+            workspace_id,
+            &dataset_id,
+            &source_id,
+            url,
+            name,
+            &owner.email,
+            seq,
+            &document_over(&[(&dataset_id, name)]),
+        )
+        .await
+        .unwrap();
+}
+
+async fn recent_urls(
+    store: &Arc<dyn WorkspaceStore>,
+    principal: &AuthPrincipal,
+    limit: usize,
+) -> Vec<String> {
+    store
+        .recent_datasets(principal, limit)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|recent| recent.canonical_url)
+        .collect()
+}
+
+async fn recent_datasets_come_newest_first_and_once_each(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let older = workspace_named(&store, &owner, "Older").await;
+    let newer = workspace_named(&store, &owner, "Newer").await;
+    attach(&store, &older.id, &owner, "/data/a.zarr", "a", 1).await;
+    attach(&store, &older.id, &owner, "/data/shared.zarr", "shared", 2).await;
+    attach(&store, &newer.id, &owner, "/data/shared.zarr", "shared", 1).await;
+    attach(&store, &newer.id, &owner, "/data/b.zarr", "b", 2).await;
+    assert!(
+        recent_urls(&store, &owner, 8).await.is_empty(),
+        "a workspace nobody opened makes nothing recent",
+    );
+
+    store
+        .record_workspace_open(&older.id, &owner)
+        .await
+        .unwrap();
+    store
+        .record_workspace_open(&newer.id, &owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        recent_urls(&store, &owner, 8).await,
+        ["/data/b.zarr", "/data/shared.zarr", "/data/a.zarr"],
+        "the newer workspace first, its latest dataset first, a shared source once",
+    );
+    assert_eq!(
+        recent_urls(&store, &owner, 2).await,
+        ["/data/b.zarr", "/data/shared.zarr"]
+    );
+
+    store
+        .record_workspace_open(&older.id, &owner)
+        .await
+        .unwrap();
+    let recent = store.recent_datasets(&owner, 8).await.unwrap();
+    assert_eq!(
+        recent
+            .iter()
+            .map(|r| (r.canonical_url.as_str(), r.name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("/data/shared.zarr", "shared"),
+            ("/data/a.zarr", "a"),
+            ("/data/b.zarr", "b"),
+        ],
+        "reopening a workspace brings its datasets back to the front",
+    );
+}
+
+async fn recent_datasets_are_the_members_own_from_workspaces_they_may_view(
+    store: Arc<dyn WorkspaceStore>,
+) {
+    let owner = member("owner@example.com");
+    let colleague = member("colleague@example.com");
+    let visitor = member("visitor@example.com");
+    let support = admin("support@example.com");
+    let mine = workspace_named(&store, &owner, "Mine").await;
+    let shared = workspace_named(&store, &owner, "Shared").await;
+    attach(&store, &mine.id, &owner, "/data/mine.zarr", "mine", 1).await;
+    attach(&store, &shared.id, &owner, "/data/shared.zarr", "shared", 1).await;
+    store
+        .upsert_member(
+            &shared.id,
+            &colleague.email,
+            "Colleague",
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    store
+        .update_link_access(
+            &shared.id,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    store.record_workspace_open(&mine.id, &owner).await.unwrap();
+    store
+        .record_workspace_open(&shared.id, &owner)
+        .await
+        .unwrap();
+    for principal in [&colleague, &visitor, &support] {
+        store
+            .record_workspace_open(&shared.id, principal)
+            .await
+            .unwrap();
+    }
+    store
+        .record_workspace_open(&mine.id, &support)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recent_urls(&store, &owner, 8).await,
+        ["/data/shared.zarr", "/data/mine.zarr"]
+    );
+    assert_eq!(
+        recent_urls(&store, &colleague, 8).await,
+        ["/data/shared.zarr"],
+        "another member's opens are theirs alone",
+    );
+    assert_eq!(
+        recent_urls(&store, &visitor, 8).await,
+        ["/data/shared.zarr"]
+    );
+    assert_eq!(
+        recent_urls(&store, &support, 8).await,
+        ["/data/mine.zarr", "/data/shared.zarr"],
+        "an administrator may view every workspace",
+    );
+
+    store
+        .remove_member(&shared.id, &colleague.email)
+        .await
+        .unwrap();
+    store
+        .update_link_access(
+            &shared.id,
+            WorkspaceLinkAccess::Restricted,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    assert!(
+        recent_urls(&store, &colleague, 8).await.is_empty(),
+        "a removed member keeps their state but loses the workspace",
+    );
+    assert!(
+        recent_urls(&store, &visitor, 8).await.is_empty(),
+        "a closed link takes the workspace away",
+    );
+
+    store.archive_workspace(&mine.id).await.unwrap().unwrap();
+    assert_eq!(
+        recent_urls(&store, &owner, 8).await,
+        ["/data/shared.zarr"],
+        "an archived workspace's datasets leave the recent list",
+    );
 }
 
 async fn recording_a_last_view_leaves_the_shared_default_alone(store: Arc<dyn WorkspaceStore>) {

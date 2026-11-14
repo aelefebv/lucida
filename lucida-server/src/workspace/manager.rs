@@ -34,7 +34,7 @@ use crate::{BroadcastItem, GeneratedConfig, UnicastRoutes};
 use super::preview::{MIN_PREVIEW_INTERVAL, PreviewError, retry_after_secs, validate_preview};
 use super::store::{StoreError, WorkspaceStore, normalize_email};
 use super::types::{
-    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    NewWorkspacePreview, PreviewWrite, RecentDataset, SavedViewVisibility, WorkspaceAdminDetails,
     WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
     WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
@@ -1107,6 +1107,20 @@ impl WorkspaceManager {
         self.require_viewer(workspace_id, principal).await?;
         self.store
             .get_user_workspace_state_for(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    /// The datasets in the workspaces the caller opened most recently, at
+    /// most `limit`. The store reads only the caller's own state and only
+    /// workspaces they may still view.
+    pub async fn recent_datasets(
+        &self,
+        principal: &AuthPrincipal,
+        limit: usize,
+    ) -> Result<Vec<RecentDataset>, WorkspaceError> {
+        self.store
+            .recent_datasets(principal, limit)
             .await
             .map_err(WorkspaceError::Store)
     }

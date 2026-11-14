@@ -209,6 +209,14 @@ pub struct WorkspaceDatasetSource {
     pub display_name: String,
 }
 
+/// A dataset in a workspace a member opened recently.
+#[derive(Debug, Clone)]
+pub struct RecentDataset {
+    pub canonical_url: String,
+    /// The source's name as it was last opened anywhere.
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceMember {
     pub email: String,
