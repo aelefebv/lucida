@@ -41,7 +41,7 @@ import {
   type OpenChoice,
   type OpenRow,
 } from "./openRows.ts";
-import { groupChoices, MAX_OPEN_TOGETHER, toggleTick } from "./openSelection.ts";
+import { groupChoices, toggleTick, useOpenTogetherLimit } from "./openSelection.ts";
 import { OPEN_DATA_SHORTCUT } from "./shortcut.ts";
 import { useListingSearch } from "./useListingSearch.ts";
 import { useRecentDatasets } from "./useRecentDatasets.ts";
@@ -117,6 +117,7 @@ function OpenDialogBody({
   // Kept while the text changes, so datasets found by different searches open together.
   const [ticked, setTicked] = useState<readonly OpenChoice[]>([]);
   const [refused, setRefused] = useState(false);
+  const limit = useOpenTogetherLimit();
   const coarse = usePointerCoarse();
 
   const query = text.trim();
@@ -155,7 +156,7 @@ function OpenDialogBody({
   const isTicked = (listing: Listing) => ticked.some((choice) => choice.url === listing.url);
 
   const tick = (listing: Listing) => {
-    const next = toggleTick(ticked, listingChoice(listing));
+    const next = toggleTick(ticked, listingChoice(listing), limit);
     if (next === null) {
       setRefused(true);
       return;
@@ -272,7 +273,7 @@ function OpenDialogBody({
     if (row.type === "group") {
       const count = row.children.length;
       const detail = row.noun === null ? null : `${row.noun} · ${plural(count, "dataset")}`;
-      const whole = groupChoices(row);
+      const whole = groupChoices(row, limit);
       return (
         <li
           key={row.key}
@@ -396,7 +397,7 @@ function OpenDialogBody({
             </UnstyledButton>
             {refused && (
               <span className="lc-open-selection-note" role="alert">
-                {formatCount(MAX_OPEN_TOGETHER)} at most: no view layout holds more
+                {formatCount(limit)} at most: no view layout holds more
               </span>
             )}
           </div>

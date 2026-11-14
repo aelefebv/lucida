@@ -61,7 +61,7 @@ import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useComparison } from "./hooks/useComparison.ts";
 import { useEditHistory } from "./hooks/useEditHistory.ts";
 import { useUserTransforms } from "./hooks/useUserTransforms.ts";
-import { layoutForEach, PHONE_LAYOUTS, VIEW_LAYOUTS, viewLayoutActions } from "./viewLayout.ts";
+import { layoutForEach, layoutsFor, viewLayoutActions } from "./viewLayout.ts";
 import { openTargets } from "./openTargets.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
@@ -996,7 +996,7 @@ function Viewer({
       viewMode={dims.viewMode}
       onViewModeToggle={dims.handleViewModeToggle}
       layout={viewLayoutName}
-      layouts={phone ? PHONE_LAYOUTS : VIEW_LAYOUTS}
+      layouts={layoutsFor(phone)}
       onLayoutChange={viewLayout.setLayout}
       links={viewLinks ? { links: viewLinks, onChange: viewLayout.link, onChangeAll: viewLayout.linkAll } : undefined}
       slicePlane={dims.slicePlane}

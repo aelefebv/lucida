@@ -27,6 +27,25 @@ export const LAYOUT_LABELS: Readonly<Record<ViewLayoutName, string>> = {
 /** The layouts a phone offers: one view, or two stacked. */
 export const PHONE_LAYOUTS: readonly ViewLayoutName[] = ["single", "rows"];
 
+/** How many views each layout divides the canvas into. */
+const VIEW_COUNT: Readonly<Record<ViewLayoutName, number>> = {
+  single: 1,
+  columns: 2,
+  rows: 2,
+  grid: 4,
+  four_up: 4,
+};
+
+/** The layouts a screen offers. */
+export function layoutsFor(phone: boolean): readonly ViewLayoutName[] {
+  return phone ? PHONE_LAYOUTS : VIEW_LAYOUTS;
+}
+
+/** The most views any of `layouts` holds. */
+export function mostViews(layouts: readonly ViewLayoutName[]): number {
+  return Math.max(...layouts.map((layout) => VIEW_COUNT[layout]));
+}
+
 export function isViewLayoutName(value: string): value is ViewLayoutName {
   return (VIEW_LAYOUTS as readonly string[]).includes(value);
 }

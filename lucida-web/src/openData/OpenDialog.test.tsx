@@ -8,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import initWasm from "lucida-core";
 import { useState } from "react";
 import { __resetPreferencesForTesting, PREFERENCES_STORAGE_KEY } from "../theme/preferences.ts";
+import { VIEWPORT_MEDIA } from "../theme/viewport.ts";
 import { Button } from "../ui/Button.tsx";
 import { __resetCommandsForTesting, listCommands, runCommand } from "../ui/commands.ts";
 import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
@@ -549,6 +550,34 @@ describe("OpenDialog ticks", () => {
     expect(tickBox(dialog, "e.ome.zarr").getAttribute("aria-pressed")).toBe("true");
     // Five is more than a group may hold to open whole.
     expect(within(groupRow(dialog, "Folder shelf")).queryByRole("button", { name: "Open folder" })).toBeNull();
+  });
+
+  it("holds a phone to two, the most its view layouts hold", async () => {
+    const shelf = folder("/srv/data/shelf");
+    const three = ["a", "b", "c"].map((name) => listing(`/srv/data/shelf/${name}.ome.zarr`, { group: shelf }));
+    globalThis.fetch = fakeListingsApi([...LISTINGS, ...three]).fetch;
+    const realMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) =>
+      query === VIEWPORT_MEDIA.phone
+        ? { matches: true, addEventListener: () => {}, removeEventListener: () => {} }
+        : realMatchMedia(query)) as unknown as typeof window.matchMedia;
+    try {
+      const user = userEvent.setup();
+      onDashboard();
+      const dialog = await openDialog(user);
+      await settled(dialog);
+      expect(within(groupRow(dialog, "Folder runs")).getByRole("button", { name: "Open folder" })).toBeTruthy();
+      expect(within(groupRow(dialog, "Folder shelf")).queryByRole("button", { name: "Open folder" })).toBeNull();
+
+      await user.click(tickBox(dialog, "a.ome.zarr"));
+      await user.click(tickBox(dialog, "b.ome.zarr"));
+      await user.click(tickBox(dialog, "c.ome.zarr"));
+      expect(tickBox(dialog, "c.ome.zarr").getAttribute("aria-pressed")).toBe("false");
+      expect(bar(dialog)?.textContent).toContain("2 datasets ticked");
+      expect(within(dialog).getByRole("alert").textContent).toBe("2 at most: no view layout holds more");
+    } finally {
+      window.matchMedia = realMatchMedia;
+    }
   });
 
   it("offers Open group, in the source's noun, only for a group the rows hold whole", async () => {

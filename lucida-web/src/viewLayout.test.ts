@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import initWasm, { WasmScene } from "lucida-core";
 
 import { singleImage } from "./pipeline/simulation/fixtures.ts";
-import { layoutForEach, viewLayoutActions } from "./viewLayout.ts";
+import { layoutForEach, layoutsFor, mostViews, viewLayoutActions } from "./viewLayout.ts";
 
 beforeAll(async () => {
   const bytes = readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm"));
@@ -75,6 +75,13 @@ describe("layoutForEach", () => {
   it("gives two datasets two views side by side, stacked on a phone, and three or four the quarters", () => {
     expect([1, 2, 3, 4].map((count) => layoutForEach(count, false))).toEqual(["single", "columns", "grid", "grid"]);
     expect([1, 2, 3, 4].map((count) => layoutForEach(count, true))).toEqual(["single", "rows", "grid", "grid"]);
+  });
+});
+
+describe("mostViews", () => {
+  it("holds four views on a wide screen and two on a phone", () => {
+    expect(mostViews(layoutsFor(false))).toBe(4);
+    expect(mostViews(layoutsFor(true))).toBe(2);
   });
 });
 
