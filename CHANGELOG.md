@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.41.0](https://github.com/aelefebv/lucida/compare/v0.40.0...v0.41.0) (2026-11-14)
+
+
+### Features
+
+* **cli:** search listings with `lucida dataset search` and retire browse ([#1652](https://github.com/aelefebv/lucida/issues/1652)) ([2d8461e](https://github.com/aelefebv/lucida/commit/2d8461ea29a1d17998b9ed429e2ab148d29351df))
+* narrow Open dialog results by owner, kind, and date ([#1653](https://github.com/aelefebv/lucida/issues/1653)) ([123a2f1](https://github.com/aelefebv/lucida/commit/123a2f195b7c8e9d88855c3673001ab08082a997))
+* recent datasets follow the person across browsers ([#1654](https://github.com/aelefebv/lucida/issues/1654)) ([e053bbe](https://github.com/aelefebv/lucida/commit/e053bbe2c5409ad9791af344f2d3bd5a155dfbb1))
+* **server:** list datasets under bucket-prefix data roots ([#1648](https://github.com/aelefebv/lucida/issues/1648)) ([0cb8f91](https://github.com/aelefebv/lucida/commit/0cb8f91727662a07b4687fbd2e79a59f4d85391c))
+* **web:** open data from one search field ([#1649](https://github.com/aelefebv/lucida/issues/1649)) ([14c5bee](https://github.com/aelefebv/lucida/commit/14c5bee8cb7d087708a2580037f56ef89f53979d))
+* **web:** open up to four datasets side by side from the Open dialog ([#1655](https://github.com/aelefebv/lucida/issues/1655)) ([6de6eba](https://github.com/aelefebv/lucida/commit/6de6eba8583d440b8553a083df10977fb3a039d9))
+
 ## [0.40.0](https://github.com/aelefebv/lucida/compare/v0.39.3...v0.40.0) (2026-11-13)
 
 
