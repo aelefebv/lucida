@@ -7,7 +7,11 @@ import { Banner } from "./shell/Banner.tsx";
 import type { OpenChoice } from "./openData/index.ts";
 import { Button } from "./ui/Button.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
-import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
+import {
+  createWorkspaceFromChoices,
+  createWorkspaceFromDatasets,
+  type DatasetSeed,
+} from "./workspaceFromDataset.ts";
 import {
   openWorkspace,
   renameWorkspace,
@@ -44,12 +48,12 @@ function openLinkUrls(search: string): string[] {
 
 export function WorkspaceRoot() {
   const [path, setPath] = useState(currentPath);
-  // Dataset URLs for `<App>` to auto-open in a just-created workspace. Keyed by
+  // Datasets for `<App>` to auto-open in a just-created workspace. Keyed by
   // workspace id so a stale seed can't bleed into a different workspace, and
   // single-use so a later re-open opens nothing extra.
   const [pendingSeed, setPendingSeed] = useState<{
     workspaceId: string;
-    datasetUrls: readonly string[];
+    seed: DatasetSeed;
   } | null>(null);
 
   useEffect(() => {
@@ -84,11 +88,11 @@ export function WorkspaceRoot() {
   }, []);
 
   const openWorkspaceById = useCallback(
-    (id: string, datasetUrls?: readonly string[], replace = false) => {
-      if (datasetUrls && datasetUrls.length > 0) {
+    (id: string, seed?: DatasetSeed, replace = false) => {
+      if (seed && seed.urls.length > 0) {
         // Set the seed before navigating; navigate keeps it because the
         // destination matches this workspace's route.
-        setPendingSeed({ workspaceId: id, datasetUrls });
+        setPendingSeed({ workspaceId: id, seed });
       }
       navigate(`/w/${encodeURIComponent(id)}`, replace);
     },
@@ -98,9 +102,9 @@ export function WorkspaceRoot() {
   // The viewer's "open in a new workspace". Failures go to the caller's
   // catch; the dataset open happens in the destination viewer.
   const openInNewWorkspace = useCallback(
-    async ({ url, title }: OpenChoice) => {
-      const workspace = await createWorkspaceFromDatasets([url], title ?? undefined);
-      openWorkspaceById(workspace.id, [url]);
+    async (choices: readonly OpenChoice[]) => {
+      const { workspace, seed } = await createWorkspaceFromChoices(choices);
+      openWorkspaceById(workspace.id, seed);
     },
     [openWorkspaceById],
   );
@@ -122,7 +126,7 @@ export function WorkspaceRoot() {
   // Only forward the seed when it belongs to the workspace being opened.
   const seedForThisWorkspace =
     pendingSeed && workspaceId && pendingSeed.workspaceId === workspaceId
-      ? pendingSeed.datasetUrls
+      ? pendingSeed.seed
       : undefined;
 
   return (
@@ -130,14 +134,15 @@ export function WorkspaceRoot() {
       {isOpenLinkPath(path) ? (
         <OpenLinkRoute
           datasetUrls={openLinkUrls(window.location.search)}
-          onWorkspaceCreated={(id, urls) => openWorkspaceById(id, urls, true)}
+          // A link's datasets share one view, as an overlay.
+          onWorkspaceCreated={(id, urls) => openWorkspaceById(id, { urls, sideBySide: false }, true)}
           onBackToDashboard={() => navigate("/", true)}
         />
       ) : workspaceId ? (
         <WorkspaceViewerRoute
           key={workspaceId}
           workspaceId={workspaceId}
-          initialDatasetUrls={seedForThisWorkspace}
+          datasetSeed={seedForThisWorkspace}
           onBackToDashboard={() => navigate("/")}
           onOpenInNewWorkspace={openInNewWorkspace}
         />
@@ -223,16 +228,16 @@ function OpenLinkRoute({
 
 interface WorkspaceViewerRouteProps {
   workspaceId: string;
-  /** Seed dataset URLs to auto-open, forwarded to <App>. */
-  initialDatasetUrls?: readonly string[];
+  /** Datasets to auto-open, forwarded to <App>. */
+  datasetSeed?: DatasetSeed;
   onBackToDashboard: () => void;
-  /** Create a new workspace around a dataset chosen in the viewer. */
-  onOpenInNewWorkspace: (choice: OpenChoice) => Promise<void>;
+  /** Create a new workspace around datasets chosen in the viewer. */
+  onOpenInNewWorkspace: (choices: readonly OpenChoice[]) => Promise<void>;
 }
 
 function WorkspaceViewerRoute({
   workspaceId,
-  initialDatasetUrls,
+  datasetSeed,
   onBackToDashboard,
   onOpenInNewWorkspace,
 }: WorkspaceViewerRouteProps) {
@@ -339,15 +344,15 @@ function WorkspaceViewerRoute({
         workspaceRole={workspace.role}
         defaultSavedViewId={workspace.default_saved_view_id}
         canRenameWorkspace={workspace.role === "owner"}
-        initialDatasetUrls={initialDatasetUrls}
+        datasetSeed={datasetSeed}
         onBackToDashboard={onBackToDashboard}
         onAccessRevoked={handleAccessRevoked}
         onRenameWorkspace={handleRename}
         onSetDefaultSavedView={handleSetDefaultSavedView}
-        onOpenInNewWorkspace={(choice) => {
+        onOpenInNewWorkspace={(choices) => {
           // Clear a stale notice when re-attempting.
           setCreateError(null);
-          void onOpenInNewWorkspace(choice).catch((e) => {
+          void onOpenInNewWorkspace(choices).catch((e) => {
             // Only the create step can fail here; keep the current workspace.
             console.warn("[WorkspaceRoot] create workspace from a dataset failed", e);
             setCreateError(e instanceof Error ? e.message : String(e));

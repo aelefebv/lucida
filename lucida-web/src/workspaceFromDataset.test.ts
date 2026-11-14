@@ -2,8 +2,10 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createWorkspaceFromChoices,
   createWorkspaceFromDatasets,
   datasetBasename,
+  workspaceNameFromChoices,
   workspaceNameFromDatasets,
 } from "./workspaceFromDataset.ts";
 import { createWorkspace, type WorkspaceRecord } from "./workspaceApi.ts";
@@ -119,5 +121,63 @@ describe("createWorkspaceFromDatasets", () => {
     await createWorkspaceFromDatasets([""]);
 
     expect(createWorkspaceMock).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe("workspaceNameFromChoices", () => {
+  const runs = { id: "/data/runs", label: "runs", noun: "Folder" };
+  const other = { id: "/data/other", label: "other", noun: "Folder" };
+  const choice = (url: string, title: string | null, group: typeof runs | null) => ({ url, title, group });
+
+  it("names one dataset after its title, not its group", () => {
+    expect(workspaceNameFromChoices([choice("/data/runs/a.zarr", "First", runs)])).toBe("First");
+  });
+
+  it("names several from one group after the group", () => {
+    expect(
+      workspaceNameFromChoices([choice("/data/runs/a.zarr", "First", runs), choice("/data/runs/b.zarr", "Second", runs)]),
+    ).toBe("runs");
+  });
+
+  it("names several from different groups, or none, after the first one's title", () => {
+    expect(
+      workspaceNameFromChoices([choice("/data/runs/a.zarr", "First", runs), choice("/data/other/b.zarr", "Second", other)]),
+    ).toBe("First");
+    expect(
+      workspaceNameFromChoices([choice("/data/runs/a.zarr", "First", runs), choice("/data/b.zarr", "Second", null)]),
+    ).toBe("First");
+    // A group id is unique only within its source.
+    const shelf = { ...runs, noun: "Shelf" };
+    expect(
+      workspaceNameFromChoices([choice("/data/runs/a.zarr", "First", runs), choice("/x/b.zarr", "Second", shelf)]),
+    ).toBe("First");
+  });
+
+  it("leaves a dataset with no title to be named after its URL", () => {
+    expect(workspaceNameFromChoices([choice("/data/a.zarr", null, null)])).toBeUndefined();
+  });
+});
+
+describe("createWorkspaceFromChoices", () => {
+  it("creates one workspace and seeds the datasets side by side, in order", async () => {
+    createWorkspaceMock.mockResolvedValue(record({ name: "runs" }));
+    const runs = { id: "/data/runs", label: "runs", noun: "Folder" };
+
+    const { workspace, seed } = await createWorkspaceFromChoices([
+      { url: "/data/runs/b.zarr", title: "Second", group: runs },
+      { url: "/data/runs/a.zarr", title: "First", group: runs },
+    ]);
+
+    expect(createWorkspaceMock).toHaveBeenCalledExactlyOnceWith("runs");
+    expect(workspace.id).toBe("ws-new");
+    expect(seed).toEqual({ urls: ["/data/runs/b.zarr", "/data/runs/a.zarr"], sideBySide: true });
+  });
+
+  it("names a dataset with no title after its URL", async () => {
+    createWorkspaceMock.mockResolvedValue(record());
+
+    await createWorkspaceFromChoices([{ url: "/data/sample.ome.zarr", title: null, group: null }]);
+
+    expect(createWorkspaceMock).toHaveBeenCalledWith("sample.ome.zarr");
   });
 });

@@ -329,6 +329,9 @@ async fn a_group_whose_label_matches_comes_back_whole_and_collapsed() {
     );
     assert_eq!(page["results"][0]["collapsed"], false);
     assert_eq!(page["results"][1]["collapsed"], true);
+    // Each result says how large its group is, matched or not.
+    assert_eq!(page["results"][0]["size"], 2);
+    assert_eq!(page["results"][1]["size"], 2);
 }
 
 #[tokio::test]

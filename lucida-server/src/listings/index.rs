@@ -87,8 +87,11 @@ pub struct ResultGroup {
     pub group: Option<ListingGroup>,
     /// What the group's source calls a group.
     pub noun: Arc<str>,
-    /// The group's label matched, so every listing in it came back.
+    /// The group's label matched, so every listing in it that passes the
+    /// kind, date and owner came back.
     pub collapsed: bool,
+    /// How many listings the group holds, matched or not.
+    pub size: usize,
     /// Newest first.
     pub listings: Vec<Listing>,
 }
@@ -370,6 +373,7 @@ impl Snapshot {
             group: entry.group.clone(),
             noun: Arc::clone(&self.nouns[entry.source]),
             collapsed: found.collapsed,
+            size: entry.listings.len(),
             listings: found
                 .listings
                 .iter()

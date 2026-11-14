@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import initWasm, { WasmScene } from "lucida-core";
 
 import { singleImage } from "./pipeline/simulation/fixtures.ts";
-import { viewLayoutActions } from "./viewLayout.ts";
+import { layoutForEach, layoutsFor, mostViews, viewLayoutActions } from "./viewLayout.ts";
 
 beforeAll(async () => {
   const bytes = readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm"));
@@ -68,5 +68,30 @@ describe("linkAll", () => {
     expect(modesNow()).toEqual({ ...OFF, orientation: "relative", t: "linked", contrast: "linked", colormap: "linked" });
     actions.linkAll("off");
     expect(modesNow()).toEqual(OFF);
+  });
+});
+
+describe("layoutForEach", () => {
+  it("gives two datasets two views side by side, stacked on a phone, and three or four the quarters", () => {
+    expect([1, 2, 3, 4].map((count) => layoutForEach(count, false))).toEqual(["single", "columns", "grid", "grid"]);
+    expect([1, 2, 3, 4].map((count) => layoutForEach(count, true))).toEqual(["single", "rows", "grid", "grid"]);
+  });
+});
+
+describe("mostViews", () => {
+  it("holds four views on a wide screen and two on a phone", () => {
+    expect(mostViews(layoutsFor(false))).toBe(4);
+    expect(mostViews(layoutsFor(true))).toBe(2);
+  });
+});
+
+describe("layOutEmpty", () => {
+  it("divides the canvas with every view showing nothing, the first view too", () => {
+    const scene = new WasmScene(1200, 800);
+    scene.apply_command(FIRST.openCommand);
+    const actions = viewLayoutActions(() => scene, () => null);
+    const views = actions.layOutEmpty("grid");
+    expect(views).toEqual(actions.views());
+    expect(views.map((view) => JSON.parse(scene.view_datasets(view)))).toEqual(views.map(() => ({ only: [] })));
   });
 });

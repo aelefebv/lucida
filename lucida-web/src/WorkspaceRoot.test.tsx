@@ -12,7 +12,7 @@ import {
 } from "@testing-library/react";
 import { WorkspaceRoot } from "./WorkspaceRoot.tsx";
 import { openWorkspace, type WorkspaceRecord } from "./workspaceApi.ts";
-import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
+import { createWorkspaceFromChoices, createWorkspaceFromDatasets, type DatasetSeed } from "./workspaceFromDataset.ts";
 
 // App pulls in the WASM viewer; stub it so the route renders without a GPU/WASM
 // runtime. The stub records the props it was last rendered with so we can assert
@@ -20,24 +20,24 @@ import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 // the in-viewer "open in a new workspace" callback.
 interface CapturedAppProps {
   workspaceId: string;
-  initialDatasetUrls?: readonly string[];
-  onOpenInNewWorkspace?: (choice: { url: string; title: string | null }) => void;
+  datasetSeed?: DatasetSeed;
+  onOpenInNewWorkspace?: (choices: { url: string; title: string | null; group: null }[]) => void;
   onAccessRevoked?: () => void;
 }
 const lastAppProps: { current: CapturedAppProps | null } = { current: null };
-// Every `initialDatasetUrls` value the viewer was rendered with, in order, to
-// assert the seed is delivered exactly once.
+// The seed URLs the viewer was rendered with each time, in order, to assert
+// the seed is delivered exactly once.
 const seedRenders: (readonly string[] | undefined)[] = [];
 vi.mock("./App.tsx", () => ({
   default: (props: CapturedAppProps) => {
     lastAppProps.current = props;
-    seedRenders.push(props.initialDatasetUrls);
+    seedRenders.push(props.datasetSeed?.urls);
     return (
       <div data-testid="app-mounted">
         <button
           type="button"
           onClick={() =>
-            props.onOpenInNewWorkspace?.({ url: "/data/new.zarr", title: "New volume" })
+            props.onOpenInNewWorkspace?.([{ url: "/data/new.zarr", title: "New volume", group: null }])
           }
         >
           in-viewer-open-in-new-workspace
@@ -51,18 +51,18 @@ vi.mock("./App.tsx", () => ({
 }));
 
 // Stub the dashboard (it needs <AuthGate> context and the listings fetch).
-// We only care that WorkspaceRoot wires `onOpenWorkspace(id, urls)` correctly,
+// We only care that WorkspaceRoot wires `onOpenWorkspace(id, seed)` correctly,
 // so expose a button that drives it with a seed.
 vi.mock("./WorkspaceDashboard.tsx", () => ({
   WorkspaceDashboard: ({
     onOpenWorkspace,
   }: {
-    onOpenWorkspace: (id: string, datasetUrls?: readonly string[]) => void;
+    onOpenWorkspace: (id: string, seed?: DatasetSeed) => void;
   }) => (
     <div data-testid="dashboard-mounted">
       <button
         type="button"
-        onClick={() => onOpenWorkspace("ws-created", ["/data/sample.ome.zarr"])}
+        onClick={() => onOpenWorkspace("ws-created", { urls: ["/data/sample.ome.zarr"], sideBySide: true })}
       >
         dashboard-open-with-seed
       </button>
@@ -71,6 +71,7 @@ vi.mock("./WorkspaceDashboard.tsx", () => ({
 }));
 
 vi.mock("./workspaceFromDataset.ts", () => ({
+  createWorkspaceFromChoices: vi.fn(),
   createWorkspaceFromDatasets: vi.fn(),
 }));
 
@@ -209,10 +210,10 @@ describe("WorkspaceRoot — access removed while the viewer is open", () => {
 });
 
 describe("WorkspaceRoot — create workspace from dataset(s)", () => {
-  const createFromDatasetsMock = vi.mocked(createWorkspaceFromDatasets);
+  const createFromChoicesMock = vi.mocked(createWorkspaceFromChoices);
 
   beforeEach(() => {
-    createFromDatasetsMock.mockReset();
+    createFromChoicesMock.mockReset();
     lastAppProps.current = null;
     seedRenders.length = 0;
   });
@@ -234,9 +235,10 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("app-mounted")).toBeTruthy();
       expect(lastAppProps.current?.workspaceId).toBe("ws-created");
-      expect(lastAppProps.current?.initialDatasetUrls).toEqual([
-        "/data/sample.ome.zarr",
-      ]);
+      expect(lastAppProps.current?.datasetSeed).toEqual({
+        urls: ["/data/sample.ome.zarr"],
+        sideBySide: true,
+      });
     });
   });
 
@@ -265,9 +267,10 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
       await screen.findByRole("button", { name: "dashboard-open-with-seed" }),
     );
     await waitFor(() => {
-      expect(lastAppProps.current?.initialDatasetUrls).toEqual([
-        "/data/sample.ome.zarr",
-      ]);
+      expect(lastAppProps.current?.datasetSeed).toEqual({
+        urls: ["/data/sample.ome.zarr"],
+        sideBySide: true,
+      });
     });
 
     // Navigate back to the dashboard (the back-arrow / "Workspaces" affordance).
@@ -293,11 +296,14 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     expect(seededRenders).toEqual([["/data/sample.ome.zarr"]]);
   });
 
-  it("in-viewer 'open in a new workspace' creates one named after the dataset and navigates in with the seed", async () => {
+  it("in-viewer 'open in a new workspace' creates one for the chosen datasets and navigates in with the seed", async () => {
     // Start inside an existing workspace.
     window.history.replaceState({}, "", "/w/ws-old");
     openWorkspaceMock.mockResolvedValue(record({ id: "ws-old", name: "Old" }));
-    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-fresh" }));
+    createFromChoicesMock.mockResolvedValue({
+      workspace: record({ id: "ws-fresh" }),
+      seed: { urls: ["/data/new.zarr"], sideBySide: true },
+    });
 
     render(<WorkspaceRoot />);
 
@@ -312,11 +318,14 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     );
 
     await waitFor(() => {
-      expect(createFromDatasetsMock).toHaveBeenCalledWith(["/data/new.zarr"], "New volume");
-      expect(lastAppProps.current?.workspaceId).toBe("ws-fresh");
-      expect(lastAppProps.current?.initialDatasetUrls).toEqual([
-        "/data/new.zarr",
+      expect(createFromChoicesMock).toHaveBeenCalledWith([
+        { url: "/data/new.zarr", title: "New volume", group: null },
       ]);
+      expect(lastAppProps.current?.workspaceId).toBe("ws-fresh");
+      expect(lastAppProps.current?.datasetSeed).toEqual({
+        urls: ["/data/new.zarr"],
+        sideBySide: true,
+      });
     });
   });
 
@@ -325,7 +334,7 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
     window.history.replaceState({}, "", "/w/ws-old");
     openWorkspaceMock.mockResolvedValue(record({ id: "ws-old", name: "Old" }));
     // The create step fails (e.g. server rejected the new workspace).
-    createFromDatasetsMock.mockRejectedValue(
+    createFromChoicesMock.mockRejectedValue(
       new Error("workspace quota exceeded"),
     );
 
@@ -349,7 +358,7 @@ describe("WorkspaceRoot — create workspace from dataset(s)", () => {
   it("the surfaced create error is dismissible", async () => {
     window.history.replaceState({}, "", "/w/ws-old");
     openWorkspaceMock.mockResolvedValue(record({ id: "ws-old", name: "Old" }));
-    createFromDatasetsMock.mockRejectedValue(new Error("boom"));
+    createFromChoicesMock.mockRejectedValue(new Error("boom"));
 
     render(<WorkspaceRoot />);
     await screen.findByTestId("app-mounted");
@@ -387,7 +396,7 @@ describe("WorkspaceRoot — open link (/open?url=…)", () => {
 
     await waitFor(() => {
       expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
-      expect(lastAppProps.current?.initialDatasetUrls).toEqual([linkedUrl]);
+      expect(lastAppProps.current?.datasetSeed).toEqual({ urls: [linkedUrl], sideBySide: false });
     });
     expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
     expect(createFromDatasetsMock).toHaveBeenCalledWith([linkedUrl]);
@@ -421,10 +430,11 @@ describe("WorkspaceRoot — open link (/open?url=…)", () => {
     render(<WorkspaceRoot />);
 
     await waitFor(() => {
-      expect(lastAppProps.current?.initialDatasetUrls).toEqual([
-        "gs://bucket/a.zarr",
-        "/data/b.zarr",
-      ]);
+      // A link's datasets share one view.
+      expect(lastAppProps.current?.datasetSeed).toEqual({
+        urls: ["gs://bucket/a.zarr", "/data/b.zarr"],
+        sideBySide: false,
+      });
     });
     expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
     expect(createFromDatasetsMock).toHaveBeenCalledWith([
@@ -446,7 +456,7 @@ describe("WorkspaceRoot — open link (/open?url=…)", () => {
 
     await waitFor(() => {
       expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
-      expect(lastAppProps.current?.initialDatasetUrls).toEqual([linkedUrl]);
+      expect(lastAppProps.current?.datasetSeed).toEqual({ urls: [linkedUrl], sideBySide: false });
     });
     expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
   });

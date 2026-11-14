@@ -85,6 +85,8 @@ const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
 export interface SavedViewBridgeHooks {
   onDatasetOpened: (datasetId: string) => void;
   onOpenDatasetFailed: (url: string, error: string) => void;
+  /** An open this client sent completed: `url`, canonical, became `datasetId`. */
+  onOpenCompleted?: (url: string, datasetId: string) => void;
 }
 
 /** Aggregate open-remote-dataset UI state (spinner / error banner / progress
@@ -1233,6 +1235,9 @@ export class SessionController {
           // Clear the transient spinner and progress only; warnings survive
           // completion.
           this.updateRemoteActivity({ loading: false, progress: null });
+          if (diagnostic.workspace_dataset_id) {
+            this.deps.getSavedViewHooks()?.onOpenCompleted?.(url, diagnostic.workspace_dataset_id);
+          }
           return;
         }
         // Progress of a fresh open retires only a previous open's failure.

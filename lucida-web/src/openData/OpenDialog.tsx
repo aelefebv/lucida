@@ -22,41 +22,47 @@ import { isRemoteDatasetUrl } from "../datasetLocation.ts";
 import { formatCount } from "../formatCount.ts";
 import { relativeTimeFromIso } from "../relativeTime.ts";
 import { usePointerCoarse } from "../theme/viewport.ts";
+import { Button } from "../ui/Button.tsx";
+import { CheckBox } from "../ui/Checkbox.tsx";
 import { Dialog } from "../ui/Dialog.tsx";
 import { Kbd } from "../ui/Kbd.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { useCommand } from "../ui/commands.ts";
 import { isApplePlatform } from "../ui/shortcuts.ts";
 import { ComboboxField } from "../ui/TextField.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import { FilterChips, type DatePreset } from "./FilterChips.tsx";
 import type { Listing, ListingKind, ListingScope } from "./listingsApi.ts";
 import {
   buildRows,
   choiceOf,
   countListings,
+  listingChoice,
   parentOf,
   visibleRows,
   type GroupRow,
   type OpenChoice,
   type OpenRow,
 } from "./openRows.ts";
+import { groupChoices, toggleTick, useOpenTogetherLimit } from "./openSelection.ts";
 import { OPEN_DATA_SHORTCUT } from "./shortcut.ts";
 import { useListingSearch } from "./useListingSearch.ts";
 import { useRecentDatasets } from "./useRecentDatasets.ts";
 import { useTypedLocation } from "./useTypedLocation.ts";
 import "./OpenDialog.css";
 
-/** One thing the dialog can do with a chosen dataset. */
+/** One thing the dialog can do with the datasets someone chose. */
 export interface OpenAction {
   /** Says what it does, e.g. "Open in a new workspace". */
   label: string;
-  run: (choice: OpenChoice) => void;
+  /** Opens one dataset, or up to four ticked together, in the order they were ticked. */
+  run: (choices: readonly OpenChoice[]) => void;
 }
 
 export interface OpenDialogProps {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
-  /** What Enter, a click, or a tap does with the chosen dataset. */
+  /** What Enter, a click, or a tap does with the chosen datasets. */
   primary: OpenAction;
   /** What Mod+Enter or a Mod-click does instead. Without it they do what Enter does. */
   secondary?: OpenAction;
@@ -124,6 +130,10 @@ function OpenDialogBody({
   const [kind, setKind] = useState<ListingKind | null>(null);
   // The bound is fixed when its chip is chosen, so every page of one search asks the same one.
   const [dateBound, setDateBound] = useState<{ within: DatePreset; since: string } | null>(null);
+  // Kept while the text changes, so datasets found by different searches open together.
+  const [ticked, setTicked] = useState<readonly OpenChoice[]>([]);
+  const [refused, setRefused] = useState(false);
+  const limit = useOpenTogetherLimit();
   const coarse = usePointerCoarse();
 
   const query = text.trim();
@@ -171,6 +181,23 @@ function OpenDialogBody({
   const setWithin = (days: DatePreset | null) =>
     setDateBound(days && { within: days, since: new Date(Date.now() - days * DAY_MS).toISOString() });
 
+  const isTicked = (listing: Listing) => ticked.some((choice) => choice.url === listing.url);
+
+  const tick = (listing: Listing) => {
+    const next = toggleTick(ticked, listingChoice(listing), limit);
+    if (next === null) {
+      setRefused(true);
+      return;
+    }
+    setTicked(next);
+    setRefused(false);
+  };
+
+  const open = (choices: readonly OpenChoice[], elsewhere: boolean) => {
+    (elsewhere && secondary ? secondary : primary).run(choices);
+    close();
+  };
+
   const activate = (row: OpenRow, elsewhere: boolean) => {
     if (row.type === "group") {
       toggle(row, !row.expanded);
@@ -186,9 +213,7 @@ function OpenDialogBody({
     }
     if (stale && row.type === "listing") return;
     const choice = choiceOf(row);
-    if (!choice) return;
-    (elsewhere && secondary ? secondary : primary).run(choice);
-    close();
+    if (choice) open([choice], elsewhere);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -226,9 +251,17 @@ function OpenDialogBody({
         }
         return;
       }
+      case " ": {
+        // Only once arrowed onto a row: while typing, Space is part of the words.
+        if (!navigating || active?.type !== "listing" || stale) return;
+        event.preventDefault();
+        tick(active.listing);
+        return;
+      }
       case "Enter": {
         event.preventDefault();
-        if (active) activate(active, isModClick(event));
+        if (ticked.length > 0) open(ticked, isModClick(event));
+        else if (active) activate(active, isModClick(event));
         return;
       }
     }
@@ -274,6 +307,7 @@ function OpenDialogBody({
     if (row.type === "group") {
       const count = row.children.length;
       const detail = row.noun === null ? null : `${row.noun} · ${plural(count, "dataset")}`;
+      const whole = groupChoices(row, limit);
       return (
         <li
           key={row.key}
@@ -291,6 +325,16 @@ function OpenDialogBody({
             {row.noun === null && <ClockCounterClockwiseIcon className="lc-open-icon" size={16} aria-hidden />}
             <span className="lc-open-title">{row.label}</span>
             {detail && <span className="lc-open-aside">{detail}</span>}
+            {whole && row.noun && (
+              <UnstyledButton
+                className="lc-open-group-action"
+                isDisabled={stale}
+                preventFocusOnPress
+                onPress={(event) => open(whole, isModClick(event))}
+              >
+                Open {row.noun.toLowerCase()}
+              </UnstyledButton>
+            )}
           </div>
           {row.expanded && (
             <ul role="group" className="lc-open-children">
@@ -300,9 +344,31 @@ function OpenDialogBody({
         </li>
       );
     }
+    const tickable = row.type === "listing" ? row.listing : null;
+    const checked = tickable !== null && isTicked(tickable);
     return (
-      <li key={row.key} {...common} aria-disabled={rowDisabled(row, stale) || undefined}>
-        <div {...rowProps}>{rowContent(row, search.loadingMore)}</div>
+      <li
+        key={row.key}
+        {...common}
+        aria-checked={tickable ? checked : undefined}
+        aria-disabled={rowDisabled(row, stale) || undefined}
+      >
+        <div {...rowProps}>
+          {tickable && (
+            // A press here ticks the row without opening it or taking focus from the field.
+            <UnstyledButton
+              className="lc-open-tick"
+              aria-label={`Tick ${tickable.title}`}
+              aria-pressed={checked}
+              isDisabled={stale}
+              preventFocusOnPress
+              onPress={() => tick(tickable)}
+            >
+              <CheckBox isSelected={checked} />
+            </UnstyledButton>
+          )}
+          {rowContent(row, search.loadingMore)}
+        </div>
       </li>
     );
   };
@@ -360,10 +426,48 @@ function OpenDialogBody({
       <p className="lc-open-announce" role="status">
         {stale ? "" : status ? status.title : announce(listingCount, search.outsideScope)}
       </p>
+      {ticked.length > 0 && (
+        <div className="lc-open-selection" role="group" aria-label="Ticked datasets">
+          <div className="lc-open-selection-text">
+            <span title={ticked.map((choice) => choice.title ?? choice.url).join("\n")}>
+              {plural(ticked.length, "dataset")} ticked
+            </span>
+            <UnstyledButton
+              className="lc-open-selection-clear"
+              preventFocusOnPress
+              onPress={() => {
+                setTicked([]);
+                setRefused(false);
+              }}
+            >
+              Clear
+            </UnstyledButton>
+            {refused && (
+              <span className="lc-open-selection-note" role="alert">
+                {formatCount(limit)} at most: no view layout holds more
+              </span>
+            )}
+          </div>
+          <div className="lc-open-selection-actions">
+            {/* A phone has no Mod key, so the other action needs a button of its own. */}
+            {secondary && (
+              <Button size="sm" onPress={() => open(ticked, true)}>
+                {secondary.label}
+              </Button>
+            )}
+            <Button size="sm" variant="primary" onPress={() => open(ticked, false)}>
+              {primary.label}
+            </Button>
+          </div>
+        </div>
+      )}
       {!coarse && (
         <footer className="lc-open-keys">
           <span>
             <Kbd keys="ArrowRight" /> Expand
+          </span>
+          <span>
+            <Kbd keys="Space" /> Tick
           </span>
           <span>
             <Kbd keys="Enter" /> {primary.label}
