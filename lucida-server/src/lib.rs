@@ -20,6 +20,8 @@ pub mod health;
 pub mod inbox;
 pub mod link_throttle;
 pub mod listings;
+#[cfg(test)]
+pub(crate) mod log_capture;
 pub mod open_diagnostics;
 pub mod origin;
 mod sample_histogram;
