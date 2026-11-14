@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.42.0](https://github.com/aelefebv/lucida/compare/v0.41.0...v0.42.0) (2026-11-14)
+
+
+### Features
+
+* **cli:** narrow `lucida dataset search` by owner, kind and date ([#1662](https://github.com/aelefebv/lucida/issues/1662)) ([4234f84](https://github.com/aelefebv/lucida/commit/4234f84c9dfbfd36bab85c8a6ea52a3c73d959b5))
+* **web:** tick recent datasets in the Open dialog ([#1660](https://github.com/aelefebv/lucida/issues/1660)) ([11b3245](https://github.com/aelefebv/lucida/commit/11b3245b864aa5bd40718e8163b7a5091e416595))
+
+
+### Bug Fixes
+
+* **server:** log a failing dataset source once per streak ([#1659](https://github.com/aelefebv/lucida/issues/1659)) ([a48c4da](https://github.com/aelefebv/lucida/commit/a48c4dad73a89058443679d2478ae9cc8f5b3517))
+
 ## [0.41.0](https://github.com/aelefebv/lucida/compare/v0.40.0...v0.41.0) (2026-11-14)
 
 
