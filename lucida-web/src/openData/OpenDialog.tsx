@@ -309,7 +309,7 @@ function OpenDialogBody({
 
   return (
     <div className="lc-open-data">
-      <div className="lc-open-field-row">
+      <div className="lc-open-controls" data-scoped={search.mineAvailable || undefined}>
         <ComboboxField
           className="lc-open-field"
           label={PLACEHOLDER}
@@ -330,13 +330,13 @@ function OpenDialogBody({
             className="lc-open-scope"
           />
         )}
+        <FilterChips
+          kind={kind}
+          onKindChange={(next) => restartWith(setKind, next)}
+          within={within}
+          onWithinChange={(next) => restartWith(setWithin, next)}
+        />
       </div>
-      <FilterChips
-        kind={kind}
-        onKindChange={(next) => restartWith(setKind, next)}
-        within={within}
-        onWithinChange={(next) => restartWith(setWithin, next)}
-      />
       <ul
         id={`${baseId}-tree`}
         className="lc-open-list"

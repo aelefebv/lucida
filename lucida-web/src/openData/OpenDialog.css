@@ -9,29 +9,37 @@
   min-height: 0;
 }
 
-.lc-open-field-row {
-  display: flex;
+/* The field, the scope toggle when there is one, and the chips below. */
+.lc-open-controls {
+  display: grid;
   flex: none;
+  grid-template-areas: "field" "chips";
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: var(--lc-space-2);
 }
 
+.lc-open-controls[data-scoped] {
+  grid-template-areas: "field scope" "chips chips";
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 /* Taller than a form field: it is the one control the dialog is about. */
 .lc-open-field {
-  flex: 1 1 auto;
-  min-width: 0;
+  grid-area: field;
   height: max(36px, var(--lc-control-h));
 }
 
 .lc-open-scope {
-  flex: none;
+  grid-area: scope;
 }
 
 /* One row that scrolls sideways when the chips outrun a narrow dialog. The
    padding keeps a focus ring inside the scroller's clip. */
 .lc-open-chips {
   display: flex;
-  flex: none;
+  grid-area: chips;
+  min-width: 0;
   gap: var(--lc-space-3);
   padding: 2px;
   overflow-x: auto;
@@ -254,5 +262,12 @@
   .lc-open-data {
     height: calc(85vh - 96px);
     height: calc(85dvh - 96px);
+  }
+
+  /* The field keeps the whole row, so its placeholder fits; the toggle leads
+     the chips and stays put while they scroll. */
+  .lc-open-controls[data-scoped] {
+    grid-template-areas: "field field" "scope chips";
+    grid-template-columns: auto minmax(0, 1fr);
   }
 }
