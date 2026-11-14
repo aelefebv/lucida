@@ -8,6 +8,7 @@ import userEvent from "@testing-library/user-event";
 import initWasm from "lucida-core";
 import { useState } from "react";
 import { __resetPreferencesForTesting, PREFERENCES_STORAGE_KEY } from "../theme/preferences.ts";
+import { VIEWPORT_MEDIA } from "../theme/viewport.ts";
 import { Button } from "../ui/Button.tsx";
 import { __resetCommandsForTesting, listCommands, runCommand } from "../ui/commands.ts";
 import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
@@ -197,7 +198,7 @@ describe("OpenDialog", () => {
     expect(outline(dialog)).toEqual(["runs"]);
 
     await user.keyboard("{ArrowRight}{ArrowDown}{ArrowDown}{Enter}");
-    expect(add).toHaveBeenCalledWith({ url: "/srv/data/runs/tiles.ome.zarr", title: "tiles.ome.zarr" });
+    expect(add).toHaveBeenCalledWith([{ url: "/srv/data/runs/tiles.ome.zarr", title: "tiles.ome.zarr", group: runs }]);
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
@@ -220,7 +221,7 @@ describe("OpenDialog", () => {
     await waitFor(() => expect(api.queries.at(-1)).toBe("old"));
     await settled(dialog);
     await user.keyboard("{ArrowDown}{Enter}");
-    expect(add).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+    expect(add).toHaveBeenCalledWith([{ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume", group: archive }]);
     expect(elsewhere).not.toHaveBeenCalled();
   });
 
@@ -232,7 +233,7 @@ describe("OpenDialog", () => {
     await waitFor(() => expect(api.queries.at(-1)).toBe("old"));
     await settled(dialog);
     await user.keyboard(`{ArrowDown}{${MOD}>}{Enter}{/${MOD}}`);
-    expect(elsewhere).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+    expect(elsewhere).toHaveBeenCalledWith([{ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume", group: archive }]);
     expect(add).not.toHaveBeenCalled();
   });
 
@@ -244,7 +245,7 @@ describe("OpenDialog", () => {
     await waitFor(() => expect(api.queries.at(-1)).toBe("loose"));
     await settled(dialog);
     await user.keyboard("{Enter}");
-    expect(open).toHaveBeenLastCalledWith({ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr" });
+    expect(open).toHaveBeenLastCalledWith([{ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr", group: null }]);
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     dialog = await openDialog(user);
@@ -261,14 +262,14 @@ describe("OpenDialog", () => {
     let dialog = await openDialog(user);
     await settled(dialog);
     await user.click(within(tree(dialog)).getByText("loose.ome.zarr"));
-    expect(add).toHaveBeenCalledWith({ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr" });
+    expect(add).toHaveBeenCalledWith([{ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr", group: null }]);
 
     dialog = await openDialog(user);
     await settled(dialog);
     await user.keyboard(`{${MOD}>}`);
     await user.click(within(tree(dialog)).getByText("loose.ome.zarr"));
     await user.keyboard(`{/${MOD}}`);
-    expect(elsewhere).toHaveBeenCalledWith({ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr" });
+    expect(elsewhere).toHaveBeenCalledWith([{ url: "/srv/data/loose.ome.zarr", title: "loose.ome.zarr", group: null }]);
   });
 
   it("turns the top row into Open <url> for a pasted URL, with the title a source gives it", async () => {
@@ -279,7 +280,7 @@ describe("OpenDialog", () => {
     await waitFor(() => expect(outline(dialog)[0]).toBe("Open Old volume"));
     expect(activeRow(dialog).textContent).toContain("/srv/data/archive/old-volume.ome.zarr");
     await user.keyboard("{Enter}");
-    expect(open).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+    expect(open).toHaveBeenCalledWith([{ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume", group: null }]);
   });
 
   it("opens a pasted URL no source lists, in its canonical form", async () => {
@@ -289,7 +290,7 @@ describe("OpenDialog", () => {
     await user.paste("GS://bucket/scans/sample.ome.zarr");
     await waitFor(() => expect(outline(dialog)[0]).toBe("Open gs://bucket/scans/sample.ome.zarr"));
     await user.keyboard("{Enter}");
-    expect(open).toHaveBeenCalledWith({ url: "gs://bucket/scans/sample.ome.zarr", title: null });
+    expect(open).toHaveBeenCalledWith([{ url: "gs://bucket/scans/sample.ome.zarr", title: null, group: null }]);
   });
 
   it("explains a malformed URL and opens nothing", async () => {
@@ -323,12 +324,12 @@ describe("OpenDialog", () => {
     expect(within(recents).getByText("Folder: archive · Image")).toBeTruthy();
 
     await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
-    expect(open).toHaveBeenCalledWith({ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume" });
+    expect(open).toHaveBeenCalledWith([{ url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume", group: archive }]);
 
     const again = await openDialog(user);
     await waitFor(() => expect(outline(again)[0]).toBe("Recent"));
     await user.click(within(tree(again)).getByText("earlier.zarr"));
-    expect(open).toHaveBeenLastCalledWith({ url: "/data/earlier.zarr", title: "earlier.zarr" });
+    expect(open).toHaveBeenLastCalledWith([{ url: "/data/earlier.zarr", title: "earlier.zarr", group: null }]);
   });
 
   it("hides the recent datasets once something is typed", async () => {
@@ -450,6 +451,188 @@ describe("OpenDialog", () => {
       runCommand("data.open");
     });
     expect(await screen.findByRole("dialog", { name: "Open data" })).toBeTruthy();
+  });
+});
+
+describe("OpenDialog ticks", () => {
+  const VOLUME = { url: "/srv/data/runs/volume.ome.zarr", title: "volume.ome.zarr", group: runs };
+  const TILES = { url: "/srv/data/runs/tiles.ome.zarr", title: "tiles.ome.zarr", group: runs };
+  const OLD = { url: "/srv/data/archive/old-volume.ome.zarr", title: "Old volume", group: archive };
+
+  function tickBox(dialog: HTMLElement, title: string): HTMLElement {
+    return within(dialog).getByRole("button", { name: `Tick ${title}` });
+  }
+
+  function bar(dialog: HTMLElement): HTMLElement | null {
+    return within(dialog).queryByRole("group", { name: "Ticked datasets" });
+  }
+
+  function groupRow(dialog: HTMLElement, name: string): HTMLElement {
+    return within(tree(dialog)).getByRole("treeitem", { name });
+  }
+
+  it("ticks without opening, keeps ticks across searches, and opens them together on Enter", async () => {
+    const user = userEvent.setup();
+    const { add, elsewhere } = inWorkspace();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    expect(bar(dialog)).toBeNull();
+
+    await user.click(tickBox(dialog, "volume.ome.zarr"));
+    expect(tickBox(dialog, "volume.ome.zarr").getAttribute("aria-pressed")).toBe("true");
+    expect(tickBox(dialog, "volume.ome.zarr").closest("[role=treeitem]")?.getAttribute("aria-checked")).toBe("true");
+    expect(add).not.toHaveBeenCalled();
+
+    await user.keyboard("old");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("old"));
+    await settled(dialog);
+    await user.click(tickBox(dialog, "Old volume"));
+    expect(bar(dialog)?.textContent).toContain("2 datasets ticked");
+
+    await user.keyboard("{Enter}");
+    expect(add).toHaveBeenCalledExactlyOnceWith([VOLUME, OLD]);
+    expect(elsewhere).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("opens the ticks in a new workspace on Mod+Enter", async () => {
+    const user = userEvent.setup();
+    const { add, elsewhere } = inWorkspace();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    await user.click(tickBox(dialog, "tiles.ome.zarr"));
+    await user.click(tickBox(dialog, "volume.ome.zarr"));
+    await user.keyboard(`{${MOD}>}{Enter}{/${MOD}}`);
+    // In the order they were ticked.
+    expect(elsewhere).toHaveBeenCalledExactlyOnceWith([TILES, VOLUME]);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("ticks from the keyboard with Space once arrowed onto a row, and leaves a typed space to the words", async () => {
+    const user = userEvent.setup();
+    const { elsewhere } = inWorkspace();
+    const dialog = await openDialog(user);
+    await user.keyboard("volume ");
+    expect(within(dialog).getByRole("combobox")).toHaveProperty("value", "volume ");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("volume"));
+    await settled(dialog);
+    expect(bar(dialog)).toBeNull();
+
+    await user.keyboard("{ArrowDown} ");
+    expect(activeRow(dialog).getAttribute("aria-checked")).toBe("true");
+    await user.keyboard(" ");
+    expect(activeRow(dialog).getAttribute("aria-checked")).toBe("false");
+    await user.keyboard(` {${MOD}>}{Enter}{/${MOD}}`);
+    expect(elsewhere).toHaveBeenCalledExactlyOnceWith([VOLUME]);
+  });
+
+  it("refuses a fifth tick with a note, and takes one again once another is unticked", async () => {
+    const shelf = folder("/srv/data/shelf");
+    const five = ["a", "b", "c", "d", "e"].map((name) => listing(`/srv/data/shelf/${name}.ome.zarr`, { group: shelf }));
+    globalThis.fetch = fakeListingsApi(five).fetch;
+    const user = userEvent.setup();
+    onDashboard();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+
+    for (const name of ["a", "b", "c", "d"]) await user.click(tickBox(dialog, `${name}.ome.zarr`));
+    expect(bar(dialog)?.textContent).toContain("4 datasets ticked");
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+
+    await user.click(tickBox(dialog, "e.ome.zarr"));
+    expect(tickBox(dialog, "e.ome.zarr").getAttribute("aria-pressed")).toBe("false");
+    expect(bar(dialog)?.textContent).toContain("4 datasets ticked");
+    expect(within(dialog).getByRole("alert").textContent).toBe("4 at most: no view layout holds more");
+
+    await user.click(tickBox(dialog, "a.ome.zarr"));
+    expect(within(dialog).queryByRole("alert")).toBeNull();
+    await user.click(tickBox(dialog, "e.ome.zarr"));
+    expect(tickBox(dialog, "e.ome.zarr").getAttribute("aria-pressed")).toBe("true");
+    // Five is more than a group may hold to open whole.
+    expect(within(groupRow(dialog, "Folder shelf")).queryByRole("button", { name: "Open folder" })).toBeNull();
+  });
+
+  it("holds a phone to two, the most its view layouts hold", async () => {
+    const shelf = folder("/srv/data/shelf");
+    const three = ["a", "b", "c"].map((name) => listing(`/srv/data/shelf/${name}.ome.zarr`, { group: shelf }));
+    globalThis.fetch = fakeListingsApi([...LISTINGS, ...three]).fetch;
+    const realMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) =>
+      query === VIEWPORT_MEDIA.phone
+        ? { matches: true, addEventListener: () => {}, removeEventListener: () => {} }
+        : realMatchMedia(query)) as unknown as typeof window.matchMedia;
+    try {
+      const user = userEvent.setup();
+      onDashboard();
+      const dialog = await openDialog(user);
+      await settled(dialog);
+      expect(within(groupRow(dialog, "Folder runs")).getByRole("button", { name: "Open folder" })).toBeTruthy();
+      expect(within(groupRow(dialog, "Folder shelf")).queryByRole("button", { name: "Open folder" })).toBeNull();
+
+      await user.click(tickBox(dialog, "a.ome.zarr"));
+      await user.click(tickBox(dialog, "b.ome.zarr"));
+      await user.click(tickBox(dialog, "c.ome.zarr"));
+      expect(tickBox(dialog, "c.ome.zarr").getAttribute("aria-pressed")).toBe("false");
+      expect(bar(dialog)?.textContent).toContain("2 datasets ticked");
+      expect(within(dialog).getByRole("alert").textContent).toBe("2 at most: no view layout holds more");
+    } finally {
+      window.matchMedia = realMatchMedia;
+    }
+  });
+
+  it("offers Open group, in the source's noun, only for a group the rows hold whole", async () => {
+    const user = userEvent.setup();
+    const { open } = onDashboard();
+    const dialog = await openDialog(user);
+    await user.keyboard("volume");
+    await waitFor(() => expect(api.queries.at(-1)).toBe("volume"));
+    await settled(dialog);
+    // Only one of the two datasets in "runs" matched, so it can't open whole.
+    expect(within(groupRow(dialog, "Folder runs")).queryByRole("button", { name: "Open folder" })).toBeNull();
+    expect(within(groupRow(dialog, "Folder archive")).getByRole("button", { name: "Open folder" })).toBeTruthy();
+
+    await user.clear(within(dialog).getByRole("combobox"));
+    await waitFor(() => expect(api.queries.at(-1)).toBe(""));
+    await settled(dialog);
+    await user.click(within(groupRow(dialog, "Folder runs")).getByRole("button", { name: "Open folder" }));
+    expect(open).toHaveBeenCalledExactlyOnceWith([VOLUME, TILES]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("opens a group in a new workspace on a Mod-click", async () => {
+    const user = userEvent.setup();
+    const { add, elsewhere } = inWorkspace();
+    const dialog = await openDialog(user);
+    await settled(dialog);
+    await user.keyboard(`{${MOD}>}`);
+    await user.click(within(groupRow(dialog, "Folder runs")).getByRole("button", { name: "Open folder" }));
+    await user.keyboard(`{/${MOD}}`);
+    expect(elsewhere).toHaveBeenCalledExactlyOnceWith([VOLUME, TILES]);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("gives both actions a button in the selection bar, for a phone without a Mod key, and clears", async () => {
+    const user = userEvent.setup();
+    const { add, elsewhere } = inWorkspace();
+    let dialog = await openDialog(user);
+    await settled(dialog);
+    await user.click(tickBox(dialog, "volume.ome.zarr"));
+    await user.click(within(bar(dialog) as HTMLElement).getByRole("button", { name: "Clear" }));
+    expect(bar(dialog)).toBeNull();
+    expect(tickBox(dialog, "volume.ome.zarr").getAttribute("aria-pressed")).toBe("false");
+
+    await user.click(tickBox(dialog, "volume.ome.zarr"));
+    await user.click(within(bar(dialog) as HTMLElement).getByRole("button", { name: "Open in a new workspace" }));
+    expect(elsewhere).toHaveBeenCalledExactlyOnceWith([VOLUME]);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // Each opening starts with nothing ticked.
+    dialog = await openDialog(user);
+    await settled(dialog);
+    expect(bar(dialog)).toBeNull();
+    await user.click(tickBox(dialog, "tiles.ome.zarr"));
+    await user.click(within(bar(dialog) as HTMLElement).getByRole("button", { name: "Add to this workspace" }));
+    expect(add).toHaveBeenCalledExactlyOnceWith([TILES]);
   });
 });
 

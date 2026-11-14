@@ -58,7 +58,8 @@ export function fakeListingsApi(
         existing.listings.push(item);
         continue;
       }
-      const result = { group: item.group, collapsed, listings: [item] };
+      const size = key === null ? 1 : listings.filter((other) => other.group?.id === key).length;
+      const result = { group: item.group, collapsed, size, listings: [item] };
       results.push(result);
       if (key !== null) byGroup.set(key, result);
     }

@@ -281,7 +281,10 @@ describe("WorkspaceDashboard", () => {
       expect(createWorkspaceMock).toHaveBeenCalledWith("sample.ome.zarr");
       expect(createWorkspaceMock).toHaveBeenCalledTimes(1);
       // The canonical URL, carried into the viewer to open there.
-      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-ds", ["gs://bucket/scans/sample.ome.zarr"]);
+      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-ds", {
+        urls: ["gs://bucket/scans/sample.ome.zarr"],
+        sideBySide: true,
+      });
     });
   });
 
@@ -297,9 +300,33 @@ describe("WorkspaceDashboard", () => {
 
     await waitFor(() => {
       expect(createWorkspaceMock).toHaveBeenCalledWith("First volume");
-      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-one", ["/srv/data/runs/one.ome.zarr"]);
+      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-one", { urls: ["/srv/data/runs/one.ome.zarr"], sideBySide: true });
     });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("opens a small folder side by side in a new workspace named after it", async () => {
+    const runs = folder("/srv/data/runs");
+    globalThis.fetch = fakeListingsApi([
+      listing("/srv/data/runs/one.ome.zarr", { title: "First volume", group: runs }),
+      listing("/srv/data/runs/two.ome.zarr", { title: "Second volume", group: runs }),
+    ]).fetch;
+    createWorkspaceMock.mockResolvedValue(record({ id: "ws-runs", name: "runs" }));
+    listWorkspacesMock.mockResolvedValue([]);
+    const onOpenWorkspace = vi.fn();
+    const user = userEvent.setup();
+
+    render(<WorkspaceDashboard onOpenWorkspace={onOpenWorkspace} />);
+    const dialog = await openDataDialog(user);
+    await user.click(await within(dialog).findByRole("button", { name: "Open folder" }));
+
+    await waitFor(() => {
+      expect(createWorkspaceMock).toHaveBeenCalledExactlyOnceWith("runs");
+      expect(onOpenWorkspace).toHaveBeenCalledWith("ws-runs", {
+        urls: ["/srv/data/runs/one.ome.zarr", "/srv/data/runs/two.ome.zarr"],
+        sideBySide: true,
+      });
+    });
   });
 
   it("explains a location that cannot open and creates nothing", async () => {

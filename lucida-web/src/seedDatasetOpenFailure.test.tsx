@@ -38,8 +38,9 @@ function FakeWorkspaceViewer({
   const [error, setError] = useState<string | null>(null);
 
   useSeedDatasetOpens({
-    initialDatasetUrls,
+    seed: { urls: initialDatasetUrls, sideBySide: false },
     ready: true,
+    viewsForEach: () => [],
     openDataset: (url) => {
       // Fire-and-forget, like bridge.sendOpenRemoteDataset: a rejection is
       // surfaced, not rethrown.

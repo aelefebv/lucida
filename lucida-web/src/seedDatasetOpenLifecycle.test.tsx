@@ -110,10 +110,11 @@ function SeedHarness({ url }: { url: string }) {
   }, []);
 
   useSeedDatasetOpens({
-    initialDatasetUrls: [url],
+    seed: { urls: [url], sideBySide: false },
     // The gate is the socket being open, not `Boolean(bridge)`.
     ready: connected,
     openDataset: (u) => bridgeRef.current?.sendOpenRemoteDataset(u),
+    viewsForEach: () => [],
   });
 
   return null;

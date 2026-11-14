@@ -51,14 +51,13 @@ import {
   type WorkspaceSummary,
 } from "./workspaceApi.ts";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
-import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
+import { createWorkspaceFromChoices, type DatasetSeed } from "./workspaceFromDataset.ts";
 import { WorkspacePreview } from "./workspacePreview/WorkspacePreview.tsx";
 import "./WorkspaceDashboard.css";
 
 interface Props {
-  /** Open a workspace. The viewer auto-opens any `datasetUrls` once
-   *  connected. */
-  onOpenWorkspace: (id: string, datasetUrls?: readonly string[]) => void;
+  /** Open a workspace. The viewer auto-opens any `seed` once connected. */
+  onOpenWorkspace: (id: string, seed?: DatasetSeed) => void;
 }
 
 type Shelf = "active" | "archived";
@@ -179,12 +178,12 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   // Only the create step can fail here, and it stays on the dashboard. A failed
   // dataset open surfaces in the viewer and keeps the workspace.
   const handleOpenData = useCallback(
-    async ({ url, title }: OpenChoice) => {
+    async (choices: readonly OpenChoice[]) => {
       setCreating(true);
       setError(null);
       try {
-        const workspace = await createWorkspaceFromDatasets([url], title ?? undefined);
-        onOpenWorkspace(workspace.id, [url]);
+        const { workspace, seed } = await createWorkspaceFromChoices(choices);
+        onOpenWorkspace(workspace.id, seed);
       } catch (e) {
         setError(messageOf(e));
       } finally {
@@ -402,7 +401,7 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
       <OpenDialog
         isOpen={openDataOpen}
         onOpenChange={setOpenDataOpen}
-        primary={{ label: "Open in a new workspace", run: (choice) => void handleOpenData(choice) }}
+        primary={{ label: "Open in a new workspace", run: (choices) => void handleOpenData(choices) }}
       />
       <KeyboardHelp />
     </div>

@@ -27,8 +27,38 @@ export const LAYOUT_LABELS: Readonly<Record<ViewLayoutName, string>> = {
 /** The layouts a phone offers: one view, or two stacked. */
 export const PHONE_LAYOUTS: readonly ViewLayoutName[] = ["single", "rows"];
 
+/** How many views each layout divides the canvas into. */
+const VIEW_COUNT: Readonly<Record<ViewLayoutName, number>> = {
+  single: 1,
+  columns: 2,
+  rows: 2,
+  grid: 4,
+  four_up: 4,
+};
+
+/** The layouts a screen offers. */
+export function layoutsFor(phone: boolean): readonly ViewLayoutName[] {
+  return phone ? PHONE_LAYOUTS : VIEW_LAYOUTS;
+}
+
+/** The most views any of `layouts` holds. */
+export function mostViews(layouts: readonly ViewLayoutName[]): number {
+  return Math.max(...layouts.map((layout) => VIEW_COUNT[layout]));
+}
+
 export function isViewLayoutName(value: string): value is ViewLayoutName {
   return (VIEW_LAYOUTS as readonly string[]).includes(value);
+}
+
+/**
+ * The layout that gives each of `count` datasets a view of its own: two side
+ * by side, or stacked on a phone, which offers no columns, and three or four
+ * in quarters.
+ */
+export function layoutForEach(count: number, phone: boolean): ViewLayoutName {
+  if (count <= 1) return "single";
+  if (count === 2) return phone ? "rows" : "columns";
+  return "grid";
 }
 
 export interface ViewLayoutActions {
@@ -45,8 +75,16 @@ export interface ViewLayoutActions {
   move(view: number, datasetId: string): void;
   /** Show `datasetId` in every view, as well as what each shows. */
   showEverywhere(datasetId: string): void;
-  /** Show these datasets in `view` as well as what it shows. */
+  /**
+   * Show these datasets in `view` as well as what it shows. Four-up shows
+   * one set of datasets in all four views, so there they join every view.
+   */
   add(view: number, datasetIds: readonly string[]): void;
+  /**
+   * Divide the canvas as `layout` does, every view showing nothing, for
+   * datasets about to open into them one each. Returns the views in order.
+   */
+  layOutEmpty(layout: ViewLayoutName): number[];
   /** Show `view` alone across the canvas, or every view again with null. */
   maximize(view: number | null): void;
   /** How the two views link, or null with one view. */
@@ -93,7 +131,21 @@ export function viewLayoutActions(
     showEverywhere: (datasetId) => write((s) => {
       for (const view of s.view_ids()) addTo(s, view, [datasetId]);
     }),
-    add: (view, datasetIds) => write((s) => addTo(s, view, datasetIds)),
+    add: (view, datasetIds) => write((s) => {
+      const views = s.view_layout() === "four_up" ? Array.from(s.view_ids()) : [view];
+      for (const each of views) addTo(s, each, datasetIds);
+    }),
+    layOutEmpty: (layout) => {
+      let views: number[] = [];
+      write((s) => {
+        applyViewportCommand(s, { type: "set_view_layout", layout });
+        views = Array.from(s.view_ids());
+        for (const view of views) {
+          applyViewportCommand(s, { type: "set_view_datasets", view, datasets: { only: [] } });
+        }
+      });
+      return views;
+    },
     maximize: (view) => write((s) => applyViewportCommand(s, { type: "maximize_view", view })),
     links: () => {
       const current = scene();

@@ -2,11 +2,20 @@
 //
 // The client sends only a name, so the server's owner-only default sharing is
 // never weakened here. The datasets are not opened here: the caller navigates
-// into the workspace and hands the URLs to `<App initialDatasetUrls=…>`. That
-// order means a failed import leaves the workspace in place and surfaces in the
-// viewer's open-failed banner instead of unwinding it.
+// into the workspace and hands them to `<App datasetSeed=…>`. That order means
+// a failed import leaves the workspace in place and surfaces in the viewer's
+// open-failed banner instead of unwinding it.
 
+import type { OpenChoice } from "./openData/index.ts";
 import { createWorkspace, type WorkspaceRecord } from "./workspaceApi.ts";
+
+/** Datasets a just-created workspace opens once its session is ready. */
+export interface DatasetSeed {
+  /** Raw user input, canonicalized when the viewer opens them. */
+  urls: readonly string[];
+  /** Each in a view of its own, rather than all of them in one view. */
+  sideBySide: boolean;
+}
 
 /**
  * Last path segment of a dataset URL or path, for the default workspace name.
@@ -44,4 +53,34 @@ export function createWorkspaceFromDatasets(
   const resolvedName = name ?? workspaceNameFromDatasets(urls);
   // Omit an empty name so the server uses its default rather than a blank one.
   return createWorkspace(resolvedName.length > 0 ? resolvedName : undefined);
+}
+
+/**
+ * The name of a workspace opened from datasets chosen together: one
+ * dataset's title, or for several, their group's label when they all come
+ * from one group and the first one's title otherwise. Undefined to name it
+ * after the URLs.
+ */
+export function workspaceNameFromChoices(choices: readonly OpenChoice[]): string | undefined {
+  const [first, ...rest] = choices;
+  if (!first) return undefined;
+  const group = first.group;
+  // A group id is unique within its source only, and the noun tells sources apart.
+  const shared =
+    rest.length > 0 &&
+    group !== null &&
+    rest.every((choice) => choice.group?.id === group.id && choice.group.noun === group.noun);
+  return (shared ? group.label : first.title) ?? undefined;
+}
+
+/**
+ * Create a workspace for datasets chosen in the Open dialog, and the seed
+ * that opens them there, each in a view of its own.
+ */
+export async function createWorkspaceFromChoices(
+  choices: readonly OpenChoice[],
+): Promise<{ workspace: WorkspaceRecord; seed: DatasetSeed }> {
+  const urls = choices.map((choice) => choice.url);
+  const workspace = await createWorkspaceFromDatasets(urls, workspaceNameFromChoices(choices));
+  return { workspace, seed: { urls, sideBySide: true } };
 }

@@ -72,6 +72,7 @@ struct SearchListingsResponse {
 struct ListingResultResponse {
     group: Option<ListingGroupResponse>,
     collapsed: bool,
+    size: usize,
     listings: Vec<ListingResponse>,
 }
 
@@ -157,6 +158,7 @@ impl ListingResultResponse {
                 .collect(),
             group,
             collapsed: result.collapsed,
+            size: result.size,
         }
     }
 }

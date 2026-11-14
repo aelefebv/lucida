@@ -51,7 +51,7 @@ import { desktopChrome } from "./shell/desktopChrome.tsx";
 import { phoneChrome } from "./shell/phone/phoneChrome.tsx";
 import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
 import { useDimensions } from "./hooks/useDimensions.ts";
-import { useBridge } from "./hooks/useBridge.ts";
+import { useBridge, type SavedViewBridgeHooks } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 import { useAutoContrast } from "./hooks/useAutoContrast.ts";
@@ -61,7 +61,8 @@ import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useComparison } from "./hooks/useComparison.ts";
 import { useEditHistory } from "./hooks/useEditHistory.ts";
 import { useUserTransforms } from "./hooks/useUserTransforms.ts";
-import { PHONE_LAYOUTS, VIEW_LAYOUTS, viewLayoutActions } from "./viewLayout.ts";
+import { layoutForEach, layoutsFor, viewLayoutActions } from "./viewLayout.ts";
+import { openTargets } from "./openTargets.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
 import {
@@ -73,6 +74,7 @@ import {
   createWorkspaceSavedView,
 } from "./workspaceApi.ts";
 import type { WorkspaceRole, WorkspaceMember } from "./workspaceApi.ts";
+import type { DatasetSeed } from "./workspaceFromDataset.ts";
 import { holdsStill, isCaptureSurface } from "./captureSurface.ts";
 import { setBundleServices } from "./trace/bundle.ts";
 import { visibleRectOf } from "./trace/flatFrame.ts";
@@ -115,18 +117,18 @@ interface AppProps {
   workspaceRole: WorkspaceRole;
   defaultSavedViewId: string | null;
   canRenameWorkspace: boolean;
-  /** Canonical dataset URLs to open once the viewer connects, set by the
+  /** Datasets to open once the viewer connects, set by the
    *  create-workspace-from-datasets flow. A failed open shows the normal
    *  banner and leaves the workspace in place. */
-  initialDatasetUrls?: readonly string[];
+  datasetSeed?: DatasetSeed;
   onBackToDashboard: () => void;
   /** The server removed this person's access while the viewer was open. */
   onAccessRevoked?: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
-  /** Create a new workspace around a dataset and navigate into it, as the
+  /** Create a new workspace around datasets and navigate into it, as the
    *  dashboard does. */
-  onOpenInNewWorkspace?: (choice: OpenChoice) => void;
+  onOpenInNewWorkspace?: (choices: readonly OpenChoice[]) => void;
 }
 
 /** The viewer for one workspace, inside the engine it drives. */
@@ -144,7 +146,7 @@ function Viewer({
   workspaceRole,
   defaultSavedViewId,
   canRenameWorkspace,
-  initialDatasetUrls,
+  datasetSeed,
   onBackToDashboard,
   onAccessRevoked,
   onRenameWorkspace,
@@ -218,10 +220,7 @@ function Viewer({
   });
   // Populated after useSavedViewSync constructs the applier (below).
   // The bridge calls into this on `dataset_opened` / `open_dataset_failed`.
-  const savedViewHooksRef = useRef<{
-    onDatasetOpened: (id: string) => void;
-    onOpenDatasetFailed: (url: string, err: string) => void;
-  } | null>(null);
+  const savedViewHooksRef = useRef<SavedViewBridgeHooks | null>(null);
 
   // Domain hooks (order matters: earlier hooks use refs for later hooks' values).
 
@@ -362,37 +361,10 @@ function Viewer({
     layoutMutation: captureSurface ? "local" : canEditWorkspace ? "broadcast" : "refuse",
   });
 
-  // The three callback-ref populate sites (savedViewHooksRef,
-  // bridgeCallbacksRef, datasetCallbacksRef) run during render, after all hooks
-  // return. That is load-bearing: populating in useEffect would leave the refs
-  // empty for the first effect pass.
-  // eslint-disable-next-line react-hooks/refs
-  savedViewHooksRef.current = {
-    onDatasetOpened: (id) => {
-      savedViewSync.applier.notifyDatasetOpened(id);
-      noteDatasetOpened(id);
-    },
-    onOpenDatasetFailed: (url, err) => {
-      savedViewSync.applier.notifyOpenFailed(url, err);
-      noteDatasetOpenFailed(url, err);
-    },
-  };
-
   const datasets = useDatasets({
     // Wrap so URL→DatasetId tracking is populated for every local open
     // (open-dialog-driven, URL-bar-driven, applier-driven).
     sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
-  });
-
-  // Open the seed datasets for the create-workspace-from-datasets flow through
-  // the same path as the in-viewer "Open". Gated on `bridge.sessionReady`
-  // (socket open and first snapshot applied), not `Boolean(bridge.bridge)`,
-  // which flips while the socket is still connecting: `Bridge.send` has no
-  // queue and would drop the send. A failed open leaves the workspace in place.
-  useSeedDatasetOpens({
-    initialDatasetUrls,
-    ready: bridge.sessionReady,
-    openDataset: datasets.handleUrlSubmit,
   });
 
   // Layout registry — null until WasmScene is set up; subscribe so the
@@ -505,7 +477,7 @@ function Viewer({
   });
 
   // Populate callback refs — runs during render, before effects fire.
-  // See the comment block above (savedViewHooksRef) for the rationale.
+  // See the comment block at the savedViewHooksRef populate for the rationale.
   // eslint-disable-next-line react-hooks/refs
   bridgeCallbacksRef.current = {
     sendCommand: bridge.sendCommand,
@@ -587,6 +559,62 @@ function Viewer({
     () => viewLayoutActions(engine.scene, engine.loop, emitPresenceWithUrl),
     [engine, emitPresenceWithUrl],
   );
+  const targets = useMemo(
+    () =>
+      openTargets({
+        addToView: (view, datasetId) => viewLayout.add(view, [datasetId]),
+        holds: (datasetId) => {
+          const current = engine.scene();
+          return current !== null && (JSON.parse(current.dataset_ids()) as string[]).includes(datasetId);
+        },
+      }),
+    [engine, viewLayout],
+  );
+  const handleUrlSubmit = datasets.handleUrlSubmit;
+  // The in-viewer open, landing in `view` when it names one.
+  const openDataset = useCallback(
+    (url: string, view: number | null) => {
+      const sent = handleUrlSubmit(url);
+      if (sent !== null && view !== null) targets.expect(sent, view);
+    },
+    [handleUrlSubmit, targets],
+  );
+
+  // The three callback-ref populate sites (savedViewHooksRef,
+  // bridgeCallbacksRef, datasetCallbacksRef) run during render, after all hooks
+  // return. That is load-bearing: populating in useEffect would leave the refs
+  // empty for the first effect pass.
+  // eslint-disable-next-line react-hooks/refs
+  savedViewHooksRef.current = {
+    onDatasetOpened: (id) => {
+      savedViewSync.applier.notifyDatasetOpened(id);
+      noteDatasetOpened(id);
+      targets.opened(id);
+    },
+    onOpenDatasetFailed: (url, err) => {
+      savedViewSync.applier.notifyOpenFailed(url, err);
+      noteDatasetOpenFailed(url, err);
+      targets.failed(url);
+    },
+    onOpenCompleted: (url, id) => targets.completed(url, id),
+  };
+
+  // Open the seed datasets for the create-workspace-from-datasets flow through
+  // the same path as the in-viewer "Open". Gated on `bridge.sessionReady`
+  // (socket open and first snapshot applied), not `Boolean(bridge.bridge)`,
+  // which flips while the socket is still connecting: `Bridge.send` has no
+  // queue and would drop the send. A failed open leaves the workspace in place.
+  const viewsForEach = useCallback(
+    (count: number) => viewLayout.layOutEmpty(layoutForEach(count, phone)),
+    [viewLayout, phone],
+  );
+  useSeedDatasetOpens({
+    seed: datasetSeed,
+    ready: bridge.sessionReady,
+    openDataset,
+    viewsForEach,
+  });
+
   const { views: shownViews, layout: viewLayoutName, links: viewLinks } = useSceneView(engine.store);
   // Several views offer each layer a place among them.
   const layerViewPlacement = useMemo((): LayerViewPlacement | undefined => {
@@ -968,7 +996,7 @@ function Viewer({
       viewMode={dims.viewMode}
       onViewModeToggle={dims.handleViewModeToggle}
       layout={viewLayoutName}
-      layouts={phone ? PHONE_LAYOUTS : VIEW_LAYOUTS}
+      layouts={layoutsFor(phone)}
       onLayoutChange={viewLayout.setLayout}
       links={viewLinks ? { links: viewLinks, onChange: viewLayout.link, onChangeAll: viewLayout.linkAll } : undefined}
       slicePlane={dims.slicePlane}
@@ -1272,7 +1300,13 @@ function Viewer({
         <OpenDialog
           isOpen={openDataOpen}
           onOpenChange={setOpenDataOpen}
-          primary={{ label: "Add to this workspace", run: (choice) => datasets.handleUrlSubmit(choice.url) }}
+          primary={{
+            label: shownViews.length > 1 ? "Add to the active view" : "Add to this workspace",
+            run: (choices) => {
+              const view = engine.scene()?.active_view() ?? null;
+              for (const choice of choices) openDataset(choice.url, view);
+            },
+          }}
           secondary={onOpenInNewWorkspace && { label: "Open in a new workspace", run: onOpenInNewWorkspace }}
         />
       )}

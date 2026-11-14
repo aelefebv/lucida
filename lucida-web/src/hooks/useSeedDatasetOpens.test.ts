@@ -3,28 +3,34 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { useSeedDatasetOpens } from "./useSeedDatasetOpens.ts";
+import type { DatasetSeed } from "../workspaceFromDataset.ts";
+
+const together = (urls: readonly string[]): DatasetSeed => ({ urls, sideBySide: false });
+const noViews = () => [];
 
 describe("useSeedDatasetOpens", () => {
   it("opens the single seed dataset once ready", () => {
     const openDataset = vi.fn();
     renderHook(() =>
       useSeedDatasetOpens({
-        initialDatasetUrls: ["/data/sample.ome.zarr"],
+        seed: together(["/data/sample.ome.zarr"]),
         ready: true,
         openDataset,
+        viewsForEach: noViews,
       }),
     );
     expect(openDataset).toHaveBeenCalledTimes(1);
-    expect(openDataset).toHaveBeenCalledWith("/data/sample.ome.zarr");
+    expect(openDataset).toHaveBeenCalledWith("/data/sample.ome.zarr", null);
   });
 
   it("opens ALL seed datasets for a multi-select create", () => {
     const openDataset = vi.fn();
     renderHook(() =>
       useSeedDatasetOpens({
-        initialDatasetUrls: ["/a.zarr", "gs://bucket/b.zarr", "/c.zarr"],
+        seed: together(["/a.zarr", "gs://bucket/b.zarr", "/c.zarr"]),
         ready: true,
         openDataset,
+        viewsForEach: noViews,
       }),
     );
     expect(openDataset).toHaveBeenCalledTimes(3);
@@ -35,14 +41,49 @@ describe("useSeedDatasetOpens", () => {
     ]);
   });
 
+  it("opens a side-by-side seed one dataset to a view, in order", () => {
+    const openDataset = vi.fn();
+    const viewsForEach = vi.fn(() => [0, 3, 4, 5]);
+    renderHook(() =>
+      useSeedDatasetOpens({
+        seed: { urls: ["/a.zarr", "/b.zarr", "/c.zarr"], sideBySide: true },
+        ready: true,
+        openDataset,
+        viewsForEach,
+      }),
+    );
+    expect(viewsForEach).toHaveBeenCalledExactlyOnceWith(3);
+    expect(openDataset.mock.calls).toEqual([
+      ["/a.zarr", 0],
+      ["/b.zarr", 3],
+      ["/c.zarr", 4],
+    ]);
+  });
+
+  it("leaves the views alone for one dataset, even side by side", () => {
+    const openDataset = vi.fn();
+    const viewsForEach = vi.fn(() => [0]);
+    renderHook(() =>
+      useSeedDatasetOpens({
+        seed: { urls: ["/a.zarr"], sideBySide: true },
+        ready: true,
+        openDataset,
+        viewsForEach,
+      }),
+    );
+    expect(viewsForEach).not.toHaveBeenCalled();
+    expect(openDataset).toHaveBeenCalledWith("/a.zarr", null);
+  });
+
   it("defers until ready, then fires exactly once", () => {
     const openDataset = vi.fn();
     const { rerender } = renderHook(
       ({ ready }: { ready: boolean }) =>
         useSeedDatasetOpens({
-          initialDatasetUrls: ["/a.zarr"],
+          seed: together(["/a.zarr"]),
           ready,
           openDataset,
+          viewsForEach: noViews,
         }),
       { initialProps: { ready: false } },
     );
@@ -60,16 +101,17 @@ describe("useSeedDatasetOpens", () => {
   it("is a no-op with no seed (normal open-existing-workspace case)", () => {
     const openDataset = vi.fn();
     const { rerender } = renderHook(
-      ({ urls }: { urls?: readonly string[] }) =>
+      ({ seed }: { seed?: DatasetSeed }) =>
         useSeedDatasetOpens({
-          initialDatasetUrls: urls,
+          seed,
           ready: true,
           openDataset,
+          viewsForEach: noViews,
         }),
-      { initialProps: { urls: undefined } as { urls?: readonly string[] } },
+      { initialProps: { seed: undefined } as { seed?: DatasetSeed } },
     );
     expect(openDataset).not.toHaveBeenCalled();
-    rerender({ urls: [] });
+    rerender({ seed: together([]) });
     expect(openDataset).not.toHaveBeenCalled();
   });
 
@@ -78,17 +120,18 @@ describe("useSeedDatasetOpens", () => {
     // workspace, mount, connect, THEN deliver the seed). Fire when both hold.
     const openDataset = vi.fn();
     const { rerender } = renderHook(
-      ({ urls }: { urls?: readonly string[] }) =>
+      ({ seed }: { seed?: DatasetSeed }) =>
         useSeedDatasetOpens({
-          initialDatasetUrls: urls,
+          seed,
           ready: true,
           openDataset,
+          viewsForEach: noViews,
         }),
-      { initialProps: { urls: undefined } as { urls?: readonly string[] } },
+      { initialProps: { seed: undefined } as { seed?: DatasetSeed } },
     );
     expect(openDataset).not.toHaveBeenCalled();
-    rerender({ urls: ["/late.zarr"] });
+    rerender({ seed: together(["/late.zarr"]) });
     expect(openDataset).toHaveBeenCalledTimes(1);
-    expect(openDataset).toHaveBeenCalledWith("/late.zarr");
+    expect(openDataset).toHaveBeenCalledWith("/late.zarr", null);
   });
 });
