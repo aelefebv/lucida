@@ -37,14 +37,13 @@ import {
   buildRows,
   choiceOf,
   countListings,
-  listingChoice,
   parentOf,
   visibleRows,
   type GroupRow,
   type OpenChoice,
   type OpenRow,
 } from "./openRows.ts";
-import { groupChoices, toggleTick, useOpenTogetherLimit } from "./openSelection.ts";
+import { groupChoices, tickChoice, toggleTick, useOpenTogetherLimit } from "./openSelection.ts";
 import { OPEN_DATA_SHORTCUT } from "./shortcut.ts";
 import { useListingSearch } from "./useListingSearch.ts";
 import { useRecentDatasets } from "./useRecentDatasets.ts";
@@ -181,10 +180,10 @@ function OpenDialogBody({
   const setWithin = (days: DatePreset | null) =>
     setDateBound(days && { within: days, since: new Date(Date.now() - days * DAY_MS).toISOString() });
 
-  const isTicked = (listing: Listing) => ticked.some((choice) => choice.url === listing.url);
+  const isTicked = (choice: OpenChoice) => ticked.some((t) => t.url === choice.url);
 
-  const tick = (listing: Listing) => {
-    const next = toggleTick(ticked, listingChoice(listing), limit);
+  const tick = (choice: OpenChoice) => {
+    const next = toggleTick(ticked, choice, limit);
     if (next === null) {
       setRefused(true);
       return;
@@ -253,9 +252,10 @@ function OpenDialogBody({
       }
       case " ": {
         // Only once arrowed onto a row: while typing, Space is part of the words.
-        if (!navigating || active?.type !== "listing" || stale) return;
+        const choice = navigating && active && !rowDisabled(active, stale) ? tickChoice(active) : null;
+        if (!choice) return;
         event.preventDefault();
-        tick(active.listing);
+        tick(choice);
         return;
       }
       case "Enter": {
@@ -344,23 +344,24 @@ function OpenDialogBody({
         </li>
       );
     }
-    const tickable = row.type === "listing" ? row.listing : null;
+    const tickable = tickChoice(row);
     const checked = tickable !== null && isTicked(tickable);
+    const disabled = rowDisabled(row, stale);
     return (
       <li
         key={row.key}
         {...common}
         aria-checked={tickable ? checked : undefined}
-        aria-disabled={rowDisabled(row, stale) || undefined}
+        aria-disabled={disabled || undefined}
       >
         <div {...rowProps}>
           {tickable && (
             // A press here ticks the row without opening it or taking focus from the field.
             <UnstyledButton
               className="lc-open-tick"
-              aria-label={`Tick ${tickable.title}`}
+              aria-label={`Tick ${tickable.title ?? tickable.url}`}
               aria-pressed={checked}
-              isDisabled={stale}
+              isDisabled={disabled}
               preventFocusOnPress
               onPress={() => tick(tickable)}
             >
