@@ -1,0 +1,9 @@
+.lc-popover.lc-contrast-editor-popover {
+  width: 480px;
+  max-width: calc(100vw - 16px - var(--lc-safe-left) - var(--lc-safe-right));
+}
+
+/* The channel's own controls, with a histogram tall enough to read. */
+.lc-contrast-editor {
+  --lc-range-bar-h: 160px;
+}

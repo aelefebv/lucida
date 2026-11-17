@@ -27,6 +27,12 @@ export interface DialogProps {
   onOpenChange?: (isOpen: boolean) => void;
   /** Width: 360, 480, or 640px. Default `md`. */
   size?: "sm" | "md" | "lg";
+  /**
+   * `center`, or `bottom` to rise from the window's bottom edge as a sheet,
+   * the way a phone shows controls opened from its own bottom sheet.
+   * Default `center`.
+   */
+  placement?: "center" | "bottom";
   /** Whether a click outside closes it. Default true. */
   isDismissable?: boolean;
 }
@@ -47,12 +53,18 @@ export function Dialog({
   isOpen,
   onOpenChange,
   size = "md",
+  placement = "center",
   isDismissable = true,
 }: DialogProps) {
   const overlayState = trigger ? {} : { isOpen, onOpenChange };
   const modal = (
-    <ModalOverlay className="lc-dialog-overlay" isDismissable={isDismissable} {...overlayState}>
-      <Modal className="lc-dialog" data-size={size} data-lc-overlay="">
+    <ModalOverlay
+      className="lc-dialog-overlay"
+      data-placement={placement}
+      isDismissable={isDismissable}
+      {...overlayState}
+    >
+      <Modal className="lc-dialog" data-size={size} data-placement={placement} data-lc-overlay="">
         <AriaDialog className="lc-dialog-inner">
           {({ close }) => (
             <>

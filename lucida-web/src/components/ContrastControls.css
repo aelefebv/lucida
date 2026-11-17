@@ -25,6 +25,12 @@
   font-size: var(--lc-text-sm);
 }
 
-.lc-contrast-full {
+/* The buttons about the bar itself end the row. */
+.lc-contrast-full,
+.lc-contrast-expand {
   margin-left: auto;
+}
+
+.lc-contrast-full + .lc-contrast-expand {
+  margin-left: 0;
 }
