@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.1](https://github.com/aelefebv/lucida/compare/v0.42.0...v0.42.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **web:** fit contrast to the full range by default, with Auto to stretch ([#1668](https://github.com/aelefebv/lucida/issues/1668)) ([78f876c](https://github.com/aelefebv/lucida/commit/78f876cf7eeff5ce82e7c6d0a05ebaf2ecfd20a7))
+
 ## [0.42.0](https://github.com/aelefebv/lucida/compare/v0.41.0...v0.42.0) (2026-11-14)
 
 
