@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.43.0](https://github.com/aelefebv/lucida/compare/v0.42.1...v0.43.0) (2026-11-17)
+
+
+### Features
+
+* **web:** make the inline contrast control precise ([#1670](https://github.com/aelefebv/lucida/issues/1670)) ([027cca8](https://github.com/aelefebv/lucida/commit/027cca8d95ff3a3249beb944c16c13ef7b2ab1da))
+* **web:** open a larger contrast editor from each channel ([#1672](https://github.com/aelefebv/lucida/issues/1672)) ([8896380](https://github.com/aelefebv/lucida/commit/88963800d435acbaf06c50023c582515ee4b0b27))
+
 ## [0.42.1](https://github.com/aelefebv/lucida/compare/v0.42.0...v0.42.1) (2026-11-17)
 
 
