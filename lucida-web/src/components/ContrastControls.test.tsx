@@ -1,13 +1,24 @@
 // @vitest-environment happy-dom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { useState } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContrastControls } from "./ContrastControls.tsx";
-import { contrastBounds, orderLimits } from "./contrastLimits.ts";
+import {
+  contrastBounds,
+  narrowestSpan,
+  orderLimits,
+  typedLimit,
+  visibleSpan,
+  zoomSpan,
+} from "./contrastLimits.ts";
+import { histogramOfSamples } from "../pipeline/valueHistogram.ts";
 
-function renderControls(overrides: Partial<Parameters<typeof ContrastControls>[0]> = {}) {
-  const props = {
+type Props = Parameters<typeof ContrastControls>[0];
+
+function controlProps(overrides: Partial<Props> = {}) {
+  return {
     label: "Channel 1",
     contrastMin: 100,
     contrastMax: 3000,
@@ -16,15 +27,67 @@ function renderControls(overrides: Partial<Parameters<typeof ContrastControls>[0
     valueRange: [0, 65535] as readonly [number, number] | null,
     integer: true,
     fullRange: false,
+    histogram: null,
     onFullRangeChange: vi.fn(),
     onContrastChange: vi.fn(),
     onGammaChange: vi.fn(),
     onAutoFit: vi.fn(),
     ...overrides,
-  };
+  } satisfies Props;
+}
+
+function renderControls(overrides: Partial<Props> = {}) {
+  const props = controlProps(overrides);
   render(<ContrastControls {...props} />);
   return props;
 }
+
+/** Controls that keep the limits they set, as the layer panel does. */
+function LiveControls(props: Props) {
+  const [[min, max], setLimits] = useState([props.contrastMin, props.contrastMax]);
+  const [fullRange, setFullRange] = useState(props.fullRange);
+  return (
+    <ContrastControls
+      {...props}
+      contrastMin={min}
+      contrastMax={max}
+      fullRange={fullRange}
+      onFullRangeChange={setFullRange}
+      onContrastChange={(lo, hi) => {
+        props.onContrastChange(lo, hi);
+        setLimits([lo, hi]);
+      }}
+    />
+  );
+}
+
+function renderLive(overrides: Partial<Props> = {}) {
+  const props = controlProps(overrides);
+  const { container } = render(<LiveControls {...props} />);
+  const track = container.querySelector(".lc-range-bar-track") as HTMLElement;
+  return { props, track };
+}
+
+/** The span the bar shows, as its handles name it to assistive tech. */
+function shownSpan(): [number, number] {
+  const handle = screen.getByRole("slider", { name: "Minimum" }) as HTMLInputElement;
+  return [Number(handle.min), Number(handle.max)];
+}
+
+/** A wheel event at `clientX`, which happy-dom's WheelEvent leaves out of its init. */
+function wheel(target: HTMLElement, deltaY: number, clientX: number) {
+  const event = new WheelEvent("wheel", { deltaY, deltaMode: 0, bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clientX", { value: clientX });
+  fireEvent(target, event);
+}
+
+/** The bar is 1000 px wide from x = 0, and each handle takes presses 12 px either side. */
+beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const width = this.classList.contains("lc-range-bar-track") ? 1000 : this.classList.contains("lc-range-bar-handle") ? 24 : 0;
+    return { left: 0, top: 0, right: width, bottom: 32, width, height: 32, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+  });
+});
 
 function field(name: string): HTMLInputElement {
   return screen.getByRole("textbox", { name }) as HTMLInputElement;
@@ -38,7 +101,10 @@ async function typeInto(name: string, text: string, commit: "{Enter}" | "blur") 
   else await userEvent.keyboard(commit);
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("ContrastControls typed limits", () => {
   it("applies a typed minimum on Enter", async () => {
@@ -53,10 +119,37 @@ describe("ContrastControls typed limits", () => {
     expect(props.onContrastChange).toHaveBeenLastCalledWith(100, 3500);
   });
 
-  it("clamps a typed value to the slider's span", async () => {
+  it("accepts a typed limit past the span, and grows the span to show it", async () => {
+    const { props } = renderLive();
+    expect(shownSpan()).toEqual([50, 4000]);
+    await typeInto("Contrast maximum", "9000", "{Enter}");
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(100, 9000);
+    expect(shownSpan()).toEqual([50, 9000]);
+  });
+
+  it("clamps a typed limit to an integer type's values, below its minimum and above its maximum", async () => {
     const props = renderControls();
     await typeInto("Contrast maximum", "90000", "{Enter}");
-    expect(props.onContrastChange).toHaveBeenLastCalledWith(100, 4000);
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(100, 65535);
+    await typeInto("Contrast minimum", "-20", "{Enter}");
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(0, 3000);
+  });
+
+  it("takes any finite typed limit for a float type", async () => {
+    const props = renderControls({ integer: false, valueRange: null, contrastMin: 0, contrastMax: 1, dataRange: { min: 0, max: 1 } });
+    await typeInto("Contrast minimum", "-250000.5", "{Enter}");
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(-250000.5, 1);
+    await typeInto("Contrast maximum", "70000", "{Enter}");
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(0, 70000);
+  });
+
+  it("grows a zoomed span to show a typed limit", async () => {
+    const { track } = renderLive({ contrastMin: 200, contrastMax: 800, dataRange: { min: 0, max: 1000 } });
+    wheel(track, -1000, 500);
+    const [lo, hi] = shownSpan();
+    expect(hi - lo).toBeLessThan(200);
+    await typeInto("Contrast maximum", "900", "{Enter}");
+    expect(shownSpan()).toEqual([lo, 900]);
   });
 
   it("keeps the minimum below the maximum", async () => {
@@ -99,6 +192,15 @@ describe("ContrastControls fields", () => {
     expect(field("Contrast maximum").value).toBe("1234.5677");
   });
 
+  it("place a float limit on the bar as shown, even where that falls just past the data's end", () => {
+    // The float32 nearest -0.7237397 is a little above it, so the shown limit is below the data's minimum.
+    const min = Math.fround(-0.7237397);
+    renderControls({ integer: false, valueRange: null, contrastMin: min, contrastMax: 6, dataRange: { min, max: 6 } });
+    expect(field("Contrast minimum").value).toBe("-0.7237397");
+    const handles = document.querySelectorAll(".lc-range-bar-handle");
+    expect([...handles].map((h) => h.getAttribute("data-beyond"))).toEqual([null, null]);
+  });
+
   it("keep the value a float limit holds when only the other is typed", async () => {
     const props = renderControls({
       integer: false,
@@ -109,6 +211,52 @@ describe("ContrastControls fields", () => {
     });
     await typeInto("Contrast maximum", "1500.25", "{Enter}");
     expect(props.onContrastChange).toHaveBeenLastCalledWith(Math.fround(0.1), 1500.25);
+  });
+});
+
+describe("ContrastControls bar", () => {
+  it("zooms the span about the pointer on a scroll, and resets it on a double-click, leaving the limits", () => {
+    const { props, track } = renderLive({ contrastMin: 200, contrastMax: 800, dataRange: { min: 0, max: 1000 } });
+    expect(shownSpan()).toEqual([0, 1000]);
+    wheel(track, -500, 250);
+    const [lo, hi] = shownSpan();
+    // The value under the pointer keeps its place a quarter of the way along.
+    expect((250 - lo) / (hi - lo)).toBeCloseTo(0.25);
+    expect(hi - lo).toBeCloseTo(1000 * Math.exp(-1));
+    fireEvent.doubleClick(track);
+    expect(shownSpan()).toEqual([0, 1000]);
+    expect(props.onContrastChange).not.toHaveBeenCalled();
+  });
+
+  it("zooms out no further than the full span, and ends a zoom when the full range is turned on", async () => {
+    const { track } = renderLive({ contrastMin: 200, contrastMax: 800, dataRange: { min: 0, max: 1000 } });
+    wheel(track, 2000, 500);
+    expect(shownSpan()).toEqual([0, 1000]);
+    wheel(track, -500, 500);
+    expect(shownSpan()[0]).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Span the slider over the full value range" }));
+    expect(shownSpan()).toEqual([0, 65535]);
+  });
+
+  it("moves both limits together when the band is dragged", () => {
+    const { props, track } = renderLive({ contrastMin: 200, contrastMax: 800, dataRange: { min: 0, max: 1000 } });
+    fireEvent.pointerDown(track, { pointerId: 1, button: 0, clientX: 500 });
+    fireEvent.pointerMove(track, { pointerId: 1, clientX: 450 });
+    fireEvent.pointerUp(track, { pointerId: 1, clientX: 450 });
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(150, 750);
+  });
+
+  it("draws the channel's histogram behind the bar, and redraws it with each fit", () => {
+    const histogram = (values: number[]) => histogramOfSamples([Float32Array.from(values)], 1, { min: 0, max: 1000 }, true);
+    const props = controlProps({ contrastMin: 0, contrastMax: 1000, dataRange: { min: 0, max: 1000 } });
+    const { rerender } = render(<ContrastControls {...props} />);
+    expect(screen.queryByTestId("contrast-histogram")).toBeNull();
+    rerender(<ContrastControls {...props} histogram={histogram([10, 20, 20])} />);
+    const first = screen.getByTestId("contrast-histogram").querySelector("path")?.getAttribute("d");
+    rerender(<ContrastControls {...props} histogram={histogram([900, 950])} />);
+    const second = screen.getByTestId("contrast-histogram").querySelector("path")?.getAttribute("d");
+    expect(first).toMatch(/^M0 1V/);
+    expect(second).not.toBe(first);
   });
 });
 
@@ -131,7 +279,7 @@ describe("ContrastControls auto", () => {
   });
 });
 
-describe("contrast bounds", () => {
+describe("contrast span", () => {
   it("spans the loaded data, or the whole range, and always holds the limits", () => {
     expect(contrastBounds(100, 3000, { min: 50, max: 4000 }, [0, 65535], false)).toEqual([50, 4000]);
     expect(contrastBounds(100, 3000, { min: 50, max: 4000 }, [0, 65535], true)).toEqual([0, 65535]);
@@ -142,6 +290,31 @@ describe("contrast bounds", () => {
     expect(contrastBounds(0, 100, { min: -5, max: 500 }, null, false)).toEqual([-5, 500]);
     expect(contrastBounds(0, 100, { min: -5, max: 500 }, null, true)).toEqual([-5, 500]);
     expect(contrastBounds(-2, 7.5, null, null, false)).toEqual([-2, 7.5]);
+  });
+
+  it("zooms about an anchor, inside the full span, down to its narrowest", () => {
+    expect(zoomSpan([0, 1000], 250, 0.5, [0, 1000], 10)).toEqual([125, 625]);
+    // Held inside the full span, and unzoomed once it would cover it.
+    expect(zoomSpan([100, 300], 300, 4, [0, 1000], 10)).toEqual([0, 800]);
+    expect(zoomSpan([100, 300], 200, 6, [0, 1000], 10)).toBeNull();
+    expect(zoomSpan([100, 120], 110, 0.01, [0, 1000], 10)).toEqual([105, 115]);
+    expect(narrowestSpan([0, 65535], true)).toBe(10);
+    expect(narrowestSpan([-1, 1], false)).toBe(2e-4);
+  });
+
+  it("shows the part of a zoom inside the full span, or the full span once none is", () => {
+    expect(visibleSpan(null, [0, 10])).toEqual([0, 10]);
+    expect(visibleSpan([5, 20], [0, 10])).toEqual([5, 10]);
+    expect(visibleSpan([20, 30], [0, 10])).toEqual([0, 10]);
+  });
+
+  it("holds a typed limit to what the data type holds", () => {
+    expect(typedLimit(-5, true, [0, 255])).toBe(0);
+    expect(typedLimit(300, true, [0, 255])).toBe(255);
+    expect(typedLimit(12.6, true, [0, 255])).toBe(13);
+    expect(typedLimit(-1e12, true, null)).toBe(-1e12);
+    expect(typedLimit(-1e12, false, null)).toBe(-1e12);
+    expect(typedLimit(0.25, false, null)).toBe(0.25);
   });
 
   it("moves whichever limit the user did not set", () => {

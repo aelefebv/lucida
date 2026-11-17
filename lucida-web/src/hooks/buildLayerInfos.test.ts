@@ -542,12 +542,13 @@ describe("buildLayerInfos channels (scene → LayerInfo seam)", () => {
     return settings;
   }
 
-  it("lists every channel with its settings, name, and loaded range, whatever the scene's c", () => {
+  it("lists every channel with its settings, name, loaded range and histogram, whatever the scene's c", () => {
     const scene = stubScene(["ds-0"], settingsWithChannels(), 2);
     const fit: ChannelFit = {
       limits: { min: 20, max: 650 },
       stretch: { min: 20, max: 650 },
       range: { min: 5, max: 700 },
+      histogram: { start: 5, binWidth: 1, counts: new Float64Array(1) },
       provisional: false,
     };
     const maps = { ...emptyMaps, contrastFit: new Map([["ds-0:ch1", fit]]) };
@@ -562,7 +563,8 @@ describe("buildLayerInfos channels (scene → LayerInfo seam)", () => {
       gamma: 2,
       dataRange: { min: 5, max: 700 },
     });
-    expect(info.channels[0]).toMatchObject({ contrastMin: 10, contrastMax: 900, dataRange: null });
+    expect(info.channels[1].histogram).toBe(fit.histogram);
+    expect(info.channels[0]).toMatchObject({ contrastMin: 10, contrastMax: 900, dataRange: null, histogram: null });
   });
 
   it("gives a single-channel image one channel", () => {

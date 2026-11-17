@@ -1,0 +1,117 @@
+.lc-range-bar {
+  min-width: 0;
+}
+
+/* The owner sets --lc-range-bar-h; a larger editor draws the same bar taller. */
+.lc-range-bar-track {
+  position: relative;
+  height: max(var(--lc-range-bar-h, 32px), var(--lc-target-min));
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-surface-3);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* A zoomed span shows part of the range, and says so. */
+.lc-range-bar[data-zoomed] .lc-range-bar-track {
+  box-shadow: inset 0 0 0 1px var(--lc-text-subtle);
+}
+
+.lc-range-bar-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.lc-range-bar-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--lc-accent-subtle);
+  cursor: grab;
+}
+
+.lc-range-bar-band[data-dragging] {
+  cursor: grabbing;
+}
+
+/* The press area a finger needs, around a line two pixels wide. */
+.lc-range-bar-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: max(20px, var(--lc-target-min));
+  translate: -50% 0;
+  cursor: ew-resize;
+}
+
+.lc-range-bar-handle::before,
+.lc-range-bar-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  translate: -50% 0;
+  pointer-events: none;
+}
+
+.lc-range-bar-handle::before {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--lc-accent-text);
+  transition: width var(--lc-motion-fast) var(--lc-ease);
+}
+
+/* Caps at both ends, so the line reads as something to take hold of. */
+.lc-range-bar-handle::after {
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  background:
+    linear-gradient(var(--lc-accent-text), var(--lc-accent-text)) top / 100% 3px no-repeat,
+    linear-gradient(var(--lc-accent-text), var(--lc-accent-text)) bottom / 100% 3px no-repeat;
+  border-radius: 1px;
+}
+
+.lc-range-bar-handle:not([data-beyond]):hover::before,
+.lc-range-bar-handle[data-dragging]::before {
+  width: 3px;
+}
+
+.lc-range-bar-handle:has(:focus-visible) {
+  border-radius: var(--lc-radius-sm);
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
+}
+
+/* A value past the span's end shows as an arrow at that end, and only the keyboard moves it. */
+.lc-range-bar-handle[data-beyond] {
+  cursor: default;
+}
+
+.lc-range-bar-handle[data-beyond]::before {
+  top: 50%;
+  bottom: auto;
+  width: 0;
+  height: 0;
+  translate: -50% -50%;
+  border-block: 6px solid transparent;
+  background: none;
+}
+
+.lc-range-bar-handle[data-beyond="start"]::before {
+  left: calc(50% + 6px);
+  border-right: 6px solid var(--lc-accent-text);
+}
+
+.lc-range-bar-handle[data-beyond="end"]::before {
+  left: calc(50% - 6px);
+  border-left: 6px solid var(--lc-accent-text);
+}
+
+.lc-range-bar-handle[data-beyond]::after {
+  display: none;
+}

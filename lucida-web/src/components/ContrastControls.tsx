@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { ArrowsOutLineHorizontalIcon, MagicWandIcon } from "@phosphor-icons/react";
 import { Button, IconButton, Slider, Switch, Tooltip } from "../ui/index.ts";
-import { contrastBounds, orderLimits } from "./contrastLimits.ts";
-import { shortestFloat32Text } from "./pixelReadout.ts";
+import type { ValueHistogram } from "../pipeline/valueHistogram.ts";
+import { ContrastLimits } from "./ContrastLimits.tsx";
 import "./ContrastControls.css";
 
 const GAMMA_MIN = 0.1;
@@ -18,10 +18,12 @@ interface Props {
   dataRange: { min: number; max: number } | null;
   /** Every value the data type holds, or `null` for a float type. */
   valueRange: readonly [number, number] | null;
-  /** Whole-number data steps by 1; other data by a thousandth of the span. */
+  /** Whole-number data steps by 1; other data by a thousandth of the span in view. */
   integer: boolean;
-  /** Span the slider over the data type's whole range instead of the loaded data's. */
+  /** Span the bar over the data type's whole range instead of the loaded data's. */
   fullRange: boolean;
+  /** The loaded values, drawn behind the limits, or `null` before any have loaded. */
+  histogram: ValueHistogram | null;
   onFullRangeChange: (fullRange: boolean) => void;
   onContrastChange: (min: number, max: number) => void;
   onGammaChange: (gamma: number) => void;
@@ -32,7 +34,7 @@ interface Props {
   children?: ReactNode;
 }
 
-/** Contrast limits and gamma, each a slider with editable values, plus auto-fit. */
+/** Contrast limits over the channel's histogram, gamma as a slider, and auto-fit. */
 export function ContrastControls({
   label,
   contrastMin,
@@ -42,6 +44,7 @@ export function ContrastControls({
   valueRange,
   integer,
   fullRange,
+  histogram,
   onFullRangeChange,
   onContrastChange,
   onGammaChange,
@@ -49,37 +52,17 @@ export function ContrastControls({
   continuous,
   children,
 }: Props) {
-  const [minValue, maxValue] = contrastBounds(contrastMin, contrastMax, dataRange, valueRange, fullRange);
-  const span = maxValue - minValue;
-  const step = integer ? 1 : span > 0 ? span / 1000 : 0.001;
-  // The fields show each limit whole. The renderer applies a limit in float32,
-  // so a float limit shows the fewest digits that name the same float32, up to
-  // the nine any float32 needs, and an integer limit shows every digit.
-  const format: Intl.NumberFormatOptions = integer
-    ? { maximumFractionDigits: 0, useGrouping: false }
-    : { maximumSignificantDigits: 9, useGrouping: false };
-  const shown = (limit: number) => (integer ? limit : Number(shortestFloat32Text(limit)));
-  const shownMin = shown(contrastMin);
-  const shownMax = shown(contrastMax);
-
   return (
     <div className="lc-contrast" role="group" aria-label={`${label} contrast`}>
-      <Slider<readonly [number, number]>
-        label="Contrast"
-        value={[shownMin, shownMax]}
-        minValue={minValue}
-        maxValue={maxValue}
-        step={step}
-        formatOptions={format}
-        valueDisplay="field"
-        thumbLabels={["Minimum", "Maximum"]}
-        onChange={(next) => {
-          const [lo, hi] = orderLimits(next, shownMin, step);
-          // A limit left where it showed keeps the value it holds.
-          const nextMin = lo === shownMin ? contrastMin : lo;
-          const nextMax = hi === shownMax ? contrastMax : hi;
-          if (nextMin !== contrastMin || nextMax !== contrastMax) onContrastChange(nextMin, nextMax);
-        }}
+      <ContrastLimits
+        contrastMin={contrastMin}
+        contrastMax={contrastMax}
+        dataRange={dataRange}
+        valueRange={valueRange}
+        integer={integer}
+        fullRange={fullRange}
+        histogram={histogram}
+        onContrastChange={onContrastChange}
       />
       <Slider<number>
         label="Gamma"

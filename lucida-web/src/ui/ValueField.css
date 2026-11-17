@@ -1,0 +1,28 @@
+.lc-value-field-input {
+  box-sizing: border-box;
+  width: max(6ch, calc((var(--lc-field-chars, 0) + 0.5) * 1ch + 2 * var(--lc-space-1) + 2px));
+  height: max(20px, var(--lc-target-min));
+  margin: 0;
+  padding: 0 var(--lc-space-1);
+  border: 1px solid transparent;
+  border-radius: var(--lc-radius-sm);
+  outline: none;
+  background: transparent;
+  color: var(--lc-text);
+  font: inherit;
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.lc-value-field-input:hover {
+  border-color: var(--lc-border-strong);
+  background: var(--lc-field-bg);
+}
+
+/* The same 2px ring as a text field's. */
+.lc-value-field-input:focus {
+  border-color: var(--lc-focus-ring);
+  background: var(--lc-field-bg);
+  box-shadow: 0 0 0 1px var(--lc-focus-ring);
+}

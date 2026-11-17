@@ -29,6 +29,7 @@ function channel(overrides: Partial<LayerChannel> = {}): LayerChannel {
     contrastMax: 65535,
     gamma: 1,
     dataRange: null,
+    histogram: null,
     ...overrides,
   };
 }

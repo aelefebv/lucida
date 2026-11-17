@@ -319,13 +319,38 @@ describe("AutoContrastFitter", () => {
       [600, 609, 1],
     ]);
     const [[, settled]] = run(fitter, requests, cache, "generated", histograms);
-    expect(settled).toEqual({
+    expect(settled).toMatchObject({
       provisional: false,
       limits: { min: 20, max: 609 },
       stretch: { min: 20, max: 609 },
       range: { min: 20, max: 609 },
     });
+    // The histogram counts the server's samples, not the stand-in's.
+    expect(settled.histogram.counts.reduce((sum, n) => sum + n, 0)).toBeCloseTo(1000);
     expect(run(fitter, requests, cache, "generated", histograms)).toEqual([]);
+  });
+
+  it("counts the samples each fit reads into its histogram, and hands out a fit whose histogram alone changed", () => {
+    const fitter = new AutoContrastFitter();
+    const cache = new Cache();
+    cache.hold(COARSE, block(700));
+    const [[, first]] = run(fitter, [...DETAIL, COARSE], cache, "source");
+    // A uint16 histogram bins whole numbers, each in the middle of its bin.
+    expect(first.histogram.start).toBe(699.5);
+    expect(first.histogram.binWidth).toBe(1);
+    expect(first.histogram.counts.reduce((sum, n) => sum + n, 0)).toBe(16);
+    expect(first.histogram.counts[0]).toBe(1);
+
+    // Panned onto a chunk with the same smallest and largest value and the
+    // same percentiles, but different values between them.
+    const panned = { ...COARSE, chunkKey: "1/0/0/0/0/9" };
+    const values = block(700);
+    values[1] = values[2];
+    cache.hold(panned, values);
+    const [[, second]] = run(fitter, [...DETAIL, panned], cache, "source");
+    expect(second.range).toEqual(first.range);
+    expect(second.stretch).toEqual(first.stretch);
+    expect(second.histogram).not.toEqual(first.histogram);
   });
 
   it("keeps a generated level's limits through a pan or zoom, which changes the chunks but not the histogram", () => {

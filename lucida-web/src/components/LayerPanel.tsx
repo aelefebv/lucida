@@ -46,6 +46,7 @@ import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import { UserTransformFields } from "./UserTransformFields.tsx";
 import type { UserTransform } from "../userTransform.ts";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
+import type { ValueHistogram } from "../pipeline/valueHistogram.ts";
 import type { LevelRange } from "../renderer/workerProtocol.ts";
 import type { DatasetImportWarning } from "../bridge.ts";
 import { importWarningText } from "./healthText.ts";
@@ -90,6 +91,8 @@ export interface LayerChannel {
   gamma: number;
   /** The loaded data's range for this channel, or `null` before any has loaded. */
   dataRange: { min: number; max: number } | null;
+  /** The loaded values counted for display, or `null` before any have loaded. */
+  histogram: ValueHistogram | null;
 }
 
 export interface LayerInfo {
@@ -576,6 +579,7 @@ function SingleChannel({ layer, ...props }: LayerRowProps) {
         contrastMax={channel.contrastMax}
         gamma={channel.gamma}
         dataRange={channel.dataRange}
+        histogram={channel.histogram}
         valueRange={layer.valueRange}
         integer={layer.integerData}
         fullRange={fullRange}
@@ -716,6 +720,7 @@ function ChannelRow(props: LayerRowProps & { channel: LayerChannel; channelIndex
             contrastMax={channel.contrastMax}
             gamma={channel.gamma}
             dataRange={channel.dataRange}
+            histogram={channel.histogram}
             valueRange={layer.valueRange}
             integer={layer.integerData}
             fullRange={fullRange}
