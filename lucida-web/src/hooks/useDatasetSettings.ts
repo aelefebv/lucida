@@ -427,11 +427,11 @@ export function useDatasetSettings({
     setAutoContrastMap((prev) => (prev.get(id) === false ? prev : new Map(prev).set(id, false)));
   }, [applyChannelContrast, loopRef]);
 
-  /** Set a channel's limits to its latest fit once. */
+  /** Set a channel's limits to its latest fit's stretch once, as a hand-set limit. */
   const handleChannelAutoFit = useCallback((id: string, channel: number) => {
     const fit = contrastFitMap.get(channelRangeKey(id, channel));
-    if (fit) applyChannelContrast(id, channel, fit.limits.min, fit.limits.max);
-  }, [contrastFitMap, applyChannelContrast]);
+    if (fit) handleChannelSetContrast(id, channel, fit.stretch.min, fit.stretch.max);
+  }, [contrastFitMap, handleChannelSetContrast]);
 
   /** Keep every channel of the layer at its latest fit, or stop. */
   const handleAutoContrastChange = useCallback((id: string, on: boolean) => {

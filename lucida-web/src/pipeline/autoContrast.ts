@@ -11,9 +11,11 @@
  * are max-pooled, which lifts every percentile, so they only stand in until
  * the histograms arrive. The minimap's textures are never read.
  *
- * The statistic is the 0.1st and 99.9th percentiles: of a fixed lattice of
- * each chunk's in-bounds samples, or of every sample a histogram counts.
- * Both are order statistics of a multiset, so no arrival order changes them.
+ * A fit takes two statistics, of a fixed lattice of each chunk's in-bounds
+ * samples or of every sample a histogram counts: the smallest and largest
+ * value, which auto-contrast sets, and the 0.1st and 99.9th percentiles,
+ * the stretch Auto sets once. All are order statistics of a multiset, so no
+ * arrival order changes them.
  */
 
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../manifestTypes.ts";
@@ -23,6 +25,7 @@ import { LANES } from "./fetch/types.ts";
 import type { HistogramBin } from "./generatedAvailability.ts";
 import { decodedValues } from "../renderer/dataTypeUtil.ts";
 
+/** The percentiles of a fit's stretch. */
 export const LOW_QUANTILE = 0.001;
 export const HIGH_QUANTILE = 0.999;
 
@@ -61,8 +64,10 @@ export interface ValueRange {
 }
 
 export interface ChannelFit {
-  /** The contrast limits auto-contrast sets. */
+  /** The contrast limits auto-contrast sets: the range. */
   limits: ValueRange;
+  /** The limits Auto sets once: the percentiles, or the range where they meet. */
+  stretch: ValueRange;
   /** The smallest and largest value read, which the contrast slider spans. */
   range: ValueRange;
   /** True while the fit stands in for one whose chunks are still arriving. */
@@ -139,9 +144,9 @@ export function chunkSamples(
 }
 
 /**
- * The limits and range of the values in `parts`, or `null` when they hold
- * none. Limits whose percentiles meet, as in mostly-constant data, widen to
- * the range.
+ * The fit of the values in `parts`, or `null` when they hold none. A
+ * stretch whose percentiles meet, as in mostly-constant data, widens to the
+ * range.
  */
 export function fitValues(parts: readonly Lattice[]): Omit<ChannelFit, "provisional"> | null {
   let total = 0;
@@ -164,7 +169,8 @@ export function fitValues(parts: readonly Lattice[]): Omit<ChannelFit, "provisio
     Math.ceil(HIGH_QUANTILE * (n - 1)),
   );
   return {
-    limits: high > low ? { min: low, max: high } : { min, max },
+    limits: { min, max },
+    stretch: high > low ? { min: low, max: high } : { min, max },
     range: { min, max },
   };
 }
@@ -236,11 +242,12 @@ function selectRanks(
 }
 
 /**
- * The limits and range of every sample in `histograms`, by the percentiles
- * {@link fitValues} takes, or `null` when they count none. Each limit is
- * the near edge of the bin its percentile falls in, the smallest sample for
- * the low limit and the largest for the high one, so a limit is a sample
- * value and never clips more than the percentile does. Bins of two
+ * The fit of every sample in `histograms`, by the statistics
+ * {@link fitValues} takes, or `null` when they count none. Each bin keeps
+ * its smallest and largest sample, so the limits are exact. Each end of the
+ * stretch is the near edge of the bin its percentile falls in, the smallest
+ * sample for the low end and the largest for the high one, so it is a
+ * sample value and never clips more than the percentile does. Bins of two
  * histograms can share a range; walking them by their smallest sample puts
  * a percentile within one bin of where merging them would.
  */
@@ -270,7 +277,11 @@ export function fitHistograms(
     }
   }
   const range = { min: bins[0][0], max };
-  return { limits: low !== null && high > low ? { min: low, max: high } : range, range };
+  return {
+    limits: { ...range },
+    stretch: low !== null && high > low ? { min: low, max: high } : { ...range },
+    range,
+  };
 }
 
 /** The `k`th smallest value of `a`, reordering `a` in place. */
@@ -362,7 +373,7 @@ export class AutoContrastFitter {
   private readonly lattices = new WeakMap<ArrayBuffer, Lattice>();
   private readonly outstanding = emptyLaneOutstanding();
 
-  /** The fits whose limits or range changed since the last update. */
+  /** The fits whose limits, stretch or range changed since the last update. */
   update(
     plans: ReadonlyMap<string, RequestPlan>,
     datasets: ReadonlyMap<string, { manifest: DatasetManifest }>,
@@ -402,7 +413,13 @@ export class AutoContrastFitter {
         const values = "histograms" in choice ? fitHistograms(choice.histograms) : this.fit(choice.chunks, manifest, cache);
         if (!values) continue;
         const fit: ChannelFit = { ...values, provisional: choice.provisional };
-        if (state.last && sameRange(state.last.limits, fit.limits) && sameRange(state.last.range, fit.range)) {
+        const last = state.last;
+        if (
+          last &&
+          sameRange(last.limits, fit.limits) &&
+          sameRange(last.stretch, fit.stretch) &&
+          sameRange(last.range, fit.range)
+        ) {
           continue;
         }
         state.last = fit;

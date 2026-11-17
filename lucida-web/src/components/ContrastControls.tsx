@@ -25,7 +25,7 @@ interface Props {
   onFullRangeChange: (fullRange: boolean) => void;
   onContrastChange: (min: number, max: number) => void;
   onGammaChange: (gamma: number) => void;
-  /** Fit the limits to the loaded data once. */
+  /** Stretch the limits over the loaded data once. */
   onAutoFit: () => void;
   /** Continuous auto-contrast, when it is shown with these controls. */
   continuous?: { isSelected: boolean; onChange: (on: boolean) => void };
@@ -94,7 +94,7 @@ export function ContrastControls({
         }}
       />
       <div className="lc-contrast-actions">
-        <Tooltip content={dataRange ? "Fit the limits to the loaded data once" : "No data has loaded yet"}>
+        <Tooltip content={dataRange ? "Stretch: clip the lowest and highest 0.1% of values" : "No data has loaded yet"}>
           <Button size="sm" icon={MagicWandIcon} onPress={onAutoFit} isDisabled={!dataRange}>
             Auto
           </Button>

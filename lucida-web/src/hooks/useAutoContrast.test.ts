@@ -5,7 +5,12 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import { applyAutoContrastFits } from "./useAutoContrast.ts";
 
-const FIT: ChannelFit = { limits: { min: 12, max: 840 }, range: { min: 0, max: 1000 }, provisional: false };
+const FIT: ChannelFit = {
+  limits: { min: 12, max: 840 },
+  stretch: { min: 30, max: 700 },
+  range: { min: 0, max: 1000 },
+  provisional: false,
+};
 
 function target(over: { auto?: (datasetId: string) => boolean; following?: boolean } = {}) {
   const scene = {
