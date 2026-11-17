@@ -637,6 +637,9 @@ function OverlaySection() {
         >
           Annotations on it stay in the workspace and come back if you add it again.
         </Dialog>
+        <Dialog title="Display" placement="bottom" trigger={<Button variant="ghost">Open as a sheet</Button>}>
+          <Switch label="Show scale bar" isSelected onChange={() => {}} />
+        </Dialog>
       </Row>
     </Section>
   );

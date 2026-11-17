@@ -19,6 +19,16 @@
   }
 }
 
+/* A sheet meets the bottom edge and rides above an on-screen keyboard, whose
+   height React Aria leaves out of --visual-viewport-height. */
+.lc-dialog-overlay[data-placement="bottom"] {
+  bottom: auto;
+  box-sizing: border-box;
+  height: var(--visual-viewport-height, 100%);
+  align-items: flex-end;
+  padding: max(var(--lc-space-6), var(--lc-safe-top)) var(--lc-safe-right) 0 var(--lc-safe-left);
+}
+
 .lc-dialog-overlay[data-entering] {
   animation: lc-dialog-fade var(--lc-motion) var(--lc-ease);
 }
@@ -50,6 +60,16 @@
 
 .lc-dialog[data-entering] {
   animation: lc-dialog-rise var(--lc-motion) var(--lc-ease);
+}
+
+.lc-dialog[data-placement="bottom"] {
+  border-bottom: none;
+  border-radius: var(--lc-radius-lg) var(--lc-radius-lg) 0 0;
+  padding-bottom: var(--lc-safe-bottom);
+}
+
+.lc-dialog[data-placement="bottom"][data-entering] {
+  animation-name: lc-dialog-sheet-rise;
 }
 
 .lc-dialog-inner {
@@ -93,6 +113,12 @@
 @keyframes lc-dialog-fade {
   from {
     opacity: 0;
+  }
+}
+
+@keyframes lc-dialog-sheet-rise {
+  from {
+    translate: 0 100%;
   }
 }
 

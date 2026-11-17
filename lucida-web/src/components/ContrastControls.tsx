@@ -2,7 +2,9 @@ import type { ReactNode } from "react";
 import { ArrowsOutLineHorizontalIcon, MagicWandIcon } from "@phosphor-icons/react";
 import { Button, IconButton, Slider, Switch, Tooltip } from "../ui/index.ts";
 import type { ValueHistogram } from "../pipeline/valueHistogram.ts";
+import { ContrastEditor } from "./ContrastEditor.tsx";
 import { ContrastLimits } from "./ContrastLimits.tsx";
+import { useContrastZoom, type ContrastZoom } from "./useContrastZoom.ts";
 import "./ContrastControls.css";
 
 const GAMMA_MIN = 0.1;
@@ -34,8 +36,41 @@ interface Props {
   children?: ReactNode;
 }
 
-/** Contrast limits over the channel's histogram, gamma as a slider, and auto-fit. */
-export function ContrastControls({
+/**
+ * Contrast limits over the channel's histogram, gamma as a slider, and
+ * auto-fit, with a button that opens the same controls larger. Both show the
+ * same props, so an edit in either shows in both; each bar zooms on its own,
+ * and the larger one opens at the span this one shows.
+ */
+export function ContrastControls(props: Props) {
+  const [zoom, setZoom] = useContrastZoom(props.fullRange);
+  return (
+    <Controls
+      {...props}
+      zoom={zoom}
+      onZoomChange={setZoom}
+      editor={
+        <ContrastEditor label={props.label}>
+          <EditorControls {...props} initialZoom={zoom} />
+        </ContrastEditor>
+      }
+    />
+  );
+}
+
+function EditorControls({ initialZoom, ...props }: Props & { initialZoom: ContrastZoom | null }) {
+  const [zoom, setZoom] = useContrastZoom(props.fullRange, initialZoom);
+  return <Controls {...props} zoom={zoom} onZoomChange={setZoom} />;
+}
+
+interface ControlsProps extends Props {
+  zoom: ContrastZoom | null;
+  onZoomChange: (zoom: ContrastZoom | null) => void;
+  /** The button that opens the larger editor, left out of the editor itself. */
+  editor?: ReactNode;
+}
+
+function Controls({
   label,
   contrastMin,
   contrastMax,
@@ -51,7 +86,10 @@ export function ContrastControls({
   onAutoFit,
   continuous,
   children,
-}: Props) {
+  zoom,
+  onZoomChange,
+  editor,
+}: ControlsProps) {
   return (
     <div className="lc-contrast" role="group" aria-label={`${label} contrast`}>
       <ContrastLimits
@@ -63,6 +101,8 @@ export function ContrastControls({
         fullRange={fullRange}
         histogram={histogram}
         onContrastChange={onContrastChange}
+        zoom={zoom}
+        onZoomChange={onZoomChange}
       />
       <Slider<number>
         label="Gamma"
@@ -96,11 +136,12 @@ export function ContrastControls({
             className="lc-contrast-full"
             icon={ArrowsOutLineHorizontalIcon}
             size="sm"
-            label="Span the slider over the full value range"
+            label="Span the bar over the full value range"
             isSelected={fullRange}
             onSelectedChange={onFullRangeChange}
           />
         )}
+        {editor}
       </div>
     </div>
   );

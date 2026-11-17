@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useLocale } from "react-aria-components";
 import { RangeBar, ValueField } from "../ui/index.ts";
 import { columnHeights, type ValueHistogram } from "../pipeline/valueHistogram.ts";
@@ -12,6 +12,7 @@ import {
   zoomSpan,
 } from "./contrastLimits.ts";
 import { shortestFloat32Text } from "./pixelReadout.ts";
+import type { ContrastZoom } from "./useContrastZoom.ts";
 import "./ContrastLimits.css";
 
 interface Props {
@@ -28,19 +29,16 @@ interface Props {
   /** The loaded values, drawn behind the bar, or `null` before any have loaded. */
   histogram: ValueHistogram | null;
   onContrastChange: (min: number, max: number) => void;
-}
-
-/** A zoomed span, and the full-range setting it was zoomed under. */
-interface Zoom {
-  span: readonly [number, number];
-  fullRange: boolean;
+  /** The bar's zoomed span, or `null` for its full span, as `useContrastZoom` holds it. */
+  zoom: ContrastZoom | null;
+  onZoomChange: (zoom: ContrastZoom | null) => void;
 }
 
 /**
  * The contrast limits as two fields over a bar with the channel's histogram
  * behind it. Scrolling zooms the bar's span and double-clicking resets it;
  * neither moves a limit. It fills its container's width, and the owner sets
- * the bar's height with `--lc-range-bar-h`.
+ * the bar's height with `--lc-range-bar-h` and holds its zoom.
  */
 export function ContrastLimits({
   contrastMin,
@@ -51,9 +49,10 @@ export function ContrastLimits({
   fullRange,
   histogram,
   onContrastChange,
+  zoom,
+  onZoomChange,
 }: Props) {
   const { locale } = useLocale();
-  const [zoom, setZoom] = useState<Zoom | null>(null);
   // The fields show each limit whole. The renderer applies a limit in float32,
   // so a float limit shows the fewest digits that name the same float32, up to
   // the nine any float32 needs, and an integer limit shows every digit.
@@ -67,8 +66,6 @@ export function ContrastLimits({
   // The bar places the limits as shown, which can fall just past the float32
   // the data range ends on, so the span holds them as shown.
   const full = contrastBounds(shownMin, shownMax, dataRange, valueRange, fullRange);
-  // Turning the full range on or off asks for a different span, so it ends a zoom.
-  if (zoom && zoom.fullRange !== fullRange) setZoom(null);
   const zoomed = zoom && zoom.fullRange === fullRange ? zoom.span : null;
   const span = visibleSpan(zoomed, full);
   const width = span[1] - span[0];
@@ -94,7 +91,7 @@ export function ContrastLimits({
     if (!zoomed || moved.length === 0) return;
     const grown = spanHolding(zoomed, ...moved);
     const nextFull = contrastBounds(shown(set[0]), shown(set[1]), dataRange, valueRange, fullRange);
-    setZoom(grown[0] <= nextFull[0] && grown[1] >= nextFull[1] ? null : { span: grown, fullRange });
+    onZoomChange(grown[0] <= nextFull[0] && grown[1] >= nextFull[1] ? null : { span: grown, fullRange });
   };
 
   return (
@@ -129,9 +126,9 @@ export function ContrastLimits({
         onChange={apply}
         onZoom={(anchor, factor) => {
           const next = zoomSpan(span, anchor, factor, full, narrowestSpan(full, integer));
-          setZoom(next ? { span: next, fullRange } : null);
+          onZoomChange(next ? { span: next, fullRange } : null);
         }}
-        onZoomReset={() => setZoom(null)}
+        onZoomReset={() => onZoomChange(null)}
       >
         {histogram && <HistogramShape histogram={histogram} lo={span[0]} hi={span[1]} />}
       </RangeBar>

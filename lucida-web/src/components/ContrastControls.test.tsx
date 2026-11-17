@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContrastControls } from "./ContrastControls.tsx";
 import {
@@ -14,6 +14,7 @@ import {
   zoomSpan,
 } from "./contrastLimits.ts";
 import { histogramOfSamples } from "../pipeline/valueHistogram.ts";
+import { VIEWPORT_MEDIA } from "../theme/viewport.ts";
 
 type Props = Parameters<typeof ContrastControls>[0];
 
@@ -104,6 +105,7 @@ async function typeInto(name: string, text: string, commit: "{Enter}" | "blur") 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("ContrastControls typed limits", () => {
@@ -234,7 +236,7 @@ describe("ContrastControls bar", () => {
     expect(shownSpan()).toEqual([0, 1000]);
     wheel(track, -500, 500);
     expect(shownSpan()[0]).toBeGreaterThan(0);
-    await userEvent.click(screen.getByRole("button", { name: "Span the slider over the full value range" }));
+    await userEvent.click(screen.getByRole("button", { name: "Span the bar over the full value range" }));
     expect(shownSpan()).toEqual([0, 65535]);
   });
 
@@ -276,6 +278,168 @@ describe("ContrastControls auto", () => {
     renderControls({ continuous: { isSelected: true, onChange } });
     await userEvent.click(screen.getByRole("switch", { name: "Continuous" }));
     expect(onChange).toHaveBeenCalledWith(false);
+  });
+});
+
+describe("ContrastControls editor", () => {
+  /** The span a bar shows inside `root`, as its handles name it. */
+  function spanIn(root: HTMLElement): [number, number] {
+    const handle = within(root).getByRole("slider", { name: "Minimum", hidden: true }) as HTMLInputElement;
+    return [Number(handle.min), Number(handle.max)];
+  }
+
+  function fieldIn(root: HTMLElement, name: string): HTMLInputElement {
+    return within(root).getByRole("textbox", { name, hidden: true }) as HTMLInputElement;
+  }
+
+  function trackIn(root: HTMLElement): HTMLElement {
+    return root.querySelector(".lc-range-bar-track") as HTMLElement;
+  }
+
+  async function openEditor(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole("button", { name: "Expand contrast" }));
+    return screen.findByRole("dialog", { name: "Channel 1 contrast" });
+  }
+
+  function renderInline() {
+    const props = controlProps({ contrastMin: 200, contrastMax: 800, dataRange: { min: 0, max: 1000 } });
+    const { container } = render(<LiveControls {...props} />);
+    return { props, inline: container.querySelector(".lc-contrast") as HTMLElement };
+  }
+
+  it("opens beside the channel with every control, takes focus, and gives it back on Escape", async () => {
+    const user = userEvent.setup();
+    renderInline();
+    const editor = await openEditor(user);
+    expect(editor.closest(".lc-contrast-editor-popover")).not.toBeNull();
+    expect(editor.contains(document.activeElement)).toBe(true);
+    for (const name of ["Contrast minimum", "Contrast maximum", "Gamma"]) expect(fieldIn(editor, name)).toBeTruthy();
+    expect(within(editor).getByRole("button", { name: "Auto" })).toBeTruthy();
+    expect(within(editor).getByRole("button", { name: "Span the bar over the full value range" })).toBeTruthy();
+    expect(within(editor).queryByRole("button", { name: "Expand contrast" })).toBeNull();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Expand contrast" }));
+  });
+
+  it("closes on a click outside", async () => {
+    const user = userEvent.setup();
+    renderInline();
+    await openEditor(user);
+    await user.click(document.body);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("shows Continuous when the inline control does", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    renderControls({ continuous: { isSelected: true, onChange } });
+    const editor = await openEditor(user);
+    await user.click(within(editor).getByRole("switch", { name: "Continuous" }));
+    expect(onChange).toHaveBeenCalledWith(false);
+  });
+
+  it("opens as a sheet from the bottom edge on a phone, and closes from its button", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === VIEWPORT_MEDIA.phone,
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    const user = userEvent.setup();
+    renderInline();
+    const editor = await openEditor(user);
+    expect(editor.closest(".lc-dialog")?.getAttribute("data-placement")).toBe("bottom");
+    expect(editor.contains(document.activeElement)).toBe(true);
+    await user.click(within(editor).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Expand contrast" }));
+  });
+
+  it("shows a limit set in either in both", async () => {
+    const user = userEvent.setup();
+    const { props, inline } = renderInline();
+    const track = trackIn(inline);
+    fireEvent.pointerDown(track, { pointerId: 1, button: 0, clientX: 500 });
+    fireEvent.pointerMove(track, { pointerId: 1, clientX: 450 });
+    fireEvent.pointerUp(track, { pointerId: 1, clientX: 450 });
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(150, 750);
+
+    const editor = await openEditor(user);
+    expect(fieldIn(editor, "Contrast minimum").value).toBe("150");
+    expect(fieldIn(editor, "Contrast maximum").value).toBe("750");
+    const editorMax = fieldIn(editor, "Contrast maximum");
+    await user.clear(editorMax);
+    await user.type(editorMax, "900{Enter}");
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(150, 900);
+    expect(fieldIn(inline, "Contrast maximum").value).toBe("900");
+  });
+
+  it("follows limits set elsewhere while it is open, as a continuous fit sets them", async () => {
+    const user = userEvent.setup();
+    const props = controlProps();
+    const { container, rerender } = render(<ContrastControls {...props} />);
+    const editor = await openEditor(user);
+    rerender(<ContrastControls {...props} contrastMin={400} contrastMax={2500} />);
+    for (const root of [container, editor]) {
+      expect(fieldIn(root, "Contrast minimum").value).toBe("400");
+      expect(fieldIn(root, "Contrast maximum").value).toBe("2500");
+    }
+  });
+
+  it("shows the gamma the inline control shows", async () => {
+    const user = userEvent.setup();
+    const props = controlProps({ gamma: 1.5 });
+    const { rerender } = render(<ContrastControls {...props} />);
+    const editor = await openEditor(user);
+    const gamma = fieldIn(editor, "Gamma");
+    expect(gamma.value).toBe("1.50");
+    await user.clear(gamma);
+    await user.type(gamma, "2.25{Enter}");
+    expect(props.onGammaChange).toHaveBeenLastCalledWith(2.25);
+    rerender(<ContrastControls {...props} gamma={0.8} />);
+    expect(fieldIn(editor, "Gamma").value).toBe("0.80");
+  });
+
+  it("opens at the span the inline bar shows, and zooms without moving it", async () => {
+    const user = userEvent.setup();
+    const { inline } = renderInline();
+    wheel(trackIn(inline), -500, 250);
+    const inlineSpan = spanIn(inline);
+    const editor = await openEditor(user);
+    expect(spanIn(editor)).toEqual(inlineSpan);
+
+    wheel(trackIn(editor), -500, 250);
+    expect(spanIn(editor)[1] - spanIn(editor)[0]).toBeLessThan(inlineSpan[1] - inlineSpan[0]);
+    expect(spanIn(inline)).toEqual(inlineSpan);
+    fireEvent.doubleClick(trackIn(editor));
+    expect(spanIn(editor)).toEqual([0, 1000]);
+    expect(spanIn(inline)).toEqual(inlineSpan);
+  });
+
+  it("drags the band, slows a Shift-drag, and ends both zooms when the full range is turned on", async () => {
+    const user = userEvent.setup();
+    const { props, inline } = renderInline();
+    wheel(trackIn(inline), -500, 500);
+    const editor = await openEditor(user);
+    const track = trackIn(editor);
+    fireEvent.doubleClick(track);
+
+    fireEvent.pointerDown(track, { pointerId: 1, button: 0, clientX: 500 });
+    fireEvent.pointerMove(track, { pointerId: 1, clientX: 450 });
+    fireEvent.pointerUp(track, { pointerId: 1, clientX: 450 });
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(150, 750);
+
+    // The maximum is at 750 on a bar 1000 values and 1000 px wide.
+    fireEvent.pointerDown(track, { pointerId: 2, button: 0, clientX: 750 });
+    fireEvent.pointerMove(track, { pointerId: 2, clientX: 850, shiftKey: true });
+    fireEvent.pointerUp(track, { pointerId: 2, clientX: 850, shiftKey: true });
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(150, 760);
+
+    await user.click(within(editor).getByRole("button", { name: "Span the bar over the full value range" }));
+    expect(spanIn(editor)).toEqual([0, 65535]);
+    expect(spanIn(inline)).toEqual([0, 65535]);
   });
 });
 
