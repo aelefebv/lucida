@@ -53,19 +53,20 @@ describe("fitHistograms", () => {
     expect(fitHistograms([exact(values)])).toEqual(fitValues([lattice(Float32Array.from(values))]));
   });
 
-  it("takes a bin's near edge, so a limit is a sample and clips no more than its percentile", () => {
+  it("limits to the smallest and largest sample, and stretches to a bin's near edge, which clips no more than its percentile", () => {
     const bins: HistogramBin[] = [
       [0, 0, 20],
       [1000, 1015, 9_960],
       [4096, 4160, 20],
     ];
-    expect(fitHistograms([{ bins }])).toEqual({ limits: { min: 0, max: 4160 }, range: { min: 0, max: 4160 } });
+    const range = { min: 0, max: 4160 };
+    expect(fitHistograms([{ bins }])).toEqual({ limits: range, stretch: range, range });
     const wide: HistogramBin[] = [
       [0, 0, 1],
       [1000, 1015, 99_998],
       [4096, 4160, 1],
     ];
-    expect(fitHistograms([{ bins: wide }])?.limits).toEqual({ min: 1000, max: 1015 });
+    expect(fitHistograms([{ bins: wide }])).toEqual({ limits: range, stretch: { min: 1000, max: 1015 }, range });
   });
 
   it("gives one answer whatever order the histograms come in", () => {
@@ -75,8 +76,8 @@ describe("fitHistograms", () => {
     expect(fitHistograms([c, b, a])).toEqual(fitHistograms([a, b, c]));
   });
 
-  it("widens to the range when the percentiles meet, and has nothing to fit without samples", () => {
-    expect(fitHistograms([{ bins: [[0, 0, 9_999], [300, 300, 1]] }])?.limits).toEqual({ min: 0, max: 300 });
+  it("widens the stretch to the range when the percentiles meet, and has nothing to fit without samples", () => {
+    expect(fitHistograms([{ bins: [[0, 0, 9_999], [300, 300, 1]] }])?.stretch).toEqual({ min: 0, max: 300 });
     expect(fitHistograms([{ bins: [] }])).toBeNull();
   });
 });
@@ -84,8 +85,12 @@ describe("fitHistograms", () => {
 describe("fitValues", () => {
   const ramp = (from: number, count: number) => lattice(Float32Array.from({ length: count }, (_, i) => from + i));
 
-  it("takes the 0.1st and 99.9th percentiles and the full range", () => {
-    expect(fitValues([ramp(0, 10_000)])).toEqual({ limits: { min: 9, max: 9990 }, range: { min: 0, max: 9999 } });
+  it("limits to the smallest and largest value, and stretches to the 0.1st and 99.9th percentiles", () => {
+    expect(fitValues([ramp(0, 10_000)])).toEqual({
+      limits: { min: 0, max: 9999 },
+      stretch: { min: 9, max: 9990 },
+      range: { min: 0, max: 9999 },
+    });
   });
 
   it("gives one answer whatever order the chunks come in", () => {
@@ -94,10 +99,10 @@ describe("fitValues", () => {
     expect(fitValues(reversed)).toEqual(fitValues(parts));
   });
 
-  it("widens to the range when the percentiles meet", () => {
+  it("widens the stretch to the range when the percentiles meet", () => {
     const mostlyZero = new Float32Array(10_000);
     mostlyZero[17] = 300;
-    expect(fitValues([lattice(mostlyZero)])?.limits).toEqual({ min: 0, max: 300 });
+    expect(fitValues([lattice(mostlyZero)])?.stretch).toEqual({ min: 0, max: 300 });
   });
 
   it("has nothing to fit without values", () => {
@@ -136,7 +141,8 @@ describe("fitValues", () => {
 
       const fit = fitValues(parts.map(lattice));
       expect(fit?.range).toEqual({ min, max });
-      expect(fit?.limits).toEqual(high > low ? { min: low, max: high } : { min, max });
+      expect(fit?.limits).toEqual({ min, max });
+      expect(fit?.stretch).toEqual(high > low ? { min: low, max: high } : { min, max });
     }
   });
 });
@@ -313,7 +319,12 @@ describe("AutoContrastFitter", () => {
       [600, 609, 1],
     ]);
     const [[, settled]] = run(fitter, requests, cache, "generated", histograms);
-    expect(settled).toEqual({ provisional: false, limits: { min: 20, max: 609 }, range: { min: 20, max: 609 } });
+    expect(settled).toEqual({
+      provisional: false,
+      limits: { min: 20, max: 609 },
+      stretch: { min: 20, max: 609 },
+      range: { min: 20, max: 609 },
+    });
     expect(run(fitter, requests, cache, "generated", histograms)).toEqual([]);
   });
 

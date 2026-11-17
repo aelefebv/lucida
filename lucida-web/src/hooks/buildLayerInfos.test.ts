@@ -544,7 +544,12 @@ describe("buildLayerInfos channels (scene → LayerInfo seam)", () => {
 
   it("lists every channel with its settings, name, and loaded range, whatever the scene's c", () => {
     const scene = stubScene(["ds-0"], settingsWithChannels(), 2);
-    const fit: ChannelFit = { limits: { min: 20, max: 650 }, range: { min: 5, max: 700 }, provisional: false };
+    const fit: ChannelFit = {
+      limits: { min: 20, max: 650 },
+      stretch: { min: 20, max: 650 },
+      range: { min: 5, max: 700 },
+      provisional: false,
+    };
     const maps = { ...emptyMaps, contrastFit: new Map([["ds-0:ch1", fit]]) };
     const [info] = buildLayerInfos(scene, threeChannelDatasets(), maps);
 
