@@ -15,7 +15,8 @@
  * samples or of every sample a histogram counts: the smallest and largest
  * value, which auto-contrast sets, and the 0.1st and 99.9th percentiles,
  * the stretch Auto sets once. All are order statistics of a multiset, so no
- * arrival order changes them.
+ * arrival order changes them. Each fit also counts the same samples into a
+ * histogram for the contrast control to draw, which neither statistic reads.
  */
 
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../manifestTypes.ts";
@@ -24,6 +25,8 @@ import type { LaneOutstanding } from "./fetch/types.ts";
 import { LANES } from "./fetch/types.ts";
 import type { HistogramBin } from "./generatedAvailability.ts";
 import { decodedValues } from "../renderer/dataTypeUtil.ts";
+import { isIntegerDataType } from "../types.ts";
+import { histogramOfBins, histogramOfSamples, sameHistogram, type ValueHistogram } from "./valueHistogram.ts";
 
 /** The percentiles of a fit's stretch. */
 export const LOW_QUANTILE = 0.001;
@@ -70,9 +73,14 @@ export interface ChannelFit {
   stretch: ValueRange;
   /** The smallest and largest value read, which the contrast slider spans. */
   range: ValueRange;
+  /** The values read, counted over the range for display. */
+  histogram: ValueHistogram;
   /** True while the fit stands in for one whose chunks are still arriving. */
   provisional: boolean;
 }
+
+/** A fit's statistics, which {@link fitValues} and {@link fitHistograms} take. */
+export type FitStatistics = Omit<ChannelFit, "histogram" | "provisional">;
 
 /** One channel's new fit. */
 export interface ChannelFitUpdate {
@@ -148,7 +156,7 @@ export function chunkSamples(
  * stretch whose percentiles meet, as in mostly-constant data, widens to the
  * range.
  */
-export function fitValues(parts: readonly Lattice[]): Omit<ChannelFit, "provisional"> | null {
+export function fitValues(parts: readonly Lattice[]): FitStatistics | null {
   let total = 0;
   let min = Infinity;
   let max = -Infinity;
@@ -159,7 +167,7 @@ export function fitValues(parts: readonly Lattice[]): Omit<ChannelFit, "provisio
     if (part.max > max) max = part.max;
   }
   if (total === 0) return null;
-  const thin = Math.ceil(total / FIT_SAMPLES);
+  const thin = thinning(parts);
   let n = 0;
   for (const part of parts) n += Math.ceil(part.values.length / thin);
   const [low, high] = selectRanks(
@@ -173,6 +181,13 @@ export function fitValues(parts: readonly Lattice[]): Omit<ChannelFit, "provisio
     stretch: high > low ? { min: low, max: high } : { min, max },
     range: { min, max },
   };
+}
+
+/** The stride at which a fit over `parts` reads each part's values. */
+function thinning(parts: readonly Lattice[]): number {
+  let total = 0;
+  for (const part of parts) total += part.values.length;
+  return Math.max(1, Math.ceil(total / FIT_SAMPLES));
 }
 
 /** One count per value of a sample key's top 16 bits; reused, since a fit runs to completion. */
@@ -253,7 +268,7 @@ function selectRanks(
  */
 export function fitHistograms(
   histograms: readonly { readonly bins: readonly HistogramBin[] }[],
-): Omit<ChannelFit, "provisional"> | null {
+): FitStatistics | null {
   const bins = histograms.flatMap((h) => h.bins).filter((bin) => bin[2] > 0);
   bins.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
   let total = 0;
@@ -370,10 +385,10 @@ interface ChannelState {
 export class AutoContrastFitter {
   private readonly chunks = new Map<string, DatasetChunks>();
   private readonly states = new Map<string, Map<number, ChannelState>>();
-  private readonly lattices = new WeakMap<ArrayBuffer, Lattice>();
+  private readonly latticeOf = new WeakMap<ArrayBuffer, Lattice>();
   private readonly outstanding = emptyLaneOutstanding();
 
-  /** The fits whose limits, stretch or range changed since the last update. */
+  /** The fits whose limits, stretch, range or histogram changed since the last update. */
   update(
     plans: ReadonlyMap<string, RequestPlan>,
     datasets: ReadonlyMap<string, { manifest: DatasetManifest }>,
@@ -410,7 +425,10 @@ export class AutoContrastFitter {
         if (choice === null || choice.input === state.fitted) continue;
         state.fitted = choice.input;
 
-        const values = "histograms" in choice ? fitHistograms(choice.histograms) : this.fit(choice.chunks, manifest, cache);
+        const integer = manifest.images.every((image) => isIntegerDataType(image.multiscale.data_type));
+        const values = "histograms" in choice
+          ? fitOfHistograms(choice.histograms, integer)
+          : fitOfLattices(this.lattices(choice.chunks, manifest, cache), integer);
         if (!values) continue;
         const fit: ChannelFit = { ...values, provisional: choice.provisional };
         const last = state.last;
@@ -418,7 +436,8 @@ export class AutoContrastFitter {
           last &&
           sameRange(last.limits, fit.limits) &&
           sameRange(last.stretch, fit.stretch) &&
-          sameRange(last.range, fit.range)
+          sameRange(last.range, fit.range) &&
+          sameHistogram(last.histogram, fit.histogram)
         ) {
           continue;
         }
@@ -448,17 +467,14 @@ export class AutoContrastFitter {
     );
   }
 
-  private fit(
-    read: readonly ChunkRequest[],
-    manifest: DatasetManifest,
-    cache: FitCache,
-  ): Omit<ChannelFit, "provisional"> | null {
+  /** The lattices of the resident chunks among `read`, each built once per chunk. */
+  private lattices(read: readonly ChunkRequest[], manifest: DatasetManifest, cache: FitCache): Lattice[] {
     const images = new Map(manifest.images.map((image) => [image.image_id, image]));
     const parts: Lattice[] = [];
     for (const req of read) {
       const entry = cache.cachedSamples(req.entityId, req.chunkKey);
       if (!entry) continue;
-      let part = this.lattices.get(entry.data);
+      let part = this.latticeOf.get(entry.data);
       if (!part) {
         const geometry = chunkGeometry(images.get(req.imageId), req);
         try {
@@ -466,12 +482,29 @@ export class AutoContrastFitter {
         } catch {
           continue;
         }
-        this.lattices.set(entry.data, part);
+        this.latticeOf.set(entry.data, part);
       }
       parts.push(part);
     }
-    return fitValues(parts);
+    return parts;
   }
+}
+
+function fitOfLattices(parts: readonly Lattice[], integer: boolean): Omit<ChannelFit, "provisional"> | null {
+  const statistics = fitValues(parts);
+  if (!statistics) return null;
+  const samples = parts.map((part) => part.values);
+  return { ...statistics, histogram: histogramOfSamples(samples, thinning(parts), statistics.range, integer) };
+}
+
+function fitOfHistograms(
+  histograms: readonly { readonly bins: readonly HistogramBin[] }[],
+  integer: boolean,
+): Omit<ChannelFit, "provisional"> | null {
+  const statistics = fitHistograms(histograms);
+  if (!statistics) return null;
+  const bins = histograms.flatMap((h) => h.bins);
+  return { ...statistics, histogram: histogramOfBins(bins, statistics.range, integer) };
 }
 
 /** What one fit reads, and the input key that says whether it has been read. */

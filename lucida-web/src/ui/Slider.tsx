@@ -1,14 +1,13 @@
-import type { CSSProperties } from "react";
 import {
-  Input,
   Label,
-  NumberField as AriaNumberField,
   Slider as AriaSlider,
   SliderOutput,
   SliderThumb,
   SliderTrack,
   useLocale,
 } from "react-aria-components";
+import { displayFormat } from "./numberFormat.ts";
+import { ValueField } from "./ValueField.tsx";
 import "./Slider.css";
 
 /** One value, or a `[low, high]` range with two thumbs. */
@@ -50,24 +49,6 @@ function fromArray<T extends SliderValue>(values: number[], like: T): T {
   return (typeof like === "number" ? values[0] : [values[0], values[1]]) as T;
 }
 
-/**
- * How a value shows: with the caller's options, or else with every fraction
- * digit the value holds and at least the three a number format shows by
- * default. A stored value can sit off the slider's step, and React Aria would
- * round it to the step for display.
- */
-function displayFormat(values: readonly number[], formatOptions?: Intl.NumberFormatOptions): Intl.NumberFormatOptions {
-  if (formatOptions) return formatOptions;
-  const digits = Math.max(3, ...values.map(fractionDigits));
-  return { maximumFractionDigits: Math.min(digits, 20) };
-}
-
-/** The fraction digits the shortest text that reads back as `value` has. */
-function fractionDigits(value: number): number {
-  const [mantissa, exponent = "0"] = String(Math.abs(value)).split("e");
-  return Math.max(0, (mantissa.split(".")[1]?.length ?? 0) - Number(exponent));
-}
-
 export function Slider<T extends SliderValue>({
   label,
   labelPosition = "top",
@@ -91,7 +72,6 @@ export function Slider<T extends SliderValue>({
 
   // An edited value keeps the range ordered: low never passes high.
   const commitField = (index: number, next: number) => {
-    if (Number.isNaN(next)) return;
     const updated = [...values];
     updated[index] = Math.min(maxValue, Math.max(minValue, next));
     if (isRange) {
@@ -128,18 +108,19 @@ export function Slider<T extends SliderValue>({
           {valueDisplay === "field" && (
             <span className="lc-slider-fields">
               {values.map((v, i) => (
-                <SliderValueField
-                  key={i}
-                  label={isRange ? `${label} ${thumbLabels[i].toLowerCase()}` : label}
-                  value={v}
-                  minValue={minValue}
-                  maxValue={maxValue}
-                  step={step}
-                  formatOptions={formatOptions}
-                  isDisabled={isDisabled}
-                  onCommit={(next) => commitField(i, next)}
-                  separator={i === 1}
-                />
+                <span key={i} className="lc-slider-field-group">
+                  {i === 1 && <span className="lc-slider-separator">–</span>}
+                  <ValueField
+                    label={isRange ? `${label} ${thumbLabels[i].toLowerCase()}` : label}
+                    value={v}
+                    minValue={minValue}
+                    maxValue={maxValue}
+                    step={step}
+                    formatOptions={formatOptions}
+                    isDisabled={isDisabled}
+                    onCommit={(next) => commitField(i, next)}
+                  />
+                </span>
               ))}
             </span>
           )}
@@ -169,56 +150,5 @@ export function Slider<T extends SliderValue>({
         }}
       </SliderTrack>
     </AriaSlider>
-  );
-}
-
-function SliderValueField({
-  label,
-  value,
-  minValue,
-  maxValue,
-  step,
-  formatOptions,
-  isDisabled,
-  onCommit,
-  separator,
-}: {
-  label: string;
-  value: number;
-  minValue: number;
-  maxValue: number;
-  step: number;
-  formatOptions?: Intl.NumberFormatOptions;
-  isDisabled?: boolean;
-  onCommit: (value: number) => void;
-  separator: boolean;
-}) {
-  const { locale } = useLocale();
-  const format = displayFormat([value], formatOptions);
-  // Wide enough for the whole value: an int64 limit runs to 20 characters.
-  const chars = new Intl.NumberFormat(locale, format).format(value).length;
-  return (
-    <span className="lc-slider-field-group">
-      {separator && <span className="lc-slider-separator">–</span>}
-      <AriaNumberField
-        className="lc-slider-field"
-        aria-label={label}
-        value={value}
-        onChange={onCommit}
-        minValue={minValue}
-        maxValue={maxValue}
-        step={step}
-        formatOptions={format}
-        isDisabled={isDisabled}
-        // `snap` would show a stored value rounded to the step, and keep a typed
-        // one from landing between steps. The slider clamps a commit itself, and
-        // the field never shows an off-step value as invalid.
-        commitBehavior="validate"
-        validationBehavior="aria"
-        isInvalid={false}
-      >
-        <Input className="lc-slider-field-input" style={{ "--lc-field-chars": chars } as CSSProperties} />
-      </AriaNumberField>
-    </span>
   );
 }

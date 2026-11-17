@@ -57,6 +57,7 @@ import { Menu, MenuItem, MenuSection, MenuSeparator } from "../Menu.tsx";
 import { NumberField } from "../NumberField.tsx";
 import { PanelHeader } from "../PanelHeader.tsx";
 import { Popover } from "../Popover.tsx";
+import { RangeBar } from "../RangeBar.tsx";
 import { SegmentedControl } from "../SegmentedControl.tsx";
 import { Select } from "../Select.tsx";
 import { SHORTCUT_GROUPS, useShortcut, useShortcutList, type KeyCombo } from "../shortcuts.ts";
@@ -521,6 +522,14 @@ function SliderSection() {
   const [z, setZ] = useState(34);
   const [range, setRange] = useState<readonly [number, number]>([120, 2400]);
   const [gamma, setGamma] = useState(1);
+  const [limits, setLimits] = useState<readonly [number, number]>([800, 2600]);
+  const [span, setSpan] = useState<readonly [number, number]>([0, 4095]);
+  const zoom = (anchor: number, factor: number) => {
+    const width = Math.min(4095, Math.max(10, (span[1] - span[0]) * factor));
+    const at = (anchor - span[0]) / (span[1] - span[0]);
+    const lo = Math.min(4095 - width, Math.max(0, anchor - at * width));
+    setSpan([lo, lo + width]);
+  };
   return (
     <Section title="Slider">
       <div className="gallery-fields gallery-fields-single">
@@ -536,6 +545,16 @@ function SliderSection() {
         <Slider label="Z plane" value={z} onChange={setZ} minValue={0} maxValue={127} valueDisplay="field" />
         <Slider label="Contrast" value={range} onChange={setRange} minValue={0} maxValue={4095} valueDisplay="field" />
         <Slider label="Gamma" value={gamma} onChange={setGamma} minValue={0.1} maxValue={4} step={0.05} isDisabled />
+        <RangeBar
+          label="Range bar"
+          value={limits}
+          onChange={setLimits}
+          span={span}
+          step={1}
+          isZoomed={span[0] > 0 || span[1] < 4095}
+          onZoom={zoom}
+          onZoomReset={() => setSpan([0, 4095])}
+        />
       </div>
     </Section>
   );

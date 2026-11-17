@@ -44,6 +44,7 @@ export {
 export { NumberField, type NumberFieldProps } from "./NumberField.tsx";
 export { PanelHeader, type PanelHeaderProps } from "./PanelHeader.tsx";
 export { Popover, type PopoverPlacement, type PopoverProps } from "./Popover.tsx";
+export { RangeBar, type RangeBarProps } from "./RangeBar.tsx";
 export {
   SegmentedControl,
   type SegmentedControlProps,
@@ -81,3 +82,4 @@ export { dismissToast, toast, type ToastOptions, type ToastTone } from "./toastQ
 export { Toolbar, ToolbarSeparator, type ToolbarProps } from "./Toolbar.tsx";
 export { Tooltip, type TooltipPlacement, type TooltipProps } from "./Tooltip.tsx";
 export { UnstyledButton, type UnstyledButtonProps } from "./UnstyledButton.tsx";
+export { ValueField, type ValueFieldProps } from "./ValueField.tsx";

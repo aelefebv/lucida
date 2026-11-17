@@ -19,6 +19,7 @@ const FIT: ChannelFit = {
   limits: { min: 3, max: 4000 },
   stretch: { min: 90, max: 1200 },
   range: { min: 3, max: 4000 },
+  histogram: { start: 3, binWidth: 1, counts: new Float64Array(1) },
   provisional: false,
 };
 

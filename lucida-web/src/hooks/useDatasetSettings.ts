@@ -4,7 +4,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { LayerInfo } from "../components/LayerPanel.tsx";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetState } from "../types.ts";
-import { dtypeRange } from "../types.ts";
+import { dtypeRange, isIntegerDataType } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import type { ViewportCommand } from "../commands.ts";
@@ -203,6 +203,7 @@ export function buildLayerInfos(
     const channelCount = Math.max(1, multiscale?.levels[0]?.shape[Axis.C] ?? rawChannels.length);
     const channels = Array.from({ length: channelCount }, (_, i) => {
       const raw = rawChannels[i];
+      const fit = maps.contrastFit.get(channelRangeKey(id, i));
       const label = multiscale?.channel_infos?.[i]?.label;
       return {
         name: channelDisplayName(i, raw?.name, label),
@@ -213,7 +214,8 @@ export function buildLayerInfos(
         contrastMin: raw?.contrast_min ?? settings?.contrast_min ?? 0,
         contrastMax: raw?.contrast_max ?? settings?.contrast_max ?? 65535,
         gamma: raw?.gamma ?? settings?.gamma ?? 1,
-        dataRange: maps.contrastFit.get(channelRangeKey(id, i))?.range ?? null,
+        dataRange: fit?.range ?? null,
+        histogram: fit?.histogram ?? null,
       };
     });
 
@@ -227,7 +229,7 @@ export function buildLayerInfos(
       renderMode: settings?.render_mode ?? "translucent",
       autoContrast: maps.autoContrast.get(id) ?? true,
       valueRange: dtypeRange(dataType),
-      integerData: !dataType.toLowerCase().startsWith("float"),
+      integerData: isIntegerDataType(dataType),
       labelRows: labelRows.length > 0 ? labelRows : undefined,
       channelBlendMode: settings?.channel_blend_mode ?? "additive",
       levelPin: settings?.detail_level_override ?? null,

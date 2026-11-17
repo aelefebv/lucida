@@ -10,6 +10,11 @@ export interface DatasetState {
 }
 
 
+/** Whether a data type holds whole numbers: every type but the floats. */
+export function isIntegerDataType(dtype: string): boolean {
+  return !dtype.toLowerCase().startsWith("float");
+}
+
 /**
  * Every value an integer data type holds, as `[min, max]`. `null` for a
  * float type or a 64-bit integer, whose values have no useful bound. Handles

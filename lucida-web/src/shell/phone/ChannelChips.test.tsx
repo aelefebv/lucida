@@ -24,6 +24,7 @@ function channel(name: string, visible = true): LayerChannel {
     contrastMax: 1,
     gamma: 1,
     dataRange: null,
+    histogram: null,
   };
 }
 

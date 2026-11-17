@@ -1,0 +1,46 @@
+.lc-contrast-limits {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  min-width: 0;
+}
+
+/* Fields too wide to sit beside the label drop below it. */
+.lc-contrast-limits-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-2);
+  min-height: 20px;
+}
+
+.lc-contrast-limits-label {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 500;
+}
+
+/* A limit too wide for one line puts the maximum on the next. */
+.lc-contrast-limits-fields {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  margin-left: auto;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-contrast-histogram {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: calc(100% - 4px);
+  fill: var(--lc-text-subtle);
+  opacity: 0.5;
+}

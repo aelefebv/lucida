@@ -6,7 +6,7 @@
 }
 
 /* Room for five digits, a 16-bit maximum, at least; a wider limit widens it. */
-.lc-contrast .lc-slider-field-input {
+.lc-contrast .lc-value-field-input {
   min-width: 7.5ch;
 }
 
