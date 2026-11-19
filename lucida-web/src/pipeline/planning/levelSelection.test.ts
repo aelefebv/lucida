@@ -94,7 +94,7 @@ describe("selectLevels", () => {
     expect(chosen.budgetLimited).toBe(false);
     const a = chosen.entities.get("a")!;
     expect(a.detailLevels).toEqual([1]);
-    expect(a.keepsCoarse).toBe(false);
+    expect(a.coarseCells).toBe(0);
     // 1024 samples across at level 1 is 16 by 16 chunks on the one plane.
     expect(a.detail).toHaveLength(256);
     expect(new Set(a.detail.map((cell) => cell.z))).toEqual(new Set([2]));

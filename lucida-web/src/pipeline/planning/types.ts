@@ -166,8 +166,8 @@ export interface EntityLevelSelection {
   lookahead: SelectedCell[];
   /** The levels of {@link detail}, finest first. */
   detailLevels: number[];
-  /** Whether the selection left some of the entity's cells at the coarse tier's level. */
-  keepsCoarse: boolean;
+  /** How many of the entity's cells the selection left at the coarse tier's level, which the coarse tier draws. */
+  coarseCells: number;
 }
 
 /** What the level selection chose for one dataset in one view. */

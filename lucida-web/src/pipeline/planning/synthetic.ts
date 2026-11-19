@@ -92,7 +92,7 @@ export function targetLevelSelection(view: ViewSnapshotBase): DatasetLevelSelect
   cells.sort((a, b) => a.key - b.key);
   const entities = new Map<string, EntityLevelSelection>();
   for (const entity of tiles) {
-    entities.set(entity.entityId, { detail: [], lookahead: [], detailLevels: [entity.targetLevel], keepsCoarse: false });
+    entities.set(entity.entityId, { detail: [], lookahead: [], detailLevels: [entity.targetLevel], coarseCells: 0 });
   }
   cells.forEach(({ entity, x, y, z }, rank) => {
     entities.get(entity.entityId)!.detail.push({ level: entity.targetLevel, x, y, z, rank });
