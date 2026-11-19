@@ -61,7 +61,7 @@ function makeCtx(views: TickView[]) {
       entityIndexByDatasetMode: new Map(),
     }),
   };
-  const uploader = { deliverToWorker: vi.fn(() => false) };
+  const uploader = { deliverToWorker: vi.fn((): boolean => false) };
   return { ctx, client, camera, epochs, coordinator, uploader };
 }
 
@@ -100,6 +100,21 @@ describe("a tick of every view", () => {
       { view: 0, rect: [0, 0, 400, 600] },
       { view: 1, rect: [400, 0, 400, 600] },
     ]);
+  });
+
+  it("hands the worker a gesture's frame ahead of the tick's uploads, and any other frame behind them", () => {
+    const h = makeCtx([{ ...LEFT, rect: [0, 0, 800, 600] }]);
+    h.uploader.deliverToWorker.mockImplementation(() => {
+      rendered.push(["uploads", -1]);
+      return true;
+    });
+    expect(tick(h, new ViewRedraws())).toBe(true);
+    expect(rendered).toEqual([["uploads", -1], ["volume", 0]]);
+
+    rendered.length = 0;
+    (h.ctx as { gesture?: boolean }).gesture = true;
+    expect(tick(h, new ViewRedraws())).toBe(true);
+    expect(rendered).toEqual([["volume", 0], ["uploads", -1]]);
   });
 });
 

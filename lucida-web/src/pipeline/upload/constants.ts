@@ -6,19 +6,21 @@
 
 /**
  * The upload work handed to the render worker and not yet done, on the
- * worker and on the GPU, that a gesture allows. The frame that answers the
- * input is drawn behind it, so uploads go on through a gesture without
+ * worker and on the GPU, that a gesture allows. A gesture's frame goes to the
+ * worker ahead of its tick's uploads (`viewTick.ts`), and this keeps them
+ * done before the next one, so uploads go on through a gesture without
  * costing it a frame.
  */
 export const GESTURE_UPLOAD_AHEAD_MS = 4;
 
 /**
  * The upload work handed to the render worker and not yet done when no input
- * waits on the frame behind it: a view opening, switching mode or filling in
- * once it stops. About a frame at 60 Hz, so a fill keeps the worker busy, and
- * an input that lands meanwhile waits behind no more than this.
+ * waits on a frame: a view opening, switching mode or filling in once it
+ * stops. Two frames at 60 Hz, so a fill keeps the worker and the GPU busy
+ * through a full-quality frame, which holds back the report of every upload
+ * behind it. The first input that lands meanwhile waits behind no more.
  */
-export const UPLOAD_AHEAD_MS = 16;
+export const UPLOAD_AHEAD_MS = 32;
 
 /** The write rate assumed until the worker reports one: below a workstation GPU's, so a slow device is not flooded first. */
 export const INITIAL_UPLOAD_BYTES_PER_MS = 1024 * 1024;

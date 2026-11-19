@@ -421,7 +421,7 @@ describe("Uploader unified delivery", () => {
     { gesture: false, bytesPerMs: 4 * MIB, sent: 4 * UPLOAD_AHEAD_MS },
     { gesture: true, bytesPerMs: MIB / 2, sent: GESTURE_UPLOAD_AHEAD_MS / 2 },
   ])("sends what fits in the worker's room at the rate it reports: gesture $gesture, $bytesPerMs bytes a ms", ({ gesture, bytesPerMs, sent }) => {
-    const deliverable = Array.from({ length: 100 }, (_, i) =>
+    const deliverable = Array.from({ length: 4 * sent }, (_, i) =>
       makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(MIB), priority: i }));
     const volumeChunkData = vi.fn();
     const ctx = { ...makeCtx({ cpuCache: makeCpuCache(deliverable), client: { volumeChunkData }, mode: "volume" }), gesture };
