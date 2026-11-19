@@ -31,11 +31,11 @@ export interface UploadTickStats {
   uploadedChunks: number;
   /** Bytes actually posted (from delivery `data.byteLength`). */
   bytesUploaded: number;
-  bytesBudget: number;
+  /** The render worker's time the tick could hand it, in milliseconds. */
+  budgetMs: number;
   /**
-   * Upload stopped early because remaining budget hit zero. Not a
-   * function of bytesUploaded reaching bytesBudget: a single chunk
-   * larger than remaining will still be uploaded and trigger this.
+   * Upload stopped early because that time ran out. A single chunk that
+   * costs more than what remained is still uploaded and triggers this.
    */
   budgetExhausted: boolean;
   // Skip reasons during the delivery pass (one entry per considered item):
@@ -86,7 +86,7 @@ export function emptyUploadTickStats(): UploadTickStats {
   return {
     drainedChunks: 0,
     uploadedChunks: 0,
-    bytesUploaded: 0, bytesBudget: 0,
+    bytesUploaded: 0, budgetMs: 0,
     budgetExhausted: false,
     skippedPrefetch: 0, skippedOverview: 0, skippedWrongLod: 0,
     skippedAlreadySent: 0, skippedOtherPlane: 0, skippedNoMeta: 0,
@@ -286,7 +286,7 @@ export class UploadTelemetry {
       () => ({
         consecutiveTicks: this.budgetExhaustedDetector.getConsecutiveCount(),
         bytesUploadedThisTick: stats.bytesUploaded,
-        bytesBudget: stats.bytesBudget,
+        budgetMs: stats.budgetMs,
       }),
     );
 

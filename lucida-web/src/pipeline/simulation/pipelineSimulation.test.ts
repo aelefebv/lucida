@@ -439,9 +439,11 @@ describe("a gesture over a volume the budgets cut short", () => {
 });
 
 describe("a three-channel volume on a GPU slower than the frame clock", () => {
-  // 64³ chunks are 512 KiB, so one tick's upload budget delivers 16 of the
-  // view's 396, and each frame holds the stand-in GPU, and with it the frame
-  // clock, for 25 ticks. A frame every tick that delivers would be 25 frames.
+  // 64³ chunks are 512 KiB. The stand-in worker reports no costs, so a tick
+  // delivers the 32 of the view's 396 that fit the worker's room at the
+  // initial rate, and each frame holds the stand-in GPU, and with it the
+  // frame clock, for 25 ticks. A frame every tick that delivers would be 13
+  // frames.
   const scenario = describeScenario({
     name: "three-channel volume on a slow GPU",
     mode: "volume",

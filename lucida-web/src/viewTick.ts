@@ -11,7 +11,6 @@
 
 import { assertCanvasSize } from "./applyAndSend.ts";
 import type { MinimapChunkCoord, TickCoordinator, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
 import { readResolvedLayers } from "./resolvedLayers.ts";
@@ -50,7 +49,7 @@ function deliver(ctx: TickContext, coordinator: TickCoordinator, uploader: Uploa
     uploader.holdDelivery();
     return false;
   }
-  return uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES);
+  return uploader.deliverToWorker(ctx);
 }
 
 /** The one view across the canvas, which draws straight onto it. */

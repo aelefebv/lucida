@@ -8,7 +8,8 @@ export {
   COLD_STATE_CHURN_THRESHOLD_PER_SEC,
   COLD_STATE_DURATION_SAMPLES,
   COLD_STATE_WINDOW_MS,
-  MAIN_VIEW_UPLOAD_BUDGET_BYTES,
+  GESTURE_UPLOAD_AHEAD_MS,
+  UPLOAD_AHEAD_MS,
   UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
   UPLOAD_FILTER_RATIO_THRESHOLD,
   UPLOAD_LOG_RATE_LIMIT_MS,
@@ -50,6 +51,7 @@ export {
 } from "./telemetry/coldState.ts";
 
 export { Uploader } from "./uploader.ts";
+export { UploadPacer } from "./pacing.ts";
 
 export type {
   UploadClient,

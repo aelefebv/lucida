@@ -58,12 +58,15 @@ import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent } from "../../trace/types.ts";
 import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
-import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
+import { GESTURE_UPLOAD_AHEAD_MS, UPLOAD_AHEAD_MS } from "./constants.ts";
+import { UploadPacer } from "./pacing.ts";
+import { VIEW_STILL_MS } from "../tickCoordinator.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
   private readonly workerFeedback = new WorkerFeedback(this.resendGuard);
   private readonly workerResources = new WorkerResourceTracker();
+  private readonly pacer = new UploadPacer();
 
   readonly uploadTelemetry = new UploadTelemetry();
 
@@ -334,28 +337,43 @@ export class Uploader {
   // Per-tick upload (slicePath / volumePath)
 
   /**
-   * Deliver nothing this tick. The chunks held back go at
-   * {@link HELD_UPLOAD_BUDGET_BYTES} a tick once delivery resumes, until a
-   * tick delivers all it can.
+   * Deliver nothing this tick. Once delivery resumes and the view holds
+   * still, the chunks held back may give the worker {@link UPLOAD_AHEAD_MS}
+   * in hand, though the gesture that held them has only just stopped, until
+   * a tick delivers all it can.
    */
   holdDelivery(): void {
     this.heldBacklog = true;
   }
 
+  /** The render worker's report of deliveries to the pools of `mode` it and the GPU are done with. */
+  noteUploadCost(mode: PoolMode, bytes: number, ms: number): void {
+    this.pacer.noteDone(mode, bytes, ms);
+  }
+
   /**
    * Deliver cached, wanted, not-yet-sent chunks to the GPU worker in
-   * strict priority order. Budget is a one-item soft cap: the next
-   * priority item is sent while `remaining > 0`, even if oversized, and
-   * the loop stops after the send drives `remaining <= 0`.
+   * strict priority order, until the deliveries it has not reported done
+   * reach {@link GESTURE_UPLOAD_AHEAD_MS} of its time during a gesture, else
+   * {@link UPLOAD_AHEAD_MS}. A delivery held back while the view moved goes
+   * as if no gesture ran once the view holds still, but not before: the hold
+   * also ends when the budgets stop cutting the view short, and its inputs
+   * may still be landing. Each delivery costs what the worker's reports
+   * say it takes the worker, and the loop also stops once it has taken that
+   * long of this thread. The budget is a one-item soft cap: the next
+   * priority item is sent while room remains, even if it costs more, and
+   * the loop stops after the send uses the rest.
    *
    * Each delivery goes to the pools of its mode, and to a slice pool cut at
    * the plane it names.
    */
-  deliverToWorker(ctx: TickContext, budget: number): boolean {
+  deliverToWorker(ctx: TickContext): boolean {
     const tickStart = performance.now();
-    if (this.heldBacklog) budget = Math.max(budget, HELD_UPLOAD_BUDGET_BYTES);
+    const moving = (ctx.sinceGestureMs ?? Infinity) < VIEW_STILL_MS;
+    const aheadMs = moving || (ctx.gesture && !this.heldBacklog) ? GESTURE_UPLOAD_AHEAD_MS : UPLOAD_AHEAD_MS;
+    const budgetMs = this.pacer.roomMs(aheadMs);
     this.currentUploadStats = emptyUploadTickStats();
-    this.currentUploadStats.bytesBudget = budget;
+    this.currentUploadStats.budgetMs = budgetMs;
 
     const epochs = this.lastEpochs ?? {
       content: 0, layout: 0, view: 0, selection: 0, request: 0,
@@ -375,15 +393,15 @@ export class Uploader {
     const deliverables = Array.from(ctx.cpuCache.getDeliverable());
     const tierDemand = this.computeChunkTierDemand(deliverables);
     const splitTierBudget = tierDemand.detail && tierDemand.coarse;
-    let detailRemaining = splitTierBudget ? Math.ceil(budget / 2) : budget;
-    let coarseRemaining = splitTierBudget ? Math.floor(budget / 2) : budget;
-    let remaining = budget;
+    let detailRemaining = splitTierBudget ? budgetMs / 2 : budgetMs;
+    let coarseRemaining = splitTierBudget ? budgetMs / 2 : budgetMs;
+    let remaining = budgetMs;
     let budgetExhausted = false;
     let sentAny = false;
 
     for (const delivery of deliverables) {
       if (this.resendGuard.isHeld(delivery)) continue;
-      if (remaining <= 0) {
+      if (remaining <= 0 || performance.now() - tickStart >= aheadMs) {
         budgetExhausted = true;
         break;
       }
@@ -413,9 +431,10 @@ export class Uploader {
       sentAny = true;
       this.currentUploadStats.bytesUploaded += sent;
       recordUpload(sent);
-      remaining -= sent;
-      if (splitTierBudget && chunkTier === "detail") detailRemaining -= sent;
-      if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= sent;
+      const costMs = this.pacer.posted(delivery.mode, sent);
+      remaining -= costMs;
+      if (splitTierBudget && chunkTier === "detail") detailRemaining -= costMs;
+      if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= costMs;
       if (remaining <= 0) budgetExhausted = true;
     }
 
@@ -459,8 +478,8 @@ export class Uploader {
 
     // Label overlays go to the r32uint label pool. The slice view sends one
     // Z-plane of each chunk and the volume view the whole chunk. Every
-    // dispatch reports the real bytes sent so the frame budget throttles
-    // uploads, and at least one always goes so labels never starve.
+    // dispatch reports the real bytes sent, which the worker's time is
+    // costed by, and at least one always goes so labels never starve.
     let sent: Dispatched | DispatchSkip;
     const { mode } = delivery;
     if (meta.isLabel) {

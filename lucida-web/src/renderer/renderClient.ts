@@ -32,6 +32,7 @@ import type {
   GpuFailedMessage,
   ProbeMessage,
   ProbeSample,
+  PoolMode,
 } from "./workerProtocol.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import type { SpatialAxis } from "./slicePlane.ts";
@@ -293,6 +294,9 @@ export class RenderClient implements UploadClient {
    */
   onFrameDone: ((frameSeq: number, doneAtMs: number) => void) | null = null;
 
+  /** Hears what the worker's chunk deliveries to the pools of `mode` cost it. */
+  onUploadCost: ((mode: PoolMode, bytes: number, ms: number) => void) | null = null;
+
   private noteFrameDone(frameSeq: number, workerDoneAtMs: number | undefined): void {
     const now = performance.now();
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
@@ -346,6 +350,8 @@ export class RenderClient implements UploadClient {
       this.onMinimapOverviewsLost?.(msg.memberIds);
     } else if (msg.type === "frameDone") {
       this.noteFrameDone(msg.frameSeq, msg.doneAtMs);
+    } else if (msg.type === "uploadCost") {
+      this.onUploadCost?.(msg.mode, msg.bytes, msg.ms);
     } else if (msg.type === "pipelinesCompiled") {
       this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {

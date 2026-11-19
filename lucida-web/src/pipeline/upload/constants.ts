@@ -1,17 +1,34 @@
 /**
- * Upload-phase constants: per-frame upload budget + telemetry tuning
- * (windows, thresholds) for the cold-state rebuild and upload detectors.
+ * Upload-phase constants: how much upload work the render worker may have
+ * in hand, how its write rate is learned, and telemetry tuning (windows,
+ * thresholds) for the cold-state rebuild and upload detectors.
  */
-
-/** Per-frame upload budget for the main view (slice + volume). */
-export const MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8 * 1024 * 1024; // 8 MB per frame
 
 /**
- * Per-frame upload budget for chunks held back while the view moved, once it
- * holds still. The frames these uploads delay answer no input, and the held
- * chunks are what the stopped view waits for.
+ * The upload work handed to the render worker and not yet done, on the
+ * worker and on the GPU, that a gesture allows. The frame that answers the
+ * input is drawn behind it.
  */
-export const HELD_UPLOAD_BUDGET_BYTES = 32 * 1024 * 1024;
+export const GESTURE_UPLOAD_AHEAD_MS = 4;
+
+/**
+ * The upload work handed to the render worker and not yet done when no input
+ * waits on the frame behind it: a view opening, switching mode or filling
+ * in, and the chunks held back while it moved, which the stopped view waits
+ * for. About a frame at 60 Hz, so a fill keeps the worker busy, and an input
+ * that lands meanwhile waits behind no more than this.
+ */
+export const UPLOAD_AHEAD_MS = 16;
+
+/** The write rate assumed until the worker reports one: below a workstation GPU's, so a slow device is not flooded first. */
+export const INITIAL_UPLOAD_BYTES_PER_MS = 1024 * 1024;
+
+/**
+ * How much measured write time halves an earlier report's weight in the
+ * write rate: a couple of ticks' uploads, so the rate follows a device that
+ * slows under load within a few frames.
+ */
+export const UPLOAD_COST_HALF_LIFE_MS = 20;
 
 // Cold-state rebuild telemetry
 /** Rolling-window size for hit/rebuild rates and cause attribution. */

@@ -1204,6 +1204,18 @@ export interface FrameDoneMessage {
   doneAtMs?: number;
 }
 
+/**
+ * Chunk deliveries to the pools of `mode` the worker and the GPU are done
+ * with since its last report: the bytes they carried and the time the worker
+ * spent on them. The page paces its uploads by it.
+ */
+export interface UploadCostMessage {
+  type: "uploadCost";
+  mode: PoolMode;
+  bytes: number;
+  ms: number;
+}
+
 /** Why a frame could not be read: the error's name and message, as the bundle's reason carries them. */
 export interface CaptureFailure {
   name: string;
@@ -1297,6 +1309,7 @@ export type WorkerToMainMessage =
   | GpuCapacityMessage
   | MinimapOverviewsLostMessage
   | FrameDoneMessage
+  | UploadCostMessage
   | FrameCapturedMessage
   | ProbeResultMessage
   | GpuErrorMessage

@@ -5,6 +5,7 @@ import { bootstrapWorker } from "./worker/bootstrap.ts";
 import { dispatchMessage, noteAbandonedFrame } from "./worker/dispatch.ts";
 import { handleDestroy } from "./worker/lifecycle.ts";
 import { inOrder } from "./worker/inOrder.ts";
+import { chunkDeliveryOf, UploadCostMeter } from "./worker/uploadCost.ts";
 import { reportWorkerErrors } from "../pageErrors.ts";
 
 reportWorkerErrors();
@@ -31,7 +32,14 @@ function postError(err: unknown): void {
   post({ type: "error", message: err instanceof Error ? err.message : String(err) });
 }
 
+// The device is read at each report, since a lost one is replaced.
+const uploadCost = new UploadCostMeter(post, () => ctx?.device.queue.onSubmittedWorkDone() ?? Promise.resolve());
+
 async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
+  // Every chunk delivery is reported, whatever becomes of it, since the page
+  // counts each one it sent until it hears it is done.
+  const delivery = chunkDeliveryOf(msg);
+  const startedAt = performance.now();
   try {
     if (msg.type === "init") {
       ctx = await bootstrapWorker(msg.canvas, post, msg.deviceMemoryGiB ?? null, (task) => enqueue(task));
@@ -47,6 +55,8 @@ async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
     await dispatchMessage(ctx, msg);
   } catch (err) {
     postError(err);
+  } finally {
+    if (delivery) uploadCost.note(delivery.mode, delivery.bytes, performance.now() - startedAt);
   }
 }
 

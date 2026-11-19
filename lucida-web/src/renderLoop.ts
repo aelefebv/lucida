@@ -284,6 +284,7 @@ export class RenderLoop implements TraceEnvironment {
         this.republishSettle();
       }
     };
+    this.client.onUploadCost = (mode, bytes, ms) => this.uploader.noteUploadCost(mode, bytes, ms);
     this.client.onFrameDone = (frameSeq, doneAtMs) => {
       if (this.bandedSeq !== null && frameSeq >= this.bandedSeq) this.bandedSeq = null;
       traceRecorder.noteFrameDone(frameSeq, doneAtMs);
@@ -361,6 +362,7 @@ export class RenderLoop implements TraceEnvironment {
       this.fitResumeTimer = null;
     }
     this.client.onChunkResidency = null;
+    this.client.onUploadCost = null;
     this.client.onWantedSetDelta = null;
     this.client.onMinimapOverviewsLost = null;
     this.client.onGpuCapacity = null;
@@ -953,6 +955,7 @@ export class RenderLoop implements TraceEnvironment {
       marchStepScale: quality?.marchStepScale ?? marchStepScaleFor(renderScale),
       bands: quality?.bands ?? 1,
       gesture: performance.now() - this.lastGestureAt < GESTURE_HOLD_MS,
+      sinceGestureMs: performance.now() - this.lastGestureAt,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
     };
