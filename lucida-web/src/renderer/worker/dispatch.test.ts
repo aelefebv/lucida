@@ -9,6 +9,7 @@ import { dispatchMessage } from "./dispatch.ts";
 import { UNTIMED } from "../passTiming.ts";
 import { indexWantedChunks } from "../wantedChunks.ts";
 import { EvictionOrder } from "../evictionOrder.ts";
+import { SlotJournal } from "../slotJournal.ts";
 
 async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
@@ -33,6 +34,7 @@ describe("worker dispatch and the pipeline compile", () => {
       getCursorRenderer: () => ({ compiled: Promise.resolve(), hasData: () => false }),
       ensureOffscreenPool: () => [],
       post: vi.fn(),
+      flushWantedSetReports: vi.fn(),
     } as unknown as WorkerCtx;
 
     let settled = false;
@@ -91,6 +93,7 @@ describe("worker dispatch frame done", () => {
       getCursorRenderer: () => ({ compiled: Promise.resolve(), hasData: () => false }),
       ensureOffscreenPool: () => [],
       post(msg: WorkerToMainMessage) { posts.push(msg); },
+      flushWantedSetReports: () => {},
     } as unknown as WorkerCtx;
     return { ctx, posts };
   }
@@ -113,7 +116,7 @@ describe("worker dispatch frame done", () => {
 function makeCtx(): {
   ctx: WorkerCtx;
   posts: WorkerToMainMessage[];
-  wantedSetPosts: number;
+  wantedSetRequests: number;
 } {
   const posts: WorkerToMainMessage[] = [];
   const counters = { wantedSet: 0 };
@@ -121,12 +124,13 @@ function makeCtx(): {
     device: {},
     state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
-    postWantedSet() { counters.wantedSet++; },
+    requestWantedSetReport() { counters.wantedSet++; },
+    flushWantedSetReports() {},
   } as unknown as WorkerCtx;
   return {
     ctx,
     posts,
-    get wantedSetPosts() { return counters.wantedSet; },
+    get wantedSetRequests() { return counters.wantedSet; },
   };
 }
 
@@ -267,6 +271,7 @@ describe("worker dispatch upload feedback", () => {
       chunkX: 8, chunkY: 8, chunkZ: 8,
       slots: new Map<string, number>(),
       order: new EvictionOrder(),
+      journal: new SlotJournal(),
       views: new Map(),
       freeSlots: [0],
       totalSlots: 1,
@@ -337,13 +342,13 @@ describe("worker dispatch upload feedback", () => {
     expect(posts).toEqual([]);
     expect(ctx.state.draws.size).toBe(0);
     expect(ctx.state.currentColdState).toBeNull();
-    expect(harness.wantedSetPosts).toBe(1);
+    expect(harness.wantedSetRequests).toBe(1);
   });
 
   it("treats a view-move delta for an un-ingested dataset as a safe no-op", async () => {
     // A delta can race ahead of the dataset's first full cold state. It must not
-    // touch GPU state or throw, but still posts the wanted set (matching the
-    // full path).
+    // touch GPU state or throw, but still asks for the wanted-set report
+    // (matching the full path).
     const harness = makeCtx();
     const { ctx, posts } = harness;
 
@@ -372,7 +377,7 @@ describe("worker dispatch upload feedback", () => {
     expect(posts).toEqual([]);
     expect(ctx.state.draws.size).toBe(0);
     expect(ctx.state.currentColdState).toBeNull();
-    expect(harness.wantedSetPosts).toBe(1);
+    expect(harness.wantedSetRequests).toBe(1);
   });
 });
 

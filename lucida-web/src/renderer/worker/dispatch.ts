@@ -95,6 +95,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       } finally {
         postFrameDone(ctx, msg.frameSeq);
       }
+      ctx.flushWantedSetReports();
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -120,6 +121,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       } finally {
         postFrameDone(ctx, msg.frameSeq);
       }
+      // After the frame, so the report never holds it up, and once for every
+      // upload the frame drew.
+      ctx.flushWantedSetReports();
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -178,35 +182,35 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.state.currentColdState = msg;
       ctx.state.currentEpochs = msg.epochs;
       applyColdState(ctx, msg);
-      ctx.postWantedSet(msg.datasetId, undefined, msg.view);
+      ctx.requestWantedSetReport(msg.datasetId, undefined, msg.view);
       postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDisplay":
-      // Display-only edit. No residency changed, so no wanted-set is posted.
+      // Display-only edit. No residency changed, so no wanted-set report is asked for.
       applyColdStateDisplay(ctx, msg);
       return;
 
     case "coldStateSelection":
-      // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
+      // A T/Z scrub changes the wanted chunks, so the wanted-set report is asked for.
       ctx.state.unplannedDatasets.delete(msg.datasetId);
       applyColdStateSelection(ctx, msg);
-      ctx.postWantedSet(msg.datasetId, undefined, msg.view);
+      ctx.requestWantedSetReport(msg.datasetId, undefined, msg.view);
       postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDelta":
-      // Posted even when the delta was a no-op, matching the full and
+      // Asked for even when the delta was a no-op, matching the full and
       // selection paths.
       ctx.state.unplannedDatasets.delete(msg.datasetId);
       releaseUndrawnViews(ctx, msg.datasetId, msg.drawnViews);
       applyColdStateDelta(ctx, msg);
-      ctx.postWantedSet(msg.datasetId, undefined, msg.view);
+      ctx.requestWantedSetReport(msg.datasetId, undefined, msg.view);
       postGpuMemoryIfChanged(ctx);
       return;
 
     case "failedChunks": {
-      // No residency changed, so no wanted-set is posted. The retained cold
+      // No residency changed, so no wanted-set report is asked for. The retained cold
       // state is re-ingested so the indirection marks the new list now,
       // not at the next view change.
       const failed = new Map(msg.images.map(({ imageId, chunkKeys }) => [imageId, new Set(chunkKeys)]));

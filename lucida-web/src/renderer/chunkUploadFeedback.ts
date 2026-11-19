@@ -76,9 +76,9 @@ export class ResidencyBatch {
     else this.refused.set(reason, [chunkKey]);
   }
 
-  /** Whether any chunk was refused or evicted, which can change the wanted set's report. */
-  get displacedAny(): boolean {
-    return this.evicted.length > 0 || this.refused.size > 0;
+  /** Whether the delivery held or evicted a chunk, which can change the wanted set's report. */
+  get changedSlots(): boolean {
+    return this.held.length > 0 || this.evicted.length > 0;
   }
 
   /**

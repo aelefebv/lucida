@@ -246,7 +246,7 @@ export function handleVolumeChunkData(
   }
 
   batch.post(ctx, memberId, "volume", tier);
-  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId), "volume");
+  if (batch.changedSlots) ctx.requestWantedSetReport(ctx.state.memberToDataset.get(memberId), "volume");
 
   if (failure !== null) throw failure;
 }

@@ -9,24 +9,29 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import type { PoolMode, WorkerToMainMessage } from "../workerProtocol.ts";
+import type { WorkerToMainMessage } from "../workerProtocol.ts";
 import { initGPU, requestGpuDevice } from "../gpuContext.ts";
 import { fitBudgets } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
 import { CursorRenderer } from "../cursorRenderer.ts";
-import { computeWantedSet, WantedSetMemo, type AtlasSnapshot } from "../wantedSet.ts";
-import { createInitialState, type RendererState, type ViewDraw } from "./state.ts";
-import { drawOf, drawsOf } from "./draws.ts";
-import type { SliceAtlasState } from "../slice/atlas.ts";
-import type { AtlasState } from "../volume/atlas.ts";
+import { createInitialState } from "./state.ts";
+import { drawOf } from "./draws.ts";
+import { WantedSetReporter } from "./wantedSetReport.ts";
 import { getOrCreateLUT } from "./resources.ts";
 import { viewLayerTargets } from "./viewResources.ts";
 import { ViewLander } from "../viewLander.ts";
 import { createFrameTiming, type FrameTiming } from "../passTiming.ts";
 import { watchDevice } from "./deviceLoss.ts";
-import { sourceKey } from "../poolKeys.ts";
+
+/**
+ * How long a wanted-set report asked for waits for a frame to flush it
+ * before it goes out on its own: longer than a frame, so a page drawing
+ * flushes it first, and short enough that a view that stopped drawing still
+ * hears what it lacks.
+ */
+const REPORT_WAIT_MS = 100;
 
 /** What is built on one device and rebuilt on its replacement. */
 interface DeviceRenderers {
@@ -78,7 +83,8 @@ export async function bootstrapWorker(
     (err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }),
   );
 
-  const postWantedSet = createWantedSetPoster(state, post);
+  const reporter = new WantedSetReporter(state, post);
+  let reportTimer: ReturnType<typeof setTimeout> | null = null;
 
   const ctx: WorkerCtx = {
     device,
@@ -107,7 +113,19 @@ export async function bootstrapWorker(
     ensureOffscreenPool: (view, count, w, h) => viewLayerTargets(ctx, view, count, w, h),
     getOrCreateLUT: (name) => getOrCreateLUT(ctx.device, name),
     post,
-    postWantedSet,
+    requestWantedSetReport(datasetId, mode, view) {
+      reporter.request(datasetId, mode, view);
+      // In message order, so it never reads the state halfway through a handler.
+      reportTimer ??= setTimeout(() => {
+        reportTimer = null;
+        schedule(async () => reporter.flush());
+      }, REPORT_WAIT_MS);
+    },
+    flushWantedSetReports() {
+      if (reportTimer !== null) clearTimeout(reportTimer);
+      reportTimer = null;
+      reporter.flush();
+    },
     lookupEntityDescriptor(datasetId: string, view: number) {
       return drawOf(state, datasetId, view)?.descriptor ?? null;
     },
@@ -123,78 +141,4 @@ export async function bootstrapWorker(
     },
   });
   return ctx;
-}
-
-/**
- * Build {@link WorkerCtx.postWantedSet} over one worker's state. Kept apart
- * from {@link bootstrapWorker} so a test can run the real report without a GPU.
- */
-export function createWantedSetPoster(
-  state: RendererState,
-  post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
-): (datasetId?: string, mode?: PoolMode, view?: number) => void {
-  // Each draw's member plans, kept between reports: a view move changes few
-  // members' wanted chunks, and every report reads residency afresh.
-  const memos = new WeakMap<ViewDraw, WantedSetMemo>();
-  return function postWantedSet(datasetId?: string, mode?: PoolMode, view?: number): void {
-    if (datasetId === undefined) {
-      const cold = state.currentColdState;
-      const draw = cold ? drawOf(state, cold.datasetId, cold.view) : undefined;
-      if (draw) postFor(draw);
-      return;
-    }
-    for (const draw of drawsOf(state, datasetId, mode)) {
-      if (view === undefined || draw.view === view) postFor(draw);
-    }
-  };
-
-  function postFor(draw: ViewDraw): void {
-    const { cold, mode } = draw;
-    const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
-    let memo = memos.get(draw);
-    if (!memo) memos.set(draw, (memo = new WantedSetMemo()));
-    const result = computeWantedSet(
-      cold,
-      draw.wanted,
-      mode === "volume" ? viewSnapshots(state.volumeAtlases, draw) : new Map(),
-      mode === "slice" ? viewSnapshots(state.sliceAtlases, draw) : new Map(),
-      (memberId, tier, level) => draw.routes.get(memberId)?.get(sourceKey(tier, level)),
-      memo,
-    );
-    post({
-      type: "wantedSetDelta",
-      datasetId: cold.datasetId,
-      viewMode: mode,
-      epochs,
-      missing: result.missing,
-    });
-    post({
-      type: "entityLevels",
-      datasetId: cold.datasetId,
-      view: draw.view,
-      entities: result.levels,
-    });
-  }
-}
-
-/**
- * The pools `draw`'s view draws from, each as that view samples it: the
- * shared slots, read through the view's sections at the view's Z.
- */
-function viewSnapshots(
-  atlases: ReadonlyMap<string, SliceAtlasState | AtlasState>,
-  draw: ViewDraw,
-): Map<string, AtlasSnapshot> {
-  const out = new Map<string, AtlasSnapshot>();
-  for (const [poolKey, atlas] of atlases) {
-    const view = atlas.views.get(draw.view);
-    if (!view || atlas.datasetId !== draw.datasetId) continue;
-    out.set(poolKey, {
-      z: draw.cold.currentZ,
-      slots: atlas.slots,
-      planesByChunk: "planesByChunk" in atlas ? atlas.planesByChunk : undefined,
-      entityMetas: view.entityMetas,
-    });
-  }
-  return out;
 }

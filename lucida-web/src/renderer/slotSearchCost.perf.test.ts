@@ -53,7 +53,8 @@ function makeCtx(): WorkerCtx {
     format: "bgra8unorm",
     state: createInitialState(1536 * MIB),
     post: (_msg: WorkerToMainMessage) => {},
-    postWantedSet: () => {},
+    requestWantedSetReport: () => {},
+    flushWantedSetReports: () => {},
   } as unknown as WorkerCtx;
 }
 
