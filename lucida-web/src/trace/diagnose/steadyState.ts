@@ -10,7 +10,7 @@
  */
 
 import { RESIDENCY_TIERS, type ResidencyTier } from "../../pipeline/residencyTier.ts";
-import { UNLABELLED, type LaneName, type TraceRun } from "../types.ts";
+import { UNLABELLED, type LaneName, type SelectedLevelChunks, type TraceRun } from "../types.ts";
 import { chunkIdentity } from "./chunkStates.ts";
 import { usToMs } from "./phaseRollup.ts";
 import { RULESET } from "./ruleset.ts";
@@ -22,6 +22,7 @@ import type {
   ReceivedSummary,
   RefetchSummary,
   ReplanSummary,
+  SelectionReading,
   SteadyStateInterval,
   SteadyStateReading,
   TierAtSettle,
@@ -65,6 +66,7 @@ export function deriveSteadyState(
   absence: string,
 ): SteadyStateDerivation {
   const tiers = tiersAtSettle(run);
+  const selection = selectionAtSettle(run);
   const replans = interval ? summariseReplans(interval) : null;
   const described = interval && replans ? describeInterval(interval, replans) : null;
   const received = interval ? summariseReceived(interval) : null;
@@ -74,7 +76,10 @@ export function deriveSteadyState(
   const findings: SteadyStateFinding[] = [
     ...receivedFinding(described, received),
     ...refetchFinding(refetch),
-    ...budgetBoundFindings(tiers),
+    // A run with a level selection asks the detail tier only for what fits,
+    // so the selection's reading speaks for that tier.
+    ...budgetBoundFindings(selection ? tiers.filter((tier) => tier.tier !== "detail") : tiers),
+    ...selectionFindings(selection),
     ...replanFinding(described, replans),
     ...sentFinding(described, sent),
   ];
@@ -87,6 +92,7 @@ export function deriveSteadyState(
       replans,
       sent,
       tiers,
+      selection,
       statement: statementFor(described, findings, absence),
     },
     findings,
@@ -229,6 +235,13 @@ function summariseReplans(interval: TraceRun): ReplanSummary {
   return { passes: busiest(passes), availabilityWoken: busiest(woken) };
 }
 
+function selectionAtSettle(run: TraceRun): SelectionReading | null {
+  const selection = run.header.selectionAtSettle;
+  if (!selection) return null;
+  const settle = run.header.outstandingAtSettle;
+  return { ...selection, wanted: settle.desiredDetailChunks, resident: settle.residentDetailChunks };
+}
+
 function tiersAtSettle(run: TraceRun): TierAtSettle[] {
   const settle = run.header.outstandingAtSettle;
   const minFillPct = RULESET.steadyState.budgetBound.minFillPct;
@@ -348,6 +361,59 @@ function budgetBoundFindings(tiers: TierAtSettle[]): SteadyStateFinding[] {
     }));
 }
 
+/**
+ * A note for each dataset the budget kept from the levels the screen calls
+ * for: what it draws at instead, and how much of that is resident.
+ */
+function selectionFindings(selection: SelectionReading | null): SteadyStateFinding[] {
+  if (!selection) return [];
+  const rule = RULESET.steadyState.levelSelection;
+  return selection.datasets
+    .filter((dataset) => dataset.budgetLimited && dataset.target !== null && coarserThan(dataset, dataset.target.min))
+    .map((dataset) => ({
+      severity: "note" as const,
+      rule: rule.id,
+      subject: `levels of ${dataset.datasetId}`,
+      observed: {
+        datasetId: dataset.datasetId,
+        target: dataset.target,
+        levels: dataset.levels,
+        coarseChunks: dataset.coarseChunks,
+        coarseLevel: dataset.coarseLevel,
+        wanted: selection.wanted,
+        resident: selection.resident,
+        residentBytes: selection.usedBytes,
+        budgetBytes: selection.shareBytes,
+      },
+      threshold: { kind: "selection", value: 0, why: rule.why },
+    }));
+}
+
+/** Whether a dataset's selection draws any of it coarser than `level`. */
+function coarserThan(dataset: { levels: SelectedLevelChunks[]; coarseChunks: number; coarseLevel: number | null }, level: number): boolean {
+  return dataset.levels.some((entry) => entry.level > level) ||
+    (dataset.coarseChunks > 0 && dataset.coarseLevel !== null && dataset.coarseLevel > level);
+}
+
+/** `levels 1-2 (48 at 1, 762 at 2, 12 at the coarse tier's 4)`: what a selection draws at. */
+function describeSelectedLevels(observed: {
+  levels?: SelectedLevelChunks[];
+  coarseChunks?: number;
+  coarseLevel?: number | null;
+}): string {
+  const levels = observed.levels ?? [];
+  const parts = levels.map((entry) => `${count(entry.chunks)} at ${entry.level}`);
+  const all = levels.map((entry) => entry.level);
+  if ((observed.coarseChunks ?? 0) > 0 && observed.coarseLevel !== null && observed.coarseLevel !== undefined) {
+    parts.push(`${count(observed.coarseChunks!)} at the coarse tier's ${observed.coarseLevel}`);
+    all.push(observed.coarseLevel);
+  }
+  if (all.length === 0) return "no level";
+  const min = Math.min(...all);
+  const max = Math.max(...all);
+  return `${min === max ? `level ${min}` : `levels ${min}-${max}`} (${parts.join(", ")})`;
+}
+
 function replanFinding(
   interval: SteadyStateInterval | null,
   replans: ReplanSummary | null,
@@ -425,6 +491,16 @@ export function describeSteadyStateFinding(finding: SteadyStateFinding | Finding
         `nothing in flight, so ${count(observed.lossChunks)} of ${count(observed.wanted)} wanted chunk(s) ` +
         `cannot fit — the view settles covering less, a coverage loss of ${count(observed.lossPct)}%`
       );
+    case rules.levelSelection.id: {
+      const target = observed.target;
+      const called = target ? (target.min === target.max ? `level ${target.min}` : `levels ${target.min}-${target.max}`) : "no level";
+      return (
+        `the view draws ${observed.datasetId} at ${describeSelectedLevels(observed)} where the screen calls for ` +
+        `${called}, the finest that fit the ${count(observed.budgetBytes)} B the selection may hold; it holds ` +
+        `${count(observed.residentBytes)} B, and ${count(observed.resident)} of ${count(observed.wanted)} ` +
+        `selected chunk(s) are resident`
+      );
+    }
     case rules.replans.id:
       return (
         `${count(observed.wokenPasses)} of ${count(observed.passes)} planning pass(es) in the ` +

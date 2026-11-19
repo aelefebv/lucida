@@ -20,7 +20,14 @@ import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleOutcome, type SettleState } from "./pipeline/settle.ts";
 import { failedChunkReport, summarizeFailedChunks } from "./pipeline/failedChunks.ts";
-import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
+import {
+  PointEvent,
+  type CacheWarmth,
+  type InputKind,
+  type Outstanding,
+  type RunConditions,
+  type SelectionAtSettle,
+} from "./trace/types.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { deliveryTarget } from "./renderer/poolKeys.ts";
@@ -590,6 +597,11 @@ export class RenderLoop implements TraceEnvironment {
       coarseBytes: s.coarseBytes,
       coarseBudgetBytes: s.coarseBudgetBytes,
     };
+  }
+
+  /** {@link TraceEnvironment}: what the level selection chose as the run closed. */
+  captureSelection(): SelectionAtSettle | null {
+    return this.tickCoordinator.selectionAtSettle();
   }
 
   private publishRenderedCaptureReady(): void {

@@ -78,6 +78,7 @@ import {
   type GpuMemoryReading,
   type InputKind,
   type Outstanding,
+  type SelectionAtSettle,
   type PageError,
   type PageErrorSource,
   type PageScrollReading,
@@ -176,6 +177,8 @@ export interface TraceEnvironment {
   /** Read at run close, once the page the run describes actually exists. */
   captureConditions(): RunConditions;
   captureOutstanding(): Outstanding;
+  /** Read at run close: what the level selection chose. A page without one leaves it out. */
+  captureSelection?(): SelectionAtSettle | null;
 }
 
 /** Observes one committed per-tick aggregate sample. See {@link TraceRecorder.onTick}. */
@@ -1849,6 +1852,7 @@ export class TraceRecorder {
         quiescenceHoldMs: this.quiescenceHoldMs,
         timeoutMs: this.timeoutMs,
         outstandingAtSettle: run.environment.captureOutstanding(),
+        ...(run.environment.captureSelection && { selectionAtSettle: run.environment.captureSelection() }),
         wantedSetMetAtUs: run.wantedSetMetAtMs === null ? null : this.offsetUs(run, run.wantedSetMetAtMs),
         ...(run.views.size > 0 && {
           views: [...run.views].map(([view, { settledAtMs, wanted, short }]) => ({

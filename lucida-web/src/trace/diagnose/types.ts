@@ -24,7 +24,10 @@ import type {
   PointEventReason,
   RowOutcomeName,
   RunCause,
+  SelectedLevelChunks,
+  SelectionAtSettle,
 } from "../types.ts";
+import type { LevelRange } from "../../renderer/workerProtocol.ts";
 import type { Ruleset } from "./ruleset.ts";
 
 /**
@@ -283,6 +286,13 @@ export interface FindingObservation {
   /** The coverage the screen goes without: wanted chunks that are not resident. */
   lossChunks?: number;
   lossPct?: number;
+  /** A level selection: its dataset, the level the screen calls for, and the detail chunks it chose by level. */
+  datasetId?: string;
+  target?: LevelRange | null;
+  levels?: SelectedLevelChunks[];
+  /** Chunks it left at the coarse tier's level, and that level. */
+  coarseChunks?: number;
+  coarseLevel?: number | null;
   /** Chunks the uploader stopped re-sending, each with the renderer's last reason for handing it back. */
   held?: Array<{ entityId: string; chunkKey: string; reason: string }>;
   /** The entities a cold-open allowance widened the ceiling by. */
@@ -959,6 +969,15 @@ export interface ReplanSummary {
 }
 
 /**
+ * The level selection as the run closed, beside how much of it was resident:
+ * the detail tier's wanted chunks are the selection's.
+ */
+export interface SelectionReading extends SelectionAtSettle {
+  wanted: number;
+  resident: number;
+}
+
+/**
  * One residency tier as the run's settle block left it. `budgetBound` is
  * the rule's judgement; the numbers beside it are what it judged.
  */
@@ -999,6 +1018,8 @@ export interface SteadyStateReading {
   sent: SentSummary | null;
   /** Both tiers, from the run's settle block, whether or not an interval followed. */
   tiers: TierAtSettle[];
+  /** The level selection as the run closed, or null for a run that recorded none. */
+  selection: SelectionReading | null;
   /** What the ruleset found, or why it could not look, in one sentence. */
   statement: string;
 }

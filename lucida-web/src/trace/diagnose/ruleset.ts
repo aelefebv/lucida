@@ -20,7 +20,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 16;
+export const RULESET_VERSION = 17;
 
 export interface AbsoluteRule {
   id: string;
@@ -118,6 +118,12 @@ export interface RefetchRule {
 export interface BudgetBoundRule {
   id: string;
   minFillPct: number;
+  why: string;
+}
+
+/** A view the budget kept from the levels the screen calls for, drawing the finest that fit. */
+export interface LevelSelectionRule {
+  id: string;
   why: string;
 }
 
@@ -219,6 +225,7 @@ export interface SteadyStateRules {
   received: SustainedRule;
   refetch: RefetchRule;
   budgetBound: BudgetBoundRule;
+  levelSelection: LevelSelectionRule;
   replans: ReplanRule;
   sent: SustainedRule;
 }
@@ -528,6 +535,10 @@ export const RULESET: Ruleset = {
       id: "steady.budget-bound",
       minFillPct: 90,
       why: "Eviction holds a tier under its budget by at most the chunk that did not fit, so a full tier reads a little under it. A tier holding nine tenths of its budget, wanting more chunks than it holds, with nothing pending and nothing in flight, has stopped asking because the rest cannot fit: it is budget-bound, and the view settles covering what it holds. That is the planned behavior under memory pressure, so the finding is a note, not a failure. Below that fill the same shortfall is something else, chunks the source could not serve yet or a queue that emptied for another reason, and is not blamed on the budget. The loss is stated in chunks of the wanted set, which is the coverage the screen goes without.",
+    },
+    levelSelection: {
+      id: "steady.level-selection",
+      why: "The level selection starts every visible chunk at the coarse tier's level and refines the chunks whose samples look largest on screen until each spans a device pixel or the budget is spent, so a view whose target level does not fit draws the finest levels that do, near chunks finer than far ones. That is the planned behavior under memory pressure, so the finding is a note: it names the levels drawn against the level the screen calls for, the budget that stopped the refinement, and how much of the selection is resident, which is the view's coverage. The detail tier's budget-bound reading gives way to it, since the selection asks only for what fits.",
     },
     replans: {
       id: "steady.replans",

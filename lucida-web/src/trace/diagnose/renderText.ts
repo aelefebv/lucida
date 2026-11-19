@@ -161,6 +161,10 @@ export function renderDiagnostic(
   const lag = lagOf(document, p);
   if (lag) push(IDENTITY, `lag       ${lag}`);
   push(IDENTITY, `gpu mem   ${gpuMemoryOf(document, p)}`);
+  // What each dataset draws at, the level selection's choice, against the
+  // level the screen calls for. Older documents and pages without a
+  // selection print no line.
+  levelsOf(document, p).forEach((line) => push(IDENTITY, `levels    ${line}`));
 
   // The identity line names only the types that sent anything. The SENT table
   // at DETAIL lists the whole closed set, zeros included.
@@ -722,6 +726,41 @@ function lagOf(document: DiagnosticDocument, p: PrintNumber): string | null {
       : `${p("lag.frames.presented", frames.presented)} frames, ${p("lag.frames.dropped", frames.dropped)} dropped ` +
         `against a ${p("lag.frames.displayIntervalMs", frames.displayIntervalMs!)} ms refresh`;
   return `${toFrame} · ${longTasks} · ${dropped}`;
+}
+
+/**
+ * One line per dataset: the levels its selection draws at and the chunks at
+ * each, the level the screen calls for, and, once, the bytes the selection
+ * holds of what it may and how much of it is resident.
+ */
+function levelsOf(document: DiagnosticDocument, p: PrintNumber): string[] {
+  const selection = document.steadyState.selection;
+  if (!selection) return [];
+  const base = "steadyState.selection";
+  return selection.datasets.map((dataset, index) => {
+    const at = `${base}.datasets[${index}]`;
+    const parts = dataset.levels.map((entry, i) =>
+      `${p(`${at}.levels[${i}].chunks`, entry.chunks.toLocaleString())} at ${p(`${at}.levels[${i}].level`, entry.level)}`);
+    if (dataset.coarseChunks > 0 && dataset.coarseLevel !== null) {
+      parts.push(
+        `${p(`${at}.coarseChunks`, dataset.coarseChunks.toLocaleString())} at the coarse tier's ` +
+          `${p(`${at}.coarseLevel`, dataset.coarseLevel)}`,
+      );
+    }
+    const target = dataset.target === null
+      ? "nothing in view"
+      : `the screen calls for ${dataset.target.min === dataset.target.max
+        ? `level ${p(`${at}.target.min`, dataset.target.min)}`
+        : `levels ${p(`${at}.target.min`, dataset.target.min)}-${p(`${at}.target.max`, dataset.target.max)}`}`;
+    const held = index === 0
+      ? ` · holds ${p(`${base}.usedBytes`, selection.usedBytes.toLocaleString())} B of the ` +
+        `${p(`${base}.shareBytes`, selection.shareBytes.toLocaleString())} B it may · ` +
+        `${p(`${base}.resident`, selection.resident.toLocaleString())} of ` +
+        `${p(`${base}.wanted`, selection.wanted.toLocaleString())} selected chunk(s) resident`
+      : "";
+    return `${dataset.datasetId}: ${parts.length > 0 ? parts.join(", ") : "nothing selected"} where ${target}` +
+      `${dataset.budgetLimited ? " · the budget stopped it" : ""}${held}`;
+  });
 }
 
 function gpuMemoryOf(document: DiagnosticDocument, p: PrintNumber): string {

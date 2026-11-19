@@ -82,6 +82,7 @@ import { regionInWorkerFrame, workerCutAxis, workerCutIndex } from "./upload/col
 import { computeActiveSetIndexMap } from "./upload/coldState/build.ts";
 import type { Uploader } from "./upload/uploader.ts";
 import { traceRecorder } from "../trace/recorder.ts";
+import type { DatasetSelectionAtSettle, SelectionAtSettle } from "../trace/types.ts";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -164,6 +165,56 @@ function gpuBound(summaries: ReadonlyMap<number, ViewSelectionSummary>): boolean
 
 /** How full the GPU side of a stopped selection is when it, not the CPU side, stopped it. */
 const GPU_BOUND_FILL = 0.9;
+
+/** The datasets a selection ran over, each with the views that draw it, the drawn view first. */
+type SelectedDatasets = readonly { dsId: string; views: readonly { view: TickView; snapshot: ViewSnapshotBase }[] }[];
+
+/**
+ * What a selection chose, as the trace keeps it: for each dataset, in the
+ * first view that draws it, the detail chunks by level, the chunks left at
+ * the coarse tier's level, and the level the screen calls for.
+ */
+function selectionReading(datasets: SelectedDatasets, selection: LevelSelectionResult): SelectionAtSettle {
+  const readings: DatasetSelectionAtSettle[] = [];
+  for (const { dsId, views } of datasets) {
+    const drawn = views[0];
+    if (drawn === undefined) continue;
+    const chosen = selection.byView.get(drawn.view.id)?.get(dsId);
+    const channels = drawn.snapshot.selection.visibleChannels.length;
+    const byLevel = new Map<number, number>();
+    let coarseChunks = 0;
+    let coarseLevel: number | null = null;
+    let targetMin = Infinity;
+    let targetMax = -Infinity;
+    for (const entity of drawn.snapshot.entities) {
+      if (!entity.visible || entity.kind === "Group") continue;
+      targetMin = Math.min(targetMin, entity.targetLevel);
+      targetMax = Math.max(targetMax, entity.targetLevel);
+      const cells = chosen?.entities.get(entity.entityId);
+      if (cells === undefined) continue;
+      for (const cell of cells.detail) byLevel.set(cell.level, (byLevel.get(cell.level) ?? 0) + channels);
+      if (cells.coarseCells > 0) {
+        coarseChunks += cells.coarseCells * channels;
+        coarseLevel = entity.coarseLevel;
+      }
+    }
+    readings.push({
+      datasetId: dsId,
+      target: targetMin === Infinity ? null : { min: targetMin, max: targetMax },
+      levels: [...byLevel].sort(([a], [b]) => a - b).map(([level, chunks]) => ({ level, chunks })),
+      coarseChunks,
+      coarseLevel,
+      budgetLimited: chosen?.budgetLimited ?? false,
+    });
+  }
+  let usedBytes = 0;
+  let shareBytes = 0;
+  for (const summary of selection.summaries.values()) {
+    usedBytes += summary.used.cpu;
+    shareBytes += summary.share.cpu;
+  }
+  return { datasets: readings, usedBytes: Math.round(usedBytes), shareBytes: Math.floor(shareBytes) };
+}
 
 /** One view of a planned dataset. */
 interface PlannedView {
@@ -752,8 +803,17 @@ export class TickCoordinator {
 
   /** What the last level selection chose, which the next leans toward. */
   private levelMemory: LevelSelectionMemory = initialLevelSelectionMemory();
-  /** The budget the last selection ran within, and what each view spent of it. */
-  private lastSelection: { budget: SelectionBytes; summaries: ReadonlyMap<number, ViewSelectionSummary> } | null = null;
+  /** The budget the last selection ran within, what each view spent of it, and what the trace reads of it. */
+  private lastSelection: {
+    budget: SelectionBytes;
+    summaries: ReadonlyMap<number, ViewSelectionSummary>;
+    reading: SelectionAtSettle;
+  } | null = null;
+
+  /** What the last selection the plans used chose, for a run closing now. Null before the first. */
+  selectionAtSettle(): SelectionAtSettle | null {
+    return this.lastSelection?.reading ?? null;
+  }
 
   /**
    * The level selection for every view, over every dataset each draws, from
@@ -762,8 +822,8 @@ export class TickCoordinator {
    */
   private selectLevels(
     ctx: TickContext,
-    datasets: readonly { dsId: string; views: readonly { view: TickView; snapshot: ViewSnapshotBase }[] }[],
-  ): LevelSelectionResult & { budget: SelectionBytes } {
+    datasets: SelectedDatasets,
+  ): LevelSelectionResult & { budget: SelectionBytes; datasets: SelectedDatasets } {
     const byView = new Map<number, SelectionDataset[]>();
     for (const { dsId, views } of datasets) {
       const manifest = ctx.datasets.get(dsId)!.manifest;
@@ -779,13 +839,20 @@ export class TickCoordinator {
       return { view, datasets: of, area: rect ? Math.max(0, rect[2]) * Math.max(0, rect[3]) : 0 };
     });
     const budget = selectionBudget(ctx, ctx.client.gpuCapacity());
-    return { ...selectLevels(views, budget, this.levelMemory, configStore.get()), budget };
+    return { ...selectLevels(views, budget, this.levelMemory, configStore.get()), budget, datasets };
   }
 
-  /** Keep what a selection the plans used chose, for the next to lean toward and for capacity reports to weigh. */
-  private commitSelection(selection: LevelSelectionResult & { budget: SelectionBytes }): void {
+  /**
+   * Keep what a selection the plans used chose: for the next to lean toward,
+   * for capacity reports to weigh, and for the trace to read when a run closes.
+   */
+  private commitSelection(selection: LevelSelectionResult & { budget: SelectionBytes; datasets: SelectedDatasets }): void {
     this.levelMemory = selection.memory;
-    this.lastSelection = { budget: selection.budget, summaries: selection.summaries };
+    this.lastSelection = {
+      budget: selection.budget,
+      summaries: selection.summaries,
+      reading: selectionReading(selection.datasets, selection),
+    };
   }
 
   /** Admit against the worker's latest report, and keep what {@link noteGpuCapacity} weighs. */
@@ -1619,7 +1686,7 @@ export class TickCoordinator {
       if (entry.kind !== "tile") return true;
       const chosen = chosenOf(pd.dsId).entities.get(entry.entityId);
       return numberArraysEqual(chosen?.detailLevels ?? [], entry.detailLevels) &&
-        (chosen?.keepsCoarse ?? true) === (entry.keepsCoarse ?? false);
+        (chosen === undefined || chosen.coarseCells > 0) === (entry.keepsCoarse ?? false);
     }));
     if (!keepsLevels) return false;
     this.commitSelection(levelSelection);

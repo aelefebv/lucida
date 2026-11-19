@@ -307,7 +307,7 @@ function runView(input: EncodedView, budget: SelectionBytes, config: PlanningCon
     detail: [],
     lookahead: [],
     detailLevels: [],
-    keepsCoarse: false,
+    coarseCells: 0,
   }));
   const remembered = input.owners.map((): number[] => []);
   let at = SELECTION_HEADER;
@@ -317,7 +317,7 @@ function runView(input: EncodedView, budget: SelectionBytes, config: PlanningCon
     remembered[owner].push(0, level, out[at + 2], out[at + 3], out[at + 4], 0);
     const chosen = byOwner[owner];
     if (level === input.owners[owner].coarse) {
-      chosen.keepsCoarse = true;
+      chosen.coarseCells++;
       continue;
     }
     chosen.detail.push({ level, x: out[at + 2], y: out[at + 3], z: out[at + 4], rank });

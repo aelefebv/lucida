@@ -106,7 +106,7 @@ function makeTileEntry(entity: EntitySnapshot, selection: DatasetLevelSelection)
     imageId: entity.imageId,
     targetLevel: entity.targetLevel,
     detailLevels,
-    keepsCoarse: chosen?.keepsCoarse ?? detailLevels.length === 0,
+    keepsCoarse: chosen === undefined ? detailLevels.length === 0 : chosen.coarseCells > 0,
     coarseLevel: compatibleCoarseLevel(entity, detailLevels[0] ?? -Infinity),
   };
 }
