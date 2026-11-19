@@ -7,6 +7,7 @@ pub mod cursor;
 pub mod epoch;
 pub mod framing;
 pub(crate) mod gzip;
+pub mod level_selection;
 pub(crate) mod mat4;
 pub mod minimap;
 pub mod placement;

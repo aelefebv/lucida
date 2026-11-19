@@ -432,7 +432,8 @@ impl Scene {
     /// region of the scene frame there. A volume view culls against the box
     /// of the dataset's first member set at the frame's origin, so a member's
     /// frustum test is a shift by its layout position. `None` for a dataset
-    /// with no image, or an unknown view.
+    /// with no image, or an unknown view. Its measure is scaled to the render
+    /// target, as the target level's is.
     pub fn visible_region(&self, view: ViewId, dataset_id: &DatasetId) -> Option<VisibleRegion> {
         let id = view;
         let view = self.view(view)?;
@@ -441,7 +442,7 @@ impl Scene {
         let placed = self.placed(dataset_id)?;
         // A layer shallower than the view's slab plans its nearest plane.
         let z_range = self.layer_cut(id, dataset_id, SlicePlane::Xy);
-        Some(match &view.camera {
+        let mut region = match &view.camera {
             Camera::Slice(slice) if !placed.to_scene.keeps_axis(slice.plane.cut().xyz()) => {
                 slice.tilted_region(&placed.to_scene, self.cut_slab(id, slice.plane.cut()))
             }
@@ -461,7 +462,11 @@ impl Scene {
                 view.camera
                     .visible_region(&z_range, Some(&cube), Some(&shape))
             }
-        })
+        };
+        // The level selection reads the measure as the target level does,
+        // under the render target's pixel-ratio cap.
+        region.measure = region.measure.scaled(self.render_ratio_scale());
+        Some(region)
     }
 }
 
