@@ -11,6 +11,7 @@
  */
 
 import { Axis } from "../../axes.ts";
+import { compareIds } from "../compareIds.ts";
 import { sliceLevelPlane, tczyx, type PoolCut, type SliceCut, type SpatialAxis } from "../../renderer/slicePlane.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
@@ -153,7 +154,7 @@ export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
   const priority = a.priority - b.priority;
   if (priority !== 0) return priority;
 
-  const image = a.imageId.localeCompare(b.imageId);
+  const image = compareIds(a.imageId, b.imageId);
   if (image !== 0) return image;
 
   return (
@@ -163,7 +164,7 @@ export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
     a.y - b.y ||
     a.x - b.x ||
     a.c - b.c ||
-    a.chunkKey.localeCompare(b.chunkKey)
+    compareIds(a.chunkKey, b.chunkKey)
   );
 }
 
