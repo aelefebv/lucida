@@ -51,6 +51,8 @@ def test_the_catalog_has_every_shape_the_matrix_needs() -> None:
     assert traits["collection"] == {"collection", "channels"}
     assert traits["labeled-volume"] == {"volume", "labels"}
     assert traits["physical-volume"] == {"volume", "physical"}
+    assert traits["large-aniso-volume"] == {"volume", "channels", "physical"}
+    assert traits["huge-volume"] == {"volume", "channels"}
     for name in ("single-level", "sharded", "float32", "anisotropic", "sparse"):
         assert name in CATALOG
 
@@ -436,6 +438,17 @@ def test_the_phone_suite_opens_cold_on_a_phone_at_ratio_3_on_both_pages() -> Non
     ]
     assert perf.viewport_args(SCENARIOS["volume-open-small"]) == ["--width", "480", "--height", "300"]
     assert perf.viewport_args(SCENARIOS["cold-open"]) == []
+
+
+def test_the_large_3d_suite_runs_the_volumes_larger_than_memory_at_ratio_2_and_nothing_quicker_does() -> None:
+    cases, _ = plan(suite="large-3d")
+    assert [case.id for case in cases] == [
+        f"{dataset}.{scenario}.dpr2"
+        for dataset in ("deep-volume", "large-aniso-volume", "huge-volume")
+        for scenario in ("volume-open", "volume-zoom", "large-canvas-orbit", "orbit-sustained")
+    ]
+    for suite in ("quick", "gate"):
+        assert not {"large-aniso-volume", "huge-volume"} & set(SUITES[suite].datasets), suite
 
 
 def test_the_trace_gate_workflow_runs_every_gate_dataset_once() -> None:

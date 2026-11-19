@@ -16,6 +16,14 @@
       "description": "multi-channel 3D volume 600 planes deep, whose finest level outgrows the memory budgets",
       "generate": "--size 600,1024,1024 --channels 3 --levels 4 --chunk 64"
     },
+    "large-aniso-volume": {
+      "description": "multi-channel 3D volume of 600 planes of 2048x2048, 4 times as far apart as its samples, with levels and chunks shaped to that spacing as converters write it",
+      "generate": "--size 600,2048,2048 --channels 3 --levels 5 --factor 1,2,2 --factor 1,2,2 --factor 2,2,2 --factor 2,2,2 --chunk 16,128,128 --chunk 32,64,64 --chunk 64 --chunk 64 --chunk 64 --scale 4,1,1 --unit micrometer"
+    },
+    "huge-volume": {
+      "description": "multi-channel 3D volume of 1024 planes of 2048x2048, whose finest level is 24 GiB in 49,152 chunks",
+      "generate": "--size 1024,2048,2048 --channels 3 --levels 5 --chunk 64"
+    },
     "volume": {
       "description": "multi-channel 3D volume",
       "generate": "--size 128,512,512 --channels 3 --levels 3 --chunk 64"
