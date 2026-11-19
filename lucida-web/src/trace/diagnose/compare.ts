@@ -302,6 +302,13 @@ function compareHeaders(left: ResolvedSide, right: ResolvedSide): HeaderDifferen
     if (l === undefined && r === undefined) continue;
     listed("cache", `cache.${field}`, l ?? null, r ?? null);
   }
+  // The memory budgets each run ran under, however they were set. A run
+  // recorded before its header carried them reads as unknown.
+  if (left.run.budgets || right.run.budgets) {
+    for (const field of ["gpuTotalBytes", "cpuMainBytes", "cpuOverviewBytes", "cpuBytesInFlight"] as const) {
+      listed("condition", `budgets.${field}`, left.run.budgets?.[field] ?? null, right.run.budgets?.[field] ?? null);
+    }
+  }
   const conditionKeys = new Set([
     ...Object.keys(left.side.conditions ?? {}),
     ...Object.keys(right.side.conditions ?? {}),

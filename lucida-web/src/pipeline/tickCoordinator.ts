@@ -56,7 +56,7 @@ import {
   type SelectionDataset,
   type ViewSelectionSummary,
 } from "./planning/levelSelection.ts";
-import { pageDeviceBudgets } from "../deviceBudget.ts";
+import { pageDeviceBudgets } from "../pageBudgets.ts";
 import type {
   ActiveSetEntry,
   DatasetLevelSelection,

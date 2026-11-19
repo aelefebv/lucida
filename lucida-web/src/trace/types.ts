@@ -377,6 +377,23 @@ export interface RunConditions {
   composedView: ComposedView;
   devicePixelRatio: number;
   viewport: Viewport;
+  /** Absent on a document from before the field. */
+  budgets?: RunBudgets;
+}
+
+/**
+ * The memory budgets a run ran under. The GPU total is what the page gave
+ * the render worker; each reading's `gpuMemory` carries the worker's own,
+ * lower once the device ran out of memory under it. The CPU stores are what
+ * the cache ran under, Dev controls knobs included.
+ */
+export interface RunBudgets {
+  gpuTotalBytes: number;
+  /** Whether a person set the GPU total in Settings, rather than the device fitting it. */
+  gpuTotalSet: boolean;
+  cpuMainBytes: number;
+  cpuOverviewBytes: number;
+  cpuBytesInFlight: number;
 }
 
 /**

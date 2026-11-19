@@ -5,6 +5,7 @@ import { WorkspaceRoot } from './WorkspaceRoot.tsx'
 import { AuthGate } from './auth/AuthGate.tsx'
 import { installTraceSeam, resolveGpuIdentity } from './trace/seam.ts'
 import { traceRecorder } from './trace/recorder.ts'
+import { noteAdapter } from './pageBudgets.ts'
 import { observeLongTasks } from './trace/longTasks.ts'
 import { installAppearance } from './theme/appearance.ts'
 import { installDeploymentTheme } from './theme/deployment.ts'
@@ -18,7 +19,12 @@ installTraceSeam()
 // than one only a developer's console saw.
 setPageErrorSink((report, count) => traceRecorder.recordError(report, count))
 watchErrors(window, (report) => reportPageError(report))
-void resolveGpuIdentity().then(gpu => traceRecorder.setGpu(gpu))
+void resolveGpuIdentity().then(gpu => {
+  traceRecorder.setGpu(gpu)
+  // The render worker asks for the same default adapter, so the budgets the
+  // page fits to this one fit the worker's device.
+  noteAdapter(gpu?.fallback ?? null)
+})
 observeLongTasks(traceRecorder)
 
 // index.html already applied the stored appearance before first paint; this

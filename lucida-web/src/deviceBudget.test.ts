@@ -1,66 +1,127 @@
 import { describe, expect, it } from "vitest";
 import {
-  CEILING_BUDGETS,
+  DESKTOP_BUDGETS,
   GPU_TOTAL_FLOOR_BYTES,
+  deviceClassOf,
   fitBudgets,
   halvedGpuTotal,
+  readDeviceFacts,
   readDeviceMemoryGiB,
+  type DeviceFacts,
 } from "./deviceBudget.ts";
 
 const MIB = 1024 * 1024;
+const GIB = 1024 * MIB;
 
 function media(matching: string[]) {
   return (query: string) => ({ matches: matching.includes(query) });
 }
 
+const desktop = (memoryGiB: number | null): DeviceFacts => ({ memoryGiB, touchOnly: false, fallbackAdapter: false });
+const phone = (memoryGiB: number): DeviceFacts => ({ memoryGiB, touchOnly: true, fallbackAdapter: false });
+const software = (memoryGiB: number | null): DeviceFacts => ({ memoryGiB, touchOnly: false, fallbackAdapter: true });
+
 describe("fitBudgets", () => {
-  it("keeps today's budgets on a desktop that reports 8 GiB or more, or nothing", () => {
-    expect(fitBudgets(null)).toEqual(CEILING_BUDGETS);
-    expect(fitBudgets(8)).toEqual(CEILING_BUDGETS);
-    expect(fitBudgets(32)).toEqual(CEILING_BUDGETS);
+  it("gives a desktop with a hardware adapter and 16 GiB or more a 4 GiB GPU total", () => {
+    for (const memory of [16, 32]) {
+      expect(fitBudgets(desktop(memory))).toEqual({
+        gpuTotalBytes: 4 * GIB,
+        labelVolumeBytes: 1365 * MIB,
+        labelTotalVolumeBytes: 1365 * MIB,
+        cpuMainBytes: 4 * GIB,
+        cpuOverviewBytes: 64 * MIB,
+        cpuBytesInFlight: 32 * MIB,
+      });
+    }
+    expect(fitBudgets(desktop(32))).toEqual(DESKTOP_BUDGETS);
   });
 
-  it("halves every budget on a device that reports 4 GiB", () => {
-    expect(fitBudgets(4)).toEqual({
-      gpuTotalBytes: 768 * MIB,
-      labelVolumeBytes: 256 * MIB,
-      labelTotalVolumeBytes: 256 * MIB,
-      cpuMainBytes: 256 * MIB,
+  it("halves a desktop's budgets at 8 GiB, and takes a desktop that reports nothing for one", () => {
+    expect(fitBudgets(desktop(8)).gpuTotalBytes).toBe(2 * GIB);
+    expect(fitBudgets(desktop(8)).cpuMainBytes).toBe(2 * GIB);
+    expect(fitBudgets(desktop(null))).toEqual(fitBudgets(desktop(8)));
+  });
+
+  it("keeps a phone, a tablet and a software adapter to what a phone holds", () => {
+    expect(fitBudgets(phone(8))).toMatchObject({ gpuTotalBytes: 1 * GIB, cpuMainBytes: 1 * GIB });
+    // Safari reports nothing, which a touch-only device reads as 4 GiB.
+    expect(fitBudgets(phone(4))).toEqual({
+      gpuTotalBytes: 512 * MIB,
+      labelVolumeBytes: 170 * MIB,
+      labelTotalVolumeBytes: 170 * MIB,
+      cpuMainBytes: 512 * MIB,
       cpuOverviewBytes: 32 * MIB,
       cpuBytesInFlight: 16 * MIB,
     });
+    expect(fitBudgets(software(32))).toEqual(fitBudgets(phone(8)));
+    expect(fitBudgets(software(null))).toEqual(fitBudgets(phone(8)));
   });
 
   it("stops at a floor on the smallest devices", () => {
-    const tiny = fitBudgets(0.25);
+    const tiny = fitBudgets(phone(0.25));
     expect(tiny.gpuTotalBytes).toBe(GPU_TOTAL_FLOOR_BYTES);
     expect(tiny.cpuMainBytes).toBe(64 * MIB);
+    expect(tiny.cpuOverviewBytes).toBe(16 * MIB);
     expect(tiny.cpuBytesInFlight).toBe(8 * MIB);
-    for (const [key, bytes] of Object.entries(tiny)) {
-      expect(bytes, key).toBeGreaterThan(0);
-      expect(bytes, key).toBeLessThanOrEqual(CEILING_BUDGETS[key as keyof typeof CEILING_BUDGETS]);
+    expect(tiny.labelVolumeBytes).toBe(64 * MIB);
+  });
+
+  it("sizes the detail store to hold the whole GPU total, within a quarter of the device's memory", () => {
+    for (const facts of [desktop(32), desktop(16), desktop(8), desktop(4), phone(8), phone(4), phone(2), software(16)]) {
+      const budgets = fitBudgets(facts);
+      const label = JSON.stringify(facts);
+      expect(budgets.cpuMainBytes, label).toBeGreaterThanOrEqual(budgets.gpuTotalBytes);
+      const inMemory = deviceClassOf(facts) === "desktop"
+        ? budgets.cpuMainBytes
+        : budgets.cpuMainBytes + budgets.gpuTotalBytes;
+      expect(inMemory, label).toBeLessThanOrEqual((facts.memoryGiB! * GIB) / 4);
     }
   });
 
-  it("leaves every label atlas room inside the GPU total", () => {
-    for (const memory of [null, 8, 4, 2, 1, 0.25]) {
-      const budgets = fitBudgets(memory);
-      expect(budgets.labelTotalVolumeBytes, String(memory)).toBeLessThan(budgets.gpuTotalBytes);
+  it("runs under a GPU total a person set, with the detail store following it up to half the device's memory", () => {
+    expect(fitBudgets(desktop(32), 8 * GIB)).toMatchObject({ gpuTotalBytes: 8 * GIB, cpuMainBytes: 8 * GIB });
+    expect(fitBudgets(desktop(16), 16 * GIB)).toMatchObject({ gpuTotalBytes: 16 * GIB, cpuMainBytes: 8 * GIB });
+    // Lower than the device's own, on a desktop and on a phone.
+    expect(fitBudgets(desktop(32), 1 * GIB)).toMatchObject({ gpuTotalBytes: 1 * GIB, cpuMainBytes: 1 * GIB });
+    expect(fitBudgets(phone(8), 256 * MIB)).toMatchObject({ gpuTotalBytes: 256 * MIB, cpuMainBytes: 256 * MIB });
+    expect(fitBudgets(desktop(32), 1).gpuTotalBytes).toBe(GPU_TOTAL_FLOOR_BYTES);
+  });
+
+  it("leaves every label atlas room inside the GPU total, and no larger than one texture may be", () => {
+    for (const set of [null, 192 * MIB, 1 * GIB, 4 * GIB, 32 * GIB]) {
+      for (const facts of [desktop(32), desktop(8), phone(4), phone(0.25)]) {
+        const budgets = fitBudgets(facts, set);
+        expect(budgets.labelTotalVolumeBytes).toBeLessThan(budgets.gpuTotalBytes);
+        expect(budgets.labelVolumeBytes).toBeLessThanOrEqual(2 * GIB);
+      }
     }
   });
 });
 
 describe("halvedGpuTotal", () => {
   it("halves the total after an out-of-memory failure, down to the floor and no further", () => {
+    expect(halvedGpuTotal(32 * GIB)).toBe(16 * GIB);
+    expect(halvedGpuTotal(4 * GIB)).toBe(2 * GIB);
     expect(halvedGpuTotal(1536 * MIB)).toBe(768 * MIB);
     expect(halvedGpuTotal(300 * MIB)).toBe(GPU_TOTAL_FLOOR_BYTES);
     expect(halvedGpuTotal(GPU_TOTAL_FLOOR_BYTES)).toBe(GPU_TOTAL_FLOOR_BYTES);
+  });
+
+  it("reaches the floor from the largest total within a few failures", () => {
+    let total = 32 * GIB;
+    let failures = 0;
+    while (total > GPU_TOTAL_FLOOR_BYTES) {
+      total = halvedGpuTotal(total);
+      failures++;
+    }
+    expect(failures).toBeLessThanOrEqual(8);
   });
 });
 
 describe("readDeviceMemoryGiB", () => {
   it("takes the reported figure", () => {
     expect(readDeviceMemoryGiB({ deviceMemory: 4 })).toBe(4);
+    expect(readDeviceMemoryGiB({ deviceMemory: 32 })).toBe(32);
     expect(readDeviceMemoryGiB({ deviceMemory: 0.5, matchMedia: media(["(pointer: coarse)"]) })).toBe(0.5);
   });
 
@@ -79,5 +140,15 @@ describe("readDeviceMemoryGiB", () => {
     expect(readDeviceMemoryGiB({ deviceMemory: 0 })).toBeNull();
     expect(readDeviceMemoryGiB({ deviceMemory: Number.NaN })).toBeNull();
     expect(readDeviceMemoryGiB({ deviceMemory: "8" })).toBeNull();
+  });
+});
+
+describe("readDeviceFacts", () => {
+  it("tells a touch-only device from one with a fine pointer", () => {
+    expect(readDeviceFacts({ deviceMemory: 8, matchMedia: media(["(pointer: coarse)"]) }))
+      .toEqual({ memoryGiB: 8, touchOnly: true });
+    expect(readDeviceFacts({ deviceMemory: 8, matchMedia: media(["(pointer: coarse)", "(any-pointer: fine)"]) }))
+      .toEqual({ memoryGiB: 8, touchOnly: false });
+    expect(readDeviceFacts({})).toEqual({ memoryGiB: null, touchOnly: false });
   });
 });

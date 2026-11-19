@@ -7,7 +7,6 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { LabelVolumeChunkDataMessage } from "../workerProtocol.ts";
 import type { Chunk } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
-import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import { handleLabelVolumeChunkData } from "./upload.ts";
 import { computeLabelVolumeSizing, labelPaddedVolumeBytes } from "./atlas.ts";
 import { destroyAllVolumeResources, removeVolumeResources } from "./index.ts";
@@ -317,13 +316,14 @@ describe("computeLabelVolumeSizing", () => {
     // exceeds the 512 MB budget while the true volume fits. Sizing on padded
     // bytes would leave fewer slots than cells and render holes.
     const w = 1088, h = 1024, d = 120, chunk = 128, maxDim = 2048;
+    const budget = 512 * 1024 * 1024;
     const s = computeLabelVolumeSizing(w, h, d, chunk, chunk, chunk, maxDim);
 
     // The true volume fits the budget, which is why the level is eligible...
-    expect(w * h * d * 4).toBeLessThanOrEqual(CEILING_BUDGETS.labelVolumeBytes);
+    expect(w * h * d * 4).toBeLessThanOrEqual(budget);
     // ...but the padded bricks would exceed it.
     const paddedBytes = s.gridCellCount * s.chunkX * s.chunkY * s.chunkZ * 4;
-    expect(paddedBytes).toBeGreaterThan(CEILING_BUDGETS.labelVolumeBytes);
+    expect(paddedBytes).toBeGreaterThan(budget);
 
     // Residency invariant: capacity is the whole grid, never clamped to bytes.
     expect(s.capacity).toBe(s.gridCellCount);

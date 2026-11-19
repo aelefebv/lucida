@@ -27,7 +27,8 @@ import {
   viewFrameTarget,
   viewLayerTargets,
 } from "./viewResources.ts";
-import { GpuRoom, grantGrowth, handleGpuOutOfMemory, measureGpuCapacity, measureGpuMemory } from "./gpuBudget.ts";
+import { GpuRoom, grantGrowth, handleGpuOutOfMemory, measureGpuCapacity, measureGpuMemory, setGpuTotal } from "./gpuBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import { wantNothingOf } from "../coldState/apply.ts";
 
 const MIB = 1024 * 1024;
@@ -372,10 +373,41 @@ describe("running out of memory", () => {
     expect(b.keys.slice(0, 64).every((key) => b.atlas.slots.has(`imgB|${key}`))).toBe(true);
   });
 
+  it("halves a desktop's total again on each failure, down to the floor, keeping every wanted chunk", () => {
+    const { ctx } = makeCtx(DESKTOP_BUDGETS.gpuTotalBytes);
+    // Twelve pools of 60 layers of 4 MiB, nearly 3 GiB, each wanting one layer's chunks.
+    const pools = Array.from({ length: 12 }, (_, i) => heldPool(ctx, `ds1:ch${i}:32x32x32:detail`, `img${i}`, 60));
+    pools.forEach(({ keys }, i) => want(ctx, `img${i}`, keys.slice(0, 64)));
+    expect(measureGpuMemory(ctx.state).bytes).toBeGreaterThan(2048 * MIB);
+
+    const totals: number[] = [];
+    while (handleGpuOutOfMemory(ctx)) {
+      totals.push(ctx.state.gpuTotalBytes / MIB);
+      expect(measureGpuMemory(ctx.state).bytes).toBeLessThanOrEqual(ctx.state.gpuTotalBytes);
+    }
+    expect(totals).toEqual([2048, 1024, 512, 256, 192]);
+    pools.forEach(({ atlas, keys }, i) =>
+      expect(keys.slice(0, 64).every((key) => atlas.slots.has(`img${i}|${key}`))).toBe(true));
+  });
+
   it("reports at the floor that trying again would not help", () => {
     const { ctx } = makeCtx(192 * MIB);
     expect(handleGpuOutOfMemory(ctx)).toBe(false);
     expect(ctx.state.gpuTotalBytes).toBe(192 * MIB);
+  });
+});
+
+describe("a total the page sets", () => {
+  it("takes back what a lower one no longer covers, from chunks the planner doesn't want", () => {
+    const { ctx } = makeCtx(4096 * MIB);
+    const b = heldPool(ctx, "ds1:32x32x32:detail", "imgB", 60);
+    want(ctx, "imgB", b.keys.slice(0, 64));
+
+    setGpuTotal(ctx, 100 * MIB);
+
+    expect(ctx.state.gpuTotalBytes).toBe(100 * MIB);
+    expect(measureGpuMemory(ctx.state).bytes).toBeLessThanOrEqual(100 * MIB);
+    expect(b.keys.slice(0, 64).every((key) => b.atlas.slots.has(`imgB|${key}`))).toBe(true);
   });
 });
 
