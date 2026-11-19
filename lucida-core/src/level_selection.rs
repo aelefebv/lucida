@@ -17,6 +17,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use lucida_content::LevelGeometry;
 
@@ -75,6 +76,33 @@ pub struct Cell {
     pub y: u32,
     pub x: u32,
 }
+
+/// A multiply-rotate hash over a cell's five numbers. The selection hashes a
+/// cell several times per cell it selects, and std's keyed hash, built to
+/// resist chosen keys, cost most of its time on cells the core makes itself.
+#[derive(Default)]
+pub struct CellHasher(u64);
+
+impl Hasher for CellHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u32(u32::from(byte));
+        }
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(n)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// A set of cells under [`CellHasher`].
+pub type CellSet = HashSet<Cell, BuildHasherDefault<CellHasher>>;
+
+type CellMap<V> = HashMap<Cell, V, BuildHasherDefault<CellHasher>>;
 
 /// A selected cell, its measure, the device pixels one of its samples spans
 /// where it is nearest the eye, and how far its center lies from the view's
@@ -179,9 +207,9 @@ impl<'a> SelectionEntity<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct PreviousSelection {
     /// Cells it selected.
-    pub kept: HashSet<Cell>,
+    pub kept: CellSet,
     /// Cells it replaced with finer ones.
-    pub refined: HashSet<Cell>,
+    pub refined: CellSet,
 }
 
 /// Which way the view last zoomed, and so which cells beyond the selection
@@ -266,8 +294,8 @@ struct Refiner<'s, 'a> {
     entities: &'s [SelectionEntity<'a>],
     previous: &'s PreviousSelection,
     /// Selected cells, each with its measure and distance.
-    selected: HashMap<Cell, SelectedCell>,
-    refined: HashSet<Cell>,
+    selected: CellMap<SelectedCell>,
+    refined: CellSet,
     /// Per entity, how many charged cells each detail level holds, which
     /// keeps the levels within the renderer's sources.
     detail_levels: Vec<BTreeMap<u32, usize>>,
@@ -282,8 +310,8 @@ impl<'s, 'a> Refiner<'s, 'a> {
         Self {
             entities,
             previous,
-            selected: HashMap::new(),
-            refined: HashSet::new(),
+            selected: CellMap::default(),
+            refined: CellSet::default(),
             detail_levels: vec![BTreeMap::new(); entities.len()],
             heap: BinaryHeap::new(),
             used: Cost::default(),
@@ -457,8 +485,8 @@ impl<'s, 'a> Refiner<'s, 'a> {
             let levels = &self.detail_levels[cell.entity as usize];
             let finest = levels.keys().next().map_or(finer, |&f| f.min(finer));
             let reach = finest + (MAX_LEVEL_SOURCES - 1);
-            let beyond: Vec<u32> = levels.range(reach + 1..).map(|(&l, _)| l).collect();
-            if finer > reach || (!beyond.is_empty() && !entity.start_free) {
+            let beyond = levels.range(reach + 1..).next().is_some();
+            if finer > reach || (beyond && !entity.start_free) {
                 self.heap.pop();
                 continue;
             }
@@ -496,12 +524,14 @@ impl<'s, 'a> Refiner<'s, 'a> {
             self.heap.pop();
             self.unselect(cell);
             self.refined.insert(cell);
-            if !beyond.is_empty() {
+            if beyond {
                 let dropped: Vec<Cell> = self
                     .selected
                     .keys()
                     .copied()
-                    .filter(|c| c.entity == cell.entity && beyond.contains(&c.level))
+                    .filter(|c| {
+                        c.entity == cell.entity && c.level > reach && entity.charged(c.level)
+                    })
                     .collect();
                 for cell in dropped {
                     self.unselect(cell);
@@ -547,7 +577,7 @@ impl<'s, 'a> Refiner<'s, 'a> {
             .filter(|cell| finest[cell.entity as usize] == Some(cell.level))
             .collect();
         sources.sort_unstable();
-        let mut parents = HashMap::new();
+        let mut parents = CellMap::default();
         let entities = self.entities;
         for cell in sources {
             let entity = &entities[cell.entity as usize];

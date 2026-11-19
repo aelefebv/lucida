@@ -1,9 +1,9 @@
 /**
  * What one planning pass costs on the main thread, from the snapshot to the
- * sorted plan, for the shapes the viewer meets: a small collection, a
- * multichannel timeseries volume, and a collection wide enough that the
- * plan's one crossing into the core's chunk enumerator carries thousands of
- * queries. Read the logged p50s.
+ * sorted plan, the level selection included, for the shapes the viewer
+ * meets: a small collection, a multichannel timeseries volume, and a
+ * collection wide enough that the plan's crossings into the core carry
+ * thousands of entities. Read the logged p50s.
  */
 import { beforeAll, describe, it } from "vitest";
 import { WasmScene } from "lucida-core";
@@ -12,9 +12,15 @@ import { describeTiming, expectWithinBudget, timeStep } from "../../test/perfBud
 import { parseResolvedLayers } from "../../resolvedLayers.ts";
 import { loadWasm } from "../../viewProperties.ts";
 import { collection, singleImage, type DatasetFixture } from "../simulation/fixtures.ts";
+import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
+import { initialLevelSelectionMemory, selectLevels, type LevelSelectionMemory } from "./levelSelection.ts";
 import { plan } from "./plan.ts";
 import { buildViewSnapshot } from "./snapshot.ts";
-import { initialPlanningState, type PlanningSnapshot } from "./types.ts";
+import { initialPlanningState, type PlanningSnapshot, type ViewSnapshotBase } from "./types.ts";
+
+/** The page's budgets on a capable desktop. */
+const BUDGET = { cpu: CEILING_BUDGETS.cpuMainBytes, gpu: CEILING_BUDGETS.gpuTotalBytes };
 
 beforeAll(loadWasm);
 
@@ -68,7 +74,7 @@ const CASES: Case[] = [
   },
 ];
 
-function snapshotFor(c: Case, dpr: number): { snapshot: PlanningSnapshot; scene: WasmScene } {
+function snapshotFor(c: Case, dpr: number): { base: ViewSnapshotBase; scene: WasmScene } {
   const scene = new WasmScene(CANVAS[0] * dpr, CANVAS[1] * dpr);
   scene.apply_command(c.dataset.openCommand);
   scene.set_viewport(CANVAS[0] * dpr, CANVAS[1] * dpr, dpr);
@@ -85,25 +91,34 @@ function snapshotFor(c: Case, dpr: number): { snapshot: PlanningSnapshot; scene:
     mode: c.mode,
   });
   if (!built) throw new Error(`${c.name}: no snapshot`);
+  return { base: built, scene };
+}
+
+/** One pass: the level selection, then the plan from it. */
+function planPass(c: Case, base: ViewSnapshotBase, memory: LevelSelectionMemory) {
+  const views = [{ view: base.view, datasets: [{ datasetId: c.dataset.datasetId, view: base, manifest: c.dataset.manifest }], area: 1 }];
+  const selected = selectLevels(views, BUDGET, memory, DEFAULT_PLANNING_CONFIG);
   const snapshot: PlanningSnapshot = {
     datasetId: c.dataset.datasetId,
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
-    views: [built],
+    views: [{ ...base, levelSelection: selected.byView.get(base.view)!.get(c.dataset.datasetId)! }],
     minimapPending: new Map(),
   };
-  return { snapshot, scene };
+  return { plan: plan(snapshot, initialPlanningState()), memory: selected.memory };
 }
 
 describe("planning cost per pass", () => {
   for (const c of CASES) {
     for (const dpr of [1, 2]) {
       it(`${c.name} at device pixel ratio ${dpr}`, () => {
-        const { snapshot, scene } = snapshotFor(c, dpr);
+        const { base, scene } = snapshotFor(c, dpr);
         try {
-          // A view that kept zooming in, so the prefetch lane holds a level step.
-          const state = { ...initialPlanningState(), zoomDirection: "in" as const };
-          const requests = plan(snapshot, state).requests.length;
-          const timing = timeStep(() => plan(snapshot, state), { samples: 60, warmup: 10 });
+          // A view that zoomed in since its last selection, so the selection
+          // looks ahead to the next finer chunks.
+          const zoomedOut = { ...base, visibleRegion: { ...base.visibleRegion, effectiveZoom: base.visibleRegion.effectiveZoom / 2 } };
+          const memory = planPass(c, zoomedOut, initialLevelSelectionMemory()).memory;
+          const requests = planPass(c, base, memory).plan.requests.length;
+          const timing = timeStep(() => planPass(c, base, memory), { samples: 60, warmup: 10 });
           console.log(`[plan] ${c.name} @${dpr}x, ${requests} requests: ${describeTiming(timing, c.budgetUs)}`);
           expectWithinBudget(`${c.name} @${dpr}x`, timing, c.budgetUs);
         } finally {

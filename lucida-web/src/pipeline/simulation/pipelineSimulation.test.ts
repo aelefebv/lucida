@@ -83,6 +83,8 @@ describe("a volume whose detail outgrows a pool sized at the WebGPU minimums", (
   // 768 level-0 chunks of 512 KiB, 384 MiB. The minimums' 256 MiB buffer
   // holds 512 of them, and this device's lets the pool hold them all inside
   // the GPU total. The first plan is made before the worker reports either.
+  // At ratio 1 the far half spans fewer pixels, and the selection draws it a
+  // level coarser.
   const scenario = describeScenario({
     name: "deep volume",
     mode: "volume",
@@ -100,7 +102,9 @@ describe("a volume whose detail outgrows a pool sized at the WebGPU minimums", (
       const run = await runScenario(scenario, { dpr });
       expectSettled(run);
       const [open] = run.phases;
-      expect(open.detail).toEqual({ resident: 768, desired: 768 });
+      expect(open.detail.resident).toBe(open.detail.desired);
+      expect(open.detail.desired).toBeGreaterThan(512);
+      expect(open.detail.desired).toBeLessThanOrEqual(768);
       expect(open.coverage).toBe(1);
     });
   }
@@ -134,9 +138,10 @@ describe("a wide collection with more tiles than the coarse budget holds", () =>
   }
 });
 
-describe("a wide collection whose demand exceeds both budgets", () => {
-  // 40 detail chunks and 20 coarse chunks of room. At ratio 1 the view wants
-  // 36 detail and 36 coarse chunks, at ratio 2 it wants 144 and 36.
+describe("a wide collection whose target levels exceed both budgets", () => {
+  // 40 detail chunks and 20 coarse chunks of room. At ratio 1 the screen
+  // calls for 36 detail chunks, at ratio 2 for 144, beside 36 coarse ones.
+  // The selection draws what fits and the coarse tier the rest.
   const scenario = describeScenario({
     name: "wide collection over budget",
     dataset: WIDE,
@@ -145,12 +150,13 @@ describe("a wide collection whose demand exceeds both budgets", () => {
     tickBound: 120,
   });
   for (const dpr of DEVICE_PIXEL_RATIOS) {
-    it(`settles covering less within the tick bound, without refetching, at device pixel ratio ${dpr}`, async () => {
+    it(`settles holding what fits within the tick bound, without refetching, at device pixel ratio ${dpr}`, async () => {
       const run = await runScenario(scenario, { dpr });
       expectSettled(run);
       const [open] = run.phases;
-      expect(open.quiescence).toBe("coverage_limited");
-      expect(open.coverage).toBeLessThan(1);
+      // The coarse tier borrows the detail room the selection leaves.
+      expect(open.detail.resident).toBe(open.detail.desired);
+      expect(open.detail.desired).toBeLessThanOrEqual(40);
       // Whatever was admitted is resident, it fits the 60 chunks of room,
       // and each resident chunk took one request: nothing was evicted and
       // fetched again.
@@ -247,21 +253,21 @@ describe("a Z scrub under a label", () => {
 });
 
 describe("a view whose target level is the coarse level", () => {
-  // One level, so the detail and coarse tiers want the same four chunks
-  // under the same keys.
+  // One level, which the coarse tier holds, so the selection keeps every
+  // chunk there and the detail tier wants none.
   const scenario = describeScenario({
     name: "target level is the coarse level",
     dataset: singleImage({ id: "flat", pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 1 } }),
   });
   for (const dpr of DEVICE_PIXEL_RATIOS) {
-    it(`counts a chunk sent to both tiers once per tier at device pixel ratio ${dpr}`, async () => {
+    it(`draws it from the coarse tier alone, each chunk sent once, at device pixel ratio ${dpr}`, async () => {
       const run = await runScenario(scenario, { dpr });
       expectSettled(run);
       const [open] = run.phases;
-      expect(open.detail.desired).toBe(4);
+      expect(open.detail.desired).toBe(0);
       expect(open.coarse.desired).toBe(4);
-      expect(open.chunksSent).toBe(8);
-      expect(open.distinctChunksSent).toBe(8);
+      expect(open.chunksSent).toBe(4);
+      expect(open.distinctChunksSent).toBe(4);
       expect(open.resent).toEqual([]);
     });
   }
@@ -398,21 +404,23 @@ describe("a two-timepoint volume whose detail budget holds the view but not its 
         expect(phase.detail.resident, phase.label).toBe(phase.detail.desired);
       }
     });
-    it(`settles covering less in every phase when the view itself does not fit at device pixel ratio ${dpr}`, async () => {
+    it(`settles holding the selection in every phase when the target levels do not fit at device pixel ratio ${dpr}`, async () => {
       const run = await runScenario(short, { dpr });
       expectSettled(run);
       for (const phase of run.phases) {
-        expect(phase.quiescence, phase.label).toBe("coverage_limited");
-        expect(phase.detail.resident, phase.label).toBe(100);
+        expect(phase.quiescence, phase.label).toBe("quiescent");
+        expect(phase.detail.resident, phase.label).toBe(phase.detail.desired);
+        expect(phase.detail.resident, phase.label).toBeLessThanOrEqual(100);
       }
     });
   }
 });
 
-describe("a gesture over a volume the budgets cut short", () => {
-  // The view wants 128 chunks of level 0 and the detail budget holds 100, so
-  // each replan of the moving view admits a different 100. The worker takes
-  // them while the view moves, a gesture's room at a time.
+describe("a gesture over a volume whose target level the budget cannot hold", () => {
+  // The screen calls for 128 chunks of level 0 and the detail budget holds
+  // 100, so the selection draws part of the view a level coarser and moves
+  // its finer chunks with the view. The worker takes them while the view
+  // moves, a gesture's room at a time.
   const CHUNK_32_CUBE_BYTES = 32 * 32 * 32 * 2;
   const scenario = describeScenario({
     name: "orbit over a volume beyond the detail budget",
@@ -426,14 +434,15 @@ describe("a gesture over a volume the budgets cut short", () => {
     steps: [{ zoom: 2 }, { gesture: { orbit: [0.08, 0.03] }, moves: 30 }],
   });
   for (const dpr of DEVICE_PIXEL_RATIOS) {
-    it(`keeps sending the worker chunks while it moves, and holds what the budgets hold once it stops, at device pixel ratio ${dpr}`, async () => {
+    it(`keeps sending the worker chunks while it moves, and settles holding the selection within the budget once it stops, at device pixel ratio ${dpr}`, async () => {
       const run = await runScenario(scenario, { dpr });
       expectSettled(run);
       const orbit = run.phases[2];
       expect(orbit.chunksSentDuringInput, run.report).toBeGreaterThan(0);
       expect(orbit.chunksSent, run.report).toBeGreaterThan(0);
-      expect(orbit.quiescence, run.report).toBe("coverage_limited");
-      expect(orbit.detail.resident, run.report).toBe(100);
+      expect(orbit.quiescence, run.report).toBe("quiescent");
+      expect(orbit.detail.resident, run.report).toBe(orbit.detail.desired);
+      expect(orbit.detail.resident, run.report).toBeLessThanOrEqual(100);
     });
   }
 });

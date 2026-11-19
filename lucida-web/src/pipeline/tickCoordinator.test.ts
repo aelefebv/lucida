@@ -2356,9 +2356,10 @@ describe("incremental delta fold", () => {
     }
   });
 
-  it("carries a target-level change through the fold as a cold-state delta, never a full rebuild", () => {
+  it("carries a level change through the fold as a cold-state delta, never a full rebuild", () => {
     // A zoom is a quantized change, so the record arrives in the delta's
-    // `changed` list rather than forcing a full `view_query`.
+    // `changed` list rather than forcing a full `view_query`. The region's
+    // measure moves with it, and the selection follows to the same level.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const datasets = new Map<string, DatasetEntry>([
@@ -2373,6 +2374,13 @@ describe("incremental delta fold", () => {
         ],
         memberPositions: { "tile-0": [0, 0] },
       });
+      let zoom = 1;
+      const scene = {
+        ...fold.scene,
+        visible_region: () => JSON.stringify({
+          xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: zoom, sort_center: null, frustum_planes: null,
+        }),
+      };
       const cpuCache = createMockCpuCache();
       const client = {
         coldState: vi.fn(),
@@ -2384,7 +2392,7 @@ describe("incremental delta fold", () => {
         datasetLevels: vi.fn(() => null),
       };
       const ctx = () =>
-        ({ ...(makeCtx(fold.scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
+        ({ ...(makeCtx(scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
       const detailLevels = (p: RequestPlan) =>
         p.requests.filter((r) => r.lane === "detail").map((r) => r.level);
 
@@ -2400,6 +2408,8 @@ describe("incremental delta fold", () => {
       // Tick 2: the zoom out, past the coalescing window.
       vi.advanceTimersByTime(500);
       fold.setView(2);
+      // Past the hysteresis band below half a pixel per sample, so level 1.
+      zoom = 0.4;
       orch.planAndFetch(ctx(), emptyMinimap);
 
       expect(fold.viewQuery).not.toHaveBeenCalled();

@@ -57,6 +57,8 @@ function makeActiveEntry(
     imageId: overrides?.imageId ?? "img",
     detailLevels: overrides?.detailLevels ?? [0],
     coarseLevel: overrides?.coarseLevel ?? null,
+    ...(overrides?.targetLevel !== undefined && { targetLevel: overrides.targetLevel }),
+    ...(overrides?.keepsCoarse !== undefined && { keepsCoarse: overrides.keepsCoarse }),
     levels: overrides?.levels ?? [
       {
         level: 0,
@@ -508,7 +510,7 @@ describe("computeWantedSet", () => {
       const atlases = new Map([["pool", makeVolumePool("img:ch0", sections, slotsOf(everyChunk("img:ch0", 0)))]]);
 
       expect(levelsFor(coldState, wantTarget(0), atlases)).toEqual([
-        { entityId: "entity-0", targetLevel: 0, visible: true, displayed: { min: 0, max: 0 } },
+        { entityId: "entity-0", targetLevel: 0, selected: { min: 0, max: 0 }, visible: true, displayed: { min: 0, max: 0 } },
       ]);
     });
 
@@ -518,7 +520,7 @@ describe("computeWantedSet", () => {
 
       const result = computeWantedSet(coldState, wantTarget(0), atlases, new Map(), poolsFromAtlases(atlases));
       expect(result.levels).toEqual([
-        { entityId: "entity-0", targetLevel: 0, visible: true, displayed: { min: 1, max: 1 } },
+        { entityId: "entity-0", targetLevel: 0, selected: { min: 0, max: 0 }, visible: true, displayed: { min: 1, max: 1 } },
       ]);
       expect(chunks(result.missing).map((m) => m.chunkKey.split("/")[0])).toEqual(Array(32).fill("0"));
     });
@@ -542,12 +544,37 @@ describe("computeWantedSet", () => {
       expect(levelsFor(coldState, wanted(["img:ch0", "detail", leftHalf]), atlases)[0].displayed).toEqual({ min: 0, max: 0 });
     });
 
+    it("reads each wanted chunk from its own level when the selection chose several", () => {
+      // The near half at level 0, the far half at level 1, both resident.
+      const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0, 1] })] });
+      const near = levelKeys(0).filter((key) => key.split("/")[3] === "0");
+      const far = levelKeys(1);
+      const atlases = new Map([["pool", makeVolumePool("img:ch0", sections, slotsOf([
+        ...near.map((key) => vk("img:ch0", key)), ...far.map((key) => vk("img:ch0", key)),
+      ]))]]);
+
+      expect(levelsFor(coldState, wanted(["img:ch0", "detail", [...near, ...far]]), atlases)[0]).toEqual({
+        entityId: "entity-0", targetLevel: 0, selected: { min: 0, max: 1 }, visible: true, displayed: { min: 0, max: 1 },
+      });
+    });
+
+    it("reports the level the screen calls for apart from the levels the selection chose", () => {
+      const coldState = makeColdState({
+        activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [1], targetLevel: 0, keepsCoarse: true, coarseLevel: 2 })],
+      });
+      const atlases = new Map([["pool", makeVolumePool("img:ch0", sections, slotsOf(everyChunk("img:ch0", 1)))]]);
+
+      expect(levelsFor(coldState, wantTarget(1), atlases)[0]).toEqual({
+        entityId: "entity-0", targetLevel: 0, selected: { min: 1, max: 2 }, visible: true, displayed: { min: 1, max: 1 },
+      });
+    });
+
     it("never reports a level finer than the target", () => {
       const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [1] })] });
       const atlases = new Map([["pool", makeVolumePool("img:ch0", sections, slotsOf([...everyChunk("img:ch0", 0), ...everyChunk("img:ch0", 2)]))]]);
 
       expect(levelsFor(coldState, wantTarget(1), atlases)[0]).toEqual({
-        entityId: "entity-0", targetLevel: 1, visible: true, displayed: { min: 2, max: 2 },
+        entityId: "entity-0", targetLevel: 1, selected: { min: 1, max: 1 }, visible: true, displayed: { min: 2, max: 2 },
       });
     });
 
@@ -569,7 +596,7 @@ describe("computeWantedSet", () => {
       const atlases = new Map([["pool", makeVolumePool("img:ch0", sections)]]);
 
       expect(levelsFor(coldState, wantTarget(0), atlases)).toEqual([
-        { entityId: "entity-0", targetLevel: 0, visible: true, displayed: null },
+        { entityId: "entity-0", targetLevel: 0, selected: { min: 0, max: 0 }, visible: true, displayed: null },
       ]);
     });
 
@@ -578,12 +605,12 @@ describe("computeWantedSet", () => {
       const atlases = new Map([["pool", makeVolumePool("img:ch0", sections, slotsOf(everyChunk("img:ch0", 1)))]]);
 
       expect(levelsFor(coldState, NO_WANTED, atlases)).toEqual([
-        { entityId: "entity-0", targetLevel: 1, visible: false, displayed: null },
+        { entityId: "entity-0", targetLevel: 1, selected: { min: 1, max: 1 }, visible: false, displayed: null },
       ]);
     });
 
-    it("counts only target-level chunks toward the displayed level", () => {
-      // A wanted coarse-tier chunk is not a target position.
+    it("counts only detail-tier chunks toward the displayed level", () => {
+      // A wanted coarse-tier chunk is not a position the selection chose a detail level for.
       const coldState = makeColdState({
         activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0], coarseLevel: 2 })],
       });
@@ -594,7 +621,7 @@ describe("computeWantedSet", () => {
       const poolFor = tierPool([["img:ch0", "detail", "detail-pool"], ["img:ch0", "coarse", "coarse-pool"]]);
 
       expect(levelsFor(coldState, wanted(["img:ch0", "coarse", levelKeys(2)]), atlases, poolFor)[0])
-        .toEqual({ entityId: "entity-0", targetLevel: 0, visible: false, displayed: null });
+        .toEqual({ entityId: "entity-0", targetLevel: 0, selected: { min: 0, max: 0 }, visible: false, displayed: null });
     });
 
     it("takes the finest and coarsest level across the visible channels", () => {

@@ -66,12 +66,12 @@ export interface ViewDraw {
    */
   routes: Map<string, Map<string, string>>;
   /**
-   * memberId → the target level of the view's cold state. Eviction takes a
-   * resident chunk finer than every view's target first. Absent for a member
-   * with no chunk levels. Replaced, never changed in place, like
-   * {@link wanted}.
+   * memberId → the finest level the view's cold state draws it from.
+   * Eviction takes a resident chunk finer than every view's finest first.
+   * Absent for a member with no chunk levels. Replaced, never changed in
+   * place, like {@link wanted}.
    */
-  targetLevels: ReadonlyMap<string, number>;
+  finestLevels: ReadonlyMap<string, number>;
   /** The sections {@link cold} laid out, by member. */
   sources: Map<string, EntitySource[]>;
   /** The view's entity descriptor buffer and index maps, rebuilt on each cold state. */

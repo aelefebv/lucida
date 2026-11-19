@@ -47,9 +47,19 @@ import { admitPlans, chunkBytesFor, type Admission } from "./planning/admission.
 import { tallyViewCoverage, type ViewCoverage } from "./planning/viewCoverage.ts";
 import { requestIdentity } from "./planning/plan.ts";
 import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
+import {
+  initialLevelSelectionMemory,
+  selectLevels,
+  type LevelSelectionMemory,
+  type LevelSelectionResult,
+  type SelectionBytes,
+  type SelectionDataset,
+  type ViewSelectionSummary,
+} from "./planning/levelSelection.ts";
 import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
   ActiveSetEntry,
+  DatasetLevelSelection,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningState,
@@ -59,6 +69,7 @@ import type {
   PlanningSnapshot,
   SelectionState,
   ViewSnapshot,
+  ViewSnapshotBase,
 } from "./planning/index.ts";
 import type { SceneEpochs } from "./epochs.ts";
 import type { VisibleRegion } from "./viewport.ts";
@@ -126,6 +137,34 @@ function leadLayers(ctx: TickContext, layersByView: ReadonlyMap<number, Resolved
   return lead;
 }
 
+/** What the level selection chose for a dataset a view draws none of. */
+const NOTHING_CHOSEN: DatasetLevelSelection = { entities: new Map(), budgetLimited: false };
+
+/**
+ * The bytes the level selection selects within: the CPU cache's detail
+ * store, and what the GPU's chunk pools may hold as the worker's latest
+ * report gives it.
+ */
+function selectionBudget(ctx: TickContext, report: GpuCapacityReport | null): SelectionBytes {
+  return {
+    cpu: ctx.cpuCache.tierCapacity().detail,
+    gpu: gpuChunkRoomBytes(report, pageDeviceBudgets().gpuTotalBytes),
+  };
+}
+
+/** Whether a selection the budget stopped was stopped by the GPU side, so more GPU room would change it. */
+function gpuBound(summaries: ReadonlyMap<number, ViewSelectionSummary>): boolean {
+  for (const { limit, used, share } of summaries.values()) {
+    // A refused refinement fits neither side's remainder, so the bound side
+    // is the one within a refinement of its share.
+    if (limit !== null && used.gpu >= GPU_BOUND_FILL * share.gpu) return true;
+  }
+  return false;
+}
+
+/** How full the GPU side of a stopped selection is when it, not the CPU side, stopped it. */
+const GPU_BOUND_FILL = 0.9;
+
 /** One view of a planned dataset. */
 interface PlannedView {
   view: TickView;
@@ -140,6 +179,14 @@ interface PlannedView {
   layer: ResolvedLayer | undefined;
   /** Whether the selection stepped along its cut since the view's previous plan ({@link isCutStep}). */
   cutStep: boolean;
+}
+
+/** A dataset ready to plan once the level selection has run: its views, before the selection. */
+interface PreparedDataset {
+  dsId: string;
+  dsSettings: SceneSettings["allSettings"][string] | undefined;
+  planningState: PlanningState;
+  views: (Omit<PlannedView, "snapshot"> & { snapshot: ViewSnapshotBase })[];
 }
 
 interface PlannedDataset {
@@ -445,42 +492,6 @@ function displayStatesEqual(
 interface DatasetRequests {
   dsId: string;
   requests: readonly ChunkRequest[];
-  /** The views that asked for each of its detail and coarse requests, with several views. */
-  viewsOf?: (req: ChunkRequest) => readonly number[];
-}
-
-/**
- * Which views asked for each of a dataset's detail and coarse requests:
- * every view its plan lists them under, or the one view that plans it.
- */
-function viewsAsking(planned: { views: readonly PlannedView[]; result: RequestPlan }): (req: ChunkRequest) => readonly number[] {
-  const own = (req: ChunkRequest): boolean => req.lane === "detail" || req.lane === "coarse";
-  const byView = planned.result.byView;
-  if (!byView) {
-    const only = [planned.views[0].view.id];
-    return (req) => (own(req) ? only : []);
-  }
-  const asking = new Map<string, number[]>();
-  for (const [view, requests] of byView) {
-    for (const req of requests) {
-      const id = requestIdentity(req);
-      const views = asking.get(id);
-      if (views === undefined) asking.set(id, [view]);
-      else if (!views.includes(view)) views.push(view);
-    }
-  }
-  // Admission asks for each request several times, so its views are found once.
-  const ofRequest = new Map<ChunkRequest, readonly number[]>();
-  for (const req of planned.result.requests) {
-    if (own(req)) ofRequest.set(req, asking.get(requestIdentity(req)) ?? []);
-  }
-  return (req) => ofRequest.get(req) ?? [];
-}
-
-/** Each view's area on the canvas, which its share of the budgets is weighed by, with several views. */
-function viewAreas(ctx: TickContext): Map<number, number> {
-  if (ctx.views.length < 2) return new Map();
-  return new Map(ctx.views.map((view) => [view.id, Math.max(0, view.rect[2]) * Math.max(0, view.rect[3])]));
 }
 
 /**
@@ -496,19 +507,17 @@ function admitDatasetPlans(
 ): Admission[] {
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
   return admitPlans(
-    plans.map(({ dsId, requests, viewsOf }) => {
+    plans.map(({ dsId, requests }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
         heldWhole: (req: ChunkRequest) => ctx.cpuCache.holdsWhole(req),
         slotOf: gpuSlotsFor(manifest, report, gpuTotalBytes),
-        viewsOf,
       };
     }),
     ctx.cpuCache.tierCapacity(),
     gpuChunkRoomBytes(report, gpuTotalBytes),
-    viewAreas(ctx),
   );
 }
 
@@ -753,6 +762,44 @@ export class TickCoordinator {
   /** A capacity report would admit part of the last shortfall, and no plan has used it yet. */
   private capacityReplanOwed = false;
 
+  /** What the last level selection chose, which the next leans toward. */
+  private levelMemory: LevelSelectionMemory = initialLevelSelectionMemory();
+  /** The budget the last selection ran within, and what each view spent of it. */
+  private lastSelection: { budget: SelectionBytes; summaries: ReadonlyMap<number, ViewSelectionSummary> } | null = null;
+
+  /**
+   * The level selection for every view, over every dataset each draws, from
+   * the memory the last selection left. It changes nothing here: the caller
+   * {@link commitSelection}s it once it plans from it.
+   */
+  private selectLevels(
+    ctx: TickContext,
+    datasets: readonly { dsId: string; views: readonly { view: TickView; snapshot: ViewSnapshotBase }[] }[],
+  ): LevelSelectionResult & { budget: SelectionBytes } {
+    const byView = new Map<number, SelectionDataset[]>();
+    for (const { dsId, views } of datasets) {
+      const manifest = ctx.datasets.get(dsId)!.manifest;
+      for (const { view, snapshot } of views) {
+        const of = byView.get(view.id) ?? [];
+        of.push({ datasetId: dsId, view: snapshot, manifest });
+        byView.set(view.id, of);
+      }
+    }
+    const rects = new Map(ctx.views.map((view) => [view.id, view.rect]));
+    const views = [...byView].map(([view, of]) => {
+      const rect = rects.get(view);
+      return { view, datasets: of, area: rect ? Math.max(0, rect[2]) * Math.max(0, rect[3]) : 0 };
+    });
+    const budget = selectionBudget(ctx, ctx.client.gpuCapacity());
+    return { ...selectLevels(views, budget, this.levelMemory, configStore.get()), budget };
+  }
+
+  /** Keep what a selection the plans used chose, for the next to lean toward and for capacity reports to weigh. */
+  private commitSelection(selection: LevelSelectionResult & { budget: SelectionBytes }): void {
+    this.levelMemory = selection.memory;
+    this.lastSelection = { budget: selection.budget, summaries: selection.summaries };
+  }
+
   /** Admit against the worker's latest report, and keep what {@link noteGpuCapacity} weighs. */
   private admit(ctx: TickContext, plans: readonly DatasetRequests[]): Admission[] {
     const report = ctx.client.gpuCapacity();
@@ -770,10 +817,19 @@ export class TickCoordinator {
     if (this.capacityReplanOwed) return true;
     const last = this.lastAdmission;
     const report = ctx.client.gpuCapacity();
-    if (!last || last.short === 0 || report === last.report) return false;
+    if (!last || report === last.report) return false;
     // A removed dataset plans again on its own.
     if (last.plans.some(({ dsId }) => !ctx.datasets.has(dsId))) return false;
-    if (shortfallOf(admitDatasetPlans(ctx, last.plans, report)) >= last.short) return false;
+    // A selection the GPU side stopped selects again within the new room.
+    // Otherwise only a shortfall the report would admit some of is worth a
+    // plan. The plans are the selection's, which the budget bounds, so
+    // admitting them again costs what the view holds, not what it shows.
+    const selection = this.lastSelection;
+    const roomMoved = selection !== null && gpuBound(selection.summaries) &&
+      selectionBudget(ctx, report).gpu !== selection.budget.gpu;
+    if (!roomMoved && (last.short === 0 || shortfallOf(admitDatasetPlans(ctx, last.plans, report)) >= last.short)) {
+      return false;
+    }
     this.capacityReplanOwed = true;
     return true;
   }
@@ -968,6 +1024,7 @@ export class TickCoordinator {
     const memberRosterByDatasetView = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDatasetView = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
+    const preparedDatasets: PreparedDataset[] = [];
 
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
@@ -982,7 +1039,7 @@ export class TickCoordinator {
 
       const planningStateForDataset = this.planningState.get(dsId)
         ?? initialPlanningState();
-      const plannedViewsOfDataset: PlannedView[] = [];
+      const preparedViews: PreparedDataset["views"] = [];
       for (const view of viewsOfDataset) {
         // Fold the view delta instead of re-running `view_query`: O(delta)
         // rather than O(N members) on a camera move, a level change included.
@@ -1008,10 +1065,26 @@ export class TickCoordinator {
         if (!snapshot) continue;
         const previousCut = planningStateForDataset.views.get(view.id)?.previousCut ?? null;
         const cutStep = isCutStep(previousCut, snapshot.selection, planningConfig.sliceBandPlanes);
-        plannedViewsOfDataset.push({ view, mode, snapshot, layer, cutStep });
+        preparedViews.push({ view, mode, snapshot, layer, cutStep });
       }
+      if (preparedViews.length === 0) continue;
+      preparedDatasets.push({ dsId, dsSettings, planningState: planningStateForDataset, views: preparedViews });
+    }
+
+    // The level selection runs once over every dataset each view draws, so
+    // they share the budget, before any dataset plans from it.
+    const levelSelection = this.selectLevels(ctx, preparedDatasets);
+    this.commitSelection(levelSelection);
+
+    for (const { dsId, dsSettings, planningState: planningStateForDataset, views: preparedViews } of preparedDatasets) {
+      const plannedViewsOfDataset: PlannedView[] = preparedViews.map((prepared) => ({
+        ...prepared,
+        snapshot: {
+          ...prepared.snapshot,
+          levelSelection: levelSelection.byView.get(prepared.view.id)?.get(dsId) ?? NOTHING_CHOSEN,
+        },
+      }));
       const drawnOfDataset = plannedViewsOfDataset[0];
-      if (drawnOfDataset === undefined) continue;
       const { entities, visibleRegion, selection } = drawnOfDataset.snapshot;
 
       // Plan. Opaque carry-forward state travels via {@link PlanningState};
@@ -1059,7 +1132,6 @@ export class TickCoordinator {
       plannedDatasets.map((planned) => ({
         dsId: planned.dsId,
         requests: planned.result.requests,
-        viewsOf: views.length > 1 ? viewsAsking(planned) : undefined,
       })),
     );
     // With several views, how much of what each asks for admission let in.
@@ -1544,7 +1616,7 @@ export class TickCoordinator {
       stats: PlanStats;
       cutStep: boolean;
     }
-    const planned: ScrubPlanned[] = perDataset.map((pd) => {
+    const scrubbedViews = perDataset.map((pd) => {
       const visibleRegion = withCutRange(pd.cachedRegion, pd.newCut.range);
       // Each layer scrubs to the scene's t and z clamped into it.
       const selection: SelectionState = {
@@ -1555,10 +1627,29 @@ export class TickCoordinator {
         renderMode: "slice",
         interactionState: "idle",
       };
+      const view: ViewSnapshotBase = { view: drawn.id, entities: pd.entities, visibleRegion, selection };
+      return { dsId: pd.dsId, views: [{ view: drawn, snapshot: view }] };
+    });
+    // The cut picks the chunks along it, so the selection runs again. The
+    // cached active set holds only while it keeps every entity's levels.
+    const levelSelection = this.selectLevels(ctx, scrubbedViews);
+    const chosenOf = (dsId: string) => levelSelection.byView.get(drawn.id)?.get(dsId) ?? NOTHING_CHOSEN;
+    const keepsLevels = perDataset.every((pd) => (pd.planningState.views.get(drawn.id)?.activeSet ?? []).every((entry) => {
+      if (entry.kind !== "tile") return true;
+      const chosen = chosenOf(pd.dsId).entities.get(entry.entityId);
+      return numberArraysEqual(chosen?.detailLevels ?? [], entry.detailLevels) &&
+        (chosen?.keepsCoarse ?? true) === (entry.keepsCoarse ?? false);
+    }));
+    if (!keepsLevels) return false;
+    this.commitSelection(levelSelection);
+
+    const planned: ScrubPlanned[] = perDataset.map((pd, index) => {
+      const view = scrubbedViews[index].views[0].snapshot;
+      const { visibleRegion, selection } = view;
       const snapshot: PlanningSnapshot = {
         datasetId: pd.dsId,
         epochs: scrubEpochs,
-        views: [{ view: drawn.id, entities: pd.entities, visibleRegion, selection }],
+        views: [{ ...view, levelSelection: chosenOf(pd.dsId) }],
         minimapPending: minimapPendingFetch,
       };
       const stats = emptyPlanStats();

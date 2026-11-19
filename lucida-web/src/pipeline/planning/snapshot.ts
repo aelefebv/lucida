@@ -9,7 +9,7 @@ import type { WasmScene } from "lucida-core";
 import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
 import { layerCut, shownChannels, type ResolvedLayer } from "../../resolvedLayers.ts";
 import { cutAxis, type SliceCut, type SlicePlane, type SpatialAxis } from "../../renderer/slicePlane.ts";
-import type { EntitySnapshot, SelectionState, ViewSnapshot } from "./index.ts";
+import type { EntitySnapshot, SelectionState, ViewSnapshotBase } from "./index.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import {
   makeEntitySnapshot,
@@ -36,6 +36,7 @@ interface VisibleRegionJson {
   frustum_planes: [number, number, number, number][] | null;
   side_planes?: [number, number, number, number][];
   cut_axis?: SpatialAxis;
+  measure?: unknown;
 }
 
 /**
@@ -113,7 +114,7 @@ export function sliceCut(
  * Returns `null` when `view_query` has no `visible_entities`, as for a
  * dataset the view does not show; the caller leaves the view out.
  */
-export function buildViewSnapshot(args: BuildViewSnapshotArgs): ViewSnapshot | null {
+export function buildViewSnapshot(args: BuildViewSnapshotArgs): ViewSnapshotBase | null {
   const { scene, view, datasetId, dataset, layer, mode } = args;
 
   // With `entitiesOverride`, steps 1 to 4 are skipped. Steps 5 and 6 still
@@ -186,6 +187,7 @@ export function buildViewSnapshot(args: BuildViewSnapshotArgs): ViewSnapshot | n
         frustumPlanes: vr.frustum_planes,
         ...(vr.side_planes !== undefined ? { sidePlanes: vr.side_planes } : {}),
         ...(vr.cut_axis !== undefined ? { cutAxis: vr.cut_axis } : {}),
+        ...(vr.measure !== undefined ? { measure: vr.measure } : {}),
       }
     : DEFAULT_VISIBLE_REGION;
 

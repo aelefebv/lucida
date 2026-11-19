@@ -2,6 +2,8 @@
 
 import {
   initialPlanningState,
+  type DatasetLevelSelection,
+  type EntityLevelSelection,
   type EntitySnapshot,
   type TileSnapshot,
   type ImageSnapshot,
@@ -10,7 +12,11 @@ import {
   type PlanningState,
   type GroupSnapshot,
   type ViewSnapshot,
+  type ViewSnapshotBase,
 } from "./index.ts";
+import { groupMembers } from "./activeSet.ts";
+import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
+import { enumerateChunks } from "./enumerate.ts";
 
 /**
  * Overrides for {@link createSyntheticEntity}. `kind` selects the
@@ -60,9 +66,48 @@ export function createSyntheticEntity(
   return image;
 }
 
-/** Build a valid {@link ViewSnapshot} with defaults, merged with overrides. */
+/**
+ * A level selection that draws every visible tile at its target level, every
+ * chunk of it in view: what the selection chooses for a slice view whose
+ * target-level chunks fit the budget. Ranked by importance, then distance
+ * from the focus, at the default weights. For tests of what planning does
+ * with a selection, apart from how the core makes one.
+ */
+export function targetLevelSelection(view: ViewSnapshotBase): DatasetLevelSelection {
+  const config = DEFAULT_PLANNING_CONFIG;
+  const shown = new Set(groupMembers(view.entities).flatMap((group) => group.tiles));
+  const tiles = view.entities.filter((entity) => shown.has(entity));
+  const found = enumerateChunks(
+    view.visibleRegion,
+    config.depthBiasView,
+    tiles.map((entity) => ({ entity, level: entity.targetLevel, radiusView: config.detailRenderRadiusView })),
+  );
+  const cells: { entity: EntitySnapshot; x: number; y: number; z: number; key: number }[] = [];
+  tiles.forEach((entity, query) => {
+    found.forEach(query, (x, y, z, distance) => {
+      const key = (1 - entity.importance) * config.importanceWeight + distance * config.distanceWeight;
+      cells.push({ entity, x, y, z, key });
+    });
+  });
+  cells.sort((a, b) => a.key - b.key);
+  const entities = new Map<string, EntityLevelSelection>();
+  for (const entity of tiles) {
+    entities.set(entity.entityId, { detail: [], lookahead: [], detailLevels: [entity.targetLevel], keepsCoarse: false });
+  }
+  cells.forEach(({ entity, x, y, z }, rank) => {
+    entities.get(entity.entityId)!.detail.push({ level: entity.targetLevel, x, y, z, rank });
+  });
+  return { entities, budgetLimited: false };
+}
+
+/**
+ * Build a valid {@link ViewSnapshot} with defaults, merged with overrides.
+ * Without a `levelSelection`, it draws at the target level
+ * ({@link targetLevelSelection}).
+ */
 export function createSyntheticView(overrides?: Partial<ViewSnapshot>): ViewSnapshot {
-  return {
+  const { levelSelection, ...rest } = overrides ?? {};
+  const base: ViewSnapshotBase = {
     view: 0,
     entities: [],
     visibleRegion: {
@@ -80,8 +125,9 @@ export function createSyntheticView(overrides?: Partial<ViewSnapshot>): ViewSnap
       renderMode: "slice",
       interactionState: "idle",
     },
-    ...overrides,
+    ...rest,
   };
+  return { ...base, levelSelection: levelSelection ?? targetLevelSelection(base) };
 }
 
 /**
@@ -95,11 +141,12 @@ export function createSyntheticView(overrides?: Partial<ViewSnapshot>): ViewSnap
 export function createSyntheticSnapshot(
   overrides?: Partial<PlanningSnapshot> & Partial<Omit<ViewSnapshot, "view">>,
 ): PlanningSnapshot {
-  const { entities, visibleRegion, selection, ...rest } = overrides ?? {};
+  const { entities, visibleRegion, selection, levelSelection, ...rest } = overrides ?? {};
   const view: Partial<ViewSnapshot> = {};
   if (entities) view.entities = entities;
   if (visibleRegion) view.visibleRegion = visibleRegion;
   if (selection) view.selection = selection;
+  if (levelSelection) view.levelSelection = levelSelection;
   return {
     datasetId: "synthetic-ds",
     epochs: {

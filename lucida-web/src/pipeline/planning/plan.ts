@@ -1,7 +1,7 @@
 /**
- * Top-level pure planner. Composes active-set assignment, the core's chunk
- * enumeration, and lane scheduling into a {@link RequestPlan}, for every view
- * of a dataset at once.
+ * Top-level pure planner. Composes active-set assignment from the level
+ * selection, the core's chunk enumeration, and lane scheduling into a
+ * {@link RequestPlan}, for every view of a dataset at once.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
@@ -28,24 +28,13 @@ import {
   type RequestPlan,
   type ViewPlanningState,
   type ViewSnapshot,
-  type ZoomDirection,
 } from "./types.ts";
 import { validatePlanningInputs } from "./validate.ts";
-
-function resolveZoomDirection(
-  state: ViewPlanningState,
-  effectiveZoom: number,
-): ZoomDirection | null {
-  const previous = state.previousEffectiveZoom;
-  if (previous === null || effectiveZoom === previous) return state.zoomDirection;
-  return effectiveZoom > previous ? "in" : "out";
-}
 
 /** One view's lanes, as the plan resolved them for this pass. */
 interface ViewLanes {
   view: ViewSnapshot;
   activeSet: ActiveSetEntry[];
-  zoomDirection: ZoomDirection | null;
   /** The selection stepped along its cut since the view's last plan ({@link isCutStep}). */
   cutStep: boolean;
 }
@@ -71,14 +60,14 @@ function emitLanes(
   // is counted against: its detail and coarse lanes, before two views'
   // requests for one chunk fold into one.
   const byView = views.length > 1 ? new Map<number, ChunkRequest[]>() : undefined;
-  for (const { view, activeSet, zoomDirection, cutStep } of views) {
+  for (const { view, activeSet, cutStep } of views) {
     const input = { ...view, datasetId: snapshot.datasetId };
     const entityById = new Map<string, EntitySnapshot>();
     for (const entity of view.entities) entityById.set(entity.entityId, entity);
-    const chunks = enumeratePlanChunks(activeSet, input, entityById, config, zoomDirection);
+    const chunks = enumeratePlanChunks(activeSet, input, entityById, config);
     const from = lanes.count;
-    emitDetailLane(chunks, input, stats, lanes, config);
-    emitPrefetchLane(chunks, input, stats, lanes, config, cutStep);
+    emitDetailLane(chunks, input, lanes, config);
+    emitPrefetchLane(chunks, input, lanes, config, cutStep);
     emitCoarseLane(chunks, input, stats, lanes, config);
     if (view.view === snapshot.leadingView) lanes.lead(from);
     byView?.set(view.view, lanes.since(from).filter((req) => req.lane !== "prefetch"));
@@ -180,21 +169,24 @@ function mergeEntries(a: ActiveSetEntry, b: ActiveSetEntry): ActiveSetEntry {
   if (a.kind === "invisible") return b;
   return {
     ...a,
+    targetLevel: b.targetLevel === undefined ? a.targetLevel : Math.min(a.targetLevel ?? b.targetLevel, b.targetLevel),
     detailLevels: [...new Set([...a.detailLevels, ...b.detailLevels])].sort((x, y) => x - y),
-    // Not null exactly when the coarse level is no finer than the target,
-    // so a view targeting a finer level keeps it.
+    keepsCoarse: (a.keepsCoarse ?? false) || (b.keepsCoarse ?? false),
+    // Not null exactly when the coarse level is no finer than the detail
+    // levels, so a view drawing finer keeps it.
     coarseLevel: a.coarseLevel ?? b.coarseLevel,
   };
 }
 
 /**
  * Emit the chunk requests for active sets already resolved: each view's own,
- * from `state`. Lets a caller regenerate requests for a T scrub or a move
- * along the cut without `buildActiveSet`. A scrub is not a zoom, so each
- * view's stored `zoomDirection` applies, and a view whose selection stepped
- * along its cut since `state` was planned fetches the step's chunks
- * ({@link isCutStep}). The result matches a full {@link plan} for that
- * selection. Postconditions match {@link plan}; mutates only `stats`.
+ * from `state`, with the chunks of each view's level selection in
+ * `snapshot`. Lets a caller regenerate requests for a T scrub or a move
+ * along the cut without `buildActiveSet`, when the selection's levels are
+ * the ones the active sets hold. A view whose selection stepped along its
+ * cut since `state` was planned fetches the step's chunks ({@link isCutStep}).
+ * The result matches a full {@link plan} for that selection. Postconditions
+ * match {@link plan}; mutates only `stats`.
  */
 export function emitPlanRequests(
   snapshot: PlanningSnapshot,
@@ -207,7 +199,6 @@ export function emitPlanRequests(
     return {
       view,
       activeSet: before.activeSet,
-      zoomDirection: before.zoomDirection,
       cutStep: isCutStep(before.previousCut, view.selection, config.sliceBandPlanes),
     };
   });
@@ -216,7 +207,7 @@ export function emitPlanRequests(
 
 /**
  * `state` after {@link emitPlanRequests} served `snapshot`: each view
- * remembers the cut it now stands at, and keeps its active set and zoom.
+ * remembers the cut it now stands at, and keeps its active set.
  */
 export function scrubbedPlanningState(snapshot: PlanningSnapshot, state: PlanningState): PlanningState {
   const views = new Map(state.views);
@@ -250,19 +241,11 @@ export function plan(
   const views = new Map<number, ViewPlanningState>();
   const lanes = snapshot.views.map((view): ViewLanes => {
     const before = viewState(state, view);
-    const activeSet = buildActiveSet(view.entities);
-    const effectiveZoom = view.visibleRegion.effectiveZoom;
-    const zoomDirection = resolveZoomDirection(before, effectiveZoom);
-    views.set(view.view, {
-      activeSet,
-      previousEffectiveZoom: effectiveZoom,
-      zoomDirection,
-      previousCut: view.selection.cut,
-    });
+    const activeSet = buildActiveSet(view.entities, view.levelSelection);
+    views.set(view.view, { activeSet, previousCut: view.selection.cut });
     return {
       view,
       activeSet,
-      zoomDirection,
       cutStep: isCutStep(before.previousCut, view.selection, config.sliceBandPlanes),
     };
   });

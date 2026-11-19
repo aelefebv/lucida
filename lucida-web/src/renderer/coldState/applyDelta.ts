@@ -24,7 +24,7 @@ import { drawOf } from "../worker/draws.ts";
 import { syncLabelPools } from "../labelPools.ts";
 import type { ViewDraw } from "../worker/state.ts";
 import type { EntitySource } from "../entitySources.ts";
-import { targetLevelOf } from "../entitySources.ts";
+import { finestLevelOf } from "../entitySources.ts";
 import { entryPoolSources } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
 import { relayMember, wantsRepack } from "./sectionLayout.ts";
@@ -150,7 +150,7 @@ function relayChangedMembers(ctx: WorkerCtx, draw: ViewDraw, changed: readonly C
   // Each touched view's sections, copied once: the view's map is replaced,
   // never changed in place, since eviction's order compares it by identity.
   const metas = new Map<ViewIndirection, Map<string, readonly LodIndirectionMeta[]>>();
-  const targetLevels = new Map(draw.targetLevels);
+  const finestLevels = new Map(draw.finestLevels);
   for (const { entry, memberId, wanted, views } of plans) {
     const sources: EntitySource[] = [];
     const routes = new Map<string, string>();
@@ -175,13 +175,13 @@ function relayChangedMembers(ctx: WorkerCtx, draw: ViewDraw, changed: readonly C
     }
     draw.sources.set(memberId, sources);
     draw.routes.set(memberId, routes);
-    const target = targetLevelOf(entry);
-    if (target === undefined) targetLevels.delete(memberId);
-    else targetLevels.set(memberId, target);
+    const target = finestLevelOf(entry);
+    if (target === undefined) finestLevels.delete(memberId);
+    else finestLevels.set(memberId, target);
     ctx.state.memberToDataset.set(memberId, cold.datasetId);
   }
   for (const [view, held] of metas) view.entityMetas = held;
-  draw.targetLevels = targetLevels;
+  draw.finestLevels = finestLevels;
   for (const view of metas.keys()) if (view.entityMetas.size === 0 || wantsRepack(view.space)) return false;
 
   for (const [poolKey, only] of added) {

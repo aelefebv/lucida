@@ -28,4 +28,11 @@ export interface VisibleRegion {
    * in each image's own samples. Absent: Z.
    */
   cutAxis?: SpatialAxis;
+  /**
+   * Device pixels per level-0 sample anywhere in the region, as the core
+   * writes it (`SampleMeasure` in `lucida-core/src/camera.rs`), which the
+   * level selection reads at every chunk. Planning passes it back to the
+   * core unread. Absent: `effectiveZoom` everywhere.
+   */
+  measure?: unknown;
 }

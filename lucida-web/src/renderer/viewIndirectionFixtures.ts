@@ -18,7 +18,7 @@ export function fakeDraw(overrides: {
   t?: number;
   z?: number;
   wanted?: WantedChunkIndex;
-  targetLevels?: Map<string, number>;
+  finestLevels?: Map<string, number>;
 } = {}): ViewDraw {
   const mode = overrides.mode ?? "volume";
   return {
@@ -28,7 +28,7 @@ export function fakeDraw(overrides: {
     cold: { currentT: overrides.t ?? 0, currentZ: overrides.z ?? 0, viewMode: mode } as ColdStateMessage,
     wanted: overrides.wanted ?? new Map(),
     routes: new Map(),
-    targetLevels: overrides.targetLevels ?? new Map(),
+    finestLevels: overrides.finestLevels ?? new Map(),
     sources: new Map(),
     descriptor: null,
   };

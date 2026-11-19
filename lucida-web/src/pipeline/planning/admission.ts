@@ -1,19 +1,15 @@
 /**
  * Capacity-aware admission: the part of a plan the memory budgets hold.
  *
- * A plan's requests arrive in priority order. Admission walks them in that
- * order and keeps each one whose chunk fits what its residency tier has
- * left, and declares the rest as the plan's shortfall: the coverage the view
- * goes without. Admitting only what fits is what lets a view whose demand
- * exceeds its budgets settle, covering its most important part, instead of
- * evicting one wanted chunk to make room for another forever.
- *
- * Several views share the budgets. When they want more than the room holds,
- * each first gets a share of it weighed by its area on screen, and only what
- * the shares leave is taken in priority order. Priority alone would hand the
- * room to whichever view's requests rank first, and a volume view, which
- * wants every chunk along its depth, would leave the slice views beside it
- * nothing past their coarse tier.
+ * The detail lane is the level selection, which fits the budgets by
+ * construction and shares them out among views, so admission takes it whole
+ * and a settled view holds its selection. Admission is the check behind
+ * that: it walks a plan's requests in priority order, keeps each one whose
+ * chunk fits what its residency tier and its GPU pool have left, and
+ * declares the rest as the plan's shortfall, the coverage the view goes
+ * without. That is what still lets a view settle when a pool's slots, the
+ * coarse tier, or prefetch would otherwise evict one wanted chunk for
+ * another forever.
  */
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
@@ -40,12 +36,6 @@ export interface PlanToAdmit {
   heldWhole?: (req: ChunkRequest) => boolean;
   /** The GPU slot pool a request's chunk lands in, or null for a lane that never uploads. */
   slotOf?: (req: ChunkRequest) => GpuSlot | null;
-  /**
-   * The views that asked for one of the plan's detail or coarse requests,
-   * when several views share the budgets. Prefetch and the minimap belong to
-   * no view, and take what the views leave.
-   */
-  viewsOf?: (req: ChunkRequest) => readonly number[];
 }
 
 export interface Admission {
@@ -64,8 +54,7 @@ export interface Admission {
 /**
  * Admit every dataset's plan into one `capacity`, and into `gpuRoom`, the
  * bytes the render worker's chunk pools may hold between them. Returns one
- * admission per plan, in the order given. `viewAreas` gives each view's area
- * on screen when several views share the room; see {@link fairShares}.
+ * admission per plan, in the order given.
  *
  * The view's detail requests go first, across every plan. The coarse tier
  * goes next: it is a fallback and takes only the room detail leaves, so the
@@ -85,7 +74,6 @@ export function admitPlans(
   plans: readonly PlanToAdmit[],
   capacity: Readonly<PerTier>,
   gpuRoom: number = Infinity,
-  viewAreas: ReadonlyMap<number, number> = new Map(),
 ): Admission[] {
   const used: PerTier = { detail: 0, coarse: 0 };
   const slotsUsed = new Map<string, number>();
@@ -131,56 +119,6 @@ export function admitPlans(
     state.admitted.add(req);
   };
 
-  /**
-   * Admit the views' shares of a tier's room, when several views want more
-   * than it holds. Each view takes its own requests in priority order until
-   * its share of the CPU room or of the GPU room is spent. A request two
-   * views asked for counts toward the first's demand, and is charged to the
-   * first with room for it; a chunk two requests share counts toward each,
-   * which only overstates a demand by the few chunks views share. What the
-   * shares leave, the greedy pass below takes in priority order.
-   */
-  const admitShares = (tier: ResidencyTier, room: number, wanted: (req: ChunkRequest) => boolean): void => {
-    if (viewAreas.size < 2) return;
-    const candidate = (state: State, req: ChunkRequest): boolean =>
-      req.tier === tier && wanted(req) && !state.admitted.has(req);
-    const cpuDemand = new Map<number, number>();
-    const gpuDemand = new Map<number, number>();
-    for (const state of states) {
-      state.plan.requests.forEach((req, i) => {
-        if (!candidate(state, req)) return;
-        const view = state.plan.viewsOf?.(req)[0];
-        if (view === undefined) return;
-        cpuDemand.set(view, (cpuDemand.get(view) ?? 0) + bytesOf(state, i));
-        gpuDemand.set(view, (gpuDemand.get(view) ?? 0) + (state.slots[i]?.slotBytes ?? 0));
-      });
-    }
-    const cpuRoom = room - used[tier];
-    const gpuLeft = gpuRoom - gpuUsed;
-    if (sum(cpuDemand) <= cpuRoom && sum(gpuDemand) <= gpuLeft) return;
-    const cpuShare = fairShares(cpuDemand, viewAreas, cpuRoom);
-    const gpuShare = fairShares(gpuDemand, viewAreas, gpuLeft);
-    const cpuSpent = new Map<number, number>();
-    const gpuSpent = new Map<number, number>();
-    for (const state of states) {
-      state.plan.requests.forEach((req, i) => {
-        if (!candidate(state, req)) return;
-        const slot = state.slots[i];
-        if (poolFull(slot)) return;
-        const bytes = state.charged.has(state.keys[i]) ? 0 : bytesOf(state, i);
-        if (used[tier] + bytes > room) return;
-        const slotBytes = slot?.slotBytes ?? 0;
-        const owner = (state.plan.viewsOf?.(req) ?? []).find((view) =>
-          (cpuSpent.get(view) ?? 0) + bytes <= (cpuShare.get(view) ?? 0) &&
-          (gpuSpent.get(view) ?? 0) + slotBytes <= (gpuShare.get(view) ?? 0));
-        if (owner === undefined) return;
-        cpuSpent.set(owner, (cpuSpent.get(owner) ?? 0) + bytes);
-        gpuSpent.set(owner, (gpuSpent.get(owner) ?? 0) + slotBytes);
-        take(state, i, bytes);
-      });
-    }
-  };
-
   const admit = (state: State, tier: ResidencyTier, room: number, wanted: (req: ChunkRequest) => boolean): void => {
     const { plan, admitted, charged, noRoom, shortfall } = state;
     const short = (req: ChunkRequest): void => {
@@ -207,10 +145,8 @@ export function admitPlans(
   };
 
   const speculative = (req: ChunkRequest): boolean => req.lane === "prefetch";
-  admitShares("detail", capacity.detail, (req) => !speculative(req));
   for (const state of states) admit(state, "detail", capacity.detail, (req) => !speculative(req));
   const coarseRoom = capacity.coarse + Math.max(0, capacity.detail - used.detail);
-  admitShares("coarse", coarseRoom, () => true);
   for (const state of states) admit(state, "coarse", coarseRoom, () => true);
   const borrowed = Math.max(0, used.coarse - capacity.coarse);
   for (const state of states) admit(state, "detail", capacity.detail - borrowed, speculative);
@@ -227,48 +163,6 @@ export function admitPlans(
       borrowed: Math.max(0, coarseSoFar - capacity.coarse) - loanBefore,
     };
   });
-}
-
-/**
- * Divide `room` among claims in proportion to their weights, max-min fair: a
- * claim that wants less than its share takes only what it wants, and what it
- * leaves is divided again among the rest.
- *
- * A view's weight is its area on screen, so it gets room for what it can
- * show, however much it asks for. Room in proportion to what each view asks
- * for would favour a volume view, which asks for every chunk along its
- * depth, and a fixed floor per view would be a guess at what a view needs.
- */
-export function fairShares(
-  demand: ReadonlyMap<number, number>,
-  weights: ReadonlyMap<number, number>,
-  room: number,
-): Map<number, number> {
-  const shares = new Map<number, number>();
-  const weightOf = (view: number): number => Math.max(weights.get(view) ?? 0, 0);
-  let open = [...demand].filter(([, wants]) => wants > 0);
-  let left = Math.max(0, room);
-  while (open.length > 0) {
-    const total = open.reduce((sum, [view]) => sum + weightOf(view), 0);
-    const shareOf = (view: number): number => (total > 0 ? (left * weightOf(view)) / total : left / open.length);
-    const met = open.filter(([view, wants]) => wants <= shareOf(view));
-    if (met.length === 0) {
-      for (const [view] of open) shares.set(view, shareOf(view));
-      break;
-    }
-    for (const [view, wants] of met) {
-      shares.set(view, wants);
-      left -= wants;
-    }
-    open = open.filter((claim) => !met.includes(claim));
-  }
-  return shares;
-}
-
-function sum(values: ReadonlyMap<number, number>): number {
-  let total = 0;
-  for (const value of values.values()) total += value;
-  return total;
 }
 
 /**

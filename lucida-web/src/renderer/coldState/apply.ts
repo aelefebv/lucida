@@ -14,7 +14,7 @@
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateMessage, PoolMode } from "../workerProtocol.ts";
 import { destroyDescriptorBuffer, iterateColdMembers, rebuildDescriptorBuffer } from "../descriptorBuffer.ts";
-import { targetLevelOf, type EntitySource } from "../entitySources.ts";
+import { finestLevelOf, type EntitySource } from "../entitySources.ts";
 import { syncLabelPools } from "../labelPools.ts";
 import {
   getOrCreateVolumePool,
@@ -113,7 +113,7 @@ function drawFor(ctx: WorkerCtx, msg: ColdStateMessage, wanted: WantedChunkIndex
       cold: msg,
       wanted,
       routes: new Map(),
-      targetLevels: new Map(),
+      finestLevels: new Map(),
       sources: new Map(),
       descriptor: null,
     };
@@ -190,13 +190,13 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   // 1. Register member→dataset mappings and target levels. Canonical
   // iteration produces the same memberId scheme as the rest of the pipeline.
-  const targetLevels = new Map<string, number>();
+  const finestLevels = new Map<string, number>();
   for (const { entry, memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
-    const target = targetLevelOf(entry);
-    if (target !== undefined) targetLevels.set(memberId, target);
+    const target = finestLevelOf(entry);
+    if (target !== undefined) finestLevels.set(memberId, target);
   }
-  draw.targetLevels = targetLevels;
+  draw.finestLevels = finestLevels;
 
   // 2. Partition activeSet by (tier, channel, chunkDims). Entries with no
   // chunk levels are skipped here but stay in memberToDataset from step 1.

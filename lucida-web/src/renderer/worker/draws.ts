@@ -133,7 +133,7 @@ export function evictionViewsOf(
   cameras: { revisionOf(view: number): number },
 ): EvictionView[] {
   return [...pool.views.values()].map((view) => {
-    const { wanted, targetLevels } = view.draw;
+    const { wanted, finestLevels } = view.draw;
     // Each member's keys are looked up once: a full pool asks about every slot.
     const byMember = new Map<string, ReadonlySet<string> | undefined>();
     const wantedOf = (memberId: string): ReadonlySet<string> | undefined => {
@@ -144,9 +144,9 @@ export function evictionViewsOf(
       slotGridIdx: view.slotGridIdx,
       entityMetas: view.entityMetas,
       cameraFor: (memberId) => cameraFor(view.draw.view, memberId),
-      targetLevelFor: (memberId) => targetLevels.get(memberId),
+      finestLevelFor: (memberId) => finestLevels.get(memberId),
       isWanted: (memberId, chunkKey) => wantedOf(memberId)?.has(chunkKey) ?? false,
-      sources: [wanted, targetLevels, cameras.revisionOf(view.draw.view)],
+      sources: [wanted, finestLevels, cameras.revisionOf(view.draw.view)],
     };
   });
 }
