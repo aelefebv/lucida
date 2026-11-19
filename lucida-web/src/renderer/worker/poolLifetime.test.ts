@@ -89,7 +89,8 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
     ensureOffscreenPool: () => [],
     getOrCreateLUT: () => ({} as GPUTexture),
     post: (msg) => { posts.push(msg); },
-    postWantedSet: () => {},
+    requestWantedSetReport: () => {},
+    flushWantedSetReports: () => {},
     lookupEntityDescriptor: () => null,
   };
   return { ctx, posts };

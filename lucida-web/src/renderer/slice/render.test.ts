@@ -18,6 +18,7 @@ import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { handleSliceRenderMultiPass, memberScissor } from "./render.ts";
 import { attachView, fakeDraw, viewOf } from "../viewIndirectionFixtures.ts";
 import { EvictionOrder } from "../evictionOrder.ts";
+import { SlotJournal } from "../slotJournal.ts";
 
 vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 
@@ -43,6 +44,7 @@ function makeAtlas(entityMetas: Map<string, LodIndirectionMeta[]>): SliceAtlasSt
     format: "u16",
     slots: new Map(),
     order: new EvictionOrder(),
+    journal: new SlotJournal(),
     planesByChunk: new Map(),
     views: new Map(),
     freeSlots: [],

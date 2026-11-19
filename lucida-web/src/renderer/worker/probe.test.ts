@@ -24,6 +24,7 @@ import { labelSlicePoolKey, labelVolumePoolKey } from "../labelPools.ts";
 import type { ViewDraw } from "./state.ts";
 import { createInitialState } from "./state.ts";
 import { EvictionOrder } from "../evictionOrder.ts";
+import { SlotJournal } from "../slotJournal.ts";
 import { dispatchMessage } from "./dispatch.ts";
 
 const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
@@ -56,6 +57,7 @@ function fakePool(datasetId: string, chunk: number, cells: number): FakePool {
     format: "u16",
     slots: new Map(),
     order: new EvictionOrder(),
+    journal: new SlotJournal(),
     planesByChunk: new Map(),
     views: new Map(),
     freeSlots: [],

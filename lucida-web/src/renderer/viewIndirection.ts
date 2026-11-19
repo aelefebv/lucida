@@ -11,6 +11,7 @@ import type { ViewDraw } from "./worker/state.ts";
 import { INDIRECTION_MISS } from "./remap.ts";
 import { remapSlotEntries, type CompactionPlan } from "./poolCompaction.ts";
 import type { EvictionOrder } from "./evictionOrder.ts";
+import type { SlotJournal } from "./slotJournal.ts";
 
 export interface ViewIndirection {
   /** The view's draw of the pool's dataset: its cut, timepoint, wanted chunks and target levels. */
@@ -40,6 +41,8 @@ export interface SharedChunkPool {
   slots: Map<string, number>;
   /** The held slots in the order eviction takes them. */
   order: EvictionOrder;
+  /** The slot keys held or let go since the wanted-set report last read them. */
+  journal: SlotJournal;
   freeSlots: number[];
   totalSlots: number;
   /** view id → that view's indirection over the pool. */
@@ -132,6 +135,7 @@ export function flushViewIndirection(device: GPUDevice, view: ViewIndirection): 
 export function holdSlot(pool: SharedChunkPool, key: string, slot: number): void {
   pool.slots.set(key, slot);
   pool.order.hold(slot, key);
+  pool.journal.note(key);
 }
 
 /** Forget the slot `key` holds, and return it for the caller to reuse, or undefined when none does. */
@@ -140,6 +144,7 @@ export function dropSlot(pool: SharedChunkPool, key: string): number | undefined
   if (slot === undefined) return undefined;
   pool.slots.delete(key);
   pool.order.release(slot);
+  pool.journal.note(key);
   return slot;
 }
 

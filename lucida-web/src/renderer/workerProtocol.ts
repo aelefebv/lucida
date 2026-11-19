@@ -1035,10 +1035,11 @@ export type MissingChunk = {
 };
 
 /**
- * What the worker wants and lacks for one dataset, from the cold state's
- * {@link ColdStateMessage.wantedChunks}. Every chunk loss is reported on its
- * own, so a missing chunk the page's residency mirror holds is a
- * disagreement between the two records.
+ * What changed in what the worker wants and lacks for one view's draw of a
+ * dataset, from the cold state's {@link ColdStateMessage.wantedChunks}. At
+ * most one a frame, and none when nothing changed. Every chunk loss is
+ * reported on its own, so a missing chunk the page's residency mirror holds
+ * is a disagreement between the two records.
  */
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
@@ -1046,6 +1047,11 @@ export interface WantedSetDeltaMessage {
   /** The pools whose cold state named the wanted chunks. */
   viewMode: PoolMode;
   epochs: SceneEpochs;
+  /**
+   * The wanted chunks lacking that no earlier delta named: wanted since the
+   * last one, or whose slot was held or let go since it. One lacking since
+   * an earlier delta is not named again until its slot changes.
+   */
   missing: MissingChunk[];
 }
 
@@ -1076,8 +1082,8 @@ export interface EntityLevelReport {
 }
 
 /**
- * Posted alongside every {@link WantedSetDeltaMessage}: what the wanted
- * target-level chunks say about which level is on screen. Feeds the layer
+ * What the wanted target-level chunks say about which level is on screen,
+ * posted with the wanted-set report whenever it changes. Feeds the layer
  * panel's level readout.
  */
 export interface EntityLevelsMessage {

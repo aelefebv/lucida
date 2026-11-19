@@ -13,7 +13,7 @@
 
 import { dispatchMessage } from "../../renderer/worker/dispatch.ts";
 import { createInitialState } from "../../renderer/worker/state.ts";
-import { createWantedSetPoster } from "../../renderer/worker/bootstrap.ts";
+import { WantedSetReporter } from "../../renderer/worker/wantedSetReport.ts";
 import { UNTIMED } from "../../renderer/passTiming.ts";
 import type { WorkerCtx } from "../../renderer/workerContext.ts";
 import type {
@@ -114,6 +114,7 @@ export function deliveryKey(tier: ResidencyTier, memberId: string, chunkKey: str
 
 export class SimulatedWorker {
   readonly ctx: WorkerCtx;
+  private readonly reporter: WantedSetReporter;
   private readonly inbox: MainToWorkerMessage[] = [];
   private readonly outbox: WorkerToMainMessage[] = [];
   private readonly listeners = new Set<Listener>();
@@ -142,6 +143,8 @@ export class SimulatedWorker {
     const post = (msg: WorkerToMainMessage): void => {
       this.outbox.push(msg);
     };
+    const reporter = new WantedSetReporter(state, post);
+    this.reporter = reporter;
     this.ctx = {
       device: simulatedDevice(limits),
       context: { canvas: { width: 0, height: 0 } } as unknown as GPUCanvasContext,
@@ -156,7 +159,8 @@ export class SimulatedWorker {
       ensureOffscreenPool: () => [],
       getOrCreateLUT: () => { throw new Error("the simulated worker does not draw"); },
       post,
-      postWantedSet: createWantedSetPoster(state, post),
+      requestWantedSetReport: (datasetId, mode, view) => reporter.request(datasetId, mode, view),
+      flushWantedSetReports: () => reporter.flush(),
       lookupEntityDescriptor: (datasetId, view) => drawOf(state, datasetId, view)?.descriptor ?? null,
     };
   }
@@ -227,6 +231,9 @@ export class SimulatedWorker {
         }
         await dispatchMessage(this.ctx, msg);
       }
+      // A real worker reports once a frame, or after a short wait with no
+      // frame; one drain stands in for both.
+      this.reporter.flush();
       while (this.outbox.length > 0) {
         const msg = structuredClone(this.outbox.shift()!);
         this.onPost?.(msg);
@@ -332,15 +339,11 @@ export class SimulatedWorker {
   }
 
   /**
-   * What the worker wants and does not hold for one dataset, computed now.
-   * The worker reports its wanted set only after a cold state or an upload
-   * that bounced, so its last report can be stale by the time a run settles.
+   * What the worker wants and does not hold for one dataset, computed now
+   * from nothing kept. Its reports name only what changed, so no one report
+   * says it all.
    */
   missingNow(datasetId: string): MissingChunk[] {
-    const missing: MissingChunk[] = [];
-    createWantedSetPoster(this.ctx.state, (msg) => {
-      if (msg.type === "wantedSetDelta") missing.push(...msg.missing);
-    })(datasetId);
-    return missing;
+    return this.reporter.lackingNow(datasetId);
   }
 }
