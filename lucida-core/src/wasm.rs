@@ -46,13 +46,16 @@ pub fn enumerate_chunks(
 /// The levels one view draws its entities at, within `budget_cpu` and
 /// `budget_gpu` bytes (`crate::level_selection::select_levels`). `regions_json`
 /// is a JSON array of the visible regions the entities name by index, as
-/// `visible_region` writes them. `entities` and `previous` are in the flat
-/// layout `crate::level_selection` describes, as is the result. `lookahead`
-/// is 0 for none, 1 for the finer cells the selection would refine next, and
-/// 2 for the coarser cells above its finest.
+/// `visible_region` writes them, and `depth_bias` moves each one's focus as
+/// `enumerate_chunks` does. `entities` and `previous` are in the flat layout
+/// `crate::level_selection` describes, as is the result. `lookahead` is 0
+/// for none, 1 for the finer cells the selection would refine next, and 2
+/// for the coarser cells above its finest.
+#[allow(clippy::too_many_arguments)]
 #[wasm_bindgen]
 pub fn select_levels(
     regions_json: &str,
+    depth_bias: f64,
     entities: &[f64],
     previous: &[f64],
     budget_cpu: f64,
@@ -61,7 +64,7 @@ pub fn select_levels(
     lookahead: u32,
 ) -> Result<Vec<f64>, JsError> {
     use crate::level_selection::{Cost, Lookahead, select_batch};
-    let views = crate::chunk::ChunkView::many_from_json(regions_json, 0.0)
+    let views = crate::chunk::ChunkView::many_from_json(regions_json, depth_bias)
         .map_err(|e| JsError::new(&format!("invalid visible regions: {e}")))?;
     let lookahead = match lookahead {
         1 => Lookahead::Finer,

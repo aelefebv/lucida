@@ -76,12 +76,14 @@ pub struct Cell {
     pub x: u32,
 }
 
-/// A selected cell and its measure: the device pixels one of its samples
-/// spans where it is nearest the eye.
+/// A selected cell, its measure, the device pixels one of its samples spans
+/// where it is nearest the eye, and how far its center lies from the view's
+/// focus, in level-0 samples, as [`ScoredChunk::distance`] measures it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectedCell {
     pub cell: Cell,
     pub measure: f64,
+    pub distance: f64,
 }
 
 /// One visible image-bearing entity, as the selection reads it.
@@ -197,7 +199,8 @@ pub enum Lookahead {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LevelSelection {
     /// The selected cells, in fetch order: coarser levels first, so a slow
-    /// link fills the whole view before it sharpens, then larger measure.
+    /// link fills the whole view before it sharpens, then larger measure,
+    /// then nearer the focus, which orders a slice view's cells center out.
     pub cells: Vec<SelectedCell>,
     /// Cells beyond the selection worth fetching ahead, in order, which fit
     /// the room the selection leaves.
@@ -262,8 +265,8 @@ struct Ahead {
 struct Refiner<'s, 'a> {
     entities: &'s [SelectionEntity<'a>],
     previous: &'s PreviousSelection,
-    /// Selected cells and their measures.
-    selected: HashMap<Cell, f64>,
+    /// Selected cells, each with its measure and distance.
+    selected: HashMap<Cell, SelectedCell>,
     refined: HashSet<Cell>,
     /// Per entity, how many charged cells each detail level holds, which
     /// keeps the levels within the renderer's sources.
@@ -334,7 +337,7 @@ impl<'s, 'a> Refiner<'s, 'a> {
         }
     }
 
-    fn select(&mut self, cell: Cell) {
+    fn select(&mut self, cell: Cell, distance: f64) {
         let measure = self.measure(cell);
         let entities = self.entities;
         let entity = &entities[cell.entity as usize];
@@ -344,7 +347,14 @@ impl<'s, 'a> Refiner<'s, 'a> {
                 .entry(cell.level)
                 .or_default() += 1;
         }
-        self.selected.insert(cell, measure);
+        self.selected.insert(
+            cell,
+            SelectedCell {
+                cell,
+                measure,
+                distance,
+            },
+        );
         self.offer(cell, measure);
     }
 
@@ -377,18 +387,20 @@ impl<'s, 'a> Refiner<'s, 'a> {
         chunk::enumerate_chunks(entity.view, query, &mut self.counts, &mut self.found);
         let start = entity.start;
         for found in std::mem::take(&mut self.found) {
-            self.select(Cell {
+            let cell = Cell {
                 entity: entity_index as u32,
                 level: start,
                 z: found.z,
                 y: found.y,
                 x: found.x,
-            });
+            };
+            self.select(cell, found.distance);
         }
     }
 
-    /// The cells of level `finer` that cover `cell` and that the view samples.
-    fn children(&mut self, cell: Cell, finer: u32) -> Vec<Cell> {
+    /// The cells of level `finer` that cover `cell` and that the view
+    /// samples, each with its distance from the focus.
+    fn children(&mut self, cell: Cell, finer: u32) -> Vec<(Cell, f64)> {
         let entities = self.entities;
         let entity = &entities[cell.entity as usize];
         let (lo, hi) = entity.queries[cell.level as usize].cell_box([cell.x, cell.y, cell.z]);
@@ -403,12 +415,15 @@ impl<'s, 'a> Refiner<'s, 'a> {
         );
         self.found
             .iter()
-            .map(|found| Cell {
-                entity: cell.entity,
-                level: finer,
-                z: found.z,
-                y: found.y,
-                x: found.x,
+            .map(|found| {
+                let child = Cell {
+                    entity: cell.entity,
+                    level: finer,
+                    z: found.z,
+                    y: found.y,
+                    x: found.x,
+                };
+                (child, found.distance)
             })
             .collect()
     }
@@ -453,10 +468,12 @@ impl<'s, 'a> Refiner<'s, 'a> {
                     sum.add(entity.cost(level).scaled(count as f64))
                 });
 
-            let children: Vec<Cell> = self
+            let children: Vec<(Cell, f64)> = self
                 .children(cell, finer)
                 .into_iter()
-                .filter(|child| !self.selected.contains_key(child) && !self.refined.contains(child))
+                .filter(|(child, _)| {
+                    !self.selected.contains_key(child) && !self.refined.contains(child)
+                })
                 .collect();
             let mut after = self
                 .used
@@ -490,8 +507,8 @@ impl<'s, 'a> Refiner<'s, 'a> {
                     self.unselect(cell);
                 }
             }
-            for child in children {
-                self.select(child);
+            for (child, distance) in children {
+                self.select(child, distance);
                 if let Some(ahead) = ahead.as_deref_mut() {
                     ahead.spent = ahead.spent.add(entity.cost(finer));
                     ahead.cells.push(child);
@@ -503,16 +520,13 @@ impl<'s, 'a> Refiner<'s, 'a> {
 
     /// The selected cells in fetch order.
     fn cells(&self) -> Vec<SelectedCell> {
-        let mut cells: Vec<SelectedCell> = self
-            .selected
-            .iter()
-            .map(|(&cell, &measure)| SelectedCell { cell, measure })
-            .collect();
+        let mut cells: Vec<SelectedCell> = self.selected.values().copied().collect();
         cells.sort_by(|a, b| {
             b.cell
                 .level
                 .cmp(&a.cell.level)
                 .then_with(|| b.measure.total_cmp(&a.measure))
+                .then_with(|| a.distance.total_cmp(&b.distance))
                 .then_with(|| a.cell.cmp(&b.cell))
         });
         cells
@@ -533,24 +547,25 @@ impl<'s, 'a> Refiner<'s, 'a> {
             .filter(|cell| finest[cell.entity as usize] == Some(cell.level))
             .collect();
         sources.sort_unstable();
-        let mut parents = HashSet::new();
+        let mut parents = HashMap::new();
         let entities = self.entities;
         for cell in sources {
             let entity = &entities[cell.entity as usize];
             let Some(coarser) = entity.coarser(cell.level) else {
                 continue;
             };
-            for parent in self.children(cell, coarser) {
+            for (parent, distance) in self.children(cell, coarser) {
                 if !self.selected.contains_key(&parent) {
-                    parents.insert(parent);
+                    parents.insert(parent, distance);
                 }
             }
         }
         let mut ahead: Vec<SelectedCell> = parents
             .into_iter()
-            .map(|cell| SelectedCell {
+            .map(|(cell, distance)| SelectedCell {
                 cell,
                 measure: self.measure(cell),
+                distance,
             })
             .collect();
         ahead.sort_by(|a, b| {
@@ -612,12 +627,7 @@ pub fn select_levels(
             ahead
                 .cells
                 .into_iter()
-                .filter_map(|cell| {
-                    refiner
-                        .selected
-                        .get(&cell)
-                        .map(|&measure| SelectedCell { cell, measure })
-                })
+                .filter_map(|cell| refiner.selected.get(&cell).copied())
                 .collect()
         }
         Lookahead::Coarser => refiner.coarser_cells(budget.sub(used)),
@@ -643,10 +653,13 @@ pub const ENTITY_HEADER: usize = 7;
 /// the GPU; and 1 when the detail tier may hold it.
 pub const LEVEL_STRIDE: usize = 12;
 
-/// Numbers per cell in [`select_batch`]'s previous selection and output:
-/// entity, level, X, Y, Z, and a sixth: in the previous selection 1 for a
-/// cell it refined and 0 for one it kept, in the output the cell's measure.
-pub const CELL_STRIDE: usize = 6;
+/// Numbers per cell in [`select_batch`]'s previous selection: entity, level,
+/// X, Y, Z, and 1 for a cell it refined or 0 for one it kept.
+pub const PREVIOUS_STRIDE: usize = 6;
+
+/// Numbers per cell in [`select_batch`]'s output: entity, level, X, Y, Z,
+/// measure and distance. A refined cell has neither, and writes zeros.
+pub const CELL_STRIDE: usize = 7;
 
 /// Numbers at the head of [`select_batch`]'s output: how many selected,
 /// lookahead and refined cells follow, in that order; the CPU and GPU bytes
@@ -684,10 +697,8 @@ pub fn select_batch(
         let mut levels = Vec::with_capacity(count);
         let mut costs = Vec::with_capacity(count);
         let mut sources = Vec::new();
-        for (level, numbers) in entities[at + ENTITY_HEADER..end]
-            .chunks_exact(LEVEL_STRIDE)
-            .enumerate()
-        {
+        let (per_level, _) = entities[at + ENTITY_HEADER..end].as_chunks::<LEVEL_STRIDE>();
+        for (level, numbers) in per_level.iter().enumerate() {
             let dims = |i: usize| -> [u64; 5] {
                 let n = |v: f64| index(v).unwrap_or(0) as u64;
                 [1, 1, n(numbers[i + 2]), n(numbers[i + 1]), n(numbers[i])]
@@ -721,7 +732,8 @@ pub fn select_batch(
     }
 
     let mut last = PreviousSelection::default();
-    for numbers in previous.chunks_exact(CELL_STRIDE) {
+    let (previous, _) = previous.as_chunks::<PREVIOUS_STRIDE>();
+    for numbers in previous {
         let (Some(entity), Some(level), Some(x), Some(y), Some(z)) = (
             index(numbers[0]),
             index(numbers[1]),
@@ -763,21 +775,22 @@ pub fn select_batch(
         selection.counts.after_z_range as f64,
         selection.counts.after_frustum as f64,
     ]);
-    let mut push = |cell: Cell, last: f64| {
+    let mut push = |cell: Cell, measure: f64, distance: f64| {
         out.extend_from_slice(&[
             f64::from(cell.entity),
             f64::from(cell.level),
             f64::from(cell.x),
             f64::from(cell.y),
             f64::from(cell.z),
-            last,
+            measure,
+            distance,
         ]);
     };
     for cell in selection.cells.iter().chain(&selection.lookahead) {
-        push(cell.cell, cell.measure);
+        push(cell.cell, cell.measure, cell.distance);
     }
     for &cell in &selection.refined {
-        push(cell, 1.0);
+        push(cell, 0.0, 0.0);
     }
     out
 }
@@ -1336,13 +1349,14 @@ mod tests {
                 f64::from(cell.cell.y),
                 f64::from(cell.cell.z),
                 cell.measure,
+                cell.distance,
             ]
         );
 
         // Fed back as the previous selection, it selects the same again.
         let mut previous = Vec::new();
         let cells = &out[SELECTION_HEADER..];
-        for (index, numbers) in cells.chunks_exact(CELL_STRIDE).enumerate() {
+        for (index, numbers) in cells.as_chunks::<CELL_STRIDE>().0.iter().enumerate() {
             previous.extend_from_slice(&numbers[..5]);
             previous.push(if index < direct.cells.len() { 0.0 } else { 1.0 });
         }
