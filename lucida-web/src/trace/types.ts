@@ -38,7 +38,7 @@ export const TRACE_SCHEMA_VERSION = 3;
  *            take the result, so the row also carries the worker's own time
  *            ({@link TraceRow.decodeWorkUs}) and the diagnostic judges that.
  * - `upload` bytes decoded → the chunk is on the GPU. Covers the wait in
- *            the CPU cache for a delivery tick, the per-frame upload budget,
+ *            the CPU cache for a delivery tick and for room in the worker,
  *            and the worker's own texture write; residency is established by
  *            message ordering (the worker is FIFO, so a chunk posted before
  *            a render has been written by the time that render runs). A

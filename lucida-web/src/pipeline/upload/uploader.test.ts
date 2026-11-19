@@ -12,7 +12,7 @@ import { setDebugCategories } from "../../debug/logging.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
 import { TickCoordinator } from "../tickCoordinator.ts";
-import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
+import { GESTURE_UPLOAD_AHEAD_MS, UPLOAD_AHEAD_MS } from "./constants.ts";
 import { RESEND_GUARD_TICKS } from "./delivery/resendGuard.ts";
 import { Uploader } from "./uploader.ts";
 import { loadWasm } from "../../viewProperties.ts";
@@ -253,6 +253,16 @@ function makeCtx(args: {
   } as unknown as TickContext;
 }
 
+/**
+ * Report so long a run of the worker's deliveries to the pools of `mode` at
+ * `bytesPerMs` that nothing it reported before still counts.
+ */
+function teachRate(uploader: Uploader, mode: "slice" | "volume", bytesPerMs: number): void {
+  uploader.noteUploadCost(mode, bytesPerMs * 1e6, 1e6);
+}
+
+const MIB = 1024 * 1024;
+
 describe("Uploader unified delivery", () => {
   /**
    * The per-tick stats are handed to `UploadTelemetry.publish`, which the
@@ -266,12 +276,18 @@ describe("Uploader unified delivery", () => {
   // Setting the category preference is live, so the module graph is not
   // re-imported for every case, which on a loaded host can take longer than
   // the hook may.
+  /** This thread's clock, which stands still unless a test moves it, so only the worker paces a tick. */
+  let clock = 0;
+
   beforeEach(() => {
     setDebugCategories(["orch"]);
+    clock = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
   });
 
   afterEach(() => {
     setDebugCategories([]);
+    vi.restoreAllMocks();
   });
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
@@ -286,7 +302,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    const ret = uploader.deliverToWorker(ctx);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(markSent.mock.calls.map(c => c[0])).toEqual([chunk]);
@@ -302,7 +318,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    uploader.deliverToWorker(ctx);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
@@ -318,7 +334,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    uploader.deliverToWorker(ctx);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
@@ -337,10 +353,10 @@ describe("Uploader unified delivery", () => {
     });
     const uploader = new Uploader();
 
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    uploader.deliverToWorker(ctx);
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
       uploader.handleChunkResidency("img-0", "slice:z0", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
-      uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+      uploader.deliverToWorker(ctx);
     }
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
     const held = recordPointEvent.mock.calls.filter(([kind]) => kind === PointEvent.Held);
@@ -349,11 +365,11 @@ describe("Uploader unified delivery", () => {
     ]);
 
     // Held: the next ticks send nothing and ask for no further tick.
-    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024)).toBe(false);
+    expect(uploader.deliverToWorker(ctx)).toBe(false);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", view: 0, displayStateByChannel: {} });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    uploader.deliverToWorker(ctx);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateSelection({
@@ -367,7 +383,7 @@ describe("Uploader unified delivery", () => {
       epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
       labels: [],
     });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    uploader.deliverToWorker(ctx);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 2);
     recordPointEvent.mockRestore();
   });
@@ -387,8 +403,10 @@ describe("Uploader unified delivery", () => {
     const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
 
     const uploader = new Uploader();
+    // The large chunk alone costs the worker more than a tick's upload time.
+    teachRate(uploader, "volume", MIB / UPLOAD_AHEAD_MS);
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024);
+    const ret = uploader.deliverToWorker(ctx);
 
     expect(volumeChunkData).toHaveBeenCalledTimes(1);
     expect(volumeChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
@@ -397,31 +415,98 @@ describe("Uploader unified delivery", () => {
     expect(ret).toBe(true);
   });
 
-  it("sends chunks held back while the view moved at the held budget, until a tick sends all it can", () => {
-    const MIB = 1024 * 1024;
-    const chunks = (n: number) => Array.from({ length: n }, (_, i) =>
-      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(4 * MIB), priority: i }));
-    let deliverable = chunks(12);
+  it.each([
+    { gesture: false, bytesPerMs: MIB, sent: UPLOAD_AHEAD_MS },
+    { gesture: true, bytesPerMs: MIB, sent: GESTURE_UPLOAD_AHEAD_MS },
+    { gesture: false, bytesPerMs: 4 * MIB, sent: 4 * UPLOAD_AHEAD_MS },
+    { gesture: true, bytesPerMs: MIB / 2, sent: GESTURE_UPLOAD_AHEAD_MS / 2 },
+  ])("sends what fits in the worker's room at the rate it reports: gesture $gesture, $bytesPerMs bytes a ms", ({ gesture, bytesPerMs, sent }) => {
+    const deliverable = Array.from({ length: 4 * sent }, (_, i) =>
+      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(MIB), priority: i }));
+    const volumeChunkData = vi.fn();
+    const ctx = { ...makeCtx({ cpuCache: makeCpuCache(deliverable), client: { volumeChunkData }, mode: "volume" }), gesture };
+    const uploader = new Uploader();
+    teachRate(uploader, "volume", bytesPerMs);
+
+    uploader.deliverToWorker(ctx);
+
+    expect(volumeChunkData).toHaveBeenCalledTimes(sent);
+  });
+
+  it("paces each mode by the rate the worker reports for its pools", () => {
+    const planes = Array.from({ length: 100 }, (_, i) => makeChunkDelivery({ chunkKey: `0/0/0/0/0/${i}`, priority: i }));
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache: makeCpuCache(planes), client: { sliceChunkData } });
+    const uploader = new Uploader();
+    // Planes are slow per byte, and whole chunks fast: the slice view is paced by its own.
+    teachRate(uploader, "slice", PLANE_BYTES);
+    teachRate(uploader, "volume", 1000 * MIB);
+
+    uploader.deliverToWorker(ctx);
+
+    expect(sliceChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS);
+  });
+
+  it("stops once the worker's room has passed on this thread, whatever the worker's rate", () => {
+    const deliverable = Array.from({ length: 100 }, (_, i) =>
+      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, priority: i }));
+    const volumeChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache: makeCpuCache(deliverable), client: { volumeChunkData }, mode: "volume" });
+    const uploader = new Uploader();
+    teachRate(uploader, "volume", 1000 * MIB);
+    const publish = captureTickStats(uploader);
+    vi.spyOn(performance, "now").mockImplementation(() => (clock += 1));
+
+    uploader.deliverToWorker(ctx);
+
+    expect(volumeChunkData.mock.calls.length).toBeGreaterThan(0);
+    expect(volumeChunkData.mock.calls.length).toBeLessThan(UPLOAD_AHEAD_MS);
+    expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
+  });
+
+  it("hands the worker more only as it reports what it was handed done", () => {
+    const deliverable = Array.from({ length: 100 }, (_, i) =>
+      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(MIB), priority: i }));
+    let undelivered = deliverable;
     const cpuCache = makeCpuCache();
     vi.mocked(cpuCache.getDeliverable).mockImplementation(function* () {
-      yield* deliverable;
+      yield* undelivered;
     });
-    const volumeChunkData = vi.fn();
+    const volumeChunkData = vi.fn(() => {
+      undelivered = undelivered.slice(1);
+    });
     const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
     const uploader = new Uploader();
+    teachRate(uploader, "volume", MIB);
 
-    uploader.holdDelivery();
-    expect(uploader.deliverToWorker(ctx, 4 * MIB)).toBe(true);
-    expect(volumeChunkData).toHaveBeenCalledTimes(HELD_UPLOAD_BUDGET_BYTES / (4 * MIB));
+    uploader.deliverToWorker(ctx);
+    expect(volumeChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS);
+    // However much later, nothing more goes until the worker says it is done.
+    clock += 1000;
+    expect(uploader.deliverToWorker(ctx)).toBe(true);
+    expect(volumeChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS);
+    // Half done: half the room.
+    uploader.noteUploadCost("volume", (UPLOAD_AHEAD_MS / 2) * MIB, UPLOAD_AHEAD_MS / 2);
+    uploader.deliverToWorker(ctx);
+    expect(volumeChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS * 1.5);
+    uploader.noteUploadCost("volume", UPLOAD_AHEAD_MS * MIB, UPLOAD_AHEAD_MS);
+    uploader.deliverToWorker(ctx);
+    expect(volumeChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS * 2.5);
+  });
 
-    // The rest fit, so the backlog is gone and the caller's budget is back.
-    deliverable = deliverable.slice(HELD_UPLOAD_BUDGET_BYTES / (4 * MIB));
-    uploader.deliverToWorker(ctx, 4 * MIB);
-    expect(volumeChunkData).toHaveBeenCalledTimes(12);
+  it("sends a gesture's tick nothing while the worker has more in hand than a gesture allows", () => {
+    const deliverable = Array.from({ length: 100 }, (_, i) =>
+      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(MIB), priority: i }));
+    const volumeChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache: makeCpuCache(deliverable), client: { volumeChunkData }, mode: "volume" });
+    const uploader = new Uploader();
+    teachRate(uploader, "volume", MIB);
+
+    uploader.deliverToWorker(ctx);
     volumeChunkData.mockClear();
-    deliverable = chunks(3);
-    uploader.deliverToWorker(ctx, 4 * MIB);
-    expect(volumeChunkData).toHaveBeenCalledTimes(1);
+    uploader.noteUploadCost("volume", MIB, 1);
+    expect(uploader.deliverToWorker({ ...ctx, gesture: true })).toBe(true);
+    expect(volumeChunkData).not.toHaveBeenCalled();
   });
 
   it("splits upload budget across detail and coarse when both tiers have deliverables", () => {
@@ -449,7 +534,10 @@ describe("Uploader unified delivery", () => {
     const volumeChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
 
-    new Uploader().deliverToWorker(ctx, 1000);
+    // The large detail chunk costs more than the half of the tick detail has.
+    const uploader = new Uploader();
+    teachRate(uploader, "volume", 1000 / UPLOAD_AHEAD_MS);
+    uploader.deliverToWorker(ctx);
 
     expect(volumeChunkData).toHaveBeenCalledTimes(2);
     expect(volumeChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
@@ -462,7 +550,7 @@ describe("Uploader unified delivery", () => {
     ]);
   });
 
-  it("reports the bytes it posts, one plane of a chunk in the slice view, against the caller's budget", () => {
+  it("reports the bytes it posts, one plane of a chunk in the slice view, and the tick's upload time", () => {
     // Twice a plane: what the slice view posts is the one plane it draws.
     const chunk = makeChunkDelivery({ data: new ArrayBuffer(2 * PLANE_BYTES) });
     const cpuCache = makeCpuCache([chunk]);
@@ -471,11 +559,11 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    uploader.deliverToWorker(ctx);
 
     expect(sliceChunkData.mock.calls[0][1][0].data.byteLength).toBe(PLANE_BYTES);
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(PLANE_BYTES);
-    expect(publish.mock.calls[0][1].bytesBudget).toBe(8 * 1024 * 1024);
+    expect(publish.mock.calls[0][1].budgetMs).toBe(UPLOAD_AHEAD_MS);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(false);
   });
 
@@ -485,8 +573,9 @@ describe("Uploader unified delivery", () => {
     const ctx = makeCtx({ cpuCache, mode: "volume" });
 
     const uploader = new Uploader();
+    teachRate(uploader, "volume", 1024 / UPLOAD_AHEAD_MS);
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 1024);
+    uploader.deliverToWorker(ctx);
 
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
@@ -502,7 +591,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024);
+    const ret = uploader.deliverToWorker(ctx);
 
     // The send loop itself is unaffected by the telemetry gate.
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
@@ -517,10 +606,7 @@ describe("Uploader unified delivery", () => {
     const scene = createMockScene();
     const uploader = new Uploader();
 
-    uploader.deliverToWorker(
-      makeCtx({ cpuCache, scene, client: { sliceChunkData } }),
-      8 * 1024 * 1024,
-    );
+    uploader.deliverToWorker(makeCtx({ cpuCache, scene, client: { sliceChunkData } }));
 
     expect(sliceChunkData.mock.calls[0][0]).toBe("img-0:ch2");
     expect(uploader.getTrackedResourceMemberIds()).toEqual(["img-0:ch2"]);

@@ -32,6 +32,8 @@ import type { ViewIndirection } from "../../renderer/viewIndirection.ts";
 import { LABEL_TIER } from "../../renderer/chunkUploadFeedback.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import { toPlaneFrame } from "../../renderer/slicePlane.ts";
+import { chunkDeliveryOf } from "../../renderer/worker/uploadCost.ts";
+import { INITIAL_UPLOAD_BYTES_PER_MS } from "../upload/constants.ts";
 
 /** Messages that only draw, capture or style, so the simulation answers them without a handler. */
 const DRAW_ONLY = new Set<MainToWorkerMessage["type"]>([
@@ -229,7 +231,14 @@ export class SimulatedWorker {
           if (frameSeq !== undefined) this.drawFrame(frameSeq);
           continue;
         }
+        const delivery = chunkDeliveryOf(msg);
         await dispatchMessage(this.ctx, msg);
+        // The stand-in GPU is done with a delivery at once, and writes at the
+        // rate the page assumes before any report.
+        if (delivery) {
+          const ms = delivery.bytes / INITIAL_UPLOAD_BYTES_PER_MS;
+          this.outbox.push({ type: "uploadCost", mode: delivery.mode, bytes: delivery.bytes, ms });
+        }
       }
       // A real worker reports once a frame, or after a short wait with no
       // frame; one drain stands in for both.

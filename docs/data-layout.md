@@ -48,10 +48,10 @@ a scrub through time or channels decodes every bundled member.
 ### The spatial shape of an inner chunk
 
 The inner chunk is the unit the viewer fetches, decodes, uploads, and evicts. A
-smaller chunk wastes fewer bytes at the edge of the view and lets the upload
-budget of 8 MiB per frame carry more of the view each frame. A larger chunk
-costs fewer reads. 256 × 256 in 2D and 64 × 64 × 64 in 3D sit between the two,
-at 128 KiB and 512 KiB per chunk for 16-bit samples.
+smaller chunk wastes fewer bytes at the edge of the view, so the same upload
+time carries more of the view. A larger chunk costs fewer reads. 256 × 256 in
+2D and 64 × 64 × 64 in 3D sit between the two, at 128 KiB and 512 KiB per chunk
+for 16-bit samples.
 
 At the target level the screen bounds the wanted set: at most the viewport's
 area divided by one chunk's footprint, however large the image or collection.
