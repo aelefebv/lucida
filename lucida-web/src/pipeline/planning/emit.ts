@@ -1,17 +1,17 @@
 /**
- * Lane emission and priority. Turns the active set and minimap-pending
- * coords into one {@link ChunkRequest} stream per lane, from the chunks the
- * core enumerated for the plan.
+ * Lane emission and priority. Turns the active set, the level selection and
+ * minimap-pending coords into one {@link ChunkRequest} stream per lane.
  *
  * A request's priority is its lane's band plus an in-lane term under one.
  * Lane offsets and prefetch steps are whole numbers, so every reader of the
  * priority (admission, the fetch queue, the CPU store's protection and
- * eviction, delivery order) sees one lane wholly before the next.
- * Importance and distance from the view's focus order requests only within
- * their band.
+ * eviction, delivery order) sees one lane wholly before the next. The level
+ * selection's fetch order, or for the coarse lane importance and distance
+ * from the view's focus, order requests only within their band.
  */
 
 import { Axis } from "../../axes.ts";
+import { compareIds } from "../compareIds.ts";
 import { sliceLevelPlane, tczyx, type PoolCut, type SliceCut, type SpatialAxis } from "../../renderer/slicePlane.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
@@ -23,12 +23,13 @@ import type {
   ActiveSetEntry,
   ChunkRequest,
   DatasetView,
+  EntityLevelSelection,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanStats,
+  SelectedCell,
   SelectionState,
   TileEntry,
-  ZoomDirection,
 } from "./types.ts";
 
 /** Priority gap between consecutive prefetch steps. */
@@ -89,10 +90,10 @@ export function slicePlaneIn(
  * which it serves whole, and where the band would be the whole chunk. The
  * plane is the one the upload cuts (`sliceLevelPlane`), so the two agree.
  */
-function slicePlaneAt(
+export function slicePlaneAt(
   entity: EntitySnapshot,
   level: number,
-  snapshot: DatasetView,
+  snapshot: Pick<DatasetView, "selection">,
   config: PlanningConfig,
 ): PlaneInChunks | null {
   if (snapshot.selection.renderMode !== "slice" || !entity.sourceLevels.includes(level)) return null;
@@ -153,7 +154,7 @@ export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
   const priority = a.priority - b.priority;
   if (priority !== 0) return priority;
 
-  const image = a.imageId.localeCompare(b.imageId);
+  const image = compareIds(a.imageId, b.imageId);
   if (image !== 0) return image;
 
   return (
@@ -163,7 +164,7 @@ export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
     a.y - b.y ||
     a.x - b.x ||
     a.c - b.c ||
-    a.chunkKey.localeCompare(b.chunkKey)
+    compareIds(a.chunkKey, b.chunkKey)
   );
 }
 
@@ -244,83 +245,59 @@ export class LaneRequests {
 }
 
 /**
- * A request's place within its lane: more important entities first, then
- * chunks nearer the view's focus.
+ * A coarse request's place within its lane: more important entities first,
+ * then chunks nearer the view's focus. The detail and prefetch lanes rank by
+ * the level selection's fetch order instead.
  */
 function inLaneKey(entity: EntitySnapshot, distance: number, config: PlanningConfig): number {
   return (1.0 - entity.importance) * config.importanceWeight + distance * config.distanceWeight;
 }
 
-/** One visible tile and the queries its lanes read from the plan's enumeration. */
-export interface TileQueries {
+/** One visible tile: what the level selection chose for it, and its coarse query into the plan's enumeration. */
+export interface TileChunks {
   entry: TileEntry;
   entity: EntitySnapshot;
-  /** One query per detail-tier level, in `entry.detailLevels` order. */
-  detail: number[];
+  /** The level selection's cells for the tile, or undefined when it chose none. */
+  chosen: EntityLevelSelection | undefined;
   coarse: number | null;
   /** Future timepoints the prefetch lane steps through, nearest first. */
   timepointSteps: number;
-  /** The prefetch lane's level step, when the lane has steps left for it. */
-  levelStep: LevelStep | null;
 }
 
-interface LevelStep {
-  level: number;
-  query: number;
-  /** Prefetch steps it takes, each the size of the visible target-level set. */
-  steps: number;
-}
-
-/** What one plan's lanes draw on: the enumeration and how its queries map to tiles. */
+/** What one plan's lanes draw on: the selection per tile and the coarse lane's enumeration. */
 export interface PlanChunks {
-  tiles: TileQueries[];
+  tiles: TileChunks[];
   found: ChunkEnumeration;
 }
 
 /**
- * Enumerate, in one call into the core, every chunk the plan's lanes can
- * ask for: each visible tile's detail levels, its coarse level, and the
- * prefetch lane's level step. Timepoint prefetch reuses the detail chunks,
- * since only `t` differs.
+ * Enumerate, in one call into the core, the coarse level of every visible
+ * tile. The detail and prefetch lanes take their chunks from the level
+ * selection, which already enumerated them within the budget.
  */
 export function enumeratePlanChunks(
   activeSet: readonly ActiveSetEntry[],
   snapshot: DatasetView,
   entityById: ReadonlyMap<string, EntitySnapshot>,
   config: PlanningConfig,
-  zoomDirection: ZoomDirection | null,
 ): PlanChunks {
   const queries: LevelQuery[] = [];
-  const ask = (entity: EntitySnapshot, level: number, radiusView: number): number =>
-    queries.push({ entity, level, radiusView }) - 1;
-  const tiles: TileQueries[] = [];
+  const tiles: TileChunks[] = [];
   for (const entry of activeSet) {
     if (entry.kind !== "tile") continue;
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
-
-    const detail = entry.detailLevels.map((level) => ask(entity, level, config.detailRenderRadiusView));
+    const chosen = snapshot.levelSelection.entities.get(entry.entityId);
     const coarse = entry.coarseLevel === null
       ? null
-      : ask(entity, entry.coarseLevel, config.coarseRenderRadiusView);
+      : queries.push({ entity, level: entry.coarseLevel, radiusView: config.coarseRenderRadiusView }) - 1;
 
-    // The prefetch lane's budget is `prefetchDepth` steps. A level in the
-    // zoom direction takes the last step, and any step the timepoints
-    // cannot fill.
-    let timepointSteps = 0;
-    let levelStep: LevelStep | null = null;
-    const level0 = entity.levels[0];
-    if (level0 !== undefined) {
-      const level = levelInZoomDirection(entity, zoomDirection);
-      const allowed = level === null ? config.prefetchDepth : config.prefetchDepth - 1;
-      const timepoints = level0.grid_shape[Axis.T] ?? 0;
-      timepointSteps = Math.max(0, Math.min(allowed, timepoints - 1 - snapshot.selection.t));
-      const steps = config.prefetchDepth - timepointSteps;
-      if (level !== null && steps > 0) {
-        levelStep = { level, query: ask(entity, level, config.detailRenderRadiusView), steps };
-      }
-    }
-    tiles.push({ entry, entity, detail, coarse, timepointSteps, levelStep });
+    // The prefetch lane's budget is `prefetchDepth` steps. The selection's
+    // lookahead takes the last step when it has one.
+    const allowed = (chosen?.lookahead.length ?? 0) > 0 ? config.prefetchDepth - 1 : config.prefetchDepth;
+    const timepoints = entity.levels[0]?.grid_shape[Axis.T] ?? 0;
+    const timepointSteps = Math.max(0, Math.min(allowed, timepoints - 1 - snapshot.selection.t));
+    tiles.push({ entry, entity, chosen, coarse, timepointSteps });
   }
   const found = enumerateChunks(snapshot.visibleRegion, config.depthBiasView, queries);
   return { tiles, found };
@@ -329,62 +306,90 @@ export function enumeratePlanChunks(
 /** A lane's sink for requests and their in-lane keys. */
 type Push = (req: ChunkRequest, key: number) => void;
 
+/** Where one lane's requests go: its lane, tier and band, and the slice view's plane at the level. */
+interface LaneTarget {
+  lane: ChunkRequest["lane"];
+  tier: ChunkRequest["tier"];
+  band: number;
+  t: number;
+  /** With it, a chunk that holds the slice view's plane asks for that plane and fetches the band around it. */
+  slice: PlaneInChunks | null;
+  /** Keep only the chunks that hold the plane, and ask for each whole. */
+  whole: boolean;
+  /** The plane of the level the slice view cuts, which its pools hold ({@link poolCutAt}). */
+  cut: PoolCut | undefined;
+}
+
 /**
- * Push one request per channel for each chunk `query` found at `level`, at
- * timepoint `t`, in `lane`'s `band`. Channels are innermost so
- * equal-priority multi-channel chunks interleave by cell.
- *
- * With `slice`, a chunk that holds the slice view's plane asks for that
- * plane and fetches the band around it. `whole` keeps only those chunks and
- * asks for each whole.
+ * Push one request per channel for the chunk at `level`, `[x, y, z]`.
+ * Channels are innermost so equal-priority multi-channel chunks interleave
+ * by cell.
  */
-function emitQuery(
-  chunks: PlanChunks,
+function emitChunk(
   entity: EntitySnapshot,
-  query: number,
   level: number,
+  x: number,
+  y: number,
+  z: number,
+  key: number,
+  snapshot: DatasetView,
+  target: LaneTarget,
+  push: Push,
+): void {
+  const { slice, whole, cut } = target;
+  const holdsPlane = slice !== null && chunkAlong(slice.axis, x, y, z) === slice.chunk;
+  if (whole && !holdsPlane) return;
+  for (const c of snapshot.selection.visibleChannels) {
+    const req: ChunkRequest = {
+      datasetId: snapshot.datasetId,
+      entityId: entity.entityId,
+      imageId: entity.imageId,
+      level,
+      t: target.t,
+      c,
+      z,
+      y,
+      x,
+      lane: target.lane,
+      tier: target.tier,
+      mode: snapshot.selection.renderMode,
+      priority: target.band,
+      chunkKey: chunkKey(level, target.t, c, z, y, x),
+    };
+    if (holdsPlane && !whole) {
+      req.plane = slice.plane;
+      req.planes = slice.planes;
+      if (slice.axis !== "z") req.planeAxis = slice.axis;
+    }
+    if (cut) req.cut = cut;
+    push(req, key);
+  }
+}
+
+/**
+ * The level selection's `cells` of one tile into `target`, each ranked by
+ * its place in the view's fetch order.
+ */
+function emitCells(
+  entity: EntitySnapshot,
+  cells: readonly SelectedCell[],
   snapshot: DatasetView,
   config: PlanningConfig,
-  t: number,
-  lane: ChunkRequest["lane"],
-  tier: ChunkRequest["tier"],
-  band: number,
+  lane: Omit<LaneTarget, "slice" | "whole" | "cut">,
   push: Push,
-  slice: PlaneInChunks | null = null,
   whole = false,
 ): void {
-  const channels = snapshot.selection.visibleChannels;
-  const cut = poolCutAt(entity, level, snapshot);
-  chunks.found.forEach(query, (x, y, z, distance) => {
-    const holdsPlane = slice !== null && chunkAlong(slice.axis, x, y, z) === slice.chunk;
-    if (whole && !holdsPlane) return;
-    const key = inLaneKey(entity, distance, config);
-    for (const c of channels) {
-      const req: ChunkRequest = {
-        datasetId: snapshot.datasetId,
-        entityId: entity.entityId,
-        imageId: entity.imageId,
-        level,
-        t,
-        c,
-        z,
-        y,
-        x,
-        lane,
-        tier,
-        mode: snapshot.selection.renderMode,
-        priority: band,
-        chunkKey: chunkKey(level, t, c, z, y, x),
-      };
-      if (holdsPlane && !whole) {
-        req.plane = slice.plane;
-        req.planes = slice.planes;
-        if (slice.axis !== "z") req.planeAxis = slice.axis;
-      }
-      if (cut) req.cut = cut;
-      push(req, key);
+  // Cells come grouped by level, so each level's target is made once.
+  const targets = new Map<number, LaneTarget>();
+  for (const cell of cells) {
+    let target = targets.get(cell.level);
+    if (target === undefined) {
+      const slice = slicePlaneAt(entity, cell.level, snapshot, config);
+      target = { ...lane, slice, whole, cut: poolCutAt(entity, cell.level, snapshot) };
+      targets.set(cell.level, target);
     }
-  });
+    emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, push);
+  }
 }
 
 /** Add a query's culling counts once per channel. */
@@ -457,123 +462,68 @@ export function emitMinimapLane(
   }
 }
 
-/** Detail lane: each visible tile's chunks at its detail-tier levels. */
+/**
+ * Detail lane: the chunks the level selection chose for each visible tile,
+ * in the selection's fetch order: coarser levels first, so a slow link fills
+ * the whole view before it sharpens, then larger on screen, then nearer the
+ * focus.
+ */
 export function emitDetailLane(
   chunks: PlanChunks,
   snapshot: DatasetView,
-  stats: PlanStats,
   out: LaneRequests,
   config: PlanningConfig,
 ): void {
   const push: Push = (req, key) => out.push(req, key);
-  for (const { entity, entry, detail } of chunks.tiles) {
-    detail.forEach((query, i) => {
-      count(chunks, query, snapshot, stats);
-      const level = entry.detailLevels[i];
-      emitQuery(
-        chunks, entity, query, level, snapshot, config, snapshot.selection.t,
-        "detail", "detail", config.detailLaneOffset, push, slicePlaneAt(entity, level, snapshot, config),
-      );
-    });
+  for (const { entity, chosen } of chunks.tiles) {
+    if (chosen === undefined) continue;
+    emitCells(entity, chosen.detail, snapshot, config, {
+      lane: "detail", tier: "detail", band: config.detailLaneOffset, t: snapshot.selection.t,
+    }, push);
   }
 }
 
 /**
- * The target's neighbor among the source levels in the zoom direction. A
- * pinned target never moves with the zoom, so it gets none. Generated coarse
- * levels are absent from `sourceLevels`, so they are never returned.
- */
-function levelInZoomDirection(
-  entity: EntitySnapshot,
-  zoomDirection: ZoomDirection | null,
-): number | null {
-  if (zoomDirection === null || entity.levelPinned) return null;
-  const at = entity.sourceLevels.indexOf(entity.targetLevel);
-  if (at < 0) return null;
-  return entity.sourceLevels[zoomDirection === "in" ? at - 1 : at + 1] ?? null;
-}
-
-/**
- * Prefetch lane: for each visible tile, the detail chunks at future
- * timepoints, and chunks at the next level in the direction of the last
- * zoom change so that level is partly resident when the target crosses to
- * it. After a step along Z (`cutStep`), the detail chunks the slice view's
- * plane lies in come first, whole, so the steps after it find every plane
- * of them resident.
+ * Prefetch lane: for each visible tile, the selected chunks at future
+ * timepoints, and the selection's lookahead, the chunks it would draw next in
+ * the direction of the last zoom change, so they are partly resident when the
+ * selection moves to them. After a step along Z (`cutStep`), the selected
+ * chunks the slice view's plane lies in come first, whole, so the steps after
+ * it find every plane of them resident.
  *
- * The lane's budget per entity is `prefetchDepth` steps, each the visible
- * target-level set. With no level to prefetch, every step is a future
- * timepoint. With one, the level step takes the lane's last step and the
- * timepoint steps keep the ones before it. The level step also takes any
- * step the timepoints cannot fill, nearest the view's focus first. Each
- * step is its own band, nearest first, so a later step never outranks an
- * earlier one.
+ * The lane's budget per entity is `prefetchDepth` steps. Each timepoint step
+ * is the selection at that timepoint, and the lookahead takes the last step.
+ * Each step is its own band, nearest first, so a later step never outranks
+ * an earlier one. The lookahead is bounded by the room the selection leaves
+ * in the budget, never by the chunks of a level in view.
  */
 export function emitPrefetchLane(
   chunks: PlanChunks,
   snapshot: DatasetView,
-  stats: PlanStats,
   out: LaneRequests,
   config: PlanningConfig,
   cutStep = false,
 ): void {
   const push: Push = (req, key) => out.push(req, key);
-  for (const { entity, entry, detail, timepointSteps, levelStep } of chunks.tiles) {
+  const t = snapshot.selection.t;
+  for (const { entity, chosen, timepointSteps } of chunks.tiles) {
+    if (chosen === undefined) continue;
     if (cutStep) {
-      detail.forEach((query, i) => {
-        const level = entry.detailLevels[i];
-        const slice = slicePlaneAt(entity, level, snapshot, config);
-        if (slice === null) return;
-        emitQuery(
-          chunks, entity, query, level, snapshot, config, snapshot.selection.t,
-          "prefetch", "detail", config.prefetchLaneOffset, push, slice, true,
-        );
-      });
+      emitCells(entity, chosen.detail, snapshot, config, {
+        lane: "prefetch", tier: "detail", band: config.prefetchLaneOffset, t,
+      }, push, true);
     }
     for (let dt = 1; dt <= timepointSteps; dt++) {
-      detail.forEach((query, i) => {
-        count(chunks, query, snapshot, stats);
-        const level = entry.detailLevels[i];
-        emitQuery(
-          chunks, entity, query, level, snapshot, config, snapshot.selection.t + dt,
-          "prefetch", "detail", config.prefetchLaneOffset + dt * PREFETCH_STEP, push,
-          slicePlaneAt(entity, level, snapshot, config),
-        );
-      });
+      emitCells(entity, chosen.detail, snapshot, config, {
+        lane: "prefetch", tier: "detail", band: config.prefetchLaneOffset + dt * PREFETCH_STEP, t: t + dt,
+      }, push);
     }
-    if (levelStep === null) continue;
-    let stepSize = 0;
-    for (const query of detail) stepSize += chunks.found.size(query);
-    stepSize *= snapshot.selection.visibleChannels.length;
-    emitLevelStep(chunks, entity, levelStep, snapshot, stats, config, levelStep.steps * stepSize, out);
+    if (config.prefetchDepth > 0) {
+      emitCells(entity, chosen.lookahead, snapshot, config, {
+        lane: "prefetch", tier: "detail", band: config.prefetchLaneOffset + config.prefetchDepth * PREFETCH_STEP, t,
+      }, push);
+    }
   }
-}
-
-/**
- * The prefetch lane's level step: the `allowance` requests at the level
- * nearest the view's focus, in the lane's last step band.
- */
-function emitLevelStep(
-  chunks: PlanChunks,
-  entity: EntitySnapshot,
-  step: LevelStep,
-  snapshot: DatasetView,
-  stats: PlanStats,
-  config: PlanningConfig,
-  allowance: number,
-  out: LaneRequests,
-): void {
-  if (allowance <= 0) return;
-  count(chunks, step.query, snapshot, stats);
-  const band = config.prefetchLaneOffset + config.prefetchDepth * PREFETCH_STEP;
-  const candidates: { req: ChunkRequest; key: number }[] = [];
-  emitQuery(
-    chunks, entity, step.query, step.level, snapshot, config, snapshot.selection.t,
-    "prefetch", "detail", band, (req, key) => candidates.push({ req, key }),
-    slicePlaneAt(entity, step.level, snapshot, config),
-  );
-  candidates.sort((a, b) => a.key - b.key || compareChunkRequests(a.req, b.req));
-  for (const { req, key } of candidates.slice(0, allowance)) out.push(req, key);
 }
 
 /**
@@ -593,10 +543,14 @@ export function emitCoarseLane(
   const push: Push = (req, key) => out.push(req, key);
   for (const { entity, entry, coarse } of chunks.tiles) {
     if (coarse === null || entry.coarseLevel === null) continue;
+    const level = entry.coarseLevel;
+    const target: LaneTarget = {
+      lane: "coarse", tier: "coarse", band: config.coarseLaneOffset, t: snapshot.selection.t, slice: null, whole: false,
+      cut: poolCutAt(entity, level, snapshot),
+    };
     count(chunks, coarse, snapshot, stats);
-    emitQuery(
-      chunks, entity, coarse, entry.coarseLevel, snapshot, config, snapshot.selection.t,
-      "coarse", "coarse", config.coarseLaneOffset, push,
-    );
+    chunks.found.forEach(coarse, (x, y, z, distance) => {
+      emitChunk(entity, level, x, y, z, inLaneKey(entity, distance, config), snapshot, target, push);
+    });
   }
 }

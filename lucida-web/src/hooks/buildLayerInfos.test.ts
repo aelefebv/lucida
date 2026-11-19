@@ -9,6 +9,7 @@ import type { DatasetLevels, LevelsByView } from "../pipeline/datasetLevels.ts";
 import { withLevels } from "./useDatasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import type { SlicePlane } from "../renderer/slicePlane.ts";
+import type { LevelRange } from "../renderer/workerProtocol.ts";
 
 // A single-level image with the given dtype + [Y, X] shape (chunked so a small
 // label's footprint fits the default caps).
@@ -84,6 +85,11 @@ function stubScene(
 
 function datasetsWith(labels: LabelSpec[]): Map<string, DatasetState> {
   return new Map([["ds-0", { manifest: manifest(labels) } as unknown as DatasetState]]);
+}
+
+/** A view's level readout whose selection is its target. */
+function levelsOf(target: LevelRange, displayed: LevelRange | null, coarserThanTarget: boolean): DatasetLevels {
+  return { target, selected: target, displayed, coarserThanTarget, selectedCoarserThanTarget: false };
 }
 
 const emptyMaps = {
@@ -399,8 +405,10 @@ describe("buildLayerInfos level readout", () => {
       ...emptyMaps,
       levels: new Map([["ds-0", new Map([[0, {
         target: { min: 1, max: 1 },
+        selected: { min: 1, max: 1 },
         displayed: { min: 1, max: 3 },
         coarserThanTarget: true,
+        selectedCoarserThanTarget: false,
       }]])]]),
     });
     expect(infos[0]).toMatchObject({
@@ -411,8 +419,8 @@ describe("buildLayerInfos level readout", () => {
   });
 
   it("reads the active view's levels when two views draw the dataset", () => {
-    const left: DatasetLevels = { target: { min: 1, max: 1 }, displayed: { min: 1, max: 1 }, coarserThanTarget: false };
-    const right: DatasetLevels = { target: { min: 2, max: 2 }, displayed: { min: 3, max: 3 }, coarserThanTarget: true };
+    const left: DatasetLevels = levelsOf({ min: 1, max: 1 }, { min: 1, max: 1 }, false);
+    const right: DatasetLevels = levelsOf({ min: 2, max: 2 }, { min: 3, max: 3 }, true);
     const maps = { ...emptyMaps, levels: new Map([["ds-0", new Map([[0, left], [1, right]])]]) };
     const sceneIn = (view: number) => stubScene(["ds-0"], settingsWith([]), 0, [0], view);
 
@@ -432,8 +440,8 @@ describe("buildLayerInfos level readout", () => {
   });
 
   it("keeps each view's readout apart, and drops one the worker reports empty", () => {
-    const left: DatasetLevels = { target: { min: 1, max: 1 }, displayed: null, coarserThanTarget: false };
-    const right: DatasetLevels = { target: { min: 2, max: 2 }, displayed: null, coarserThanTarget: false };
+    const left: DatasetLevels = levelsOf({ min: 1, max: 1 }, null, false);
+    const right: DatasetLevels = levelsOf({ min: 2, max: 2 }, null, false);
     let levels = withLevels(new Map(), "ds-0", 0, left);
     levels = withLevels(levels, "ds-0", 1, right);
     expect(levels.get("ds-0")).toEqual(new Map([[0, left], [1, right]]));

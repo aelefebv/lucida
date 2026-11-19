@@ -12,6 +12,11 @@ export interface VisibleRegion {
   zRangeVox: [number, number];
   /** Screen pixels per voxel. */
   effectiveZoom: number;
+  /**
+   * Device pixels per level-0 sample at the camera's focus, which a zoom
+   * moves and an orbit does not. Absent: {@link effectiveZoom}.
+   */
+  focalZoom?: number;
   /** View-relative radius basis in voxels. 3-D uses the focal plane, not the far-frustum AABB. */
   radiusBasisVox?: number;
   /** Sort/focal center in voxel coordinates. */
@@ -28,4 +33,11 @@ export interface VisibleRegion {
    * in each image's own samples. Absent: Z.
    */
   cutAxis?: SpatialAxis;
+  /**
+   * Device pixels per level-0 sample anywhere in the region, as the core
+   * writes it (`SampleMeasure` in `lucida-core/src/camera.rs`), which the
+   * level selection reads at every chunk. Planning passes it back to the
+   * core unread. Absent: `effectiveZoom` everywhere.
+   */
+  measure?: unknown;
 }

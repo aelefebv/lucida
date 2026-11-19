@@ -23,8 +23,10 @@ describe("summarizeDatasetLevels", () => {
       entity({ targetLevel: 2, displayed: { min: 2, max: 2 } }),
     ])).toEqual({
       target: { min: 2, max: 2 },
+      selected: null,
       displayed: { min: 2, max: 2 },
       coarserThanTarget: false,
+      selectedCoarserThanTarget: false,
     });
   });
 
@@ -33,16 +35,20 @@ describe("summarizeDatasetLevels", () => {
       entity({ targetLevel: 1, displayed: { min: 1, max: 3 } }),
     ])).toEqual({
       target: { min: 1, max: 1 },
+      selected: null,
       displayed: { min: 1, max: 3 },
       coarserThanTarget: true,
+      selectedCoarserThanTarget: false,
     });
   });
 
   it("leaves displayed null while nothing is on screen yet", () => {
     expect(summarizeDatasetLevels([entity({ targetLevel: 0 })])).toEqual({
       target: { min: 0, max: 0 },
+      selected: null,
       displayed: null,
       coarserThanTarget: false,
+      selectedCoarserThanTarget: false,
     });
   });
 
@@ -53,8 +59,10 @@ describe("summarizeDatasetLevels", () => {
       entity({ entityId: "c", targetLevel: 2 }),
     ])).toEqual({
       target: { min: 1, max: 3 },
+      selected: null,
       displayed: { min: 1, max: 3 },
       coarserThanTarget: false,
+      selectedCoarserThanTarget: false,
     });
   });
 
@@ -74,14 +82,39 @@ describe("summarizeDatasetLevels", () => {
       offScreen,
     ])).toEqual({
       target: { min: 1, max: 1 },
+      selected: null,
       displayed: { min: 1, max: 1 },
       coarserThanTarget: false,
+      selectedCoarserThanTarget: false,
     });
     expect(summarizeDatasetLevels([offScreen])).toEqual({
       target: { min: 4, max: 4 },
+      selected: null,
       displayed: null,
       coarserThanTarget: false,
+      selectedCoarserThanTarget: false,
     });
+  });
+});
+
+describe("the selected levels", () => {
+  it("ranges the levels the selection chose, and flags one coarser than its target", () => {
+    expect(summarizeDatasetLevels([
+      entity({ entityId: "a", targetLevel: 0, selected: { min: 2, max: 3 }, displayed: { min: 2, max: 4 } }),
+      entity({ entityId: "b", targetLevel: 2, selected: { min: 2, max: 2 } }),
+    ])).toEqual({
+      target: { min: 0, max: 2 },
+      selected: { min: 2, max: 3 },
+      displayed: { min: 2, max: 4 },
+      coarserThanTarget: true,
+      selectedCoarserThanTarget: true,
+    });
+  });
+
+  it("does not flag a selection that reaches each entity's target", () => {
+    expect(summarizeDatasetLevels([
+      entity({ targetLevel: 1, selected: { min: 1, max: 1 }, displayed: { min: 1, max: 2 } }),
+    ])?.selectedCoarserThanTarget).toBe(false);
   });
 });
 
@@ -103,5 +136,7 @@ describe("sameDatasetLevels", () => {
     expect(sameDatasetLevels(base, { ...base!, target: { min: 0, max: 1 } })).toBe(false);
     expect(sameDatasetLevels(base, { ...base!, displayed: null })).toBe(false);
     expect(sameDatasetLevels(base, { ...base!, coarserThanTarget: false })).toBe(false);
+    expect(sameDatasetLevels(base, { ...base!, selected: { min: 1, max: 1 } })).toBe(false);
+    expect(sameDatasetLevels(base, { ...base!, selectedCoarserThanTarget: true })).toBe(false);
   });
 });

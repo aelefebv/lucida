@@ -1,6 +1,7 @@
 import type { CacheEntry, ReadyChunkDelivery } from "./types.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import { deliveryTarget } from "../../renderer/poolKeys.ts";
+import { compareIds } from "../compareIds.ts";
 
 /** What the current plans make of one resident entry. */
 export interface ResidentJudgement {
@@ -36,15 +37,15 @@ export function deliverySlot(imageId: string, c: number, tier: ResidencyTier, ch
 export function compareDeliveries(a: ReadyChunkDelivery, b: ReadyChunkDelivery): number {
   return (
     (a.priority ?? 0) - (b.priority ?? 0) ||
-    a.imageId.localeCompare(b.imageId) ||
+    compareIds(a.imageId, b.imageId) ||
     a.level - b.level ||
     a.t - b.t ||
     a.z - b.z ||
     a.y - b.y ||
     a.x - b.x ||
     a.c - b.c ||
-    a.chunkKey.localeCompare(b.chunkKey) ||
-    deliveryTarget(a.mode, a.cut).localeCompare(deliveryTarget(b.mode, b.cut)) ||
+    compareIds(a.chunkKey, b.chunkKey) ||
+    compareIds(deliveryTarget(a.mode, a.cut), deliveryTarget(b.mode, b.cut)) ||
     (a.residencyTier === b.residencyTier ? 0 : a.residencyTier === "detail" ? -1 : 1)
   );
 }

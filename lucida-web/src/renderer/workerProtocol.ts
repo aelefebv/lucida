@@ -602,16 +602,20 @@ export interface ColdStateActiveEntry {
     levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
   /**
-   * Levels the detail tier requests, target level first (the planner's
-   * `TileEntry.detailLevels`). The worker allocates detail sections for
-   * the target and the next coarser levels (see
-   * `entitySources.detailTierLevels`), reports missing chunks at these
-   * levels, and samples the target first, then coarser resident levels,
-   * never a finer one.
+   * Levels the detail tier requests, finest first (the planner's
+   * `TileEntry.detailLevels`, the levels the level selection chose). The
+   * worker allocates detail sections for the finest and the next coarser
+   * levels (see `entitySources.detailTierLevels`), reports missing chunks at
+   * these levels, and samples the finest first, then coarser resident
+   * levels, never a finer one.
    */
   detailLevels: number[];
   /** Level the coarse tier holds for this entity, or `null` for none. */
   coarseLevel: number | null;
+  /** The level the screen calls for, which the level readout reports against. Absent: the finest detail level. */
+  targetLevel?: number;
+  /** Whether the level selection left some of the entity's chunks at {@link coarseLevel}. Absent: no. */
+  keepsCoarse?: boolean;
   /**
    * Column-major model matrix from the entity's `[0,1]^3` unit cube to
    * world space. The worker writes it straight into the descriptor buffer;
@@ -1076,8 +1080,15 @@ export interface LevelRange {
  */
 export interface EntityLevelReport {
   entityId: string;
+  /** The level the screen calls for. */
   targetLevel: number;
+  /**
+   * The levels the level selection chose to draw the entity at, the coarse
+   * tier's included when it kept some. Absent or null before it chose any.
+   */
+  selected?: LevelRange | null;
   visible: boolean;
+  /** The levels on screen now: the selected ones once resident, coarser ones until then. */
   displayed: LevelRange | null;
 }
 

@@ -97,6 +97,13 @@ export const DISTANCE_WEIGHT = 10;
 export const DEPTH_BIAS_VIEW = 0;
 
 /**
+ * The share of the memory budget the level selection selects to. The rest
+ * holds the coarser chunks a refinement replaces until the finer ones
+ * arrive, and the prefetch lane.
+ */
+export const SELECTION_SHARE = 0.8;
+
+/**
  * Per-tick planning tunables threaded through {@link plan}. Lane offsets
  * are whole numbers: a lane's requests take priorities less than one above
  * its offset, so lanes at different offsets never interleave.
@@ -116,6 +123,8 @@ export interface PlanningConfig {
    * visible Z range. See {@link DEPTH_BIAS_VIEW}.
    */
   depthBiasView: number;
+  /** {@link SELECTION_SHARE}. */
+  selectionShare: number;
 
   /**
    * Detail render radius as a multiplier of the visible-region
@@ -157,6 +166,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
   depthBiasView: DEPTH_BIAS_VIEW,
+  selectionShare: SELECTION_SHARE,
   detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,

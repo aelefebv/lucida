@@ -1,7 +1,7 @@
 /**
  * Diffs the planner's wanted chunks against what the atlases hold, and
- * reads off from the wanted target-level chunks which level serves each
- * entity's visible pixels. GPU-free.
+ * reads off from the wanted detail chunks which level serves each entity's
+ * visible pixels. GPU-free.
  *
  * The chunks come from the cold state, never from view geometry, so this
  * wants exactly what the page delivers.
@@ -25,7 +25,7 @@ import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";
 import { makeCompositeKey, parseCompositeKey, parsePlaneChunkKey, planeChunkKey } from "./chunkKeys.ts";
 import type { SpatialAxis } from "./slicePlane.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
-import { detailTierLevels, targetLevelOf } from "./entitySources.ts";
+import { detailTierLevels, finestLevelOf, selectedLevels } from "./entitySources.ts";
 import { sliceChunkIndex, sliceLevelPlane } from "./slicePlane.ts";
 import { wantedEntryKey, type WantedChunkIndex } from "./wantedChunks.ts";
 
@@ -54,7 +54,7 @@ export interface AtlasSnapshot {
 
 export interface WantedSetResult {
   missing: MissingChunk[];
-  /** One report per tile entry with a target level, in active-set order. */
+  /** One report per tile entry, in active-set order. */
   levels: EntityLevelReport[];
 }
 
@@ -82,7 +82,7 @@ export interface WantedSetUpdate {
    * view lacked at the last update and still lacks is not named again.
    */
   missing: MissingChunk[];
-  /** One report per tile entry with a target level, in active-set order; null when the last update's still stands. */
+  /** One report per tile entry, in active-set order; null when the last update's still stands. */
   levels: EntityLevelReport[] | null;
 }
 
@@ -91,7 +91,7 @@ export interface WantedSetUpdate {
  * serves each entity's visible pixels, from nothing kept.
  *
  * Only the planner's wanted keys are reported missing. The coarser levels
- * kept under the target are sampled when resident but never wanted. A
+ * kept under the finest are sampled when resident but never wanted. A
  * position's serving level is the first in sampling order whose covering
  * chunks are all resident; a position no level covers is blank and counts
  * toward neither end of the entity's range.
@@ -123,8 +123,8 @@ function sameScope(a: PlanScope | null, b: PlanScope): boolean {
 
 /**
  * One wanted chunk the view has a section for: where it lives and, for a
- * target-level chunk of the detail tier, the sections that may serve its
- * position. It carries what was last read of it.
+ * chunk of the detail tier, the sections that may serve its position. It
+ * carries what was last read of it.
  */
 interface ChunkLookup {
   poolKey: string;
@@ -133,17 +133,17 @@ interface ChunkLookup {
   plane: number | null;
   /** What the report says when the pool lacks it. */
   missing: MissingChunk;
-  /** The sampled sections' covering chunks, in sampling order; null for a chunk that is not a target position. */
+  /** The sampled sections' covering chunks, in sampling order; null for a chunk that is not a detail position. */
   serving: Coverage[] | null;
   /** Whether the pool held it when last read. */
   held: boolean;
-  /** For a target position, the level that served it when last read; null when none did. */
+  /** For a detail position, the level that served it when last read; null when none did. */
   servedBy: number | null;
-  /** For a target position, its entity's count of positions by level. */
+  /** For a detail position, its entity's count of positions by level. */
   tally: LevelTally | null;
 }
 
-/** The chunks of one sampled level that cover a target position, all of which it needs resident to serve it. */
+/** The chunks of one sampled level that cover a detail position, all of which it needs resident to serve it. */
 interface Coverage {
   level: number;
   poolKey: string;
@@ -204,7 +204,7 @@ interface PoolSeen {
  *
  * Residency is read again only for the slot keys an update is told changed,
  * through an index from each pool's slot keys to the lookups that read them,
- * as a chunk of its own or as one covering a target position.
+ * as a chunk of its own or as one covering a detail position.
  */
 export class WantedSetTracker {
   private plans = new Map<ColdStateActiveEntry, Map<number, MemberPlan>>();
@@ -402,10 +402,16 @@ export class WantedSetTracker {
   private levelReports(coldState: ColdStateMessage): EntityLevelReport[] {
     const levels: EntityLevelReport[] = [];
     for (const entry of coldState.activeSet) {
-      const targetLevel = targetLevelOf(entry);
+      const targetLevel = entry.targetLevel ?? finestLevelOf(entry);
       if (targetLevel === undefined) continue;
       const tally = this.tallies.get(entry)!;
-      levels.push({ entityId: entry.entityId, targetLevel, visible: tally.visible, displayed: tally.displayed() });
+      levels.push({
+        entityId: entry.entityId,
+        targetLevel,
+        selected: selectedLevels(entry),
+        visible: tally.visible,
+        displayed: tally.displayed(),
+      });
     }
     return levels;
   }
@@ -422,6 +428,8 @@ function sameLevelReports(a: readonly EntityLevelReport[], b: readonly EntityLev
     const other = b[i];
     return report.entityId === other.entityId &&
       report.targetLevel === other.targetLevel &&
+      report.selected?.min === other.selected?.min &&
+      report.selected?.max === other.selected?.max &&
       report.visible === other.visible &&
       report.displayed?.min === other.displayed?.min &&
       report.displayed?.max === other.displayed?.max;
@@ -500,10 +508,10 @@ function planMember(
     if (!grids.has(level)) grids.set(level, levelGrid(entry, level));
     return grids.get(level);
   };
-  const targetLevel = targetLevelOf(entry);
+  const finest = finestLevelOf(entry);
   let sampled: SampledLevel[] | null = null;
   const sampledLevels = (): SampledLevel[] =>
-    (sampled ??= targetLevel === undefined ? [] : resolveSampledLevels(entry, section, gridOf));
+    (sampled ??= finest === undefined ? [] : resolveSampledLevels(entry, section, gridOf));
   const lookups = new Map<string, ChunkLookup>();
 
   for (const tier of RESIDENCY_TIERS) {
@@ -545,8 +553,15 @@ function planMember(
           chunkKey,
           ...(plane !== null ? { cut: { axis: scope.sliceAxis, plane } } : {}),
         },
-        serving: tier === "detail" && chunk.level === targetLevel
-          ? coverages(sampledLevels(), grid, [chunk.x, chunk.y, chunk.z], context)
+        // A wanted chunk is served by its own level once resident, or a
+        // coarser one until then, or by the level one finer the selection
+        // just coarsened it from, still resident. Levels finer than that
+        // are left out: a chunk's cover two levels down runs to dozens.
+        serving: tier === "detail"
+          ? coverages(
+            sampledLevels().filter((level) => level.grid.level >= chunk.level - 1),
+            grid, [chunk.x, chunk.y, chunk.z], context,
+          )
           : null,
         held: false,
         servedBy: null,
@@ -566,7 +581,7 @@ function holds(atlas: AtlasSnapshot | undefined, slotKey: string, plane: number 
 }
 
 /**
- * How many of one entity's wanted target positions each level serves, so
+ * How many of one entity's wanted detail positions each level serves, so
  * the finest and coarsest come out as positions change level one at a time.
  */
 class LevelTally {
@@ -680,7 +695,7 @@ interface SampledLevel {
 
 /**
  * The sections the renderer samples for one member, in sampling order:
- * the detail-tier levels finest first (the target, then the coarser
+ * the detail-tier levels finest first (the finest chosen, then the coarser
  * levels kept under it), then the coarse tier. A level the worker holds
  * no section for is skipped, as `selectEntitySources` skips it.
  */
@@ -706,9 +721,9 @@ function resolveSampledLevels(
 }
 
 /**
- * The chunks of each sampled level that cover one target-level chunk
- * position, in sampling order. A level whose covering range is empty can
- * never serve the position and is left out.
+ * The chunks of each sampled level that cover one wanted chunk's position,
+ * in sampling order. A level whose covering range is empty can never serve
+ * the position and is left out.
  */
 function coverages(
   sampled: readonly SampledLevel[],

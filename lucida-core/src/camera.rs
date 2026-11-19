@@ -38,6 +38,12 @@ pub struct VisibleRegion {
     /// reports its zoom. A volume view reports the measure where the
     /// center-screen ray meets the volume.
     pub effective_zoom: f64,
+    /// Device pixels per level-0 sample at the camera's focus: a slice view's
+    /// zoom, or where a volume camera's view axis meets the point it orbits.
+    /// A zoom moves it and an orbit holds it still, which `effective_zoom`,
+    /// taken where the center ray meets the data, does not.
+    #[serde(default)]
+    pub focal_zoom: f64,
     /// Radius basis in voxels for view-relative render-radius controls.
     ///
     /// Slice mode uses the visible view half-diagonal. 3D mode uses the
@@ -969,6 +975,7 @@ impl Slice {
             xy_bounds: [min[0], min[1], max[0], max[1]],
             z_range,
             effective_zoom: self.zoom * self.plane.sample_extent(frame_to_scene),
+            focal_zoom: self.zoom * self.plane.sample_extent(frame_to_scene),
             radius_basis_vox: visible_radius_basis_from_box(min, max),
             sort_center: None,
             frustum_planes: None,
@@ -1024,6 +1031,7 @@ impl Slice {
             xy_bounds: [min[0], min[1], max[0], max[1]],
             z_range: first..plane(max[2].ceil()).max(first + 1),
             effective_zoom: self.zoom * reach,
+            focal_zoom: self.zoom * reach,
             radius_basis_vox: visible_radius_basis_from_box(min, max),
             sort_center: Some(to_frame.apply(middle)),
             frustum_planes: Some(faces),
@@ -1647,6 +1655,8 @@ impl Arcball {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
+            focal_zoom: self.effective_zoom()
+                / densest_samples_per_world(&model_matrices_f64(volume_transform).0, shape),
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
@@ -2074,6 +2084,8 @@ impl Fly {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
+            focal_zoom: self.effective_zoom()
+                / densest_samples_per_world(&model_matrices_f64(volume_transform).0, shape),
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
@@ -4259,6 +4271,24 @@ mod tests {
         let fly = Fly::new([800, 600]);
         let f = fly.pixels_per_sample_at_hit(Some(&t), shape);
         assert!(f > 0.0 && f.is_finite());
+    }
+
+    #[test]
+    fn the_focal_zoom_follows_a_zoom_and_holds_through_an_orbit() {
+        let t = crate::transform::compute_volume_transform([256, 1024, 1024], [1.0, 1.0, 1.0]);
+        let shape = [256u32, 1024, 1024];
+        let focal = |arc: &Arcball| {
+            Camera::Arcball(arc.clone())
+                .visible_region(&(0..256), Some(&t), Some(&shape))
+                .focal_zoom
+        };
+        let mut arc = Arcball::new([800, 600]);
+        let before = focal(&arc);
+        arc.theta += 0.7;
+        arc.phi += 0.2;
+        assert!((focal(&arc) / before - 1.0).abs() < 1e-9);
+        arc.distance /= 2.0;
+        assert!((focal(&arc) / before - 2.0).abs() < 1e-9);
     }
 
     #[test]

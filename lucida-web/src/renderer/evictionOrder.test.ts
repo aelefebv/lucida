@@ -77,7 +77,7 @@ function simulate(seed: number, is3D: boolean, steps: number, checkRate = 1): vo
       slotGridIdx: view.slotGridIdx,
       entityMetas: view.entityMetas,
       cameraFor: (member) => cameras.get(i, member) ?? [0.5, 0.5, 0.5],
-      targetLevelFor: (member) => view.targets.get(member),
+      finestLevelFor: (member) => view.targets.get(member),
       isWanted: (member, chunkKey) => view.wanted.get(`detail|${member}`)?.has(chunkKey) ?? false,
       sources: [view.wanted, view.targets, cameras.revisionOf(i)],
     })),

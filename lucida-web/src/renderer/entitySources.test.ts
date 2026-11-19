@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   detailTierLevels,
   selectEntitySources,
-  targetLevelOf,
+  finestLevelOf,
   type EntitySource,
 } from "./entitySources.ts";
 import { DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
@@ -63,14 +63,14 @@ function source(tier: ResidencyTier, level: number, poolKey: string, offset = le
   };
 }
 
-describe("targetLevelOf", () => {
+describe("finestLevelOf", () => {
   it("is the first detail level of a tile entry", () => {
-    expect(targetLevelOf(tile({ detailLevels: [2] }))).toBe(2);
+    expect(finestLevelOf(tile({ detailLevels: [2] }))).toBe(2);
   });
 
   it("is undefined for an entry with no levels and for a tile with no detail levels", () => {
-    expect(targetLevelOf(empty())).toBeUndefined();
-    expect(targetLevelOf(tile({ detailLevels: [] }))).toBeUndefined();
+    expect(finestLevelOf(empty())).toBeUndefined();
+    expect(finestLevelOf(tile({ detailLevels: [] }))).toBeUndefined();
   });
 });
 

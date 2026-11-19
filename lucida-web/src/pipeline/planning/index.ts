@@ -26,6 +26,10 @@ export {
   type SelectionState,
   type ViewPlanningState,
   type ViewSnapshot,
+  type ViewSnapshotBase,
+  type DatasetLevelSelection,
+  type EntityLevelSelection,
+  type SelectedCell,
   type DatasetView,
   type MemberGroup,
   type GroupSnapshot,
@@ -62,5 +66,6 @@ export {
   createSyntheticSnapshot,
   createSyntheticView,
   createSyntheticState,
+  targetLevelSelection,
   type CreateSyntheticEntityOverrides,
 } from "./synthetic.ts";
