@@ -6,6 +6,7 @@
 
 import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { EvictionPolicy } from "./eviction.ts";
+import { EvictionQueue } from "./evictionQueue.ts";
 import type { EvictionRecordTier } from "./telemetry.ts";
 
 export interface ChunkStoreTierResidency {
@@ -48,11 +49,21 @@ export interface ChunkStoreOptions {
 
 const EVICTION_BURST_THRESHOLD = 16;
 
+function imageChunkKey(imageId: string, c: number, chunkKey: string): string {
+  return `${imageId}|${c}|${chunkKey}`;
+}
+
 export class ChunkStore {
   private store = new Map<string, Map<string, CacheEntry>>();
+  /**
+   * The entries of each image chunk, by image, channel and chunk key. The
+   * render worker names chunks that way, and more than one entity can hold
+   * the same image's chunk.
+   */
+  private readonly byImageChunk = new Map<string, CacheEntry[]>();
   private bytesCounter = 0;
   private budgetBytesCounter: number;
-  private readonly policy: EvictionPolicy<CacheEntry>;
+  private readonly order: EvictionQueue<CacheEntry>;
   private readonly evictionTier: (entry: CacheEntry) => EvictionRecordTier;
   private readonly recordEviction: (tier: EvictionRecordTier, entry: CacheEntry) => void;
   /**
@@ -67,7 +78,7 @@ export class ChunkStore {
   static readonly evictionBurstThreshold = EVICTION_BURST_THRESHOLD;
 
   constructor(opts: ChunkStoreOptions) {
-    this.policy = opts.policy;
+    this.order = new EvictionQueue(opts.policy, (entry) => this.get(entry.entityId, entry.chunkKey) === entry);
     this.budgetBytesCounter = opts.budgetBytes;
     this.evictionTier = opts.evictionTier;
     this.recordEviction = opts.recordEviction;
@@ -109,9 +120,41 @@ export class ChunkStore {
     }
     entityMap.set(entry.chunkKey, entry);
     this.bytesCounter += growth;
-    if (replaced) this.countLevel(replaced.level, -1);
+    if (replaced) {
+      this.countLevel(replaced.level, -1);
+      this.unindex(replaced);
+      this.order.remove();
+    }
     this.countLevel(entry.level, 1);
+    this.index(entry);
+    this.order.add(entry);
     return true;
+  }
+
+  /**
+   * What eviction's order reads changed in place: an entry's lane, tier,
+   * priority or plan tick, or what the policy knows of entities. The owner
+   * calls this after changing them.
+   */
+  invalidateOrder(): void {
+    this.order.invalidate();
+  }
+
+  private index(entry: CacheEntry): void {
+    const key = imageChunkKey(entry.imageId, entry.c, entry.chunkKey);
+    const entries = this.byImageChunk.get(key);
+    if (entries) entries.push(entry);
+    else this.byImageChunk.set(key, [entry]);
+  }
+
+  private unindex(entry: CacheEntry): void {
+    const key = imageChunkKey(entry.imageId, entry.c, entry.chunkKey);
+    const entries = this.byImageChunk.get(key);
+    if (!entries) return;
+    const at = entries.indexOf(entry);
+    if (at < 0) return;
+    if (entries.length === 1) this.byImageChunk.delete(key);
+    else entries.splice(at, 1);
   }
 
   /** Resident chunks per level, indexed by level. Sparse levels read as zero. */
@@ -129,15 +172,13 @@ export class ChunkStore {
     if (this.bytesCounter + incomingBytes <= this.budgetBytesCounter) return true;
     const bytesNeeded = this.bytesCounter + incomingBytes - this.budgetBytesCounter;
     const protects = this.protects;
-    let entries = this.collectEntries();
-    if (replaced) entries = entries.filter((resident) => resident !== replaced);
-    if (incoming && protects) {
-      entries = entries.filter((resident) => !protects(resident, incoming));
-      let available = 0;
-      for (const entry of entries) available += entry.sizeBytes;
-      if (available < bytesNeeded) return false;
-    }
-    const victims = this.policy.selectVictims(entries, bytesNeeded);
+    const guarded = incoming !== undefined && protects !== undefined;
+    const { victims, enough } = this.order.take(
+      () => this.allEntries(),
+      bytesNeeded,
+      (resident) => resident === replaced || (guarded && protects(resident, incoming)),
+    );
+    if (!enough && guarded) return false;
 
     let freed = 0;
     for (const victim of victims) {
@@ -164,11 +205,13 @@ export class ChunkStore {
     if (entityMap.size === 0) this.store.delete(entityId);
     this.bytesCounter -= entry.sizeBytes;
     this.countLevel(entry.level, -1);
+    this.unindex(entry);
+    this.order.remove();
     this.recordEviction(this.evictionTier(entry), entry);
     return true;
   }
 
-  /** Drop an entry returned by `policy.selectVictims` without re-keying. */
+  /** Drop an entry the store holds, by reference. */
   removeEntry(entry: CacheEntry): void {
     const entityMap = this.store.get(entry.entityId);
     if (!entityMap) return;
@@ -176,6 +219,8 @@ export class ChunkStore {
     if (entityMap.size === 0) this.store.delete(entry.entityId);
     this.bytesCounter -= entry.sizeBytes;
     this.countLevel(entry.level, -1);
+    this.unindex(entry);
+    this.order.remove();
     this.recordEviction(this.evictionTier(entry), entry);
   }
 
@@ -215,19 +260,9 @@ export class ChunkStore {
     }
   }
 
+  /** An entry holding the image's chunk, under any entity. */
   findByImageChunk(imageId: string, c: number, chunkKey: string): CacheEntry | undefined {
-    for (const entityMap of this.store.values()) {
-      for (const entry of entityMap.values()) {
-        if (
-          entry.imageId === imageId &&
-          entry.c === c &&
-          entry.chunkKey === chunkKey
-        ) {
-          return entry;
-        }
-      }
-    }
-    return undefined;
+    return this.byImageChunk.get(imageChunkKey(imageId, c, chunkKey))?.[0];
   }
 
   *entityChunkKeys(): Iterable<[string, IterableIterator<string>]> {
@@ -244,6 +279,8 @@ export class ChunkStore {
       for (const entry of entityMap.values()) {
         this.bytesCounter -= entry.sizeBytes;
         this.countLevel(entry.level, -1);
+        this.unindex(entry);
+        this.order.remove();
       }
       this.store.delete(entityId);
     }
@@ -251,18 +288,10 @@ export class ChunkStore {
 
   reset(): void {
     this.store.clear();
+    this.byImageChunk.clear();
+    this.order.invalidate();
     this.bytesCounter = 0;
     this.levelCounts.length = 0;
-  }
-
-  private collectEntries(): CacheEntry[] {
-    const result: CacheEntry[] = [];
-    for (const entityMap of this.store.values()) {
-      for (const entry of entityMap.values()) {
-        result.push(entry);
-      }
-    }
-    return result;
   }
 
   /** Main-store only; overview uses {@link totalResidency}. */
@@ -310,5 +339,6 @@ export class ChunkStore {
         entry.tier = "demoted-detail";
       }
     }
+    this.order.invalidate();
   }
 }

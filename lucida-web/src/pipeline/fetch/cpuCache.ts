@@ -543,6 +543,8 @@ export class CpuCache {
         this.targetLevelByEntity.set(entry.entityId, entry.detailLevels[0]);
       }
     }
+    // What is finer than its target may have changed.
+    this.chunkStore.invalidateOrder();
     // A label overlay's chunks are requested under the label's own image id,
     // which no active set entry names. The plan holds the dataset's whole
     // wanted set, so it is as authoritative for those entities as for the
@@ -683,6 +685,10 @@ export class CpuCache {
       pendingKeys.add(fetchKey);
       pendingChunks.push(req);
     }
+    // The loop refreshed cached entries' lanes, tiers, priorities and plan
+    // ticks in place, which eviction's order reads.
+    this.chunkStore.invalidateOrder();
+    this.overviewStore.invalidateOrder();
     // Closes the plan phase at the exact instant the scheduler took the
     // requests, so a row's plan end and its queue start are one number rather
     // than two readings of the clock that nearly agree.

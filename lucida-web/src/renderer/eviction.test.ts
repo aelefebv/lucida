@@ -94,7 +94,8 @@ function makeMockCtx(): { ctx: WorkerCtx; posts: WorkerToMainMessage[] } {
     device: makeMockDevice(),
     state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
-    postWantedSet() {},
+    requestWantedSetReport() {},
+    flushWantedSetReports() {},
   } as unknown as WorkerCtx;
   return { ctx, posts };
 }

@@ -381,7 +381,7 @@ function reclaimGpuBytes(ctx: WorkerCtx, needed: number, except?: AtlasState | S
     touched.set(datasetModeKey(datasetId, spare.kind), { datasetId, mode: spare.kind });
   }
   // A dropped fallback slot can change the level an entity displays.
-  for (const { datasetId, mode } of touched.values()) ctx.postWantedSet(datasetId, mode);
+  for (const { datasetId, mode } of touched.values()) ctx.requestWantedSetReport(datasetId, mode);
   return gave;
 }
 

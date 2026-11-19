@@ -58,7 +58,8 @@ function makeCtx(gpuTotalBytes = 1536 * MIB) {
     format: "bgra8unorm",
     state: createInitialState(gpuTotalBytes),
     post: (msg: WorkerToMainMessage) => posts.push(msg),
-    postWantedSet: vi.fn(),
+    requestWantedSetReport: vi.fn(),
+    flushWantedSetReports: vi.fn(),
   } as unknown as WorkerCtx;
   return { ctx, posts, copies };
 }

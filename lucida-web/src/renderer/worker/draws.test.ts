@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SharedChunkPool } from "../viewIndirection.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { EvictionOrder } from "../evictionOrder.ts";
+import { SlotJournal } from "../slotJournal.ts";
 import { attachView, fakeDraw, layOut } from "../viewIndirectionFixtures.ts";
 import { wantedEntryKey } from "../wantedChunks.ts";
 import { wantedCountOf } from "./draws.ts";
@@ -9,7 +10,7 @@ import { wantedCountOf } from "./draws.ts";
 const META: LodIndirectionMeta = { level: 0, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], levelDims: [32, 64, 64], offset: 0 };
 
 function pool(): SharedChunkPool {
-  return { datasetId: "ds", slots: new Map(), order: new EvictionOrder(), freeSlots: [], totalSlots: 4, views: new Map() };
+  return { datasetId: "ds", slots: new Map(), order: new EvictionOrder(), journal: new SlotJournal(), freeSlots: [], totalSlots: 4, views: new Map() };
 }
 
 const wanted = (byMember: Record<string, string[]>) =>

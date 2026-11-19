@@ -32,14 +32,15 @@ export interface WorkerCtx {
   /** Post a message to the main thread. `transfer` moves transferables instead of cloning them. */
   post(msg: WorkerToMainMessage, transfer?: Transferable[]): void;
   /**
-   * Recompute and post the wanted-set delta and level report of each view
+   * Ask for the wanted-set report (`worker/wantedSetReport.ts`) of each view
    * that draws one dataset from its pools of `mode`, or from either mode's
    * when `mode` is absent, or of `view` alone: the dataset named, else the
-   * view whose cold state arrived last. An upload names the dataset its
-   * member belongs to, so a workspace with several datasets keeps each one's
-   * report current.
+   * view whose cold state arrived last. It goes out at the next flush, and
+   * within a short wait when no frame comes to flush it.
    */
-  postWantedSet(datasetId?: string, mode?: PoolMode, view?: number): void;
+  requestWantedSetReport(datasetId?: string, mode?: PoolMode, view?: number): void;
+  /** Post the wanted-set reports asked for, and those of views whose pools' slots changed. Once a frame. */
+  flushWantedSetReports(): void;
   /**
    * The entity descriptor buffer and index maps of `view`'s draw of the
    * dataset, or null before the view's first cold state for it.

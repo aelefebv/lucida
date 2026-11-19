@@ -268,7 +268,7 @@ export function handleSliceChunkData(
   for (const [plane, keys] of replaced) {
     postChunkResidency(ctx, memberId, "slice", tier, "lost", keys, "replaced", { axis: atlas.axis, plane });
   }
-  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId), "slice");
+  if (batch.changedSlots) ctx.requestWantedSetReport(ctx.state.memberToDataset.get(memberId), "slice");
 
   if (failure !== null) throw failure;
 }
