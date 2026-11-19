@@ -7,16 +7,16 @@
 /**
  * The upload work handed to the render worker and not yet done, on the
  * worker and on the GPU, that a gesture allows. The frame that answers the
- * input is drawn behind it.
+ * input is drawn behind it, so uploads go on through a gesture without
+ * costing it a frame.
  */
 export const GESTURE_UPLOAD_AHEAD_MS = 4;
 
 /**
  * The upload work handed to the render worker and not yet done when no input
- * waits on the frame behind it: a view opening, switching mode or filling
- * in, and the chunks held back while it moved, which the stopped view waits
- * for. About a frame at 60 Hz, so a fill keeps the worker busy, and an input
- * that lands meanwhile waits behind no more than this.
+ * waits on the frame behind it: a view opening, switching mode or filling in
+ * once it stops. About a frame at 60 Hz, so a fill keeps the worker busy, and
+ * an input that lands meanwhile waits behind no more than this.
  */
 export const UPLOAD_AHEAD_MS = 16;
 

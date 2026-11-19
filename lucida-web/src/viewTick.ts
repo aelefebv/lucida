@@ -12,7 +12,7 @@
 import { assertCanvasSize } from "./applyAndSend.ts";
 import type { MinimapChunkCoord, TickCoordinator, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
-import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
+import type { TickContext, TickView } from "./renderLoopTypes.ts";
 import { readResolvedLayers } from "./resolvedLayers.ts";
 import { renderSliceView, scaleRect, sliceFrameScale } from "./slicePath.ts";
 import { renderVolumeView, volumeFrameScale } from "./volumePath.ts";
@@ -35,21 +35,11 @@ export function tickViews(
 
   const plan = coordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!plan) return false;
-  const backlogged = deliver(ctx, coordinator, uploader);
+  const backlogged = uploader.deliverToWorker(ctx);
   if (!frame.render) return backlogged;
   if (ctx.views.length === 1) drawOnlyView(ctx, plan, ctx.views[0]);
   else drawViews(ctx, plan, redraws.select(ctx, frame.newChunks));
   return backlogged;
-}
-
-/** Deliver decoded chunks, unless a short volume view's move holds them. */
-function deliver(ctx: TickContext, coordinator: TickCoordinator, uploader: Uploader): boolean {
-  // Read after the plan, which notes whether the view moved.
-  if (drawnView(ctx).mode === "volume" && coordinator.msUntilUploadsResume(performance.now()) !== null) {
-    uploader.holdDelivery();
-    return false;
-  }
-  return uploader.deliverToWorker(ctx);
 }
 
 /** The one view across the canvas, which draws straight onto it. */

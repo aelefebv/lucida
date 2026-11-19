@@ -127,8 +127,6 @@ export interface TickContext {
    * along the cut landed within {@link GESTURE_HOLD_MS}.
    */
   gesture?: boolean;
-  /** How long since a gesture's last input landed in the active view; absent when none has. */
-  sinceGestureMs?: number;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
 }

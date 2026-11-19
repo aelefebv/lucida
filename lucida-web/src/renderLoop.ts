@@ -177,7 +177,6 @@ export class RenderLoop implements TraceEnvironment {
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
   private trailingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
-  private uploadResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
   private fitResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly framePacer = new FramePacer();
@@ -349,10 +348,6 @@ export class RenderLoop implements TraceEnvironment {
       clearTimeout(this.trailingRebuildTimer);
       this.trailingRebuildTimer = null;
     }
-    if (this.uploadResumeTimer !== null) {
-      clearTimeout(this.uploadResumeTimer);
-      this.uploadResumeTimer = null;
-    }
     if (this.minimapDisplayTimer !== null) {
       clearTimeout(this.minimapDisplayTimer);
       this.minimapDisplayTimer = null;
@@ -507,10 +502,8 @@ export class RenderLoop implements TraceEnvironment {
   private evaluateAndPublishSettle(): SettleState {
     const state = this.settleState;
     this.session.cpuCache.settleInputs(state);
-    // A view change the planner deferred has not reached the wanted set yet,
-    // and chunks held while the view moved have not reached the GPU.
-    state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild() ||
-      this.uploadResumeTimer !== null;
+    // A view change the planner deferred has not reached the wanted set yet.
+    state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild();
     // Limits held while the view moved may yet change what it draws, though
     // it has everything it wants.
     state.residencyDirty = this.residencyDirty || this.fitResumeTimer !== null;
@@ -727,23 +720,6 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Tick once the volume view has held still long enough for the uploads
-   * held while it moved to go. Until then a tick delivers nothing, so it
-   * has nothing new to draw either.
-   */
-  private scheduleUploadResume(): void {
-    if (this.mode !== "volume") return;
-    const wait = this.tickCoordinator.msUntilUploadsResume(performance.now());
-    if (wait === null || this.uploadResumeTimer !== null) return;
-    this.uploadResumeTimer = setTimeout(() => {
-      this.uploadResumeTimer = null;
-      // The view moved again during the wait.
-      if (this.tickCoordinator.msUntilUploadsResume(performance.now()) !== null) this.scheduleUploadResume();
-      else this.setDirty("residency", "uploads_resumed");
-    }, wait);
-  }
-
-  /**
    * Fit auto-contrast once the gesture that held it is over. While a gesture
    * lasts, each replan changes what a fit reads, and each fit costs a read of
    * every visible tile's samples, a render of the panels and a redraw of the
@@ -955,7 +931,6 @@ export class RenderLoop implements TraceEnvironment {
       marchStepScale: quality?.marchStepScale ?? marchStepScaleFor(renderScale),
       bands: quality?.bands ?? 1,
       gesture: performance.now() - this.lastGestureAt < GESTURE_HOLD_MS,
-      sinceGestureMs: performance.now() - this.lastGestureAt,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
     };
@@ -999,11 +974,7 @@ export class RenderLoop implements TraceEnvironment {
         shouldRender = true;
       }
     } else if (this.residencyDirty) {
-      if (this.uploadResumeTimer !== null) {
-        // Uploads are held, so nothing new has reached the GPU to draw. The
-        // timer dirties the loop again when they may go.
-        this.residencyDirty = false;
-      } else if (
+      if (
         now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS &&
         this.framePacer.mayDrawResidency(now, framesInFlight, this.deliveryBacklogged)
       ) {
@@ -1054,7 +1025,6 @@ export class RenderLoop implements TraceEnvironment {
     }
 
     this.scheduleTrailingRebuild();
-    this.scheduleUploadResume();
 
     // Recording is unconditional, and one subtraction is not a cost worth
     // gating.

@@ -60,7 +60,6 @@ import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
 import { GESTURE_UPLOAD_AHEAD_MS, UPLOAD_AHEAD_MS } from "./constants.ts";
 import { UploadPacer } from "./pacing.ts";
-import { VIEW_STILL_MS } from "../tickCoordinator.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
@@ -98,12 +97,6 @@ export class Uploader {
 
   /** Snapshotted by `sendColdState` so `deliverToWorker` can stamp chunks. */
   private lastEpochs: SceneEpochs | null = null;
-
-  /**
-   * A tick held chunks back since the last one that delivered everything it
-   * could; see {@link holdDelivery}.
-   */
-  private heldBacklog = false;
 
   /** Reset at the start of each `deliverToWorker`; mutated by the send loop. */
   private currentUploadStats: UploadTickStats = emptyUploadTickStats();
@@ -336,16 +329,6 @@ export class Uploader {
 
   // Per-tick upload (slicePath / volumePath)
 
-  /**
-   * Deliver nothing this tick. Once delivery resumes and the view holds
-   * still, the chunks held back may give the worker {@link UPLOAD_AHEAD_MS}
-   * in hand, though the gesture that held them has only just stopped, until
-   * a tick delivers all it can.
-   */
-  holdDelivery(): void {
-    this.heldBacklog = true;
-  }
-
   /** The render worker's report of deliveries to the pools of `mode` it and the GPU are done with. */
   noteUploadCost(mode: PoolMode, bytes: number, ms: number): void {
     this.pacer.noteDone(mode, bytes, ms);
@@ -355,10 +338,7 @@ export class Uploader {
    * Deliver cached, wanted, not-yet-sent chunks to the GPU worker in
    * strict priority order, until the deliveries it has not reported done
    * reach {@link GESTURE_UPLOAD_AHEAD_MS} of its time during a gesture, else
-   * {@link UPLOAD_AHEAD_MS}. A delivery held back while the view moved goes
-   * as if no gesture ran once the view holds still, but not before: the hold
-   * also ends when the budgets stop cutting the view short, and its inputs
-   * may still be landing. Each delivery costs what the worker's reports
+   * {@link UPLOAD_AHEAD_MS}. Each delivery costs what the worker's reports
    * say it takes the worker, and the loop also stops once it has taken that
    * long of this thread. The budget is a one-item soft cap: the next
    * priority item is sent while room remains, even if it costs more, and
@@ -369,8 +349,7 @@ export class Uploader {
    */
   deliverToWorker(ctx: TickContext): boolean {
     const tickStart = performance.now();
-    const moving = (ctx.sinceGestureMs ?? Infinity) < VIEW_STILL_MS;
-    const aheadMs = moving || (ctx.gesture && !this.heldBacklog) ? GESTURE_UPLOAD_AHEAD_MS : UPLOAD_AHEAD_MS;
+    const aheadMs = ctx.gesture ? GESTURE_UPLOAD_AHEAD_MS : UPLOAD_AHEAD_MS;
     const budgetMs = this.pacer.roomMs(aheadMs);
     this.currentUploadStats = emptyUploadTickStats();
     this.currentUploadStats.budgetMs = budgetMs;
@@ -439,7 +418,6 @@ export class Uploader {
     }
 
     this.currentUploadStats.budgetExhausted = budgetExhausted;
-    if (!budgetExhausted) this.heldBacklog = false;
     if (telemetryActive) {
       this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
     }

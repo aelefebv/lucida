@@ -60,9 +60,8 @@ function makeCtx(views: TickView[]) {
       memberRosterByDatasetMode: new Map(),
       entityIndexByDatasetMode: new Map(),
     }),
-    msUntilUploadsResume: () => null,
   };
-  const uploader = { deliverToWorker: vi.fn(() => false), holdDelivery: vi.fn() };
+  const uploader = { deliverToWorker: vi.fn(() => false) };
   return { ctx, client, camera, epochs, coordinator, uploader };
 }
 

@@ -11,7 +11,7 @@ import type {
 import { setDebugCategories } from "../../debug/logging.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
-import { TickCoordinator, VIEW_STILL_MS } from "../tickCoordinator.ts";
+import { TickCoordinator } from "../tickCoordinator.ts";
 import { GESTURE_UPLOAD_AHEAD_MS, UPLOAD_AHEAD_MS } from "./constants.ts";
 import { RESEND_GUARD_TICKS } from "./delivery/resendGuard.ts";
 import { Uploader } from "./uploader.ts";
@@ -413,55 +413,6 @@ describe("Uploader unified delivery", () => {
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(4 * 1024 * 1024);
     expect(ret).toBe(true);
-  });
-
-  it("lets chunks held back while the view moved fill the worker's whole room, until a tick sends all it can", () => {
-    const chunks = (n: number) => Array.from({ length: n }, (_, i) =>
-      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(MIB), priority: i }));
-    let deliverable = chunks(UPLOAD_AHEAD_MS + 2);
-    const cpuCache = makeCpuCache();
-    vi.mocked(cpuCache.getDeliverable).mockImplementation(function* () {
-      yield* deliverable;
-    });
-    const volumeChunkData = vi.fn();
-    // The gesture that held them has only just stopped.
-    const ctx = { ...makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" }), gesture: true };
-    const uploader = new Uploader();
-    teachRate(uploader, "volume", MIB);
-
-    uploader.holdDelivery();
-    expect(uploader.deliverToWorker(ctx)).toBe(true);
-    expect(volumeChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS);
-
-    // The rest fit, so the backlog is gone and the gesture's room is back.
-    uploader.noteUploadCost("volume", UPLOAD_AHEAD_MS * MIB, UPLOAD_AHEAD_MS);
-    deliverable = deliverable.slice(UPLOAD_AHEAD_MS);
-    uploader.deliverToWorker(ctx);
-    expect(volumeChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS + 2);
-    volumeChunkData.mockClear();
-    uploader.noteUploadCost("volume", 2 * MIB, 2);
-    deliverable = chunks(UPLOAD_AHEAD_MS);
-    uploader.deliverToWorker(ctx);
-    expect(volumeChunkData).toHaveBeenCalledTimes(GESTURE_UPLOAD_AHEAD_MS);
-  });
-
-  it("drains chunks held back at a gesture's room while its input still lands, and at the whole room once the view holds still", () => {
-    const deliverable = Array.from({ length: 100 }, (_, i) =>
-      makeChunkDelivery({ mode: "volume", chunkKey: `0/0/0/0/0/${i}`, data: new ArrayBuffer(MIB), priority: i }));
-    const volumeChunkData = vi.fn();
-    const ctx = makeCtx({ cpuCache: makeCpuCache(deliverable), client: { volumeChunkData }, mode: "volume" });
-    const uploader = new Uploader();
-    teachRate(uploader, "volume", MIB);
-
-    // The hold also ends when the view is no longer cut short, which can happen mid-gesture.
-    uploader.holdDelivery();
-    uploader.deliverToWorker({ ...ctx, gesture: true, sinceGestureMs: VIEW_STILL_MS / 2 });
-    expect(volumeChunkData).toHaveBeenCalledTimes(GESTURE_UPLOAD_AHEAD_MS);
-
-    uploader.noteUploadCost("volume", GESTURE_UPLOAD_AHEAD_MS * MIB, GESTURE_UPLOAD_AHEAD_MS);
-    volumeChunkData.mockClear();
-    uploader.deliverToWorker({ ...ctx, gesture: true, sinceGestureMs: VIEW_STILL_MS });
-    expect(volumeChunkData).toHaveBeenCalledTimes(UPLOAD_AHEAD_MS);
   });
 
   it.each([

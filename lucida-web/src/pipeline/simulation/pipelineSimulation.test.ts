@@ -411,8 +411,8 @@ describe("a two-timepoint volume whose detail budget holds the view but not its 
 
 describe("a gesture over a volume the budgets cut short", () => {
   // The view wants 128 chunks of level 0 and the detail budget holds 100, so
-  // each replan of the moving view admits a different 100. The cache takes
-  // them, and the worker only once the view stops.
+  // each replan of the moving view admits a different 100. The worker takes
+  // them while the view moves, a gesture's room at a time.
   const CHUNK_32_CUBE_BYTES = 32 * 32 * 32 * 2;
   const scenario = describeScenario({
     name: "orbit over a volume beyond the detail budget",
@@ -426,11 +426,11 @@ describe("a gesture over a volume the budgets cut short", () => {
     steps: [{ zoom: 2 }, { gesture: { orbit: [0.08, 0.03] }, moves: 30 }],
   });
   for (const dpr of DEVICE_PIXEL_RATIOS) {
-    it(`sends the worker nothing while it moves, and what the budgets hold once it stops, at device pixel ratio ${dpr}`, async () => {
+    it(`keeps sending the worker chunks while it moves, and holds what the budgets hold once it stops, at device pixel ratio ${dpr}`, async () => {
       const run = await runScenario(scenario, { dpr });
       expectSettled(run);
       const orbit = run.phases[2];
-      expect(orbit.chunksSentDuringInput, run.report).toBe(0);
+      expect(orbit.chunksSentDuringInput, run.report).toBeGreaterThan(0);
       expect(orbit.chunksSent, run.report).toBeGreaterThan(0);
       expect(orbit.quiescence, run.report).toBe("coverage_limited");
       expect(orbit.detail.resident, run.report).toBe(100);
