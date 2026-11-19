@@ -36,6 +36,12 @@
       "datasets": ["volume", "deep-volume"],
       "scenarios": ["cold-open", "four-up", "xz-scrub", "four-up-scrub"],
       "ratios": [1, 2]
+    },
+    "large-3d": {
+      "description": "volumes whose finest level outgrows memory many times over, opened, zoomed and orbited at ratio 2, on a large canvas too",
+      "datasets": ["deep-volume", "large-aniso-volume", "huge-volume"],
+      "scenarios": ["volume-open", "volume-zoom", "large-canvas-orbit", "orbit-sustained"],
+      "ratios": [2]
     }
   }
 }
