@@ -78,8 +78,8 @@ pub struct Cell {
 }
 
 /// A multiply-rotate hash over a cell's five numbers. The selection hashes a
-/// cell several times per cell it selects, and std's keyed hash, built to
-/// resist chosen keys, cost most of its time on cells the core makes itself.
+/// cell several times for each cell it selects, and std's keyed hash, built
+/// to resist chosen keys, is slow for keys the core makes itself.
 #[derive(Default)]
 pub struct CellHasher(u64);
 

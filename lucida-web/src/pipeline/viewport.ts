@@ -12,6 +12,11 @@ export interface VisibleRegion {
   zRangeVox: [number, number];
   /** Screen pixels per voxel. */
   effectiveZoom: number;
+  /**
+   * Device pixels per level-0 sample at the camera's focus, which a zoom
+   * moves and an orbit does not. Absent: {@link effectiveZoom}.
+   */
+  focalZoom?: number;
   /** View-relative radius basis in voxels. 3-D uses the focal plane, not the far-frustum AABB. */
   radiusBasisVox?: number;
   /** Sort/focal center in voxel coordinates. */

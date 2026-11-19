@@ -159,6 +159,21 @@ describe("selectLevels", () => {
     expect(summary.used.cpu + a.lookahead.length * band).toBeLessThanOrEqual(budget.cpu);
   });
 
+  it("keeps looking ahead while the view holds still, and stops once it moves without zooming", () => {
+    const entity = image("a", pyramid());
+    const budget = { cpu: 4 * 2 ** 20, gpu: 1e12 };
+    const run = (view: ViewSnapshotBase, memory = initialLevelSelectionMemory()) =>
+      selectLevels([viewOf(view)], budget, memory, DEFAULT_PLANNING_CONFIG);
+    const ahead = (result: ReturnType<typeof run>) => result.byView.get(0)!.get("ds")!.entities.get("a")!.lookahead;
+    const zoomed = run(sliceView(0, [entity], 0.5), run(sliceView(0, [entity], 0.2)).memory);
+    expect(ahead(zoomed).length).toBeGreaterThan(0);
+    const still = run(sliceView(0, [entity], 0.5), zoomed.memory);
+    expect(ahead(still).length).toBeGreaterThan(0);
+    const panned = sliceView(0, [entity], 0.5);
+    panned.visibleRegion = { ...panned.visibleRegion, xyBoundsVox: [100, 0, 2148, 2048] };
+    expect(ahead(run(panned, still.memory))).toEqual([]);
+  });
+
   it("looks no level ahead with the prefetch lane off", () => {
     const entity = image("a", pyramid());
     const off = { ...DEFAULT_PLANNING_CONFIG, prefetchDepth: 0 };

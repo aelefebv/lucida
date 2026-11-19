@@ -35,6 +35,13 @@ const PREVIOUS_STRIDE = 6;
 const CELL_STRIDE = 7;
 const SELECTION_HEADER = 10;
 
+/**
+ * How far the focal zoom must move between two plans of a moving view to be
+ * a zoom. A pan of a volume camera's focus moves it a little, and a wheel
+ * step or a pinch far more.
+ */
+const ZOOM_MOVE = 1.02;
+
 /** Bytes on each side: what the CPU cache holds, and what the GPU pools hold. */
 export interface SelectionBytes {
   cpu: number;
@@ -80,9 +87,11 @@ interface ViewMemory {
    * next call to fill in.
    */
   cells: ReadonlyMap<string, ReadonlyMap<string, readonly number[]>>;
-  /** `visibleRegion.effectiveZoom` of the view's first dataset, as last seen. */
+  /** The focal zoom of the view's first dataset (`VisibleRegion.focalZoom`), as last seen. */
   zoom: number | null;
-  /** Which way the zoom last moved, kept while it holds still. */
+  /** That dataset's region as last seen, to tell a move from a replan of a view that held still. */
+  region: string | null;
+  /** Which way the zoom last moved, kept while the view holds still. */
   zoomDirection: ZoomDirection | null;
 }
 
@@ -136,7 +145,8 @@ export function selectLevels(
     const run = runs[i];
     byView.set(view.view, run.datasets);
     summaries.set(view.view, { used: run.used, share: scale(run.budget, config.selectionShare), limit: run.limit });
-    remembered.set(view.view, { cells: run.cells, zoom: encoded[i].zoom, zoomDirection: encoded[i].zoomDirection });
+    const { zoom, region, zoomDirection } = encoded[i];
+    remembered.set(view.view, { cells: run.cells, zoom, region, zoomDirection });
   });
   return { byView, summaries, memory: { views: remembered } };
 }
@@ -157,6 +167,7 @@ interface EncodedView {
   datasetIds: string[];
   lookahead: number;
   zoom: number | null;
+  region: string | null;
   zoomDirection: ZoomDirection | null;
 }
 
@@ -197,11 +208,18 @@ function encodeView(view: SelectionView, memory: ViewMemory | undefined, config:
     }
   }
 
-  const zoom = view.datasets[0]?.view.visibleRegion.effectiveZoom ?? null;
-  const last = memory?.zoom ?? null;
-  const zoomDirection = zoom === null || last === null || zoom === last
-    ? memory?.zoomDirection ?? null
-    : zoom > last ? "in" : "out";
+  // The selection looks ahead the way the view last zoomed, through the
+  // replans of a view that holds still while its chunks arrive. A move that
+  // is not a zoom, an orbit or a pan, ends it: its lookahead would follow the
+  // view's near side around and fetch cells nothing draws.
+  const first = view.datasets[0]?.view.visibleRegion;
+  const zoom = first === undefined ? null : first.focalZoom ?? first.effectiveZoom;
+  const region = regions.length === 0 ? null : JSON.stringify(regions[0]);
+  let zoomDirection = memory?.zoomDirection ?? null;
+  if (zoom !== null && memory?.zoom != null && region !== memory.region) {
+    const ratio = zoom / memory.zoom;
+    zoomDirection = ratio > ZOOM_MOVE ? "in" : ratio < 1 / ZOOM_MOVE ? "out" : null;
+  }
   const lookahead = config.prefetchDepth <= 0 || zoomDirection === null ? 0 : zoomDirection === "in" ? 1 : 2;
   return {
     regions: JSON.stringify(regions),
@@ -211,6 +229,7 @@ function encodeView(view: SelectionView, memory: ViewMemory | undefined, config:
     datasetIds: view.datasets.map((dataset) => dataset.datasetId),
     lookahead,
     zoom,
+    region,
     zoomDirection,
   };
 }
