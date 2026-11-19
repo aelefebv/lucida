@@ -43,6 +43,44 @@ pub fn enumerate_chunks(
     Ok(crate::chunk::enumerate_batch(&view, queries))
 }
 
+/// The levels one view draws its entities at, within `budget_cpu` and
+/// `budget_gpu` bytes (`crate::level_selection::select_levels`). `regions_json`
+/// is a JSON array of the visible regions the entities name by index, as
+/// `visible_region` writes them. `entities` and `previous` are in the flat
+/// layout `crate::level_selection` describes, as is the result. `lookahead`
+/// is 0 for none, 1 for the finer cells the selection would refine next, and
+/// 2 for the coarser cells above its finest.
+#[wasm_bindgen]
+pub fn select_levels(
+    regions_json: &str,
+    entities: &[f64],
+    previous: &[f64],
+    budget_cpu: f64,
+    budget_gpu: f64,
+    share: f64,
+    lookahead: u32,
+) -> Result<Vec<f64>, JsError> {
+    use crate::level_selection::{Cost, Lookahead, select_batch};
+    let views = crate::chunk::ChunkView::many_from_json(regions_json, 0.0)
+        .map_err(|e| JsError::new(&format!("invalid visible regions: {e}")))?;
+    let lookahead = match lookahead {
+        1 => Lookahead::Finer,
+        2 => Lookahead::Coarser,
+        _ => Lookahead::None,
+    };
+    Ok(select_batch(
+        &views,
+        entities,
+        previous,
+        Cost {
+            cpu: budget_cpu,
+            gpu: budget_gpu,
+        },
+        share,
+        lookahead,
+    ))
+}
+
 /// A chunk the server relayed still in the codecs it was stored in, decoded
 /// to exactly `len` bytes, the size its level's metadata gives one chunk.
 /// `codecs` is the codec list of its frame. Bytes that decode to any other

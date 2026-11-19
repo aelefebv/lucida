@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::LevelGeometry;
 
-use crate::camera::VisibleRegion;
+use crate::camera::{SampleMeasure, VisibleRegion};
 use crate::slice_plane::{SlicePlane, slice_level_plane};
 use lucida_content::SpatialAxis;
 
@@ -71,6 +71,8 @@ pub struct ChunkView {
     radius_basis: f64,
     /// Where chunks are scored from: `center`, moved along Z by the depth bias.
     focus: [f64; 3],
+    /// Device pixels per level-0 sample anywhere in the region.
+    measure: SampleMeasure,
 }
 
 /// A visible region as a client holds it. Z may be fractional, and a region
@@ -89,6 +91,11 @@ struct RegionInput {
     side_planes: Option<Vec<[f64; 4]>>,
     #[serde(default)]
     cut_axis: SpatialAxis,
+    #[serde(default)]
+    effective_zoom: Option<f64>,
+    /// A region without one reads its effective zoom as uniform.
+    #[serde(default)]
+    measure: Option<SampleMeasure>,
 }
 
 impl ChunkView {
@@ -104,6 +111,8 @@ impl ChunkView {
                 frustum_planes: region.frustum_planes.map(Vec::from),
                 side_planes: region.side_planes.map(Vec::from),
                 cut_axis: region.cut_axis,
+                effective_zoom: Some(region.effective_zoom),
+                measure: Some(region.measure.clone()),
             },
             depth_bias,
         )
@@ -112,6 +121,15 @@ impl ChunkView {
     /// A view from a region serialized as [`VisibleRegion`] is.
     pub fn from_json(json: &str, depth_bias: f64) -> Result<Self, serde_json::Error> {
         Ok(Self::from_input(serde_json::from_str(json)?, depth_bias))
+    }
+
+    /// One view per region of a JSON array of them.
+    pub fn many_from_json(json: &str, depth_bias: f64) -> Result<Vec<Self>, serde_json::Error> {
+        let regions: Vec<RegionInput> = serde_json::from_str(json)?;
+        Ok(regions
+            .into_iter()
+            .map(|region| Self::from_input(region, depth_bias))
+            .collect())
     }
 
     fn from_input(region: RegionInput, depth_bias: f64) -> Self {
@@ -139,6 +157,13 @@ impl ChunkView {
             let shifted = center[2] + depth_bias.clamp(-1.0, 1.0) * (z_max - z_min) / 2.0;
             shifted.max(z_min).min(z_max)
         };
+        let measure = region.measure.unwrap_or_else(|| {
+            let [across, down, _] = SlicePlane::cutting(region.cut_axis).axes();
+            SampleMeasure::Uniform {
+                pixels_per_sample: region.effective_zoom.unwrap_or(1.0),
+                axes: [across.tczyx(), down.tczyx()],
+            }
+        });
         Self {
             xy_bounds: region.xy_bounds,
             z_range: region.z_range,
@@ -148,7 +173,21 @@ impl ChunkView {
             center,
             radius_basis,
             focus: [center[0], center[1], focus_z],
+            measure,
         }
+    }
+
+    /// Device pixels per level-0 sample anywhere in the region.
+    pub fn measure(&self) -> &SampleMeasure {
+        &self.measure
+    }
+
+    /// Device pixels per level-0 sample at the point nearest the eye of the
+    /// box `[lo, hi]`, given in the samples of an entity placed at `position`.
+    pub fn pixels_per_sample_at(&self, position: [f64; 2], lo: [f64; 3], hi: [f64; 3]) -> f64 {
+        let offset = self.entity_offset(position);
+        let placed = |p: [f64; 3]| -> [f64; 3] { std::array::from_fn(|a| p[a] + offset[a]) };
+        self.measure.at_box(placed(lo), placed(hi))
     }
 
     /// Where an entity placed at `position` on the axes this view draws
@@ -199,9 +238,24 @@ impl ChunkQuery {
         }
     }
 
+    /// The entity's place on the two axes the view draws.
+    pub fn position(&self) -> [f64; 2] {
+        self.position
+    }
+
     /// A chunk's extent in level-0 samples along each axis.
     fn chunk_world(&self) -> [f64; 3] {
         std::array::from_fn(|a| self.chunk[a] * (self.full[a] / self.shape[a].max(1.0)))
+    }
+
+    /// The box cell `[x, y, z]` covers, `[x, y, z]` in level-0 samples, cut
+    /// at the image's edge: an edge chunk's samples stop there.
+    pub fn cell_box(&self, cell: [u32; 3]) -> ([f64; 3], [f64; 3]) {
+        let world = self.chunk_world();
+        let lo: [f64; 3] = std::array::from_fn(|a| f64::from(cell[a]) * world[a]);
+        let hi: [f64; 3] =
+            std::array::from_fn(|a| ((f64::from(cell[a]) + 1.0) * world[a]).min(self.full[a]));
+        (lo, hi)
     }
 }
 
@@ -242,8 +296,45 @@ pub fn enumerate_chunks(
     counts: &mut CullCounts,
     out: &mut Vec<ScoredChunk>,
 ) {
-    let [grid_x, grid_y, grid_z] = query.grid;
-    counts.considered += grid_x as u64 * grid_y as u64 * grid_z as u64;
+    enumerate_in(view, query, None, counts, out);
+}
+
+/// [`enumerate_chunks`] for the cells of `query` that overlap the box
+/// `[lo, hi)`, `[x, y, z]` in the entity's level-0 samples: the cells of one
+/// level that cover a cell of another, whether or not the two grids nest.
+/// The counts start from the cells the box overlaps, not the whole grid.
+pub fn enumerate_chunks_within(
+    view: &ChunkView,
+    query: &ChunkQuery,
+    lo: [f64; 3],
+    hi: [f64; 3],
+    counts: &mut CullCounts,
+    out: &mut Vec<ScoredChunk>,
+) {
+    enumerate_in(view, query, Some((lo, hi)), counts, out);
+}
+
+fn enumerate_in(
+    view: &ChunkView,
+    query: &ChunkQuery,
+    within: Option<([f64; 3], [f64; 3])>,
+    counts: &mut CullCounts,
+    out: &mut Vec<ScoredChunk>,
+) {
+    let world = query.chunk_world();
+    // A box's own run of cells along each axis. Shrunk by a sliver so a box
+    // edge on a cell boundary, as a parent's is in a grid that nests, never
+    // takes in the neighbor past it through rounding.
+    let boxed: [(u32, u32); 3] = std::array::from_fn(|a| match within {
+        Some((lo, hi)) => {
+            let sliver = world[a] * 1e-9;
+            cell_range(lo[a] + sliver, hi[a] - sliver, world[a], query.grid[a])
+        }
+        None => (0, query.grid[a]),
+    });
+    let span = |(start, end): (u32, u32)| end.saturating_sub(start) as u64;
+    let [box_x, box_y, box_z] = boxed;
+    counts.considered += span(box_x) * span(box_y) * span(box_z);
 
     let slice_cut = view.frustum_planes.is_none().then_some(view.cut);
     let [ox, oy, oz] = view.entity_offset(query.position);
@@ -256,7 +347,6 @@ pub fn enumerate_chunks(
         return;
     }
 
-    let world = query.chunk_world();
     let bounds = [
         [min_x, max_x],
         [min_y, max_y],
@@ -264,18 +354,20 @@ pub fn enumerate_chunks(
     ];
     let range = |axis: SpatialAxis| {
         let a = axis.xyz();
-        if slice_cut == Some(axis) {
+        let (start, end) = if slice_cut == Some(axis) {
             slice_cell_range(bounds[a], query, a)
         } else {
             cell_range(bounds[a][0], bounds[a][1], world[a], query.grid[a])
-        }
+        };
+        let (box_start, box_end) = boxed[a];
+        (start.max(box_start), end.min(box_end))
     };
     let (col_start, col_end) = range(SpatialAxis::X);
     let (row_start, row_end) = range(SpatialAxis::Y);
     let (z_start, z_end) = range(SpatialAxis::Z);
     let cols = col_end.saturating_sub(col_start) as u64;
     let rows = row_end.saturating_sub(row_start) as u64;
-    counts.after_xy_bounds += cols * rows * grid_z as u64;
+    counts.after_xy_bounds += cols * rows * span(box_z);
     counts.after_z_range += cols * rows * z_end.saturating_sub(z_start) as u64;
 
     let radius = (query.radius_view.is_finite()
