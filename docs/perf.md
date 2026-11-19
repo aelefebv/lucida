@@ -13,7 +13,7 @@ uv run scripts/perf.py --network remote --scenario pan-sustained
 uv run scripts/perf.py --suite phone        # cold opens on a 390x844 phone at ratio 3
 uv run scripts/perf.py --suite four-up      # four-up next to one view, opened and scrubbed
 uv run scripts/perf.py --suite hover        # the pointer across one view, alone and with crosshairs elsewhere
-uv run scripts/perf.py --suite large-3d     # volumes whose finest level outgrows memory many times over, at ratio 2
+uv run scripts/perf.py --suite large-3d     # volumes whose finest level outgrows memory many times over, at ratio 2; 25 GiB to generate
 uv run scripts/perf.py --repeat 3 --save-baseline   # keep these results as the reference
 ```
 
