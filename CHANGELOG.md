@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.45.0](https://github.com/aelefebv/lucida/compare/v0.44.0...v0.45.0) (2026-11-20)
+
+
+### Features
+
+* **web:** size memory budgets to the device, and let a person set the GPU's ([#1694](https://github.com/aelefebv/lucida/issues/1694)) ([9311f08](https://github.com/aelefebv/lucida/commit/9311f08245730d3645544959191f65390b1dd19a))
+
+
+### Performance
+
+* start gesture scenarios from a known GPU clock state ([#1695](https://github.com/aelefebv/lucida/issues/1695)) ([d39873b](https://github.com/aelefebv/lucida/commit/d39873b55543b0320bef8ea7f5480e7dc27488be))
+* **web:** replans during a gesture cost what changed ([#1699](https://github.com/aelefebv/lucida/issues/1699)) ([6fd00ba](https://github.com/aelefebv/lucida/commit/6fd00ba918497e40239dd3f3bb6cf637b8618ea5))
+* **web:** start a gesture on an idle GPU at its cheapest settings ([#1698](https://github.com/aelefebv/lucida/issues/1698)) ([cb5a4eb](https://github.com/aelefebv/lucida/commit/cb5a4eb9bf6a8d55018fe49f86bfee0c724e14fd))
+
 ## [0.44.0](https://github.com/aelefebv/lucida/compare/v0.43.0...v0.44.0) (2026-11-19)
 
 
