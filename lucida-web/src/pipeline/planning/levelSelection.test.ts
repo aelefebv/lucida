@@ -201,6 +201,25 @@ describe("selectLevels", () => {
     expect(result.summaries.get(0)!.used.cpu + result.summaries.get(1)!.used.cpu).toBeLessThanOrEqual(share);
   });
 
+  it("keeps a volume view's ancestors two levels up, in one fetch order with its chunks and within its share, and a slice view's none", () => {
+    // Half a pixel per sample calls for level 1, with levels 2 and 3 above
+    // it. Level 4 is the coarse tier's.
+    const entity = image("a", pyramid());
+    const slice = sliceView(0, [entity], 0.5);
+    expect(select([viewOf(slice)]).byView.get(0)!.get("ds")!.entities.get("a")!.ancestors).toEqual([]);
+
+    const volume = { ...slice, selection: { ...slice.selection, renderMode: "volume" as const } };
+    const result = select([viewOf(volume)]);
+    const a = result.byView.get(0)!.get("ds")!.entities.get("a")!;
+    expect(a.detailLevels).toEqual([1]);
+    expect(new Set(a.ancestors.map((cell) => cell.level))).toEqual(new Set([2, 3]));
+    const fetched = [...a.detail, ...a.ancestors].sort((p, q) => p.rank - q.rank);
+    expect(fetched.map((cell) => cell.rank)).toEqual(fetched.map((_, i) => i));
+    const levels = fetched.map((cell) => cell.level);
+    expect(levels).toEqual([...levels].sort((p, q) => q - p));
+    expect(result.summaries.get(0)!.used.cpu).toBe(fetched.length * 64 * 64 * 64 * 2);
+  });
+
   it("lists nothing for a view with nothing to draw", () => {
     const result = select([viewOf(sliceView(0, [], 0.5))]);
     expect(result.byView.get(0)!.get("ds")!.entities.size).toBe(0);

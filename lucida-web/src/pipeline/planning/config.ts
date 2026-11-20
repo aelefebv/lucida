@@ -104,6 +104,16 @@ export const DEPTH_BIAS_VIEW = 0;
 export const SELECTION_SHARE = 0.8;
 
 /**
+ * How many coarser levels a volume view keeps resident above each chunk its
+ * level selection chose, inside the selection's share. A gesture's frame
+ * draws at as little as a quarter of the resolution, the interaction render
+ * scale of a half times the adaptive floor of a half, and each level up
+ * halves a sample's size, so two levels up is the level such a frame
+ * resolves where the selection's own level spans a pixel.
+ */
+export const ANCESTOR_LEVELS = 2;
+
+/**
  * Per-tick planning tunables threaded through {@link plan}. Lane offsets
  * are whole numbers: a lane's requests take priorities less than one above
  * its offset, so lanes at different offsets never interleave.
@@ -125,6 +135,8 @@ export interface PlanningConfig {
   depthBiasView: number;
   /** {@link SELECTION_SHARE}. */
   selectionShare: number;
+  /** {@link ANCESTOR_LEVELS}. */
+  ancestorLevels: number;
 
   /**
    * Detail render radius as a multiplier of the visible-region
@@ -167,6 +179,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   distanceWeight: DISTANCE_WEIGHT,
   depthBiasView: DEPTH_BIAS_VIEW,
   selectionShare: SELECTION_SHARE,
+  ancestorLevels: ANCESTOR_LEVELS,
   detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,

@@ -309,6 +309,11 @@ export interface DatasetSelectionAtSettle {
   target: LevelRange | null;
   /** The detail tier's chunks by level, finest first. */
   levels: SelectedLevelChunks[];
+  /**
+   * The chunks the detail tier keeps above those as their ancestors, by
+   * level, finest first. Absent on a document from before the field.
+   */
+  ancestors?: SelectedLevelChunks[];
   /** Chunks the selection left at the coarse tier's level, which the coarse tier draws. */
   coarseChunks: number;
   /** That level, or null when no entity has one. */

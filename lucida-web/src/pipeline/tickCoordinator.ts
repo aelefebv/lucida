@@ -172,8 +172,9 @@ type SelectedDatasets = readonly { dsId: string; views: readonly { view: TickVie
 
 /**
  * What a selection chose, as the trace keeps it: for each dataset, in the
- * first view that draws it, the detail chunks by level, the chunks left at
- * the coarse tier's level, and the level the screen calls for.
+ * first view that draws it, the detail chunks by level, the ancestors it
+ * keeps above them by level, the chunks left at the coarse tier's level, and
+ * the level the screen calls for.
  */
 function selectionReading(datasets: SelectedDatasets, selection: LevelSelectionResult): SelectionAtSettle {
   const readings: DatasetSelectionAtSettle[] = [];
@@ -183,6 +184,7 @@ function selectionReading(datasets: SelectedDatasets, selection: LevelSelectionR
     const chosen = selection.byView.get(drawn.view.id)?.get(dsId);
     const channels = drawn.snapshot.selection.visibleChannels.length;
     const byLevel = new Map<number, number>();
+    const ancestorsByLevel = new Map<number, number>();
     let coarseChunks = 0;
     let coarseLevel: number | null = null;
     let targetMin = Infinity;
@@ -194,15 +196,21 @@ function selectionReading(datasets: SelectedDatasets, selection: LevelSelectionR
       const cells = chosen?.entities.get(entity.entityId);
       if (cells === undefined) continue;
       for (const cell of cells.detail) byLevel.set(cell.level, (byLevel.get(cell.level) ?? 0) + channels);
+      for (const cell of cells.ancestors) {
+        ancestorsByLevel.set(cell.level, (ancestorsByLevel.get(cell.level) ?? 0) + channels);
+      }
       if (cells.coarseCells > 0) {
         coarseChunks += cells.coarseCells * channels;
         coarseLevel = entity.coarseLevel;
       }
     }
+    const byLevelOf = (counts: Map<number, number>) =>
+      [...counts].sort(([a], [b]) => a - b).map(([level, chunks]) => ({ level, chunks }));
     readings.push({
       datasetId: dsId,
       target: targetMin === Infinity ? null : { min: targetMin, max: targetMax },
-      levels: [...byLevel].sort(([a], [b]) => a - b).map(([level, chunks]) => ({ level, chunks })),
+      levels: byLevelOf(byLevel),
+      ancestors: byLevelOf(ancestorsByLevel),
       coarseChunks,
       coarseLevel,
       budgetLimited: chosen?.budgetLimited ?? false,

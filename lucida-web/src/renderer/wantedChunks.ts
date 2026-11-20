@@ -7,18 +7,22 @@
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { WantedChunkChanges, WantedMemberChunks } from "./workerProtocol.ts";
 
-/** `${tier}|${memberId}` → the chunk keys the planner wants for that member in that tier. */
+/**
+ * `${tier}|${memberId}` → the chunk keys the planner wants for that member in
+ * that tier, and `${tier}|${memberId}|ancestors` → those of them that are
+ * ancestors ({@link WantedMemberChunks.ancestors}).
+ */
 export type WantedChunkIndex = ReadonlyMap<string, ReadonlySet<string>>;
 
-export function wantedEntryKey(tier: ResidencyTier, memberId: string): string {
-  return `${tier}|${memberId}`;
+export function wantedEntryKey(tier: ResidencyTier, memberId: string, ancestors = false): string {
+  return ancestors ? `${tier}|${memberId}|ancestors` : `${tier}|${memberId}`;
 }
 
 export function indexWantedChunks(entries: readonly WantedMemberChunks[]): WantedChunkIndex {
   const index = new Map<string, ReadonlySet<string>>();
   for (const entry of entries) {
     if (entry.chunkKeys.length === 0) continue;
-    index.set(wantedEntryKey(entry.tier, entry.memberId), new Set(entry.chunkKeys));
+    index.set(wantedEntryKey(entry.tier, entry.memberId, entry.ancestors), new Set(entry.chunkKeys));
   }
   return index;
 }
@@ -30,8 +34,8 @@ export function indexWantedChunks(entries: readonly WantedMemberChunks[]): Wante
  */
 export function patchWantedIndex(index: WantedChunkIndex, changes: readonly WantedChunkChanges[]): WantedChunkIndex {
   const next = new Map(index);
-  for (const { memberId, tier, added, removed } of changes) {
-    const key = wantedEntryKey(tier, memberId);
+  for (const { memberId, tier, added, removed, ancestors } of changes) {
+    const key = wantedEntryKey(tier, memberId, ancestors);
     const keys = new Set(index.get(key));
     for (const chunkKey of removed) keys.delete(chunkKey);
     for (const chunkKey of added) keys.add(chunkKey);
@@ -52,12 +56,12 @@ export function patchWantedChunks(
   index: WantedChunkIndex,
 ): WantedMemberChunks[] {
   const byKey = new Map<string, WantedMemberChunks>();
-  for (const entry of retained) byKey.set(wantedEntryKey(entry.tier, entry.memberId), entry);
-  for (const { memberId, tier } of changes) {
-    const key = wantedEntryKey(tier, memberId);
+  for (const entry of retained) byKey.set(wantedEntryKey(entry.tier, entry.memberId, entry.ancestors), entry);
+  for (const { memberId, tier, ancestors } of changes) {
+    const key = wantedEntryKey(tier, memberId, ancestors);
     const keys = index.get(key);
     if (keys === undefined) byKey.delete(key);
-    else byKey.set(key, { memberId, tier, chunkKeys: [...keys] });
+    else byKey.set(key, { memberId, tier, chunkKeys: [...keys], ...(ancestors && { ancestors }) });
   }
   return [...byKey.values()];
 }

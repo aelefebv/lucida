@@ -32,7 +32,7 @@ import type {
  * numbers, then `LEVEL_STRIDE` twelve per level.
  */
 const PREVIOUS_STRIDE = 6;
-const CELL_STRIDE = 7;
+const CELL_STRIDE = 8;
 const SELECTION_HEADER = 10;
 
 /**
@@ -166,6 +166,8 @@ interface EncodedView {
   owners: Owner[];
   datasetIds: string[];
   lookahead: number;
+  /** How many coarser levels each selected cell keeps resident above it. */
+  ancestors: number;
   zoom: number | null;
   region: string | null;
   zoomDirection: ZoomDirection | null;
@@ -221,6 +223,9 @@ function encodeView(view: SelectionView, memory: ViewMemory | undefined, config:
     zoomDirection = ratio > ZOOM_MOVE ? "in" : ratio < 1 / ZOOM_MOVE ? "out" : null;
   }
   const lookahead = config.prefetchDepth <= 0 || zoomDirection === null ? 0 : zoomDirection === "in" ? 1 : 2;
+  // Only a volume view's gesture frames march coarser levels: a slice view
+  // samples once a pixel at any level.
+  const volume = view.datasets[0]?.view.selection.renderMode === "volume";
   return {
     regions: JSON.stringify(regions),
     entities: Float64Array.from(entities),
@@ -228,6 +233,7 @@ function encodeView(view: SelectionView, memory: ViewMemory | undefined, config:
     owners,
     datasetIds: view.datasets.map((dataset) => dataset.datasetId),
     lookahead,
+    ancestors: volume ? config.ancestorLevels : 0,
     zoom,
     region,
     zoomDirection,
@@ -299,23 +305,31 @@ function runView(input: EncodedView, budget: SelectionBytes, config: PlanningCon
       budget.gpu,
       config.selectionShare,
       input.lookahead,
+      input.ancestors,
     );
-  const [selectedCount, lookaheadCount, refinedCount] = [out[0], out[1], out[2]];
+  const [fetchedCount, lookaheadCount, refinedCount] = [out[0], out[1], out[2]];
   const limited = out[5] >= 0;
 
   const byOwner = input.owners.map((): EntityLevelSelection => ({
     detail: [],
+    ancestors: [],
     lookahead: [],
     detailLevels: [],
     coarseCells: 0,
   }));
   const remembered = input.owners.map((): number[] => []);
   let at = SELECTION_HEADER;
-  for (let rank = 0; rank < selectedCount; rank++, at += CELL_STRIDE) {
+  for (let rank = 0; rank < fetchedCount; rank++, at += CELL_STRIDE) {
     const owner = out[at];
     const level = out[at + 1];
-    remembered[owner].push(0, level, out[at + 2], out[at + 3], out[at + 4], 0);
     const chosen = byOwner[owner];
+    // An ancestor is a cell the selection refined, which the refined cells
+    // remember.
+    if (out[at + 7] > 0) {
+      chosen.ancestors.push({ level, x: out[at + 2], y: out[at + 3], z: out[at + 4], rank });
+      continue;
+    }
+    remembered[owner].push(0, level, out[at + 2], out[at + 3], out[at + 4], 0);
     if (level === input.owners[owner].coarse) {
       chosen.coarseCells++;
       continue;

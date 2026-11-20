@@ -732,8 +732,9 @@ function lagOf(document: DiagnosticDocument, p: PrintNumber): string | null {
 
 /**
  * One line per dataset: the levels its selection draws at and the chunks at
- * each, the level the screen calls for, and, once, the bytes the selection
- * holds of what it may and how much of it is resident.
+ * each, the ancestors it keeps above them, the level the screen calls for,
+ * and, once, the bytes the selection holds of what it may and how much of it
+ * is resident.
  */
 function levelsOf(document: DiagnosticDocument, p: PrintNumber): string[] {
   const selection = document.steadyState.selection;
@@ -749,6 +750,9 @@ function levelsOf(document: DiagnosticDocument, p: PrintNumber): string[] {
           `${p(`${at}.coarseLevel`, dataset.coarseLevel)}`,
       );
     }
+    const ancestors = (dataset.ancestors ?? []).map((entry, i) =>
+      `${p(`${at}.ancestors[${i}].chunks`, entry.chunks.toLocaleString())} at ${p(`${at}.ancestors[${i}].level`, entry.level)}`);
+    const kept = ancestors.length > 0 ? ` · keeps ${ancestors.join(", ")} above them` : "";
     const target = dataset.target === null
       ? "nothing in view"
       : `the screen calls for ${dataset.target.min === dataset.target.max
@@ -760,7 +764,7 @@ function levelsOf(document: DiagnosticDocument, p: PrintNumber): string[] {
         `${p(`${base}.resident`, selection.resident.toLocaleString())} of ` +
         `${p(`${base}.wanted`, selection.wanted.toLocaleString())} selected chunk(s) resident`
       : "";
-    return `${dataset.datasetId}: ${parts.length > 0 ? parts.join(", ") : "nothing selected"} where ${target}` +
+    return `${dataset.datasetId}: ${parts.length > 0 ? parts.join(", ") : "nothing selected"}${kept} where ${target}` +
       `${dataset.budgetLimited ? " · the budget stopped it" : ""}${held}`;
   });
 }

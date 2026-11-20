@@ -60,7 +60,7 @@ function atTarget(entities: EntitySnapshot[]): DatasetLevelSelection {
   return {
     entities: new Map(entities.map((entity) => [
       entity.entityId,
-      { detail: [], lookahead: [], detailLevels: [entity.targetLevel], coarseCells: 0 },
+      { detail: [], ancestors: [], lookahead: [], detailLevels: [entity.targetLevel], coarseCells: 0 },
     ])),
     budgetLimited: false,
   };
@@ -1332,6 +1332,7 @@ describe("prefetch lane — the level selection's lookahead", () => {
     return {
       entities: new Map([["e0", {
         detail: [at(1, 0, 0, 0), at(1, 1, 0, 1), at(1, 0, 1, 2), at(1, 1, 1, 3)],
+        ancestors: [],
         lookahead: [at(0, 1, 1, 0), at(0, 2, 1, 1), at(0, 1, 2, 2), at(0, 2, 2, 3)],
         detailLevels: [1],
         coarseCells: 0,

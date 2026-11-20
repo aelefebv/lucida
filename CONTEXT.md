@@ -115,6 +115,12 @@ and a view too deep for its target level draws coarser
 (`lucida-core/src/level_selection.rs`).
 _Avoid_: selection (unqualified; selector state such as the current z)
 
+**Ancestor**:
+A coarser chunk the level selection keeps resident over a chunk it chose, in a
+volume view up to two levels above it, so a gesture's frame, drawn at a
+fraction of the resolution, has a level its pixels resolve. Charged to the
+selection's budget, and drawn only where the chunks under it are missing.
+
 **Displayed level**:
 The level the renderer sampled for an entity's pixels: the level the selection
 chose once its chunks are resident, and a coarser resident level or the coarse
@@ -135,8 +141,8 @@ Which concurrent stream of planner work a request belongs to: `detail`,
 _Avoid_: track (a display track is a timeline row), channel (an image axis)
 
 **Wanted set**:
-The chunks the current view calls for: its level selection and the coarse tier
-under it. Demand, not possession.
+The chunks the current view calls for: its level selection, the ancestors it
+keeps, and the coarse tier under them. Demand, not possession.
 
 **Settled**:
 A view once quiescent has held: covering its whole wanted set, or covering

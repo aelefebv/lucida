@@ -80,11 +80,11 @@ describe("a static volume", () => {
 });
 
 describe("a volume whose detail outgrows a pool sized at the WebGPU minimums", () => {
-  // 768 level-0 chunks of 512 KiB, 384 MiB. The minimums' 256 MiB buffer
-  // holds 512 of them, and this device's lets the pool hold them all inside
-  // the GPU total. The first plan is made before the worker reports either.
-  // At ratio 1 the far half spans fewer pixels, and the selection draws it a
-  // level coarser.
+  // 768 level-0 chunks of 512 KiB, 384 MiB, and the 240 of levels 1 and 2
+  // kept above them. The minimums' 256 MiB buffer holds 512 of them, and
+  // this device's lets the pool hold them all inside the GPU total. The
+  // first plan is made before the worker reports either. At ratio 1 the far
+  // half spans fewer pixels, and the selection draws it a level coarser.
   const scenario = describeScenario({
     name: "deep volume",
     mode: "volume",
@@ -104,7 +104,7 @@ describe("a volume whose detail outgrows a pool sized at the WebGPU minimums", (
       const [open] = run.phases;
       expect(open.detail.resident).toBe(open.detail.desired);
       expect(open.detail.desired).toBeGreaterThan(512);
-      expect(open.detail.desired).toBeLessThanOrEqual(768);
+      expect(open.detail.desired).toBeLessThanOrEqual(768 + 240);
       expect(open.coverage).toBe(1);
     });
   }
@@ -421,10 +421,10 @@ describe("a two-timepoint volume whose detail budget holds the view but not its 
 });
 
 describe("a gesture over a volume whose target level the budget cannot hold", () => {
-  // The screen calls for 128 chunks of level 0 and the detail budget holds
-  // 100, so the selection draws part of the view a level coarser and moves
-  // its finer chunks with the view. The worker takes them while the view
-  // moves, a gesture's room at a time.
+  // The screen calls for 128 chunks of level 0 and the 32 of level 1 above
+  // them, and the detail budget holds 120, so the selection draws part of
+  // the view a level coarser and moves its finer chunks with the view. The
+  // worker takes them while the view moves, a gesture's room at a time.
   const CHUNK_32_CUBE_BYTES = 32 * 32 * 32 * 2;
   const scenario = describeScenario({
     name: "orbit over a volume beyond the detail budget",
@@ -433,7 +433,7 @@ describe("a gesture over a volume whose target level the budget cannot hold", ()
       id: "block",
       pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
     }),
-    cache: { mainBudgetBytes: 100 * CHUNK_32_CUBE_BYTES },
+    cache: { mainBudgetBytes: 120 * CHUNK_32_CUBE_BYTES },
     gpuComplete: false,
     steps: [{ zoom: 2 }, { gesture: { orbit: [0.08, 0.03] }, moves: 30 }],
   });
@@ -446,7 +446,7 @@ describe("a gesture over a volume whose target level the budget cannot hold", ()
       expect(orbit.chunksSent, run.report).toBeGreaterThan(0);
       expect(orbit.quiescence, run.report).toBe("quiescent");
       expect(orbit.detail.resident, run.report).toBe(orbit.detail.desired);
-      expect(orbit.detail.resident, run.report).toBeLessThanOrEqual(100);
+      expect(orbit.detail.resident, run.report).toBeLessThanOrEqual(120);
     });
   }
 });
