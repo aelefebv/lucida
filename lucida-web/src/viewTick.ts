@@ -33,18 +33,21 @@ export function tickViews(
   const dpr = devicePixelRatio;
   assertCanvasSize(scene, Math.round(canvas.clientWidth * dpr), Math.round(canvas.clientHeight * dpr), dpr);
 
-  const plan = coordinator.planAndFetch(ctx, minimapPendingFetch);
-  if (!plan) return false;
-  // A gesture's frame goes to the worker ahead of the tick's uploads, which
-  // land for the frame after, so they never hold up the frame that answers
-  // the input.
+  // A gesture's frame goes to the worker ahead of the tick's replan and its
+  // uploads, which land for the frame after, so neither holds up the frame
+  // that answers the input. A replan's cost grows with what the view holds.
   const drawFirst = frame.render && ctx.gesture === true;
+  const plan = coordinator.planAndFetch(ctx, minimapPendingFetch, drawFirst);
+  if (!plan) return false;
   let backlogged = drawFirst ? false : uploader.deliverToWorker(ctx);
   if (frame.render) {
     if (ctx.views.length === 1) drawOnlyView(ctx, plan, ctx.views[0]);
     else drawViews(ctx, plan, redraws.select(ctx, frame.newChunks));
   }
-  if (drawFirst) backlogged = uploader.deliverToWorker(ctx);
+  if (drawFirst) {
+    coordinator.planAndFetch(ctx, minimapPendingFetch);
+    backlogged = uploader.deliverToWorker(ctx);
+  }
   return backlogged;
 }
 

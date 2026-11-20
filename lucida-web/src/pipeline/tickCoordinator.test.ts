@@ -585,6 +585,37 @@ describe("epoch caching", () => {
     }
   });
 
+  it("serves the plan before to a frame waiting on a camera move past the window, and plans when asked again", () => {
+    // A gesture's frame draws from the plan before, which a camera move
+    // leaves drawable, and the replan follows once the frame is sent.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const { datasets } = makeTickCoordinatorDeps();
+      const orch = makeOrch();
+      const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+      const first = orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
+      planSpy.mockClear();
+
+      vi.advanceTimersByTime(500);
+      const scene2 = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
+      expect(orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap, true)).toBe(first);
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+      expect(orch.hasPendingRebuild()).toBe(false);
+
+      // Anything but the camera plans at once, frame or not.
+      planSpy.mockClear();
+      const scene3 = createMockScene({ epochs: { content: 2, layout: 1, view: 3, selection: 1 } });
+      orch.planAndFetch(makeCtx(scene3, datasets), emptyMinimap, true);
+      expect(planSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("never coalesces a structural change, even inside the coalescing window", () => {
     // Structural changes (content/layout) must render immediately —
     // a newly-added dataset or layout change can't wait for a window.

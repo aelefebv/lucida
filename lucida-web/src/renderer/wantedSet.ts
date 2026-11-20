@@ -198,6 +198,7 @@ interface PoolSeen {
  * A member plan holds while the member's entry, its wanted chunk sets and
  * every pool and section it read are the same objects and values; the cold
  * state replaces each of those, never changes one in place, when it changes.
+ * An entry replaced by one its lookups read alike keeps the plan.
  * When only its wanted sets changed, the lookups of the chunks still wanted
  * are kept. Plans are found by entry and channel, so an update builds no
  * strings for the members it keeps.
@@ -251,13 +252,17 @@ export class WantedSetTracker {
 
     const plans = new Map<ColdStateActiveEntry, Map<number, MemberPlan>>();
     const tallies = new Map<ColdStateActiveEntry, LevelTally>();
+    // The entry each kept entry replaced, when it replaced one.
+    const successors = this.successors(coldState.activeSet);
+    const predecessors = new Map([...successors].map(([before, after]) => [after, before]));
     for (const entry of coldState.activeSet) {
-      const tally = this.tallies.get(entry) ?? new LevelTally();
+      const before = predecessors.get(entry) ?? entry;
+      const tally = this.tallies.get(before) ?? new LevelTally();
       tallies.set(entry, tally);
       const byChannel = new Map<number, MemberPlan>();
       plans.set(entry, byChannel);
       for (const channel of coldState.visibleChannels) {
-        const prior = this.plans.get(entry)?.get(channel);
+        const prior = this.plans.get(before)?.get(channel);
         const { plan, added, dropped } = this.plan(scope, entry, channel, wanted, atlases, poolFor, prior);
         byChannel.set(channel, plan);
         for (const lookup of dropped) this.drop(lookup, tally);
@@ -270,7 +275,7 @@ export class WantedSetTracker {
     // What left the active set, or the visible channels, leaves the index.
     for (const [entry, byChannel] of this.plans) {
       for (const [channel, plan] of byChannel) {
-        if (plans.get(entry)?.has(channel)) continue;
+        if (plans.get(successors.get(entry) ?? entry)?.has(channel)) continue;
         const tally = this.tallies.get(entry)!;
         for (const lookup of plan.lookups.values()) this.drop(lookup, tally);
       }
@@ -303,6 +308,26 @@ export class WantedSetTracker {
       for (const plan of byChannel.values()) {
         for (const lookup of plan.lookups.values()) if (!lookup.held) out.push(lookup.missing);
       }
+    }
+    return out;
+  }
+
+  /**
+   * Each entry of `activeSet` the cold state put in place of a planned one
+   * whose lookups would read alike, by the entry it replaced. A delta
+   * replaces an entity's entry for any change to it, a display edit or a
+   * level the selection added past its finest among them, and planning all
+   * of its members again would cost what the view holds.
+   */
+  private successors(activeSet: readonly ColdStateActiveEntry[]): Map<ColdStateActiveEntry, ColdStateActiveEntry> {
+    const out = new Map<ColdStateActiveEntry, ColdStateActiveEntry>();
+    if (this.plans.size === 0) return out;
+    const planned = new Map<string, ColdStateActiveEntry>();
+    for (const entry of this.plans.keys()) planned.set(entry.entityId, entry);
+    for (const entry of activeSet) {
+      if (this.plans.has(entry)) continue;
+      const before = planned.get(entry.entityId);
+      if (before !== undefined && lookupsReadAlike(before, entry)) out.set(before, entry);
     }
     return out;
   }
@@ -443,6 +468,32 @@ export class WantedSetTracker {
     }
     return levels;
   }
+}
+
+/**
+ * Whether a member's lookups read the same of entry `a` as of `b`: the
+ * member ids, each level's grid, and the levels sampled, which start at the
+ * finest detail level and run through every coarser level of the pyramid.
+ * The level selection's other levels, the display state and the placement
+ * are read only when the levels are reported, from the entry then current.
+ */
+function lookupsReadAlike(a: ColdStateActiveEntry, b: ColdStateActiveEntry): boolean {
+  return a.entityId === b.entityId &&
+    a.imageId === b.imageId &&
+    a.coarseLevel === b.coarseLevel &&
+    finestLevelOf(a) === finestLevelOf(b) &&
+    a.levels.length === b.levels.length &&
+    a.levels.every((level, i) => {
+      const other = b.levels[i];
+      return level.level === other.level &&
+        sameTriple(level.chunkShape, other.chunkShape) &&
+        sameTriple(level.gridShape, other.gridShape) &&
+        sameTriple(level.levelDims, other.levelDims);
+    });
+}
+
+function sameTriple(a: readonly number[], b: readonly number[]): boolean {
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
 
 /** A slice slot key's chunk, `"memberId|chunkKey"`, as a slice pool's planes are keyed. */

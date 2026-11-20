@@ -930,9 +930,18 @@ export class TickCoordinator {
     this.configStoreUnsub();
   }
 
+  /**
+   * Plan the tick, or serve the plan before when nothing it depends on
+   * changed or a coalesced change waits its turn.
+   *
+   * With `frameWaiting`, a change of the camera alone also waits: the tick's
+   * frame draws from the plan before, which a camera move leaves drawable,
+   * and the caller plans again once the frame is on its way.
+   */
   planAndFetch(
     ctx: TickContext,
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
+    frameWaiting = false,
   ): TickCoordinatorResult | null {
     const tickStart = performance.now();
     // Opens the `plan` phase: everything from here to the submit that hands
@@ -981,7 +990,8 @@ export class TickCoordinator {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
           : VIEW_REPLAN_INTERVAL_MS;
-        if (tickStart < this.lastRebuildAt + interval) {
+        const cameraOnly = causes.every((cause) => cause === "view");
+        if (tickStart < this.lastRebuildAt + interval || (frameWaiting && cameraOnly)) {
           coalescedSkip = true;
           // Leave `lastEpochs` stale so the change is re-detected next
           // tick, and flag the deferral so the render loop ticks again
