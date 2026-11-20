@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.1](https://github.com/aelefebv/lucida/compare/v0.45.0...v0.45.1) (2026-11-20)
+
+
+### Performance
+
+* **web:** keep selection-sized work off a gesture's frames ([#1700](https://github.com/aelefebv/lucida/issues/1700)) ([cd9a2e2](https://github.com/aelefebv/lucida/commit/cd9a2e26ed0f51151292befb60a9cf5e4639497b))
+
 ## [0.45.0](https://github.com/aelefebv/lucida/compare/v0.44.0...v0.45.0) (2026-11-20)
 
 
