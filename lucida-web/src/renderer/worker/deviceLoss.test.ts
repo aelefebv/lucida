@@ -17,7 +17,7 @@ import type {
   WorkerToMainMessage,
 } from "../workerProtocol.ts";
 import { UNTIMED } from "../passTiming.ts";
-import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import { createInitialState } from "./state.ts";
 import { WantedSetReporter } from "./wantedSetReport.ts";
 import { dispatchMessage } from "./dispatch.ts";
@@ -376,7 +376,7 @@ describe("GPU errors", () => {
     });
     expect(posts).toContainEqual(expect.objectContaining({ type: "gpuError", kind: "out-of-memory" }));
     expect((lost.texture as unknown as MockTexture).destroyed).toBe(true);
-    expect(ctx.state.gpuTotalBytes).toBe(CEILING_BUDGETS.gpuTotalBytes / 2);
+    expect(ctx.state.gpuTotalBytes).toBe(DESKTOP_BUDGETS.gpuTotalBytes / 2);
     const rebuilt = ctx.state.volumeAtlases.get(DETAIL_POOL)!;
     expect(rebuilt).not.toBe(lost);
     expect(rebuilt.slots.size).toBe(0);

@@ -54,7 +54,7 @@ import {
   type CachedChunk,
   type ReadyChunkDelivery,
 } from "./types.ts";
-import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { WireGeneratedChunkStatusUpdate } from "../generatedAvailability.ts";
 
@@ -70,11 +70,10 @@ export type {
   TierResidencyEntry,
 } from "./types.ts";
 
-// The page passes budgets fitted to the device; these defaults are the
-// ceiling it fits them under.
-export const DEFAULT_MAIN_BUDGET = CEILING_BUDGETS.cpuMainBytes;
-export const DEFAULT_OVERVIEW_BUDGET = CEILING_BUDGETS.cpuOverviewBytes;
-export const DEFAULT_MAX_BYTES_IN_FLIGHT = CEILING_BUDGETS.cpuBytesInFlight;
+// The page passes budgets fitted to the device; these are a desktop's.
+export const DEFAULT_MAIN_BUDGET = DESKTOP_BUDGETS.cpuMainBytes;
+export const DEFAULT_OVERVIEW_BUDGET = DESKTOP_BUDGETS.cpuOverviewBytes;
+export const DEFAULT_MAX_BYTES_IN_FLIGHT = DESKTOP_BUDGETS.cpuBytesInFlight;
 /**
  * Fetches in flight at once, the same on every device. A fetch waiting on the
  * wire holds no decode worker and none of the page's memory, so the decode
@@ -414,8 +413,12 @@ export class CpuCache {
 
   private listeners: (() => void)[] = [];
 
-  /** The knob fields as constructed, which a knob that clears returns to. */
-  private readonly ownKnobValues: Readonly<Pick<CpuCacheConfig, CacheKnobField>>;
+  /**
+   * The knob fields as constructed or as the page's budgets last set them,
+   * which a knob that clears returns to.
+   */
+  private ownKnobValues: Readonly<Pick<CpuCacheConfig, CacheKnobField>>;
+  private knobs: CacheKnobs = {};
 
   private currentEpochs: SceneEpochs = {
     content: 0, layout: 0, view: 0, selection: 0, request: 0,
@@ -1524,10 +1527,20 @@ export class CpuCache {
 
   /**
    * Run under the Dev controls knobs: each field in `knobs` takes its value,
-   * and every knob field it leaves out returns to the value it was built with.
+   * and every knob field it leaves out returns to its own value.
    */
   applyKnobs(knobs: CacheKnobs): void {
+    this.knobs = knobs;
     this.updateConfig({ ...this.ownKnobValues, ...knobs });
+  }
+
+  /**
+   * New values of its own for some knob fields, as the page's memory budgets
+   * change. A knob that is set keeps overriding its field.
+   */
+  setOwnValues(values: Partial<Pick<CpuCacheConfig, CacheKnobField>>): void {
+    this.ownKnobValues = { ...this.ownKnobValues, ...values };
+    this.applyKnobs(this.knobs);
   }
 
   /** Whether the store `req`'s tier fills holds its chunk whole. */

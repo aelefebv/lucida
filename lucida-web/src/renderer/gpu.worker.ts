@@ -42,7 +42,7 @@ async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
   const startedAt = performance.now();
   try {
     if (msg.type === "init") {
-      ctx = await bootstrapWorker(msg.canvas, post, msg.deviceMemoryGiB ?? null, (task) => enqueue(task));
+      ctx = await bootstrapWorker(msg.canvas, post, msg.gpuTotalBytes, (task) => enqueue(task));
       post({ type: "ready" });
       return;
     }

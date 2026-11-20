@@ -15,6 +15,7 @@ import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { Select } from "../ui/Select.tsx";
 import { Switch } from "../ui/Switch.tsx";
 import { scaleBarPreference } from "../viewer/scaleBar.ts";
+import { GpuMemorySetting } from "./GpuMemorySetting.tsx";
 import "./SettingsMenu.css";
 
 /** The settings in a popover off the top bar. */
@@ -31,9 +32,9 @@ export function SettingsMenu() {
 }
 
 /**
- * Appearance, what shows over the canvas, and developer tools. Each control
- * writes its preference as it changes, so the change shows at once and
- * survives a reload.
+ * Appearance, what shows over the canvas, GPU memory, and developer tools.
+ * Each control writes its preference as it changes, so the change shows at
+ * once and survives a reload.
  */
 export function SettingsPanel() {
   const [theme, setTheme] = usePreference(themePreference);
@@ -94,6 +95,9 @@ export function SettingsPanel() {
       <h2 className="lc-settings-heading">View</h2>
       <Switch label="Scale bar" isSelected={scaleBar} onChange={setScaleBar} />
       <CanvasCardSwitches />
+      <div className="lc-settings-divider" role="presentation" />
+      <h2 className="lc-settings-heading">Memory</h2>
+      <GpuMemorySetting className="lc-settings-select" />
       <div className="lc-settings-divider" role="presentation" />
       <Switch
         label="Developer tools"

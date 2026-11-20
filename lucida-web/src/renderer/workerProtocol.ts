@@ -13,11 +13,21 @@ export interface InitMessage {
   type: "init";
   canvas: OffscreenCanvas;
   /**
-   * The page's reading of the device's memory, in GiB, or null when unknown.
-   * The page reads it because only it can tell a touch-only device that
-   * reports none; the worker fits its atlas budgets from it.
+   * The GPU total the page's budgets give the worker. The page fits them,
+   * since only it knows the device, the person's setting, and the CPU stores
+   * that follow the total. Absent, the worker takes a desktop's.
    */
-  deviceMemoryGiB?: number | null;
+  gpuTotalBytes?: number;
+}
+
+/**
+ * A new GPU total from the page, as its budgets change. A total lower than
+ * what is held takes the excess back from the pools, as running out of
+ * memory does.
+ */
+export interface GpuTotalMessage {
+  type: "gpuTotal";
+  bytes: number;
 }
 
 export interface ResizeMessage {
@@ -895,6 +905,7 @@ export type MainToWorkerMessage =
   | ColdStateDeltaMessage
   | FailedChunksMessage
   | DatasetUnplannedMessage
+  | GpuTotalMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
   | AbandonFrameMessage

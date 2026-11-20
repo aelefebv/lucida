@@ -189,6 +189,27 @@ describe("compareTraces", () => {
     expect(one.header.some((field) => field.field === "cache.mainBudgetBytes")).toBe(false);
   });
 
+  it("lists the memory budgets each run's header records, and reads a run from before them as unknown", () => {
+    const MIB = 1024 * 1024;
+    const withBudgets = (gpuTotalBytes: number, cpuMainBytes: number) => {
+      const run = healthyLocalOpen();
+      run.header.budgets = { gpuTotalBytes, gpuTotalSet: false, cpuMainBytes, cpuOverviewBytes: 64 * MIB, cpuBytesInFlight: 32 * MIB };
+      return makeDocument([run]);
+    };
+    const none = compareTraces({ trace: healthyDocument() }, { trace: healthyDocument() });
+    expect(none.header.some((field) => field.field.startsWith("budgets."))).toBe(false);
+
+    const comparison = compareTraces({ trace: withBudgets(1536 * MIB, 512 * MIB) }, { trace: withBudgets(4096 * MIB, 4096 * MIB) });
+    expect(comparison.comparable).toBe(true);
+    const field = (name: string) => comparison.header.find((entry) => entry.field === name);
+    expect(field("budgets.gpuTotalBytes")).toMatchObject({ left: 1536 * MIB, right: 4096 * MIB, same: false });
+    expect(field("budgets.cpuMainBytes")).toMatchObject({ left: 512 * MIB, right: 4096 * MIB, same: false });
+    expect(field("budgets.cpuBytesInFlight")).toMatchObject({ same: true });
+
+    const older = compareTraces({ trace: healthyDocument() }, { trace: withBudgets(4096 * MIB, 4096 * MIB) });
+    expect(older.header.find((entry) => entry.field === "budgets.gpuTotalBytes")).toMatchObject({ left: null });
+  });
+
   it("carries the conditions a caller knows and the trace does not, without judging them", () => {
     const comparison = compareTraces(
       { trace: healthyDocument(), conditions: { "server warmth": "cold" } },

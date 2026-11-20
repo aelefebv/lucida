@@ -10,7 +10,7 @@
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
-import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
+import { computeAtlasGeometry, poolGridCapBytes } from "../atlasSizing.ts";
 import {
   applyFailedMarks,
   failedCellsAt,
@@ -627,7 +627,7 @@ function createWatchedSliceAtlas(
   return allocateWatched(
     ctx,
     () => createSliceAtlas(
-      ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
+      ctx.device, datasetId, poolGridCapBytes(getDeviceLimits(ctx.device)),
       chunkX, chunkY, c, format,
     ),
     (lost) => replaceLostSliceAtlas(ctx, poolKey, lost),

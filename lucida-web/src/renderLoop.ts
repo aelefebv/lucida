@@ -25,9 +25,12 @@ import {
   type CacheWarmth,
   type InputKind,
   type Outstanding,
+  type RunBudgets,
   type RunConditions,
   type SelectionAtSettle,
 } from "./trace/types.ts";
+import { gpuBudgetPreference, pageDeviceBudgets } from "./pageBudgets.ts";
+import { getPreference } from "./theme/preferences.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { deliveryTarget } from "./renderer/poolKeys.ts";
@@ -578,6 +581,18 @@ export class RenderLoop implements TraceEnvironment {
         deviceWidth: this.canvas.width,
         deviceHeight: this.canvas.height,
       },
+      budgets: this.captureBudgets(),
+    };
+  }
+
+  private captureBudgets(): RunBudgets {
+    const cache = this.session.cpuCache.getConfig();
+    return {
+      gpuTotalBytes: pageDeviceBudgets().gpuTotalBytes,
+      gpuTotalSet: getPreference(gpuBudgetPreference) !== null,
+      cpuMainBytes: cache.mainBudgetBytes,
+      cpuOverviewBytes: cache.overviewBudgetBytes,
+      cpuBytesInFlight: cache.maxBytesInFlight,
     };
   }
 
