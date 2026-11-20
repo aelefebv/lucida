@@ -34,6 +34,8 @@ import { clearSections, growViewIndirection, type ViewIndirection } from "../vie
 import { remapIndirection, type AtlasState, type LodIndirectionMeta } from "../volume/index.ts";
 import { remapSliceIndirection, type SliceAtlasState } from "../slice/index.ts";
 
+const NO_SECTIONS: readonly LodIndirectionMeta[] = [];
+
 /** Whether either tier draws only the chunks inside a render radius, which moves with the view. */
 function radiusInPlay(radius: ColdStateDeltaMessage["renderRadiusView"]): boolean {
   return radius !== undefined && (renderRadiusEnabled(radius.detail) || renderRadiusEnabled(radius.coarse));
@@ -157,11 +159,16 @@ function relayChangedMembers(ctx: WorkerCtx, draw: ViewDraw, changed: readonly C
     const routes = new Map<string, string>();
     for (const [poolKey, view] of views) {
       const asks = wanted.get(poolKey) ?? [];
-      let held = metas.get(view);
-      if (!held) metas.set(view, (held = new Map(view.entityMetas)));
-      const layout = relayMember(held.get(memberId) ?? [], asks, view.space, dimArity);
-      if (layout.metas.length > 0) held.set(memberId, layout.metas);
-      else held.delete(memberId);
+      const before = (metas.get(view) ?? view.entityMetas).get(memberId) ?? NO_SECTIONS;
+      const layout = relayMember(before, asks, view.space, dimArity);
+      // A view whose sections all stay keeps its map, which eviction's order
+      // and the wanted-set report compare by identity.
+      if (layout.metas !== before) {
+        let held = metas.get(view);
+        if (!held) metas.set(view, (held = new Map(view.entityMetas)));
+        if (layout.metas.length > 0) held.set(memberId, layout.metas);
+        else held.delete(memberId);
+      }
       clearSections(atlases.get(poolKey)!, view, layout.removed, dimArity);
       growViewIndirection(ctx.device, view, view.space.end);
       if (layout.added.length > 0) {

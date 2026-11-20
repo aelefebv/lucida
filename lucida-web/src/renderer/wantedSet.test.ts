@@ -756,6 +756,12 @@ describe("a WantedSetTracker kept from one update to the next", () => {
         activeSet[index] = { ...activeSet[index], detailLevels };
         cold = { ...cold, activeSet };
       },
+      /** Replace an entry with one that reports another target level, as a delta replaces a changed entry. */
+      report: (index: number, targetLevel: number) => {
+        const activeSet = cold.activeSet.slice();
+        activeSet[index] = { ...activeSet[index], targetLevel };
+        cold = { ...cold, activeSet };
+      },
       relay: (memberId: string, sections: AtlasLevelMeta[]) => {
         metas.detail = new Map([...metas.detail, [memberId, sections]]);
       },
@@ -802,6 +808,26 @@ describe("a WantedSetTracker kept from one update to the next", () => {
       .toEqual([...level0Keys(0).slice(0, 2), level0Keys(0)[3], level1Key(0)].sort());
   });
 
+  it("keeps a member's lookups when its entry is replaced by one they read alike", () => {
+    const w = world();
+    const tracker = new WantedSetTracker();
+    w.update(tracker);
+    // Coarser levels past the finest, and another target level: what the
+    // lookups read is unchanged, and only the level report moves.
+    w.retarget(0, [0]);
+    w.report(0, 1);
+    const update = w.update(tracker);
+    expect(update.missing).toEqual([]);
+    expect(update.levels?.[0]).toEqual(expect.objectContaining({ entityId: "entity-a", targetLevel: 1 }));
+    expect(update.levels).toEqual(w.fresh().levels);
+
+    // The kept lookups still hear residency.
+    w.arrive("detail", "a:ch0", level0Keys(0)[0]);
+    w.leave("detail", "a:ch0", level0Keys(0)[0]);
+    expect(w.update(tracker).missing.map(id)).toEqual([`a:ch0 detail ${level0Keys(0)[0]}`]);
+    expect(new Set(tracker.lacking().map(id))).toEqual(new Set(w.fresh().missing.map(id)));
+  });
+
   it("plans every member again when T moves", () => {
     const w = world();
     const tracker = new WantedSetTracker();
@@ -835,7 +861,7 @@ describe("a WantedSetTracker kept from one update to the next", () => {
         case 4: w.relay(memberId, next(2) ? [level0, level1] : [level1]); break;
         case 5: w.reroute(memberId, next(2), next(2) ? "detail" : "other"); break;
         case 6: w.step(t); break;
-        case 7: break;
+        case 7: w.report(next(2), next(2)); break;
       }
       const update = w.update(tracker);
       const fresh = w.fresh();
