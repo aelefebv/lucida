@@ -182,6 +182,8 @@ export class RenderLoop implements TraceEnvironment {
   private abandonedSeq = 0;
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
+  /** When the render worker last finished a viewport frame, on this thread's clock. */
+  private lastFrameDoneAtMs: number | null = null;
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
   private trailingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
@@ -291,7 +293,9 @@ export class RenderLoop implements TraceEnvironment {
       }
     };
     this.client.onUploadCost = (mode, bytes, ms) => this.uploader.noteUploadCost(mode, bytes, ms);
+    this.client.onGpuPassTime = (gpuPassUs) => this.resolution.noteGpuPass(gpuPassUs / 1000);
     this.client.onFrameDone = (frameSeq, doneAtMs) => {
+      this.lastFrameDoneAtMs = doneAtMs;
       if (this.bandedSeq !== null && frameSeq >= this.bandedSeq) this.bandedSeq = null;
       traceRecorder.noteFrameDone(frameSeq, doneAtMs);
       if (this.client.framesAwaitingDone() > 0) return;
@@ -365,6 +369,7 @@ export class RenderLoop implements TraceEnvironment {
     }
     this.client.onChunkResidency = null;
     this.client.onUploadCost = null;
+    this.client.onGpuPassTime = null;
     this.client.onWantedSetDelta = null;
     this.client.onMinimapOverviewsLost = null;
     this.client.onGpuCapacity = null;
@@ -656,7 +661,7 @@ export class RenderLoop implements TraceEnvironment {
     if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
     if (GESTURE_INPUTS.includes(input)) this.lastGestureAt = performance.now();
     settleSignal.restart();
-    this.resolution.noteInput(this.client.lastFrameSeq());
+    this.resolution.noteInput(this.client.lastFrameSeq(), this.gpuIdleMs());
     this.inputSinceFrame = true;
     // The banded frame drawing is of the view before this input, and the
     // frame that shows the input would wait for all of it.
@@ -666,6 +671,12 @@ export class RenderLoop implements TraceEnvironment {
       this.bandedSeq = null;
     }
     this.setDirty("interactive", input);
+  }
+
+  /** How long the GPU has had no viewport frame to draw: zero while one is drawing. */
+  private gpuIdleMs(): number {
+    if (this.lastFrameDoneAtMs === null || this.client.framesAwaitingDone() > 0) return 0;
+    return Math.max(0, performance.now() - this.lastFrameDoneAtMs);
   }
 
   /**
@@ -901,9 +912,13 @@ export class RenderLoop implements TraceEnvironment {
     }
     let factor = this.resolution.scale;
     let held = false;
-    if (drawing && this.inputSinceFrame && (renderScale > this.drawnRenderScale || factor > this.drawnFactor)) {
+    // A factor that rises while input is under way is a gesture that started
+    // on an idle GPU taking its settings back once a frame kept up, which
+    // the GPU can now afford, so it is not held.
+    const factorRestored = factor > this.drawnFactor && !this.resolution.inGesture;
+    if (drawing && this.inputSinceFrame && (renderScale > this.drawnRenderScale || factorRestored)) {
       renderScale = Math.min(renderScale, this.drawnRenderScale);
-      factor = Math.min(factor, this.drawnFactor);
+      if (factorRestored) factor = this.drawnFactor;
       held = true;
     }
     const marchStepScale = renderScale < 1 ? marchStepScaleFor(renderScale) * this.resolution.marchCoarsening : 1;

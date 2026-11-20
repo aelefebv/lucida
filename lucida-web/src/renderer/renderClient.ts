@@ -297,6 +297,9 @@ export class RenderClient implements UploadClient {
   /** Hears what the worker's chunk deliveries to the pools of `mode` cost it. */
   onUploadCost: ((mode: PoolMode, bytes: number, ms: number) => void) | null = null;
 
+  /** Hears each viewport frame's GPU pass time, in microseconds, as it is read back. */
+  onGpuPassTime: ((gpuPassUs: number) => void) | null = null;
+
   private noteFrameDone(frameSeq: number, workerDoneAtMs: number | undefined): void {
     const now = performance.now();
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
@@ -339,6 +342,7 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
+      this.onGpuPassTime?.(msg.gpuPassUs);
     } else if (msg.type === "gpuMemory") {
       const { type: _type, ...report } = msg;
       this.gpuMemoryReport = report;
