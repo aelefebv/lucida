@@ -124,31 +124,49 @@ export class AdaptiveResolution {
     if (!this.gestureUnfitted) return;
     this.gestureUnfitted = false;
     if (this.fullQualityFrameMs === null) return;
-    const predictedMs = this.fullQualityFrameMs * share * this.factor * this.factor;
-    if (predictedMs <= LONG_FRAME_MS) return;
-    this.factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * Math.sqrt(TARGET_FRAME_MS / predictedMs));
-    // A frame's cost goes with its samples along each ray too, so past the
-    // resolution's floor the march takes what is left, up to its own floor.
-    const atFloorMs = this.fullQualityFrameMs * share * this.factor * this.factor;
-    if (atFloorMs > LONG_FRAME_MS) this.coarsening = Math.min(MAX_MARCH_COARSENING, atFloorMs / TARGET_FRAME_MS);
+    const predictedMs = (this.fullQualityFrameMs * share * this.factor * this.factor) / this.coarsening;
+    if (predictedMs > LONG_FRAME_MS) this.stepDown(predictedMs);
   }
 
   /**
-   * A frame finished. During a gesture a long one steps the resolution down,
-   * by as much as brings a frame like it to {@link TARGET_FRAME_MS};
+   * A frame finished. During a gesture a long one steps the frame's cost
+   * down, by as much as brings a frame like it to {@link TARGET_FRAME_MS};
    * `lastDispatchedSeq` is the newest frame already sent, which the step
-   * cannot affect. True when the scale changed.
+   * cannot affect. True when the scale or the march changed.
+   *
+   * A gesture that starts after the GPU idled meets it on its idle clocks,
+   * where a frame can take ten times what the last full-quality frame
+   * predicts, until the clocks come back a few hundred milliseconds in. A
+   * frame still long at the resolution's floor then coarsens the march, as a
+   * predicted one does, or every frame until then holds the GPU that long.
    */
   noteFrame(frameSeq: number, latencyMs: number, lastDispatchedSeq: number): boolean {
     if (this.now() - this.lastInputAt >= RESTORE_AFTER_MS) return false;
     if (frameSeq <= this.settledAfterSeq) return false;
-    if (latencyMs <= LONG_FRAME_MS || this.factor <= MIN_ADAPTIVE_SCALE) return false;
+    if (latencyMs <= LONG_FRAME_MS) return false;
+    if (this.factor <= MIN_ADAPTIVE_SCALE && this.coarsening >= MAX_MARCH_COARSENING) return false;
+    this.stepDown(latencyMs);
+    this.settledAfterSeq = lastDispatchedSeq;
+    return true;
+  }
+
+  /**
+   * Lower the cost of a frame that takes `ms` at the current scale and march
+   * to {@link TARGET_FRAME_MS}: the resolution first, then, past its floor,
+   * the march, each no lower than its own floor.
+   */
+  private stepDown(ms: number): void {
     // A frame's cost goes with its pixels, the square of the scale, so one
     // step reaches the target instead of creeping down a fixed share a step
     // while every frame on the way holds the GPU for too long.
-    this.factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * Math.sqrt(TARGET_FRAME_MS / latencyMs));
-    this.settledAfterSeq = lastDispatchedSeq;
-    return true;
+    const factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * Math.sqrt(TARGET_FRAME_MS / ms));
+    // It goes with the samples along each ray too, so past the resolution's
+    // floor the march takes what is left.
+    const atFloorMs = (ms * factor * factor) / (this.factor * this.factor);
+    if (atFloorMs > LONG_FRAME_MS) {
+      this.coarsening = Math.min(MAX_MARCH_COARSENING, (this.coarsening * atFloorMs) / TARGET_FRAME_MS);
+    }
+    this.factor = factor;
   }
 
   /** Milliseconds until a lowered resolution may come back, or null when it is full. */

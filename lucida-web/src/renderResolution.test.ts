@@ -62,13 +62,54 @@ describe("AdaptiveResolution", () => {
     expect(res.scale).toBeCloseTo(0.5, 6);
   });
 
-  it("never steps below the floor, however long the frame", () => {
+  it("never steps below the floors, however long the frame", () => {
     const c = clock();
     const res = new AdaptiveResolution(c.now);
     res.noteInput(0);
     expect(res.noteFrame(1, 400, 1)).toBe(true);
     expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
     expect(res.noteFrame(2, 400, 2)).toBe(false);
+  });
+
+  it("coarsens the march past the resolution's floor only as far as the frame there needs", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    // At the floor a quarter of the pixels: 88 / 4 is 22 ms.
+    expect(res.noteFrame(1, 88, 1)).toBe(true);
+    expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBeCloseTo(22 / TARGET_FRAME_MS, 6);
+  });
+
+  it("leaves the march alone where the resolution alone brings a frame to the target", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    expect(res.noteFrame(1, TARGET_FRAME_MS * 3, 1)).toBe(true);
+    expect(res.scale).toBeGreaterThan(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(1);
+  });
+
+  it("coarsens the march when frames at the floor still run long, as on a GPU that idled", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    // Down to the floor, where a frame like it would just keep up.
+    expect(res.noteFrame(1, LONG_FRAME_MS * 4, 2)).toBe(true);
+    expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(1);
+    // Frame 2 left before the step; frame 3, at the floor, still takes 36 ms.
+    expect(res.noteFrame(2, 36, 3)).toBe(false);
+    c.advance(16);
+    res.noteInput(3);
+    expect(res.noteFrame(3, 36, 4)).toBe(true);
+    expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+    // Restored with the resolution.
+    c.advance(RESTORE_AFTER_MS);
+    expect(res.restoreIfIdle()).toBe(true);
+    expect(res.marchCoarsening).toBe(1);
   });
 
   it("leaves a frame no longer than a display frame and the trip alone", () => {
