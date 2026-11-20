@@ -117,6 +117,11 @@ Options:
                          the root `zarr.json` on Zarr v3.
     --seed N             Seed for the picture. The same seed gives the same
                          samples whatever the layout. Default 0.
+    --workers N          Processes that write chunks side by side. Every count
+                         writes the same bytes, but for the time gzip stamps on
+                         each chunk. Default the machine's cores, at most 16,
+                         or 1 for a dataset small enough that starting
+                         processes would cost more than they save.
     --overwrite          Replace OUT if it exists.
 
 Level L has shape ceil(shape of level L-1 / factor) on every spatial axis,
@@ -150,11 +155,15 @@ from __future__ import annotations
 import argparse
 import itertools
 import math
+import multiprocessing
+import os
 import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 import numcodecs
 import numpy as np
@@ -180,6 +189,14 @@ LABEL_NAME = "balls"
 LABEL_DTYPE = "uint32"
 # Level 0 samples per ball of the label, along each spatial axis.
 LABEL_CUBE = 32
+
+# Starting a worker process costs about a second, most of it importing numpy
+# and zarr, so a dataset one process writes in a few seconds is written
+# without them.
+PARALLEL_FROM_SAMPLES = 2**25
+# A cap on the default, so a generation leaves a large shared machine most of
+# its cores.
+DEFAULT_MAX_WORKERS = 16
 
 
 @dataclass(frozen=True)
@@ -221,6 +238,8 @@ class Options:
     level_prefix: str = ""
     consolidated: bool = False
     seed: int = 0
+    # None picks a count from the dataset's size; see default_workers.
+    workers: int | None = None
     overwrite: bool = False
 
     @property
@@ -352,6 +371,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--level-prefix", default="", metavar="P", help="name level L's array P followed by L (default empty)")
     parser.add_argument("--consolidated", action="store_true", help="consolidate every metadata document into the root")
     parser.add_argument("--seed", type=int, default=0, metavar="N", help="seed for the picture (default 0)")
+    parser.add_argument("--workers", type=int, metavar="N", help=f"processes that write chunks side by side (default the cores, at most {DEFAULT_MAX_WORKERS}, or 1 for a small dataset)")
     parser.add_argument("--overwrite", action="store_true", help="replace OUT if it exists")
     args = parser.parse_args(argv)
 
@@ -366,6 +386,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     for flag, value in (("--channels", args.channels), ("--timepoints", args.timepoints), ("--levels", args.levels)):
         if value < 1:
             parser.error(f"{flag} must be at least 1")
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be at least 1")
     if args.tiles is not None and args.tiles < 1:
         parser.error("--tiles must be at least 1")
     if args.channel_colors and len(args.channel_colors) != args.channels:
@@ -430,6 +452,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         level_prefix=args.level_prefix,
         consolidated=args.consolidated,
         seed=args.seed,
+        workers=args.workers,
         overwrite=args.overwrite,
     )
 
@@ -601,23 +624,70 @@ def label_region(level: Level, origin: Sequence[int], extent: Sequence[int], siz
     return np.where(distance_squared <= 0.4**2, ids, 0).astype(LABEL_DTYPE)
 
 
-def write_image(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int, name: str) -> None:
-    """Write one multiscale image group and its level arrays under ``prefix``."""
+@dataclass(frozen=True, eq=False)
+class Fill:
+    """The samples written to one stored object: a chunk, or a shard and the
+    inner chunks it holds, in order.
+
+    No two fills write the same object, so they run in any order and in any
+    process and leave the same bytes. An image's fill covers one timepoint
+    and channel. A label's spans every timepoint, an object each, since every
+    timepoint holds the same balls.
+    """
+
+    array: zarr.Array
+    tile: int
+    level: Level
+    # One (origin, extent) per write, in the level's samples.
+    regions: tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]
+    t: int = 0
+    c: int = 0
+    label: bool = False
+
+    @property
+    def samples(self) -> int:
+        return sum(math.prod(extent) for _, extent in self.regions)
+
+
+def stored_objects(
+    shape: Sequence[int], stored: Sequence[int], unit: Sequence[int]
+) -> Iterator[list[tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]]]:
+    """The objects of shape ``stored`` that tile ``shape``, in C order.
+
+    Each is the list of ``unit`` blocks inside it that hold samples, as their
+    grid index, origin and extent; ``stored`` is a multiple of ``unit``.
+    """
+    per_object = [s // u for s, u in zip(stored, unit)]
+    for position in itertools.product(*[range(math.ceil(s / b)) for s, b in zip(shape, stored)]):
+        inside = []
+        for offset in itertools.product(*[range(n) for n in per_object]):
+            index = tuple(p * n + o for p, n, o in zip(position, per_object, offset))
+            origin = tuple(i * u for i, u in zip(index, unit))
+            if all(o < s for o, s in zip(origin, shape)):
+                inside.append((index, origin, tuple(min(u, s - o) for u, s, o in zip(unit, shape, origin))))
+        yield inside
+
+
+def create_image(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int, name: str) -> list[Fill]:
+    """Create one multiscale image group and its level arrays under ``prefix``,
+    and return the fills that write their samples."""
     zarr.create_group(store=store, path=prefix, attributes=multiscales_attributes(opts, levels, name), zarr_format=opts.zarr_version)
-    for level in levels:
-        write_level(store, prefix, opts, level, tile)
+    fills = [fill for level in levels for fill in create_level(store, prefix, opts, level, tile)]
     if opts.labels:
-        write_labels(store, prefix, opts, levels, tile)
+        fills.extend(create_labels(store, prefix, opts, levels, tile))
+    return fills
 
 
-def write_labels(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int) -> None:
-    """Write the label image of the image under ``prefix``, as `labels/` and `labels/<name>/` beside its levels."""
+def create_labels(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int) -> list[Fill]:
+    """Create the label image of the image under ``prefix``, as `labels/` and
+    `labels/<name>/` beside its levels, and return the fills that write it."""
     labels_path = f"{prefix}/labels" if prefix else "labels"
     zarr.create_group(store=store, path=labels_path, attributes=labels_index_attributes(opts), zarr_format=opts.zarr_version)
     group_path = f"{labels_path}/{LABEL_NAME}"
     zarr.create_group(store=store, path=group_path, attributes=label_attributes(opts, levels), zarr_format=opts.zarr_version)
     leading_shape = tuple(size for _, size in opts.label_leading_axes)
     leading_ones = (1,) * len(leading_shape)
+    fills = []
     for level in levels:
         chunk = opts.chunk_for(level)
         array = zarr.create_array(
@@ -631,13 +701,9 @@ def write_labels(store: zarr.storage.LocalStore, prefix: str, opts: Options, lev
             **storage_arguments(opts, LABEL_DTYPE, opts.label_axis_names),
         )
         unit = opts.shard or chunk
-        for grid_index in itertools.product(*[range(math.ceil(s / u)) for s, u in zip(level.shape, unit)]):
-            origin = [g * u for g, u in zip(grid_index, unit)]
-            extent = [min(u, s - o) for u, s, o in zip(unit, level.shape, origin)]
-            values = label_region(level, origin, extent, opts.size_of(tile))
-            region = (slice(None),) * len(leading_shape) + tuple(slice(o, o + e) for o, e in zip(origin, extent))
-            # Every timepoint holds the same balls.
-            array[region] = np.broadcast_to(values, leading_shape + values.shape)
+        for inside in stored_objects(level.shape, unit, unit):
+            fills.append(Fill(array, tile, level, tuple((origin, extent) for _, origin, extent in inside), label=True))
+    return fills
 
 
 def storage_arguments(opts: Options, dtype: str, axis_names: list[str]) -> dict:
@@ -675,7 +741,8 @@ def storage_arguments(opts: Options, dtype: str, axis_names: list[str]) -> dict:
     }
 
 
-def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, level: Level, tile: int) -> None:
+def create_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, level: Level, tile: int) -> list[Fill]:
+    """Create one level's array and return the fills that write its samples."""
     leading_shape = tuple(size for _, size in opts.leading_axes)
     leading_ones = (1,) * len(leading_shape)
     chunk = opts.chunk_for(level)
@@ -695,27 +762,69 @@ def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
         **storage_arguments(opts, opts.dtype, opts.axis_names),
     )
     if level.index in opts.unwritten_levels:
-        return
+        return []
 
-    # A sparse level is written one inner chunk at a time so the skipped
-    # chunks never reach the shard and stay absent from its index.
-    unit = opts.shard if (opts.shard and not opts.sparse) else chunk
-    grid = [range(math.ceil(s / u)) for s, u in zip(level.shape, unit)]
+    stored = opts.shard or chunk
+    # A sparse shard is written one inner chunk at a time so the skipped
+    # chunks never reach it and stay absent from its index.
+    unit = chunk if opts.sparse else stored
+    objects = list(stored_objects(level.shape, stored, unit))
+    fills = []
     for t in range(opts.timepoints):
         for c in range(opts.channels):
-            for grid_index in itertools.product(*grid):
-                if opts.sparse and (t + c + sum(grid_index)) % 2 == 1:
-                    continue
-                origin = [g * u for g, u in zip(grid_index, unit)]
-                extent = [min(u, s - o) for u, s, o in zip(unit, level.shape, origin)]
-                if opts.level_index:
-                    values = np.full(extent, level.index, dtype=opts.dtype)
-                else:
-                    values = picture_region(opts, tile, t, c, level, origin, extent)
-                leading_index = {"t": t, "c": c}
-                region: list[int | slice] = [leading_index[name] for name, _ in opts.leading_axes]
-                region.extend(slice(o, o + e) for o, e in zip(origin, extent))
-                array[tuple(region)] = values
+            for inside in objects:
+                regions = tuple(
+                    (origin, extent)
+                    for index, origin, extent in inside
+                    if not (opts.sparse and (t + c + sum(index)) % 2 == 1)
+                )
+                if regions:
+                    fills.append(Fill(array, tile, level, regions, t, c))
+    return fills
+
+
+def write_fill(opts: Options, fill: Fill) -> None:
+    for origin, extent in fill.regions:
+        spatial = tuple(slice(o, o + e) for o, e in zip(origin, extent))
+        if fill.label:
+            values = label_region(fill.level, origin, extent, opts.size_of(fill.tile))
+            leading_shape = tuple(size for _, size in opts.label_leading_axes)
+            fill.array[(slice(None),) * len(leading_shape) + spatial] = np.broadcast_to(values, leading_shape + values.shape)
+            continue
+        if opts.level_index:
+            values = np.full(extent, fill.level.index, dtype=opts.dtype)
+        else:
+            values = picture_region(opts, fill.tile, fill.t, fill.c, fill.level, origin, extent)
+        leading_index = {"t": fill.t, "c": fill.c}
+        fill.array[tuple(leading_index[name] for name, _ in opts.leading_axes) + spatial] = values
+
+
+def default_workers(fills: list[Fill]) -> int:
+    if sum(fill.samples for fill in fills) < PARALLEL_FROM_SAMPLES:
+        return 1
+    return min(os.cpu_count() or 1, DEFAULT_MAX_WORKERS)
+
+
+def write_fills(opts: Options, fills: list[Fill]) -> None:
+    """Write every fill, in this process or in ``opts.workers`` of their own."""
+    workers = opts.workers if opts.workers is not None else default_workers(fills)
+    workers = min(workers, len(fills))
+    if os.name == "nt":
+        # Python's process pool refuses more than 61 workers there.
+        workers = min(workers, 61)
+    if workers <= 1:
+        for fill in fills:
+            write_fill(opts, fill)
+        return
+    # Spawned, not forked: zarr does its I/O on a thread of its own, and a
+    # process forked while that thread holds a lock can deadlock.
+    context = multiprocessing.get_context("spawn")
+    # Batches of many fills, so a worker spends its time writing rather than
+    # waiting for work, and enough batches that the workers finish together.
+    batch = max(1, len(fills) // (workers * 16))
+    with ProcessPoolExecutor(workers, mp_context=context) as pool:
+        for _ in pool.map(partial(write_fill, opts), fills, chunksize=batch):
+            pass
 
 
 def generate(opts: Options) -> list[Level]:
@@ -729,7 +838,7 @@ def generate(opts: Options) -> list[Level]:
     store = zarr.storage.LocalStore(str(opts.out))
 
     if opts.tiles is None:
-        write_image(store, "", opts, levels, tile=0, name=name)
+        write_fills(opts, create_image(store, "", opts, levels, tile=0, name=name))
         consolidate(store, opts)
         return levels
 
@@ -737,12 +846,14 @@ def generate(opts: Options) -> list[Level]:
     rows, columns = tile_grid(opts.tiles)
     for row in range(rows):
         zarr.create_group(store=store, path=row_name(row), zarr_format=opts.zarr_version)
+    fills = []
     for tile in range(opts.tiles):
         group_path = tile_group_path(tile, columns)
         group_attributes = ome_attributes(opts, {"well": {"images": [{"path": "0"}]}})
         zarr.create_group(store=store, path=group_path, attributes=group_attributes, zarr_format=opts.zarr_version)
         tile_levels = plan_levels(opts, opts.size_of(tile))
-        write_image(store, f"{group_path}/0", opts, tile_levels, tile=tile, name=f"{name} {group_path}")
+        fills.extend(create_image(store, f"{group_path}/0", opts, tile_levels, tile=tile, name=f"{name} {group_path}"))
+    write_fills(opts, fills)
     consolidate(store, opts)
     return levels
 

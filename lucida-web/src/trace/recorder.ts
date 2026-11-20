@@ -78,6 +78,7 @@ import {
   type GpuMemoryReading,
   type InputKind,
   type Outstanding,
+  type SelectionAtSettle,
   type PageError,
   type PageErrorSource,
   type PageScrollReading,
@@ -176,6 +177,8 @@ export interface TraceEnvironment {
   /** Read at run close, once the page the run describes actually exists. */
   captureConditions(): RunConditions;
   captureOutstanding(): Outstanding;
+  /** Read at run close: what the level selection chose. A page without one leaves it out. */
+  captureSelection?(): SelectionAtSettle | null;
 }
 
 /** Observes one committed per-tick aggregate sample. See {@link TraceRecorder.onTick}. */
@@ -434,6 +437,11 @@ export class TraceRecorder {
   private readonly lastTargetByDataset = new Map<string, { min: number; max: number }>();
 
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * When the render worker last finished a viewport frame, run or no run:
+   * what a run's first input measures the GPU's idle time from.
+   */
+  private lastFrameDoneAtMs: number | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private lastQuiescence: SettleState | null = null;
 
@@ -841,7 +849,8 @@ export class TraceRecorder {
       run.wantedSetMetAtMs = null;
       for (const view of run.views.values()) view.settledAtMs = null;
     }
-    (run.lag ??= new LagRecord()).noteInput(input, atMs);
+    (run.lag ??= new LagRecord(this.lastFrameDoneAtMs === null ? null : Math.max(0, atMs - this.lastFrameDoneAtMs)))
+      .noteInput(input, atMs);
   }
 
   /**
@@ -859,6 +868,7 @@ export class TraceRecorder {
    * that frame drew.
    */
   noteFrameDone(frameSeq: number, doneAtMs: number): void {
+    this.lastFrameDoneAtMs = Math.max(this.lastFrameDoneAtMs ?? doneAtMs, doneAtMs);
     this.open?.lag?.noteFrameDone(frameSeq, doneAtMs);
   }
 
@@ -1721,6 +1731,7 @@ export class TraceRecorder {
     this.lastTargetByDataset.clear();
     this.lastAnimationFrameMs = Number.NEGATIVE_INFINITY;
     this.frameGaps = 0;
+    this.lastFrameDoneAtMs = null;
     this.beginInterval(null);
   }
 
@@ -1849,6 +1860,7 @@ export class TraceRecorder {
         quiescenceHoldMs: this.quiescenceHoldMs,
         timeoutMs: this.timeoutMs,
         outstandingAtSettle: run.environment.captureOutstanding(),
+        ...(run.environment.captureSelection && { selectionAtSettle: run.environment.captureSelection() }),
         wantedSetMetAtUs: run.wantedSetMetAtMs === null ? null : this.offsetUs(run, run.wantedSetMetAtMs),
         ...(run.views.size > 0 && {
           views: [...run.views].map(([view, { settledAtMs, wanted, short }]) => ({

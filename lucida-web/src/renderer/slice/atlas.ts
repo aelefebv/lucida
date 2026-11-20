@@ -10,7 +10,7 @@
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
-import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
+import { computeAtlasGeometry, poolGridCapBytes } from "../atlasSizing.ts";
 import {
   applyFailedMarks,
   failedCellsAt,
@@ -45,6 +45,7 @@ import {
   type ViewIndirection,
 } from "../viewIndirection.ts";
 import { EvictionOrder } from "../evictionOrder.ts";
+import { SlotJournal } from "../slotJournal.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding one plane of the
@@ -321,6 +322,8 @@ export interface SliceAtlasState {
   slots: Map<string, number>;
   /** The held slots in the order eviction takes them. */
   order: EvictionOrder;
+  /** The slot keys held or let go since the wanted-set report last read them. */
+  journal: SlotJournal;
   /**
    * `"memberId|chunkKey"` → plane → slot index: the planes of each chunk the
    * pool holds, so an upload finds them without walking every slot.
@@ -401,7 +404,7 @@ function createSliceAtlas(
   return {
     datasetId,
     texture, format,
-    slots: new Map(), order: new EvictionOrder(), planesByChunk: new Map(), views: new Map(), freeSlots, totalSlots,
+    slots: new Map(), order: new EvictionOrder(), journal: new SlotJournal(), planesByChunk: new Map(), views: new Map(), freeSlots, totalSlots,
     chunkX, chunkY,
     slotsX, slotsY, maxSlotsY,
     entityZInfo: new Map(),
@@ -624,7 +627,7 @@ function createWatchedSliceAtlas(
   return allocateWatched(
     ctx,
     () => createSliceAtlas(
-      ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
+      ctx.device, datasetId, poolGridCapBytes(getDeviceLimits(ctx.device)),
       chunkX, chunkY, c, format,
     ),
     (lost) => replaceLostSliceAtlas(ctx, poolKey, lost),
@@ -657,7 +660,7 @@ export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: Sli
   } else {
     for (const view of views.values()) destroyViewIndirection(view);
   }
-  ctx.postWantedSet(lost.datasetId, "slice");
+  ctx.requestWantedSetReport(lost.datasetId, "slice");
 }
 
 /**

@@ -82,8 +82,9 @@ export class WorkerFeedback {
   /**
    * A missing chunk normally changes nothing, since every loss is reported
    * on its own, but one the mirror holds is a disagreement: it is logged,
-   * named to the guard, and made sendable again. Returns whether anything
-   * may now be sent again.
+   * named to the guard, and made sendable again. The worker names only the
+   * chunks that came to lack since its last report, so this costs what
+   * changed. Returns whether anything may now be sent again.
    */
   handleWantedSetDelta(
     datasetId: string,

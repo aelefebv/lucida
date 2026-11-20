@@ -109,8 +109,13 @@ export function enumerateChunks(
 }
 
 /** The region as the core reads it: `VisibleRegion` in `lucida-core/src/camera.rs`. */
-function regionJson(region: VisibleRegion): string {
-  return JSON.stringify({
+export function regionJson(region: VisibleRegion): string {
+  return JSON.stringify(regionFields(region));
+}
+
+/** {@link regionJson}'s fields, for a caller that sends several regions at once. */
+export function regionFields(region: VisibleRegion): Record<string, unknown> {
+  return {
     xy_bounds: region.xyBoundsVox,
     z_range: region.zRangeVox,
     radius_basis_vox: region.radiusBasisVox ?? null,
@@ -118,5 +123,7 @@ function regionJson(region: VisibleRegion): string {
     frustum_planes: region.frustumPlanes,
     ...(region.sidePlanes ? { side_planes: region.sidePlanes } : {}),
     ...(region.cutAxis && region.cutAxis !== "z" ? { cut_axis: region.cutAxis } : {}),
-  });
+    effective_zoom: region.effectiveZoom,
+    ...(region.measure !== undefined ? { measure: region.measure } : {}),
+  };
 }

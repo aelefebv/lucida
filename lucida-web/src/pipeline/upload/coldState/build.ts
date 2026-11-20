@@ -9,6 +9,7 @@ import type {
   ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
+  WantedChunkChanges,
   WantedMemberChunks,
 } from "../../../renderer/workerProtocol.ts";
 import type { ResolvedLayer } from "../../../resolvedLayers.ts";
@@ -106,6 +107,8 @@ export function buildColdActiveEntry(
     // An invisible entity keeps only its coarsest level and no coarse tier.
     detailLevels: entry.kind === "invisible" ? [entry.coarsestLod] : entry.detailLevels,
     coarseLevel: entry.kind === "invisible" ? null : entry.coarseLevel,
+    ...(entry.kind === "tile" && entry.targetLevel !== undefined && { targetLevel: entry.targetLevel }),
+    ...(entry.kind === "tile" && entry.keepsCoarse && { keepsCoarse: true }),
     levels,
     modelMatrix,
     invModelMatrix,
@@ -211,7 +214,10 @@ export function activeEntryReuseKey(entry: ActiveSetEntry): string {
   if (entry.kind === "invisible") {
     return `i|${entry.imageId}|${entry.coarsestLod}`;
   }
-  return ["t", entry.imageId, entry.detailLevels.join(","), entry.coarseLevel ?? ""].join("|");
+  return [
+    "t", entry.imageId, entry.detailLevels.join(","), entry.coarseLevel ?? "", entry.targetLevel ?? "",
+    entry.keepsCoarse ? 1 : 0,
+  ].join("|");
 }
 
 /**
@@ -233,8 +239,8 @@ export function buildColdStateDelta(args: {
   selection: SelectionState;
   visibleRegion: VisibleRegion;
   renderRadiusView?: { detail: number; coarse: number };
-  /** The changed entries; see `ColdStateDeltaMessage.wantedChunks`. */
-  wantedChunks: WantedMemberChunks[];
+  /** What changed; see `ColdStateDeltaMessage.wantedChunks`. */
+  wantedChunks: WantedChunkChanges[];
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   layer: ResolvedLayer | undefined;

@@ -18,6 +18,11 @@
 //! A test holds [`KNOBS`] to the panel's own source: every knob the panel
 //! shows is here by field and by label, with the panel's bounds, and nothing
 //! is here that the panel does not show. The monitor gains no knob.
+//!
+//! One flag sets a viewer setting rather than a Dev controls knob:
+//! `--gpu-budget-mb` is the GPU memory budget a person sets in Settings, in
+//! megabytes as the CPU stores' knobs are. It lands in the setting's
+//! preference the same way, and the CPU detail store follows it.
 
 use std::collections::BTreeMap;
 
@@ -34,6 +39,8 @@ pub enum KnobStore {
     Planning,
     /// The CPU cache's knobs, `cache.<field>`.
     Cache,
+    /// The memory budgets Settings sets, `memory.<field>`.
+    Memory,
 }
 
 impl KnobStore {
@@ -42,6 +49,7 @@ impl KnobStore {
         match self {
             KnobStore::Planning => format!("planning.{field}"),
             KnobStore::Cache => format!("cache.{field}"),
+            KnobStore::Memory => format!("memory.{field}"),
         }
     }
 }
@@ -241,6 +249,18 @@ pub const KNOBS: &[Knob] = &[
         max: None,
         help: "Bytes the CPU cache allows in flight at once, in megabytes",
     },
+    Knob {
+        flag: "gpu-budget-mb",
+        label: "GPU budget (MB)",
+        field: "gpuBudgetBytes",
+        store: KnobStore::Memory,
+        value_name: "MB",
+        integer: true,
+        megabytes: true,
+        min: 1.0,
+        max: None,
+        help: "The GPU memory budget Settings sets, in megabytes. The CPU detail store follows it",
+    },
 ];
 
 /// The page global the capture surface starts its preferences from, and the
@@ -266,17 +286,21 @@ pub struct KnobSettings {
     /// CPU cache fields, in bytes and counts, as the cache's config holds them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cache: BTreeMap<String, Value>,
+    /// Memory budgets Settings sets, in bytes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub memory: BTreeMap<String, Value>,
 }
 
 impl KnobSettings {
     pub fn is_empty(&self) -> bool {
-        self.planning.is_empty() && self.cache.is_empty()
+        self.planning.is_empty() && self.cache.is_empty() && self.memory.is_empty()
     }
 
     fn store(&self, store: KnobStore) -> &BTreeMap<String, Value> {
         match store {
             KnobStore::Planning => &self.planning,
             KnobStore::Cache => &self.cache,
+            KnobStore::Memory => &self.memory,
         }
     }
 
@@ -284,6 +308,7 @@ impl KnobSettings {
         match store {
             KnobStore::Planning => &mut self.planning,
             KnobStore::Cache => &mut self.cache,
+            KnobStore::Memory => &mut self.memory,
         }
     }
 
@@ -342,7 +367,7 @@ impl KnobSettings {
         }
         let mut seed = serde_json::Map::new();
         seed.insert(DEVELOPER_TOOLS_PREFERENCE.to_string(), json!(true));
-        for store in [KnobStore::Planning, KnobStore::Cache] {
+        for store in [KnobStore::Planning, KnobStore::Cache, KnobStore::Memory] {
             for (field, value) in self.store(store) {
                 seed.insert(store.preference_key(field), value.clone());
             }
@@ -404,7 +429,7 @@ pub const VERSUS: &str = "versus";
 impl clap::Args for KnobArgs {
     fn augment_args(cmd: Command) -> Command {
         let mut cmd = cmd.next_help_heading(
-            "Dev controls knobs, by the name the panel shows, applied before the page loads",
+            "Dev controls knobs, by the name the panel shows, and the GPU budget, applied before              the page loads",
         );
         for knob in KNOBS {
             cmd = cmd.arg(
@@ -619,7 +644,7 @@ mod tests {
                 }
             }
         }
-        for knob in KNOBS {
+        for knob in KNOBS.iter().filter(|knob| knob.store != KnobStore::Memory) {
             assert!(
                 panel.iter().any(|shown| shown.field == knob.field),
                 "the driver sets {}, which the panel does not show",
@@ -648,10 +673,12 @@ mod tests {
         );
         let planning = web_source("pipeline/planning/configStore.ts");
         let cache = web_source("pipeline/fetch/cacheKnobs.ts");
+        let memory = web_source("pageBudgets.ts");
         for knob in KNOBS {
             let source = match knob.store {
                 KnobStore::Planning => &planning,
                 KnobStore::Cache => &cache,
+                KnobStore::Memory => &memory,
             };
             let key = knob.store.preference_key(knob.field);
             assert!(
@@ -754,6 +781,30 @@ mod tests {
         );
         assert!(script.contains(r#""planning.prefetchDepth":0"#), "{script}");
         assert!(!script.contains("localStorage"), "{script}");
+    }
+
+    /// The GPU budget lands in the setting's own preference, in bytes, as
+    /// the Settings control writes it.
+    #[test]
+    fn the_gpu_budget_seeds_the_settings_preference_in_bytes() {
+        let mut settings = KnobSettings::default();
+        settings
+            .set(knob_for_flag("gpu-budget-mb").unwrap(), 4096.0)
+            .unwrap();
+        assert_eq!(settings.memory["gpuBudgetBytes"], json!(4_294_967_296_i64));
+        assert!(settings.planning.is_empty() && settings.cache.is_empty());
+        let script = settings.new_document_script().unwrap();
+        assert!(
+            script.contains(r#""memory.gpuBudgetBytes":4294967296"#),
+            "{script}"
+        );
+        assert_eq!(settings.describe(), "gpu-budget-mb 4096");
+        let args = parse(&["--gpu-budget-mb", "1536", "--versus"]).unwrap();
+        assert_eq!(
+            args.first.memory["gpuBudgetBytes"],
+            json!(1536 * 1024 * 1024)
+        );
+        assert_eq!(args.versus, Some(KnobSettings::default()));
     }
 
     fn parse(args: &[&str]) -> Result<KnobArgs, clap::Error> {

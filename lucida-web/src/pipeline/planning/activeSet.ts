@@ -6,6 +6,7 @@
 
 import type {
   ActiveSetEntry,
+  DatasetLevelSelection,
   EntitySnapshot,
   TileEntry,
   InvisibleEntry,
@@ -66,12 +67,12 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
  * Build the active set, one entry per entity, in entity order.
  *
  * Every visible image or tile becomes a tile entry. Its detail tier holds
- * one level, the entity's target level, which the core already resolved
- * and clamped. Nothing here chooses a level or reads residency. Its coarse
- * tier holds the coarse source level when that level is no finer.
- * Projected size plays no part, because the tier model renders from chunks
- * alone. A visible group entity gets no entry of its own; its tiles carry
- * its geometry.
+ * the levels the level selection chose for it, which the core already
+ * resolved within the budget. Nothing here chooses a level or reads
+ * residency. Its coarse tier holds the coarse source level when that level
+ * is no finer. Projected size plays no part, because the tier model renders
+ * from chunks alone. A visible group entity gets no entry of its own; its
+ * tiles carry its geometry.
  *
  * Invisible entities still appear so downstream consumers (the CPU
  * cache's eviction tier mapping, the trace's per-tick tallies) can see
@@ -82,7 +83,7 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
  * visible or invisible, so the render worker's descriptor indices, which
  * follow this order, change for that tile alone.
  */
-export function buildActiveSet(entities: EntitySnapshot[]): ActiveSetEntry[] {
+export function buildActiveSet(entities: EntitySnapshot[], selection: DatasetLevelSelection): ActiveSetEntry[] {
   const tiles = new Set<EntitySnapshot>();
   for (const group of groupMembers(entities)) {
     for (const tile of group.tiles) tiles.add(tile);
@@ -90,19 +91,23 @@ export function buildActiveSet(entities: EntitySnapshot[]): ActiveSetEntry[] {
 
   const out: ActiveSetEntry[] = [];
   for (const entity of entities) {
-    if (tiles.has(entity)) out.push(makeTileEntry(entity));
+    if (tiles.has(entity)) out.push(makeTileEntry(entity, selection));
     else if (!entity.visible) out.push(makeInvisibleEntry(entity));
   }
   return out;
 }
 
-function makeTileEntry(entity: EntitySnapshot): TileEntry {
+function makeTileEntry(entity: EntitySnapshot, selection: DatasetLevelSelection): TileEntry {
+  const chosen = selection.entities.get(entity.entityId);
+  const detailLevels = chosen?.detailLevels ?? [];
   return {
     kind: "tile",
     entityId: entity.entityId,
     imageId: entity.imageId,
-    detailLevels: [entity.targetLevel],
-    coarseLevel: compatibleCoarseLevel(entity, entity.targetLevel),
+    targetLevel: entity.targetLevel,
+    detailLevels,
+    keepsCoarse: chosen === undefined ? detailLevels.length === 0 : chosen.coarseCells > 0,
+    coarseLevel: compatibleCoarseLevel(entity, detailLevels[0] ?? -Infinity),
   };
 }
 
@@ -112,13 +117,14 @@ function clampLevel(entity: EntitySnapshot, level: number): number {
   return Math.max(0, Math.min(entity.levels.length - 1, Math.floor(level)));
 }
 
+/** The entity's coarse level, unless it is finer than its finest detail level, which the coarse tier would only shadow. */
 function compatibleCoarseLevel(
   entity: EntitySnapshot,
-  targetLevel: number,
+  finest: number,
 ): number | null {
   if (entity.coarseLevel === null) return null;
   const coarseLevel = clampLevel(entity, entity.coarseLevel);
-  if (coarseLevel < targetLevel) return null;
+  if (coarseLevel < finest) return null;
   return coarseLevel;
 }
 

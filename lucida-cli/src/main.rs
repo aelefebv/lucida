@@ -7182,8 +7182,8 @@ mod tests {
             ("pin_contrast", "pins"),
         ]);
         // The planning knobs replay through the header's planning
-        // configuration. The cache knobs have no header field, so a replay
-        // runs the cache at its own values. The page reports no core count,
+        // configuration. The cache knobs and the GPU budget have no header
+        // field, so a replay runs under the replaying machine's budgets. The page reports no core count,
         // so a replay runs on the replaying machine's cores.
         let mut not_in_header = vec!["cores"];
         for knob in trace_knobs::KNOBS {
@@ -7191,7 +7191,9 @@ mod tests {
                 trace_knobs::KnobStore::Planning => {
                     replayed_by.insert(knob.field, "planning");
                 }
-                trace_knobs::KnobStore::Cache => not_in_header.push(knob.field),
+                trace_knobs::KnobStore::Cache | trace_knobs::KnobStore::Memory => {
+                    not_in_header.push(knob.field)
+                }
             }
         }
         let not_workload = [

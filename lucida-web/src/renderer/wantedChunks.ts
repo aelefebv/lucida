@@ -5,7 +5,7 @@
  */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import type { WantedMemberChunks } from "./workerProtocol.ts";
+import type { WantedChunkChanges, WantedMemberChunks } from "./workerProtocol.ts";
 
 /** `${tier}|${memberId}` → the chunk keys the planner wants for that member in that tier. */
 export type WantedChunkIndex = ReadonlyMap<string, ReadonlySet<string>>;
@@ -24,34 +24,40 @@ export function indexWantedChunks(entries: readonly WantedMemberChunks[]): Wante
 }
 
 /**
- * Apply a delta's replacements to a retained list. Each replacement takes the
- * place of the entry for its (member, tier), and one with no keys drops it.
+ * A delta's changes applied to an index. The index comes back new, and so
+ * does each member's set that changed, since eviction's order and the
+ * wanted-set tracker tell a changed one by identity.
  */
-export function patchWantedChunks(
-  retained: readonly WantedMemberChunks[],
-  replacements: readonly WantedMemberChunks[],
-): WantedMemberChunks[] {
-  const byKey = new Map<string, WantedMemberChunks>();
-  for (const entry of retained) byKey.set(wantedEntryKey(entry.tier, entry.memberId), entry);
-  for (const entry of replacements) {
-    const key = wantedEntryKey(entry.tier, entry.memberId);
-    if (entry.chunkKeys.length === 0) byKey.delete(key);
-    else byKey.set(key, entry);
+export function patchWantedIndex(index: WantedChunkIndex, changes: readonly WantedChunkChanges[]): WantedChunkIndex {
+  const next = new Map(index);
+  for (const { memberId, tier, added, removed } of changes) {
+    const key = wantedEntryKey(tier, memberId);
+    const keys = new Set(index.get(key));
+    for (const chunkKey of removed) keys.delete(chunkKey);
+    for (const chunkKey of added) keys.add(chunkKey);
+    if (keys.size === 0) next.delete(key);
+    else next.set(key, keys);
   }
-  return [...byKey.values()];
+  return next;
 }
 
 /**
- * A delta's replacements applied to an index, as {@link patchWantedChunks}
- * applies them to the list. The index comes back new, since eviction's order
- * tells a changed one by identity.
+ * The retained list a delta's changes leave, read from `index`, the index
+ * {@link patchWantedIndex} made of the same changes: each changed entry takes
+ * its keys from there, and one left with none drops.
  */
-export function patchWantedIndex(index: WantedChunkIndex, replacements: readonly WantedMemberChunks[]): WantedChunkIndex {
-  const next = new Map(index);
-  for (const entry of replacements) {
-    const key = wantedEntryKey(entry.tier, entry.memberId);
-    if (entry.chunkKeys.length === 0) next.delete(key);
-    else next.set(key, new Set(entry.chunkKeys));
+export function patchWantedChunks(
+  retained: readonly WantedMemberChunks[],
+  changes: readonly WantedChunkChanges[],
+  index: WantedChunkIndex,
+): WantedMemberChunks[] {
+  const byKey = new Map<string, WantedMemberChunks>();
+  for (const entry of retained) byKey.set(wantedEntryKey(entry.tier, entry.memberId), entry);
+  for (const { memberId, tier } of changes) {
+    const key = wantedEntryKey(tier, memberId);
+    const keys = index.get(key);
+    if (keys === undefined) byKey.delete(key);
+    else byKey.set(key, { memberId, tier, chunkKeys: [...keys] });
   }
-  return next;
+  return [...byKey.values()];
 }

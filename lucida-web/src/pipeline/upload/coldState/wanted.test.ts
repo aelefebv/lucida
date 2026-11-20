@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ChunkRequest } from "../../planning/index.ts";
-import { diffWantedChunks, wantedChunksFromPlan } from "./wanted.ts";
+import { WantedChunkCounts, wantedChunksFromPlan } from "./wanted.ts";
 
 function req(overrides: Partial<ChunkRequest>): ChunkRequest {
   return {
@@ -45,15 +45,15 @@ describe("wantedChunksFromPlan", () => {
   });
 });
 
-describe("diffWantedChunks", () => {
-  it("carries only the entries whose chunks changed, and empties the ones that left", () => {
-    const prev = wantedChunksFromPlan([
+describe("WantedChunkCounts", () => {
+  it("names only the chunks that changed between two plans, and empties the members that left", () => {
+    const prev = new WantedChunkCounts([
       req({ imageId: "a", chunkKey: "k1" }),
       req({ imageId: "a", chunkKey: "k2" }),
       req({ imageId: "b", chunkKey: "k1" }),
       req({ imageId: "c", chunkKey: "k1" }),
     ]);
-    const next = wantedChunksFromPlan([
+    const next = new WantedChunkCounts([
       // Same chunks in another order: unchanged.
       req({ imageId: "a", chunkKey: "k2" }),
       req({ imageId: "a", chunkKey: "k1" }),
@@ -61,10 +61,35 @@ describe("diffWantedChunks", () => {
       req({ imageId: "d", chunkKey: "k1" }),
     ]);
 
-    expect(diffWantedChunks(prev, next)).toEqual([
-      { memberId: "b:ch0", tier: "detail", chunkKeys: ["k3"] },
-      { memberId: "d:ch0", tier: "detail", chunkKeys: ["k1"] },
-      { memberId: "c:ch0", tier: "detail", chunkKeys: [] },
+    expect(prev.changesTo(next)).toEqual([
+      { memberId: "b:ch0", tier: "detail", added: ["k3"], removed: ["k1"] },
+      { memberId: "d:ch0", tier: "detail", added: ["k1"], removed: [] },
+      { memberId: "c:ch0", tier: "detail", added: [], removed: ["k1"] },
     ]);
+  });
+
+  it("changes by a plan's delta what a diff of the two plans changes", () => {
+    const k1 = req({ imageId: "a", chunkKey: "k1" });
+    const k2 = req({ imageId: "a", chunkKey: "k2" });
+    const k1Again = req({ imageId: "a", chunkKey: "k1", mode: "volume" });
+    const b1 = req({ imageId: "b", chunkKey: "k1" });
+    const prefetch = req({ imageId: "a", chunkKey: "k5", lane: "prefetch" });
+    const before = [k1, k2, b1];
+    const after = [k2, k1Again, prefetch];
+    const counts = new WantedChunkCounts(before);
+
+    // k1 leaves with one request and comes back with another, so the worker
+    // keeps it; b's one chunk leaves; prefetch never reaches the worker.
+    expect(counts.apply(after, { base: before, added: [k1Again, prefetch], removed: [k1, b1] })).toEqual([
+      { memberId: "b:ch0", tier: "detail", added: [], removed: ["k1"] },
+    ]);
+    expect(new WantedChunkCounts(before).changesTo(new WantedChunkCounts(after))).toEqual([
+      { memberId: "b:ch0", tier: "detail", added: [], removed: ["k1"] },
+    ]);
+  });
+
+  it("refuses a delta on requests it did not count", () => {
+    const counts = new WantedChunkCounts([req({})]);
+    expect(counts.apply([], { base: [], added: [], removed: [] })).toBeNull();
   });
 });

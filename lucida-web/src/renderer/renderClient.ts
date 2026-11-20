@@ -6,6 +6,7 @@ import type {
   CanvasColors,
   Chunk,
   InitMessage,
+  GpuTotalMessage,
   VolumeLayerParams,
   SliceLayerParams,
   MinimapLayersMessage,
@@ -32,6 +33,7 @@ import type {
   GpuFailedMessage,
   ProbeMessage,
   ProbeSample,
+  PoolMode,
 } from "./workerProtocol.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import type { SpatialAxis } from "./slicePlane.ts";
@@ -46,7 +48,7 @@ import type {
 } from "../pipeline/upload/uploadClient.ts";
 import { tokenColor } from "../theme/tokenColors.ts";
 import type { ResolvedColor } from "../theme/tokens.ts";
-import { readDeviceMemoryGiB } from "../deviceBudget.ts";
+import { pageDeviceBudgets, subscribePageBudgets } from "../pageBudgets.ts";
 import { hearWorkerErrors } from "../pageErrors.ts";
 
 /** The page's device pixels per CSS pixel, or 1 where there is no window. */
@@ -182,6 +184,7 @@ export class RenderClient implements UploadClient {
   /** When each frame still awaiting its `frameDone` was dispatched. */
   private readonly frameDispatchedAt = new Map<number, number>();
   private frameLatency: FrameLatency | null = null;
+  private readonly stopFollowingBudgets: () => void;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -220,8 +223,15 @@ export class RenderClient implements UploadClient {
     // awaiting callers still observe the rejection themselves.
     this.readyPromise.catch(() => {});
 
-    const init: InitMessage = { type: "init", canvas: offscreen, deviceMemoryGiB: readDeviceMemoryGiB() };
+    let gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
+    const init: InitMessage = { type: "init", canvas: offscreen, gpuTotalBytes };
     this.worker.postMessage(init, [offscreen]);
+    this.stopFollowingBudgets = subscribePageBudgets(() => {
+      const next = pageDeviceBudgets().gpuTotalBytes;
+      if (next === gpuTotalBytes) return;
+      gpuTotalBytes = next;
+      this.worker.postMessage({ type: "gpuTotal", bytes: next } satisfies GpuTotalMessage);
+    });
   }
 
   /** Resolves when the worker finishes init; rejects if `destroy()` runs
@@ -293,6 +303,12 @@ export class RenderClient implements UploadClient {
    */
   onFrameDone: ((frameSeq: number, doneAtMs: number) => void) | null = null;
 
+  /** Hears what the worker's chunk deliveries to the pools of `mode` cost it. */
+  onUploadCost: ((mode: PoolMode, bytes: number, ms: number) => void) | null = null;
+
+  /** Hears each viewport frame's GPU pass time, in microseconds, as it is read back. */
+  onGpuPassTime: ((gpuPassUs: number) => void) | null = null;
+
   private noteFrameDone(frameSeq: number, workerDoneAtMs: number | undefined): void {
     const now = performance.now();
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
@@ -335,6 +351,7 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
+      this.onGpuPassTime?.(msg.gpuPassUs);
     } else if (msg.type === "gpuMemory") {
       const { type: _type, ...report } = msg;
       this.gpuMemoryReport = report;
@@ -346,6 +363,8 @@ export class RenderClient implements UploadClient {
       this.onMinimapOverviewsLost?.(msg.memberIds);
     } else if (msg.type === "frameDone") {
       this.noteFrameDone(msg.frameSeq, msg.doneAtMs);
+    } else if (msg.type === "uploadCost") {
+      this.onUploadCost?.(msg.mode, msg.bytes, msg.ms);
     } else if (msg.type === "pipelinesCompiled") {
       this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {
@@ -860,6 +879,7 @@ export class RenderClient implements UploadClient {
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.stopFollowingBudgets();
     // Settle any in-flight thumbnail requests so their promises don't hang
     // after the worker is gone (the id-correlated path has no fire-and-forget).
     for (const resolve of this.thumbnailPending.values()) resolve(null);

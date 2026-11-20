@@ -91,13 +91,17 @@ export function layoutSections(
  * section where it is: keep the held sections it still asks for, free the
  * rest, and place the new ones as {@link layoutSections} does. Updates
  * `space`; see {@link wantsRepack} once every member has moved.
+ *
+ * A member that asks for the sections it holds, in order, gets back `held`
+ * itself: what reads its sections compares them by identity, and would read
+ * them all again.
  */
 export function relayMember(
   held: readonly LodIndirectionMeta[],
   requests: readonly Omit<SectionRequest, "memberId">[],
   space: SectionSpace,
   dimArity: 2 | 3,
-): { metas: LodIndirectionMeta[]; added: LodIndirectionMeta[]; removed: LodIndirectionMeta[] } {
+): { metas: readonly LodIndirectionMeta[]; added: LodIndirectionMeta[]; removed: LodIndirectionMeta[] } {
   const kept = new Set<LodIndirectionMeta>();
   const keep = requests.map(({ meta }) => {
     const was = held.find((m) => sameSection(m, meta));
@@ -115,7 +119,8 @@ export function relayMember(
     added.push(meta);
     return meta;
   });
-  return { metas, added, removed };
+  const unchanged = metas.length === held.length && metas.every((meta, i) => meta === held[i]);
+  return { metas: unchanged ? held : metas, added, removed };
 }
 
 /**

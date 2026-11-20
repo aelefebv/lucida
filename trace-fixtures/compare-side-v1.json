@@ -7,6 +7,7 @@
     "importanceWeight": 500,
     "distanceWeight": 10,
     "depthBiasView": 0,
+    "selectionShare": 0.8,
     "detailRenderRadiusView": 2,
     "coarseRenderRadiusView": 2,
     "minimapLaneOffset": 0,

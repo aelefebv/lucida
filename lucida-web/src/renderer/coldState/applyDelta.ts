@@ -24,7 +24,7 @@ import { drawOf } from "../worker/draws.ts";
 import { syncLabelPools } from "../labelPools.ts";
 import type { ViewDraw } from "../worker/state.ts";
 import type { EntitySource } from "../entitySources.ts";
-import { targetLevelOf } from "../entitySources.ts";
+import { finestLevelOf } from "../entitySources.ts";
 import { entryPoolSources } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
 import { relayMember, wantsRepack } from "./sectionLayout.ts";
@@ -33,6 +33,8 @@ import { sourceKey } from "../poolKeys.ts";
 import { clearSections, growViewIndirection, type ViewIndirection } from "../viewIndirection.ts";
 import { remapIndirection, type AtlasState, type LodIndirectionMeta } from "../volume/index.ts";
 import { remapSliceIndirection, type SliceAtlasState } from "../slice/index.ts";
+
+const NO_SECTIONS: readonly LodIndirectionMeta[] = [];
 
 /** Whether either tier draws only the chunks inside a render radius, which moves with the view. */
 function radiusInPlay(radius: ColdStateDeltaMessage["renderRadiusView"]): boolean {
@@ -83,9 +85,10 @@ export function applyColdStateDelta(
     nextActiveSet.push(entry);
   }
 
+  const wanted = patchWantedIndex(draw.wanted, msg.wantedChunks);
   cold.activeSet = nextActiveSet;
   cold.visibleRegion = msg.visibleRegion;
-  cold.wantedChunks = patchWantedChunks(cold.wantedChunks, msg.wantedChunks);
+  cold.wantedChunks = patchWantedChunks(cold.wantedChunks, msg.wantedChunks, wanted);
   cold.currentT = msg.currentT;
   cold.currentZ = msg.currentZ;
   cold.renderRadiusView = msg.renderRadiusView;
@@ -95,7 +98,7 @@ export function applyColdStateDelta(
   ctx.state.currentColdState = cold;
   ctx.state.currentEpochs = msg.epochs;
   if (inPlace && relayChangedMembers(ctx, draw, msg.upserts)) {
-    draw.wanted = patchWantedIndex(draw.wanted, msg.wantedChunks);
+    if (msg.wantedChunks.length > 0) draw.wanted = wanted;
     syncLabelPools(ctx, msg.datasetId);
     return;
   }
@@ -150,17 +153,22 @@ function relayChangedMembers(ctx: WorkerCtx, draw: ViewDraw, changed: readonly C
   // Each touched view's sections, copied once: the view's map is replaced,
   // never changed in place, since eviction's order compares it by identity.
   const metas = new Map<ViewIndirection, Map<string, readonly LodIndirectionMeta[]>>();
-  const targetLevels = new Map(draw.targetLevels);
+  const finestLevels = new Map(draw.finestLevels);
   for (const { entry, memberId, wanted, views } of plans) {
     const sources: EntitySource[] = [];
     const routes = new Map<string, string>();
     for (const [poolKey, view] of views) {
       const asks = wanted.get(poolKey) ?? [];
-      let held = metas.get(view);
-      if (!held) metas.set(view, (held = new Map(view.entityMetas)));
-      const layout = relayMember(held.get(memberId) ?? [], asks, view.space, dimArity);
-      if (layout.metas.length > 0) held.set(memberId, layout.metas);
-      else held.delete(memberId);
+      const before = (metas.get(view) ?? view.entityMetas).get(memberId) ?? NO_SECTIONS;
+      const layout = relayMember(before, asks, view.space, dimArity);
+      // A view whose sections all stay keeps its map, which eviction's order
+      // and the wanted-set report compare by identity.
+      if (layout.metas !== before) {
+        let held = metas.get(view);
+        if (!held) metas.set(view, (held = new Map(view.entityMetas)));
+        if (layout.metas.length > 0) held.set(memberId, layout.metas);
+        else held.delete(memberId);
+      }
       clearSections(atlases.get(poolKey)!, view, layout.removed, dimArity);
       growViewIndirection(ctx.device, view, view.space.end);
       if (layout.added.length > 0) {
@@ -175,13 +183,13 @@ function relayChangedMembers(ctx: WorkerCtx, draw: ViewDraw, changed: readonly C
     }
     draw.sources.set(memberId, sources);
     draw.routes.set(memberId, routes);
-    const target = targetLevelOf(entry);
-    if (target === undefined) targetLevels.delete(memberId);
-    else targetLevels.set(memberId, target);
+    const target = finestLevelOf(entry);
+    if (target === undefined) finestLevels.delete(memberId);
+    else finestLevels.set(memberId, target);
     ctx.state.memberToDataset.set(memberId, cold.datasetId);
   }
   for (const [view, held] of metas) view.entityMetas = held;
-  draw.targetLevels = targetLevels;
+  draw.finestLevels = finestLevels;
   for (const view of metas.keys()) if (view.entityMetas.size === 0 || wantsRepack(view.space)) return false;
 
   for (const [poolKey, only] of added) {

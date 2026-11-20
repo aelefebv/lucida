@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.45.1](https://github.com/aelefebv/lucida/compare/v0.45.0...v0.45.1) (2026-11-20)
+
+
+### Performance
+
+* **web:** keep selection-sized work off a gesture's frames ([#1700](https://github.com/aelefebv/lucida/issues/1700)) ([cd9a2e2](https://github.com/aelefebv/lucida/commit/cd9a2e26ed0f51151292befb60a9cf5e4639497b))
+
+## [0.45.0](https://github.com/aelefebv/lucida/compare/v0.44.0...v0.45.0) (2026-11-20)
+
+
+### Features
+
+* **web:** size memory budgets to the device, and let a person set the GPU's ([#1694](https://github.com/aelefebv/lucida/issues/1694)) ([9311f08](https://github.com/aelefebv/lucida/commit/9311f08245730d3645544959191f65390b1dd19a))
+
+
+### Performance
+
+* start gesture scenarios from a known GPU clock state ([#1695](https://github.com/aelefebv/lucida/issues/1695)) ([d39873b](https://github.com/aelefebv/lucida/commit/d39873b55543b0320bef8ea7f5480e7dc27488be))
+* **web:** replans during a gesture cost what changed ([#1699](https://github.com/aelefebv/lucida/issues/1699)) ([6fd00ba](https://github.com/aelefebv/lucida/commit/6fd00ba918497e40239dd3f3bb6cf637b8618ea5))
+* **web:** start a gesture on an idle GPU at its cheapest settings ([#1698](https://github.com/aelefebv/lucida/issues/1698)) ([cb5a4eb](https://github.com/aelefebv/lucida/commit/cb5a4eb9bf6a8d55018fe49f86bfee0c724e14fd))
+
+## [0.44.0](https://github.com/aelefebv/lucida/compare/v0.43.0...v0.44.0) (2026-11-19)
+
+
+### Features
+
+* **core:** select the levels a view draws at within a memory budget ([#1686](https://github.com/aelefebv/lucida/issues/1686)) ([dad47d7](https://github.com/aelefebv/lucida/commit/dad47d7fde1b8c5b237d1823a5b90fd8a0742223))
+* **web:** plan the levels a view draws at from the core's selection ([#1689](https://github.com/aelefebv/lucida/issues/1689)) ([7396d84](https://github.com/aelefebv/lucida/commit/7396d84a955683a7575df981b7bab9b2567b14fa))
+* **web:** say in the trace which levels a view draws, and why ([#1691](https://github.com/aelefebv/lucida/issues/1691)) ([7adc76b](https://github.com/aelefebv/lucida/commit/7adc76b194cc128f18e3001e098e228337fa0f1d))
+
+
+### Performance
+
+* a large-3d suite of volumes that outgrow memory, generated in parallel ([#1684](https://github.com/aelefebv/lucida/issues/1684)) ([e43bb7d](https://github.com/aelefebv/lucida/commit/e43bb7d9ffb287b1247dd7e24e18380e58814d3a))
+* **web:** pace GPU uploads by the worker's time, not bytes per frame ([#1690](https://github.com/aelefebv/lucida/issues/1690)) ([3d85e8e](https://github.com/aelefebv/lucida/commit/3d85e8ebd9ae9cbc1c5e0948d300f6846d6aafc0))
+* **web:** report residency changes between the render worker and the page ([#1688](https://github.com/aelefebv/lucida/issues/1688)) ([55f6563](https://github.com/aelefebv/lucida/commit/55f6563f5648ba952ebb2028bc6904f431cf1534))
+* **web:** report residency changes between the render worker and the page, not the whole wanted set ([55f6563](https://github.com/aelefebv/lucida/commit/55f6563f5648ba952ebb2028bc6904f431cf1534))
+
 ## [0.43.0](https://github.com/aelefebv/lucida/compare/v0.42.1...v0.43.0) (2026-11-17)
 
 

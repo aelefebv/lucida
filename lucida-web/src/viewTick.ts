@@ -11,9 +11,8 @@
 
 import { assertCanvasSize } from "./applyAndSend.ts";
 import type { MinimapChunkCoord, TickCoordinator, TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
-import { drawnView, type TickContext, type TickView } from "./renderLoopTypes.ts";
+import type { TickContext, TickView } from "./renderLoopTypes.ts";
 import { readResolvedLayers } from "./resolvedLayers.ts";
 import { renderSliceView, scaleRect, sliceFrameScale } from "./slicePath.ts";
 import { renderVolumeView, volumeFrameScale } from "./volumePath.ts";
@@ -34,23 +33,22 @@ export function tickViews(
   const dpr = devicePixelRatio;
   assertCanvasSize(scene, Math.round(canvas.clientWidth * dpr), Math.round(canvas.clientHeight * dpr), dpr);
 
-  const plan = coordinator.planAndFetch(ctx, minimapPendingFetch);
+  // A gesture's frame goes to the worker ahead of the tick's replan and its
+  // uploads, which land for the frame after, so neither holds up the frame
+  // that answers the input. A replan's cost grows with what the view holds.
+  const drawFirst = frame.render && ctx.gesture === true;
+  const plan = coordinator.planAndFetch(ctx, minimapPendingFetch, drawFirst);
   if (!plan) return false;
-  const backlogged = deliver(ctx, coordinator, uploader);
-  if (!frame.render) return backlogged;
-  if (ctx.views.length === 1) drawOnlyView(ctx, plan, ctx.views[0]);
-  else drawViews(ctx, plan, redraws.select(ctx, frame.newChunks));
-  return backlogged;
-}
-
-/** Deliver decoded chunks, unless a short volume view's move holds them. */
-function deliver(ctx: TickContext, coordinator: TickCoordinator, uploader: Uploader): boolean {
-  // Read after the plan, which notes whether the view moved.
-  if (drawnView(ctx).mode === "volume" && coordinator.msUntilUploadsResume(performance.now()) !== null) {
-    uploader.holdDelivery();
-    return false;
+  let backlogged = drawFirst ? false : uploader.deliverToWorker(ctx);
+  if (frame.render) {
+    if (ctx.views.length === 1) drawOnlyView(ctx, plan, ctx.views[0]);
+    else drawViews(ctx, plan, redraws.select(ctx, frame.newChunks));
   }
-  return uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES);
+  if (drawFirst) {
+    coordinator.planAndFetch(ctx, minimapPendingFetch);
+    backlogged = uploader.deliverToWorker(ctx);
+  }
+  return backlogged;
 }
 
 /** The one view across the canvas, which draws straight onto it. */

@@ -222,6 +222,32 @@ def test_sharded_and_unsharded_twins_hold_identical_samples(tmp_path: Path) -> N
     assert multiscale(flat)["datasets"] == multiscale(sharded)["datasets"]
 
 
+def stored_bytes(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        # Levels that downsample Y and X first, each with its own chunk shape,
+        # none a multiple of its level, over two timepoints and channels.
+        ["--size", "20,40,36", "--timepoints", "2", "--channels", "2", "--levels", "3", "--factor", "1,2,2", "--factor", "2", "--chunk", "4,16,16", "--chunk", "8"],
+        # Shards that hold only some of their inner chunks, and a label.
+        ["--size", "8,40,40", "--channels", "2", "--levels", "2", "--chunk", "8", "--shard", "16", "--sparse", "--labels"],
+        # Tiles of their own sizes, on Zarr v2, whose level 0 is all fill value.
+        ["--tiles", "3", "--size", "24,24", "--size", "16,40", "--levels", "2", "--chunk", "8", "--zarr-version", "2", "--level-index"],
+    ],
+    ids=["per-level-chunks", "sparse-shards-and-labels", "v2-collection-level-index"],
+)
+def test_parallel_workers_write_the_bytes_one_process_does(tmp_path: Path, layout: list[str]) -> None:
+    serial = generate(tmp_path / "serial", "twin.ome.zarr", *layout, "--workers", "1")
+    parallel = generate(tmp_path / "parallel", "twin.ome.zarr", *layout, "--workers", "3")
+    expected, written = stored_bytes(serial), stored_bytes(parallel)
+    assert sorted(written) == sorted(expected)
+    for name, data in expected.items():
+        assert written[name] == data, name
+
+
 def test_same_seed_reproduces_and_different_seed_differs(tmp_path: Path) -> None:
     common = ["--size", "16,16", "--levels", "1", "--chunk", "8"]
     first = generate(tmp_path, "a.ome.zarr", *common, "--seed", "3")
@@ -433,6 +459,7 @@ def test_parse_args_reads_every_option() -> None:
             "--dtype", "float32",
             "--range=-2.5,10",
             "--seed", "7",
+            "--workers", "5",
             "--overwrite",
         ]
     )
@@ -457,6 +484,7 @@ def test_parse_args_reads_every_option() -> None:
     assert opts.dtype == "float32"
     assert opts.value_range == (-2.5, 10.0)
     assert opts.seed == 7
+    assert opts.workers == 5
     assert opts.overwrite is True
 
 
@@ -507,6 +535,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
     assert opts.level_index is False
     assert opts.dtype == "uint16"
     assert opts.value_range == (0.0, 60000.0)
+    assert opts.workers is None
 
 
 @pytest.mark.parametrize(
@@ -536,6 +565,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         ["out.zarr", "--scale", "0"],
         ["out.zarr", "--translation", "1,2,3"],
         ["out.zarr", "--channels", "3", "--channel-colors", "00FFFF,00FF00"],
+        ["out.zarr", "--workers", "0"],
     ],
     ids=[
         "size-arity",
@@ -562,6 +592,7 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         "zero-scale",
         "translation-arity",
         "channel-colors-arity",
+        "no-workers",
     ],
 )
 def test_parse_args_rejects_inconsistent_options(argv: list[str]) -> None:

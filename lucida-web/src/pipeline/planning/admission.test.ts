@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
-import { admitPlans, chunkBytesFor, fairShares, type GpuSlot, type PerTier } from "./admission.ts";
-import type { ChunkRequest } from "./types.ts";
+import { AdmissionLedger, admitPlans, chunkBytesFor, type GpuSlot, type PerTier } from "./admission.ts";
+import { compareChunkRequests } from "./emit.ts";
+import type { ChunkRequest, RequestDelta } from "./types.ts";
 
 function request(x: number, overrides: Partial<ChunkRequest> = {}): ChunkRequest {
   const lane = overrides.lane ?? "detail";
@@ -138,99 +139,6 @@ describe("admitting against GPU slot pools", () => {
   });
 });
 
-describe("fairShares", () => {
-  it("gives a claim that wants less than its share what it wants, and the rest to the others by weight", () => {
-    const shares = fairShares(new Map([[1, 100], [2, 10], [3, 100]]), new Map([[1, 1], [2, 1], [3, 2]]), 70);
-    expect(shares.get(2)).toBe(10);
-    expect(shares.get(1)).toBeCloseTo(20);
-    expect(shares.get(3)).toBeCloseTo(40);
-  });
-
-  it("gives every claim what it wants when the room holds them all", () => {
-    expect([...fairShares(new Map([[1, 5], [2, 7]]), new Map([[1, 1], [2, 1]]), 100)]).toEqual([[1, 5], [2, 7]]);
-  });
-});
-
-describe("admitting several views into one room", () => {
-  const VOLUME = 1;
-  const SLICE = 2;
-  const quarters = new Map([[VOLUME, 1], [SLICE, 1]]);
-
-  /** A volume view's ten-byte chunks ranking first, and a slice view's one-byte planes behind them. */
-  function twoViews() {
-    const volume = [0, 1, 2, 3, 4, 5, 6, 7].map((x) => request(x, { mode: "volume" }));
-    const slice = [0, 1, 2, 3].map((x) => request(x, { plane: 0, planes: [0, 1], priority: 100 + x }));
-    const of = new Map<ChunkRequest, number>([...volume.map((r) => [r, VOLUME] as const), ...slice.map((r) => [r, SLICE] as const)]);
-    return {
-      volume,
-      slice,
-      plan: {
-        requests: [...volume, ...slice],
-        bytesOf: (req: ChunkRequest) => (req.planes ? 1 : 10),
-        viewsOf: (req: ChunkRequest) => [of.get(req)!],
-      },
-    };
-  }
-
-  it("keeps the view whose requests rank behind from going without when the room cannot hold both", () => {
-    const { plan, slice } = twoViews();
-    const [admission] = admitPlans([plan], { detail: 50, coarse: 0 }, Infinity, quarters);
-    // The slice view wants four bytes, under its half; the volume view takes the rest.
-    expect(admission.admitted.filter((r) => r.mode === "slice")).toEqual(slice);
-    expect(admission.admitted.filter((r) => r.mode === "volume").map((r) => r.x)).toEqual([0, 1, 2, 3]);
-    expect(admission.shortfall.detail).toBe(4);
-  });
-
-  it("admits one view in priority order as before", () => {
-    const { plan, volume } = twoViews();
-    const [admission] = admitPlans([plan], { detail: 50, coarse: 0 }, Infinity, new Map([[VOLUME, 1]]));
-    expect(admission.admitted).toEqual(volume.slice(0, 5));
-  });
-
-  it("weighs each view's share by its area", () => {
-    const left = [0, 1, 2, 3, 4, 5].map((x) => request(x));
-    const right = [0, 1, 2, 3, 4, 5].map((x) => request(x, { entityId: `other-${x}`, priority: 100 + x }));
-    const of = new Map<ChunkRequest, number>([...left.map((r) => [r, 1] as const), ...right.map((r) => [r, 2] as const)]);
-    const plan = { requests: [...left, ...right], bytesOf: TEN_BYTES, viewsOf: (req: ChunkRequest) => [of.get(req)!] };
-    const [admission] = admitPlans([plan], { detail: 80, coarse: 0 }, Infinity, new Map([[1, 3], [2, 1]]));
-    expect(admission.admitted.filter((r) => left.includes(r))).toHaveLength(6);
-    expect(admission.admitted.filter((r) => right.includes(r))).toHaveLength(2);
-  });
-
-  it("divides the GPU room among views as well, when it is what runs short", () => {
-    const { plan } = twoViews();
-    const slotOf = (req: ChunkRequest): GpuSlot =>
-      req.mode === "volume" ? { pool: "volume", slots: 100, slotBytes: 10 } : { pool: "slice", slots: 100, slotBytes: 1 };
-    const [admission] = admitPlans([{ ...plan, slotOf }], { detail: 1_000, coarse: 0 }, 44, quarters);
-    expect(admission.admitted.filter((r) => r.mode === "slice")).toHaveLength(4);
-    expect(admission.admitted.filter((r) => r.mode === "volume")).toHaveLength(4);
-  });
-
-  it("hands what the shares leave to the requests next in priority order", () => {
-    // Each view's share is 15 bytes: one ten-byte chunk each, and the ten
-    // bytes left over go to the next request in order.
-    const left = [0, 1, 2].map((x) => request(x));
-    const right = [0, 1, 2].map((x) => request(x, { entityId: `other-${x}`, priority: 100 + x }));
-    const of = new Map<ChunkRequest, number>([...left.map((r) => [r, 1] as const), ...right.map((r) => [r, 2] as const)]);
-    const plan = { requests: [...left, ...right], bytesOf: TEN_BYTES, viewsOf: (req: ChunkRequest) => [of.get(req)!] };
-    const [admission] = admitPlans([plan], { detail: 30, coarse: 0 }, Infinity, quarters);
-    expect(admission.admitted).toEqual([left[0], left[1], right[0]]);
-    expect(admission.shortfall.detail).toBe(3);
-  });
-
-  it("charges a request two views asked for once", () => {
-    const shared = request(0);
-    const own = [1, 2, 3].map((x) => request(x, { priority: 100 + x }));
-    const plan = {
-      requests: [shared, ...own],
-      bytesOf: TEN_BYTES,
-      viewsOf: (req: ChunkRequest) => (req === shared ? [1, 2] : [2]),
-    };
-    const [admission] = admitPlans([plan], { detail: 30, coarse: 0 }, Infinity, quarters);
-    expect(admission.admitted).toEqual([shared, own[0], own[1]]);
-  });
-});
-
 describe("admitPlans with planes", () => {
   it("charges a request for some planes of a chunk apart from one for all of it", () => {
     const planes = request(0, { plane: 1, planes: [0, 3] });
@@ -254,6 +162,104 @@ describe("admitPlans against what the cache holds", () => {
     // shares; the other two cost their planes.
     expect(admission.admitted).toEqual([...planes.slice(0, 2), whole]);
     expect(admission.shortfall.detail).toBe(1);
+  });
+});
+
+describe("AdmissionLedger", () => {
+  const slotOf = (req: ChunkRequest): GpuSlot | null =>
+    req.lane === "detail" || req.lane === "coarse" ? { pool: `${req.tier}-${req.x % 3}`, slots: 40, slotBytes: 10 } : null;
+  const SOURCES = ["manifest", "report"];
+
+  /** `next` as a plan carried from `base`: what it added and removed. */
+  function deltaOf(base: readonly ChunkRequest[], next: readonly ChunkRequest[]): RequestDelta {
+    const before = new Set(base);
+    const after = new Set(next);
+    return { base, added: next.filter((req) => !before.has(req)), removed: base.filter((req) => !after.has(req)) };
+  }
+
+  it("admits a plan's delta whole while everything fits, and passes the delta on", () => {
+    const ledger = new AdmissionLedger();
+    const first = [0, 1, 2].map((x) => request(x));
+    const [a] = ledger.admit([{ requests: first, bytesOf: TEN_BYTES, slotOf }], { detail: 100, coarse: 0 }, 1_000, SOURCES);
+    expect(a.admitted).toBe(first);
+    expect(a.delta).toBeUndefined();
+
+    const second = [first[1], first[2], request(3)];
+    const delta = deltaOf(first, second);
+    const [b] = ledger.admit([{ requests: second, bytesOf: TEN_BYTES, slotOf, delta }], { detail: 100, coarse: 0 }, 1_000, SOURCES);
+    expect(b.admitted).toBe(second);
+    expect(b.delta).toBe(delta);
+    expect(b.shortfall).toEqual({ detail: 0, coarse: 0 });
+  });
+
+  it("admits again in priority order once a delta no longer fits", () => {
+    const ledger = new AdmissionLedger();
+    const first = [0, 1, 2].map((x) => request(x));
+    ledger.admit([{ requests: first, bytesOf: TEN_BYTES }], { detail: 30, coarse: 0 }, Infinity, SOURCES);
+    const second = [...first, request(3)];
+    const [b] = ledger.admit(
+      [{ requests: second, bytesOf: TEN_BYTES, delta: deltaOf(first, second) }], { detail: 30, coarse: 0 }, Infinity, SOURCES,
+    );
+    expect(b.admitted.map((r) => r.x)).toEqual([0, 1, 2]);
+    expect(b.shortfall.detail).toBe(1);
+    expect(b.delta).toBeUndefined();
+  });
+
+  it("carries through a change of room that everything still fits", () => {
+    const ledger = new AdmissionLedger();
+    const first = [0, 1].map((x) => request(x));
+    ledger.admit([{ requests: first, bytesOf: TEN_BYTES, slotOf }], { detail: 100, coarse: 0 }, 1_000, SOURCES);
+    const second = [...first, request(2)];
+    const delta = deltaOf(first, second);
+    const [b] = ledger.admit([{ requests: second, bytesOf: TEN_BYTES, slotOf, delta }], { detail: 30, coarse: 0 }, 30, SOURCES);
+    expect(b.admitted).toBe(second);
+    expect(b.delta).toBe(delta);
+  });
+
+  it("admits again when what the bytes and slots are read from changed", () => {
+    const ledger = new AdmissionLedger();
+    const first = [0, 1].map((x) => request(x));
+    ledger.admit([{ requests: first, bytesOf: TEN_BYTES }], { detail: 100, coarse: 0 }, Infinity, SOURCES);
+    const second = [first[0]];
+    const [b] = ledger.admit(
+      [{ requests: second, bytesOf: TEN_BYTES, delta: deltaOf(first, second) }], { detail: 100, coarse: 0 }, Infinity, ["manifest", "new report"],
+    );
+    expect(b.admitted).toBe(second);
+    // Both admissions took the whole plan, so the delta still says how the admitted set changed.
+    expect(b.delta?.removed).toEqual([first[1]]);
+  });
+
+  it("admits what admitting every plan from nothing admits, over a run of replans", () => {
+    // A deterministic stream of replans, each adding and removing a few
+    // requests across lanes, tiers and pools, some of which no longer fit.
+    let seed = 7;
+    const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const lanes = ["detail", "detail", "detail", "coarse", "prefetch", "minimap"] as const;
+    const pool = Array.from({ length: 80 }, (_, x) => request(x % 50, {
+      lane: lanes[x % lanes.length],
+      priority: x,
+      entityId: `tile-${x % 50}`,
+    })).sort(compareChunkRequests);
+    const bytesOf = (req: ChunkRequest) => 8 + (req.x % 5);
+    let capacity = { detail: 260, coarse: 40 };
+    let room = 400;
+    const ledger = new AdmissionLedger();
+    let current: ChunkRequest[] = pool.filter(() => random() < 0.4);
+    ledger.admit([{ requests: current, bytesOf, slotOf }], capacity, room, SOURCES);
+    for (let step = 0; step < 300; step++) {
+      // Now and then the budgets and the GPU room move, as a report moves them.
+      if (random() < 0.1) {
+        capacity = { detail: 220 + Math.floor(random() * 80), coarse: 30 + Math.floor(random() * 20) };
+        room = 350 + Math.floor(random() * 100);
+      }
+      const next = pool.filter((req) => (current.includes(req) ? random() > 0.08 : random() < 0.06));
+      const carried = ledger.admit([{ requests: next, bytesOf, slotOf, delta: deltaOf(current, next) }], capacity, room, SOURCES)[0];
+      const fresh = admitPlans([{ requests: next, bytesOf, slotOf }], capacity, room)[0];
+      expect(carried.admitted).toEqual(fresh.admitted);
+      expect(carried.shortfall).toEqual(fresh.shortfall);
+      expect(carried.borrowed).toBe(fresh.borrowed);
+      current = next;
+    }
   });
 });
 

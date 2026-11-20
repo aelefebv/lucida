@@ -9,7 +9,7 @@
 import { Axis } from "../../axes.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
-import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
+import { computeAtlasGeometry, poolGridCapBytes } from "../atlasSizing.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
@@ -36,6 +36,7 @@ import { applyFailedMarks, failedCellsAt, failedKeysForImage } from "../failedCe
 import { INDIRECTION_MISS } from "../remap.ts";
 import { labelVolumePoolKey } from "../labelPools.ts";
 import { EvictionOrder } from "../evictionOrder.ts";
+import { SlotJournal } from "../slotJournal.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
@@ -75,6 +76,8 @@ export interface AtlasState {
   slots: Map<string, number>;
   /** The held slots in the order eviction takes them, kept in step with {@link slots}. */
   order: EvictionOrder;
+  /** The slot keys held or let go since the wanted-set report last read them. */
+  journal: SlotJournal;
   /** view id → the view's indirection over the pool, mapping the bricks of its own T. */
   views: Map<number, ViewIndirection>;
   freeSlots: number[];            // available slot indices (stack)
@@ -684,7 +687,7 @@ function createVolumeAtlas(
   return {
     datasetId,
     texture, format,
-    slots: new Map(), order: new EvictionOrder(), views: new Map(), freeSlots, totalSlots,
+    slots: new Map(), order: new EvictionOrder(), journal: new SlotJournal(), views: new Map(), freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
     slotsX, slotsY, slotsZ, rowsY,
     maxSlotsZ,
@@ -858,7 +861,7 @@ function createWatchedVolumeAtlas(
   return allocateWatched(
     ctx,
     () => createVolumeAtlas(
-      ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
+      ctx.device, datasetId, poolGridCapBytes(getDeviceLimits(ctx.device)),
       chunkX, chunkY, chunkZ, c, format,
     ),
     (lost) => replaceLostVolumeAtlas(ctx, poolKey, lost),
@@ -937,7 +940,7 @@ export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: At
   } else {
     for (const view of views.values()) destroyViewIndirection(view);
   }
-  ctx.postWantedSet(lost.datasetId, "volume");
+  ctx.requestWantedSetReport(lost.datasetId, "volume");
 }
 
 /**

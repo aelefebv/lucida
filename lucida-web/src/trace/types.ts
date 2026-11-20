@@ -38,7 +38,7 @@ export const TRACE_SCHEMA_VERSION = 3;
  *            take the result, so the row also carries the worker's own time
  *            ({@link TraceRow.decodeWorkUs}) and the diagnostic judges that.
  * - `upload` bytes decoded → the chunk is on the GPU. Covers the wait in
- *            the CPU cache for a delivery tick, the per-frame upload budget,
+ *            the CPU cache for a delivery tick and for room in the worker,
  *            and the worker's own texture write; residency is established by
  *            message ordering (the worker is FIFO, so a chunk posted before
  *            a render has been written by the time that render runs). A
@@ -296,6 +296,41 @@ export interface GpuIdentity {
   timestampQueries: boolean;
 }
 
+/** Detail chunks the level selection chose at one level: its cells, once per channel shown. */
+export interface SelectedLevelChunks {
+  level: number;
+  chunks: number;
+}
+
+/** What the level selection chose for one dataset, in the first view that draws it, as the run closed. */
+export interface DatasetSelectionAtSettle {
+  datasetId: string;
+  /** The level the screen calls for across the dataset's visible entities, or null with none in view. */
+  target: LevelRange | null;
+  /** The detail tier's chunks by level, finest first. */
+  levels: SelectedLevelChunks[];
+  /** Chunks the selection left at the coarse tier's level, which the coarse tier draws. */
+  coarseChunks: number;
+  /** That level, or null when no entity has one. */
+  coarseLevel: number | null;
+  /** Whether the budget stopped the view's refinement short of the levels the screen calls for. */
+  budgetLimited: boolean;
+}
+
+/**
+ * The level selection as the run closed: what each dataset draws at, and the
+ * bytes its views spent of the shares they selected within. A view that
+ * draws coarser than the screen calls for does so here, by choice, not for
+ * want of room.
+ */
+export interface SelectionAtSettle {
+  datasets: DatasetSelectionAtSettle[];
+  /** CPU bytes the views' selections hold, summed over the views. */
+  usedBytes: number;
+  /** CPU bytes the views may select within: the budget less the headroom it keeps, summed. */
+  shareBytes: number;
+}
+
 /**
  * What the pipeline has left to do, from the CPU cache's point of view.
  * One shape with two readings: live, it is the cache's half of the
@@ -342,6 +377,23 @@ export interface RunConditions {
   composedView: ComposedView;
   devicePixelRatio: number;
   viewport: Viewport;
+  /** Absent on a document from before the field. */
+  budgets?: RunBudgets;
+}
+
+/**
+ * The memory budgets a run ran under. The GPU total is what the page gave
+ * the render worker; each reading's `gpuMemory` carries the worker's own,
+ * lower once the device ran out of memory under it. The CPU stores are what
+ * the cache ran under, Dev controls knobs included.
+ */
+export interface RunBudgets {
+  gpuTotalBytes: number;
+  /** Whether a person set the GPU total in Settings, rather than the device fitting it. */
+  gpuTotalSet: boolean;
+  cpuMainBytes: number;
+  cpuOverviewBytes: number;
+  cpuBytesInFlight: number;
 }
 
 /**
@@ -443,6 +495,8 @@ export interface RunHeader extends RunConditions {
   /** How long the run was allowed to stay open before closing as `timeout`. */
   timeoutMs: number;
   outstandingAtSettle: Outstanding;
+  /** The level selection as the run closed; absent on a document from before it, or from a page without one. */
+  selectionAtSettle?: SelectionAtSettle | null;
   /**
    * Microseconds from run start at which the view last came to have its
    * wanted set, and kept it to the close: no input left to draw, and every
@@ -1537,6 +1591,14 @@ export interface TraceLag {
    * of them to tell.
    */
   displayIntervalUs: number | null;
+  /**
+   * How long the GPU had been idle when the interval's first input landed:
+   * from when the render worker finished its last viewport frame to the
+   * input's event. A GPU left idle drops its clocks, so a gesture after a
+   * long idle starts on slower ones. Null when no frame had finished yet,
+   * and absent from a trace recorded before it was kept.
+   */
+  gpuIdleUs?: number | null;
 }
 
 export interface TraceInput {

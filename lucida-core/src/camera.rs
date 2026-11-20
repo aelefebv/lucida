@@ -38,6 +38,12 @@ pub struct VisibleRegion {
     /// reports its zoom. A volume view reports the measure where the
     /// center-screen ray meets the volume.
     pub effective_zoom: f64,
+    /// Device pixels per level-0 sample at the camera's focus: a slice view's
+    /// zoom, or where a volume camera's view axis meets the point it orbits.
+    /// A zoom moves it and an orbit holds it still, which `effective_zoom`,
+    /// taken where the center ray meets the data, does not.
+    #[serde(default)]
+    pub focal_zoom: f64,
     /// Radius basis in voxels for view-relative render-radius controls.
     ///
     /// Slice mode uses the visible view half-diagonal. 3D mode uses the
@@ -61,6 +67,129 @@ pub struct VisibleRegion {
     /// volume view leaves it at Z and ignores it.
     #[serde(default, skip_serializing_if = "SpatialAxis::is_z")]
     pub cut_axis: SpatialAxis,
+    /// How many device pixels a level-0 sample spans anywhere in the region,
+    /// which the level selection reads per chunk.
+    pub measure: SampleMeasure,
+}
+
+/// Device pixels per level-0 sample at any point of a visible region, in the
+/// dataset's own frame. [`VisibleRegion::effective_zoom`] is this measure at
+/// one point; the level selection takes it at every chunk, so a near chunk in
+/// a perspective view resolves finer than a far one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SampleMeasure {
+    /// A slice view spaces its samples the same distance apart everywhere.
+    /// `axes` are the two axes it draws, as `[t, c, z, y, x]` indices: the
+    /// ones whose downsampling makes a level coarser on screen.
+    Uniform {
+        pixels_per_sample: f64,
+        axes: [usize; 2],
+    },
+    /// A volume view's perspective: `pixels_per_world` device pixels per world
+    /// unit one unit from `eye`, which is in level-0 samples of the frame.
+    /// `to_world` maps a step of one sample along X, Y and Z, its columns, to
+    /// world units, so a distance and a sample's extent are both read there.
+    Perspective {
+        eye: [f64; 3],
+        to_world: [[f64; 3]; 3],
+        pixels_per_world: f64,
+    },
+}
+
+impl SampleMeasure {
+    /// Device pixels per level-0 sample at the point of the box `[lo, hi]`
+    /// nearest the eye, `[x, y, z]` in the frame's samples. The nearest point
+    /// is where the box's samples look largest, so a box is judged by its
+    /// largest samples. Taken along the axis with the most samples per world
+    /// unit, as [`Camera::pixels_per_sample`] is, so the two agree at the
+    /// center-ray hit.
+    pub fn at_box(&self, lo: [f64; 3], hi: [f64; 3]) -> f64 {
+        match self {
+            SampleMeasure::Uniform {
+                pixels_per_sample, ..
+            } => *pixels_per_sample,
+            SampleMeasure::Perspective {
+                eye,
+                to_world,
+                pixels_per_world,
+            } => {
+                // Clamping axis by axis finds the nearest point of a box the
+                // map scales per axis and turns, which is what a placement is.
+                let step: [f64; 3] = std::array::from_fn(|a| eye[a].max(lo[a]).min(hi[a]) - eye[a]);
+                let world: [f64; 3] = std::array::from_fn(|r| {
+                    to_world[0][r] * step[0] + to_world[1][r] * step[1] + to_world[2][r] * step[2]
+                });
+                let distance = norm3(world).max(1e-6);
+                let finest = to_world
+                    .iter()
+                    .map(|column| norm3(*column))
+                    .fold(f64::INFINITY, f64::min);
+                pixels_per_world / distance * finest
+            }
+        }
+    }
+
+    /// The axes, as `[t, c, z, y, x]` indices, whose downsampling makes a
+    /// level coarser on screen: the two a slice view draws, or all three.
+    pub fn resolved_axes(&self) -> &[usize] {
+        match self {
+            SampleMeasure::Uniform { axes, .. } => axes,
+            SampleMeasure::Perspective { .. } => &crate::target_level::VOLUME_AXES,
+        }
+    }
+
+    /// This measure on a render target that keeps `scale` of the device
+    /// pixels, as the target level reads it under the pixel-ratio cap.
+    pub fn scaled(self, scale: f64) -> Self {
+        match self {
+            SampleMeasure::Uniform {
+                pixels_per_sample,
+                axes,
+            } => SampleMeasure::Uniform {
+                pixels_per_sample: pixels_per_sample * scale,
+                axes,
+            },
+            SampleMeasure::Perspective {
+                eye,
+                to_world,
+                pixels_per_world,
+            } => SampleMeasure::Perspective {
+                eye,
+                to_world,
+                pixels_per_world: pixels_per_world * scale,
+            },
+        }
+    }
+
+    /// A volume camera's measure over the box `model` places, `shape` level-0
+    /// samples `[z, y, x]` deep, in the frame its visible region reads samples
+    /// in: X across, Y down from the top of the unit cube, Z along it.
+    fn perspective(
+        pixels_per_world: f64,
+        eye_world: [f64; 3],
+        model: &[f64; 16],
+        inv_model: &[f64; 16],
+        shape: [u32; 3],
+    ) -> Self {
+        let [sz, sy, sx] = shape.map(|n| f64::from(n.max(1)));
+        let unit = transform_point(eye_world, inv_model);
+        let column =
+            |c: usize, per: f64| -> [f64; 3] { std::array::from_fn(|r| model[4 * c + r] * per) };
+        SampleMeasure::Perspective {
+            eye: [unit[0] * sx, (1.0 - unit[1]) * sy, unit[2] * sz],
+            to_world: [
+                column(0, 1.0 / sx),
+                column(1, -1.0 / sy),
+                column(2, 1.0 / sz),
+            ],
+            pixels_per_world,
+        }
+    }
+}
+
+fn norm3(v: [f64; 3]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 fn serialize_range_as_array<S: serde::Serializer>(
@@ -730,6 +859,16 @@ fn sanitize_projection(fov: &mut f64, near: &mut f64, far: &mut f64) {
 }
 
 impl Slice {
+    /// The measure of a region this view shows `pixels_per_sample` device
+    /// pixels per level-0 sample in, over the two axes it draws.
+    fn measure(&self, pixels_per_sample: f64) -> SampleMeasure {
+        let [across, down, _] = self.plane.axes();
+        SampleMeasure::Uniform {
+            pixels_per_sample,
+            axes: [across.tczyx(), down.tczyx()],
+        }
+    }
+
     /// A stand-in camera, unframed, for the scene to fit.
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
@@ -836,11 +975,13 @@ impl Slice {
             xy_bounds: [min[0], min[1], max[0], max[1]],
             z_range,
             effective_zoom: self.zoom * self.plane.sample_extent(frame_to_scene),
+            focal_zoom: self.zoom * self.plane.sample_extent(frame_to_scene),
             radius_basis_vox: visible_radius_basis_from_box(min, max),
             sort_center: None,
             frustum_planes: None,
             side_planes,
             cut_axis: self.plane.cut(),
+            measure: self.measure(self.zoom * self.plane.sample_extent(frame_to_scene)),
         }
     }
 
@@ -890,11 +1031,13 @@ impl Slice {
             xy_bounds: [min[0], min[1], max[0], max[1]],
             z_range: first..plane(max[2].ceil()).max(first + 1),
             effective_zoom: self.zoom * reach,
+            focal_zoom: self.zoom * reach,
             radius_basis_vox: visible_radius_basis_from_box(min, max),
             sort_center: Some(to_frame.apply(middle)),
             frustum_planes: Some(faces),
             side_planes: None,
             cut_axis: SpatialAxis::Z,
+            measure: self.measure(self.zoom * reach),
         }
     }
 
@@ -1512,11 +1655,20 @@ impl Arcball {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
+            focal_zoom: self.effective_zoom()
+                / densest_samples_per_world(&model_matrices_f64(volume_transform).0, shape),
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
             side_planes: None,
             cut_axis: SpatialAxis::Z,
+            measure: SampleMeasure::perspective(
+                self.pixels_per_world_at_unit_distance(),
+                self.eye_position(),
+                &model_matrices_f64(volume_transform).0,
+                &inv_model,
+                shape,
+            ),
         }
     }
 }
@@ -1770,6 +1922,12 @@ impl Fly {
         self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan())
     }
 
+    /// Screen pixels per world unit one unit from the eye, which a fly
+    /// camera's effective zoom already is.
+    fn pixels_per_world_at_unit_distance(&self) -> f64 {
+        self.effective_zoom()
+    }
+
     /// Device pixels per level-0 sample where the center-screen ray meets the
     /// volume, along the axis with the most samples per world unit. See
     /// [`Camera::pixels_per_sample`].
@@ -1926,11 +2084,20 @@ impl Fly {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
+            focal_zoom: self.effective_zoom()
+                / densest_samples_per_world(&model_matrices_f64(volume_transform).0, shape),
             radius_basis_vox: focal_plane_radius_basis(self.viewport, zoom_per_voxel),
             sort_center,
             frustum_planes: Some(frustum_planes),
             side_planes: None,
             cut_axis: SpatialAxis::Z,
+            measure: SampleMeasure::perspective(
+                self.pixels_per_world_at_unit_distance(),
+                self.eye_position(),
+                &model_matrices_f64(volume_transform).0,
+                &inv_model,
+                shape,
+            ),
         }
     }
 }
@@ -4104,6 +4271,24 @@ mod tests {
         let fly = Fly::new([800, 600]);
         let f = fly.pixels_per_sample_at_hit(Some(&t), shape);
         assert!(f > 0.0 && f.is_finite());
+    }
+
+    #[test]
+    fn the_focal_zoom_follows_a_zoom_and_holds_through_an_orbit() {
+        let t = crate::transform::compute_volume_transform([256, 1024, 1024], [1.0, 1.0, 1.0]);
+        let shape = [256u32, 1024, 1024];
+        let focal = |arc: &Arcball| {
+            Camera::Arcball(arc.clone())
+                .visible_region(&(0..256), Some(&t), Some(&shape))
+                .focal_zoom
+        };
+        let mut arc = Arcball::new([800, 600]);
+        let before = focal(&arc);
+        arc.theta += 0.7;
+        arc.phi += 0.2;
+        assert!((focal(&arc) / before - 1.0).abs() < 1e-9);
+        arc.distance /= 2.0;
+        assert!((focal(&arc) / before - 2.0).abs() < 1e-9);
     }
 
     #[test]

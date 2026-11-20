@@ -17,9 +17,9 @@ import type {
   WorkerToMainMessage,
 } from "../workerProtocol.ts";
 import { UNTIMED } from "../passTiming.ts";
-import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import { createInitialState } from "./state.ts";
-import { createWantedSetPoster } from "./bootstrap.ts";
+import { WantedSetReporter } from "./wantedSetReport.ts";
 import { dispatchMessage } from "./dispatch.ts";
 import { DEVICE_LOSS_WINDOW_MS, MAX_DEVICE_LOSSES, recoverDevice, watchDevice, type DeviceRecovery } from "./deviceLoss.ts";
 import { clearGpuErrorReports, GPU_ERROR_REPORT_SPACING_MS } from "./gpuErrors.ts";
@@ -91,6 +91,7 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
   const post = (msg: WorkerToMainMessage) => {
     posts.push(msg);
   };
+  const reporter = new WantedSetReporter(state, post);
   const ctx: WorkerCtx = {
     device,
     context: { configure: vi.fn(), canvas: { width: 8, height: 8 } } as unknown as GPUCanvasContext,
@@ -105,7 +106,8 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
     ensureOffscreenPool: () => [],
     getOrCreateLUT: () => ({}) as GPUTexture,
     post,
-    postWantedSet: createWantedSetPoster(state, post),
+    requestWantedSetReport: (datasetId, mode, view) => reporter.request(datasetId, mode, view),
+    flushWantedSetReports: () => reporter.flush(),
     lookupEntityDescriptor: () => null,
   };
   return { ctx, posts };
@@ -374,7 +376,7 @@ describe("GPU errors", () => {
     });
     expect(posts).toContainEqual(expect.objectContaining({ type: "gpuError", kind: "out-of-memory" }));
     expect((lost.texture as unknown as MockTexture).destroyed).toBe(true);
-    expect(ctx.state.gpuTotalBytes).toBe(CEILING_BUDGETS.gpuTotalBytes / 2);
+    expect(ctx.state.gpuTotalBytes).toBe(DESKTOP_BUDGETS.gpuTotalBytes / 2);
     const rebuilt = ctx.state.volumeAtlases.get(DETAIL_POOL)!;
     expect(rebuilt).not.toBe(lost);
     expect(rebuilt.slots.size).toBe(0);

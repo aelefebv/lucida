@@ -242,7 +242,7 @@ describe("UploadTelemetry — shape regression", () => {
         drainedChunks: 5,
         uploadedChunks: 4,
         bytesUploaded: 1536,
-        bytesBudget: 8192,
+        budgetMs: 12,
         budgetExhausted: false,
         skippedPrefetch: 1,
         skippedWrongLod: 1,

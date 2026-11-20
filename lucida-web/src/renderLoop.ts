@@ -20,7 +20,17 @@ import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleOutcome, type SettleState } from "./pipeline/settle.ts";
 import { failedChunkReport, summarizeFailedChunks } from "./pipeline/failedChunks.ts";
-import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
+import {
+  PointEvent,
+  type CacheWarmth,
+  type InputKind,
+  type Outstanding,
+  type RunBudgets,
+  type RunConditions,
+  type SelectionAtSettle,
+} from "./trace/types.ts";
+import { gpuBudgetPreference, pageDeviceBudgets } from "./pageBudgets.ts";
+import { getPreference } from "./theme/preferences.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { deliveryTarget } from "./renderer/poolKeys.ts";
@@ -175,9 +185,10 @@ export class RenderLoop implements TraceEnvironment {
   private abandonedSeq = 0;
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
+  /** When the render worker last finished a viewport frame, on this thread's clock. */
+  private lastFrameDoneAtMs: number | null = null;
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
   private trailingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
-  private uploadResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
   private fitResumeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly framePacer = new FramePacer();
@@ -284,7 +295,10 @@ export class RenderLoop implements TraceEnvironment {
         this.republishSettle();
       }
     };
+    this.client.onUploadCost = (mode, bytes, ms) => this.uploader.noteUploadCost(mode, bytes, ms);
+    this.client.onGpuPassTime = (gpuPassUs) => this.resolution.noteGpuPass(gpuPassUs / 1000);
     this.client.onFrameDone = (frameSeq, doneAtMs) => {
+      this.lastFrameDoneAtMs = doneAtMs;
       if (this.bandedSeq !== null && frameSeq >= this.bandedSeq) this.bandedSeq = null;
       traceRecorder.noteFrameDone(frameSeq, doneAtMs);
       if (this.client.framesAwaitingDone() > 0) return;
@@ -348,10 +362,6 @@ export class RenderLoop implements TraceEnvironment {
       clearTimeout(this.trailingRebuildTimer);
       this.trailingRebuildTimer = null;
     }
-    if (this.uploadResumeTimer !== null) {
-      clearTimeout(this.uploadResumeTimer);
-      this.uploadResumeTimer = null;
-    }
     if (this.minimapDisplayTimer !== null) {
       clearTimeout(this.minimapDisplayTimer);
       this.minimapDisplayTimer = null;
@@ -361,6 +371,8 @@ export class RenderLoop implements TraceEnvironment {
       this.fitResumeTimer = null;
     }
     this.client.onChunkResidency = null;
+    this.client.onUploadCost = null;
+    this.client.onGpuPassTime = null;
     this.client.onWantedSetDelta = null;
     this.client.onMinimapOverviewsLost = null;
     this.client.onGpuCapacity = null;
@@ -505,10 +517,8 @@ export class RenderLoop implements TraceEnvironment {
   private evaluateAndPublishSettle(): SettleState {
     const state = this.settleState;
     this.session.cpuCache.settleInputs(state);
-    // A view change the planner deferred has not reached the wanted set yet,
-    // and chunks held while the view moved have not reached the GPU.
-    state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild() ||
-      this.uploadResumeTimer !== null;
+    // A view change the planner deferred has not reached the wanted set yet.
+    state.interactiveDirty = this.interactiveDirty || this.tickCoordinator.hasPendingRebuild();
     // Limits held while the view moved may yet change what it draws, though
     // it has everything it wants.
     state.residencyDirty = this.residencyDirty || this.fitResumeTimer !== null;
@@ -571,6 +581,18 @@ export class RenderLoop implements TraceEnvironment {
         deviceWidth: this.canvas.width,
         deviceHeight: this.canvas.height,
       },
+      budgets: this.captureBudgets(),
+    };
+  }
+
+  private captureBudgets(): RunBudgets {
+    const cache = this.session.cpuCache.getConfig();
+    return {
+      gpuTotalBytes: pageDeviceBudgets().gpuTotalBytes,
+      gpuTotalSet: getPreference(gpuBudgetPreference) !== null,
+      cpuMainBytes: cache.mainBudgetBytes,
+      cpuOverviewBytes: cache.overviewBudgetBytes,
+      cpuBytesInFlight: cache.maxBytesInFlight,
     };
   }
 
@@ -595,6 +617,11 @@ export class RenderLoop implements TraceEnvironment {
       coarseBytes: s.coarseBytes,
       coarseBudgetBytes: s.coarseBudgetBytes,
     };
+  }
+
+  /** {@link TraceEnvironment}: what the level selection chose as the run closed. */
+  captureSelection(): SelectionAtSettle | null {
+    return this.tickCoordinator.selectionAtSettle();
   }
 
   private publishRenderedCaptureReady(): void {
@@ -649,7 +676,7 @@ export class RenderLoop implements TraceEnvironment {
     if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
     if (GESTURE_INPUTS.includes(input)) this.lastGestureAt = performance.now();
     settleSignal.restart();
-    this.resolution.noteInput(this.client.lastFrameSeq());
+    this.resolution.noteInput(this.client.lastFrameSeq(), this.gpuIdleMs());
     this.inputSinceFrame = true;
     // The banded frame drawing is of the view before this input, and the
     // frame that shows the input would wait for all of it.
@@ -659,6 +686,12 @@ export class RenderLoop implements TraceEnvironment {
       this.bandedSeq = null;
     }
     this.setDirty("interactive", input);
+  }
+
+  /** How long the GPU has had no viewport frame to draw: zero while one is drawing. */
+  private gpuIdleMs(): number {
+    if (this.lastFrameDoneAtMs === null || this.client.framesAwaitingDone() > 0) return 0;
+    return Math.max(0, performance.now() - this.lastFrameDoneAtMs);
   }
 
   /**
@@ -721,23 +754,6 @@ export class RenderLoop implements TraceEnvironment {
       if (due === null) return;
       if (due > 0) this.scheduleTrailingRebuild();
       else this.setDirty("interactive", "pending_residency_rebuild");
-    }, wait);
-  }
-
-  /**
-   * Tick once the volume view has held still long enough for the uploads
-   * held while it moved to go. Until then a tick delivers nothing, so it
-   * has nothing new to draw either.
-   */
-  private scheduleUploadResume(): void {
-    if (this.mode !== "volume") return;
-    const wait = this.tickCoordinator.msUntilUploadsResume(performance.now());
-    if (wait === null || this.uploadResumeTimer !== null) return;
-    this.uploadResumeTimer = setTimeout(() => {
-      this.uploadResumeTimer = null;
-      // The view moved again during the wait.
-      if (this.tickCoordinator.msUntilUploadsResume(performance.now()) !== null) this.scheduleUploadResume();
-      else this.setDirty("residency", "uploads_resumed");
     }, wait);
   }
 
@@ -911,9 +927,13 @@ export class RenderLoop implements TraceEnvironment {
     }
     let factor = this.resolution.scale;
     let held = false;
-    if (drawing && this.inputSinceFrame && (renderScale > this.drawnRenderScale || factor > this.drawnFactor)) {
+    // A factor that rises while input is under way is a gesture that started
+    // on an idle GPU taking its settings back once a frame kept up, which
+    // the GPU can now afford, so it is not held.
+    const factorRestored = factor > this.drawnFactor && !this.resolution.inGesture;
+    if (drawing && this.inputSinceFrame && (renderScale > this.drawnRenderScale || factorRestored)) {
       renderScale = Math.min(renderScale, this.drawnRenderScale);
-      factor = Math.min(factor, this.drawnFactor);
+      if (factorRestored) factor = this.drawnFactor;
       held = true;
     }
     const marchStepScale = renderScale < 1 ? marchStepScaleFor(renderScale) * this.resolution.marchCoarsening : 1;
@@ -996,11 +1016,7 @@ export class RenderLoop implements TraceEnvironment {
         shouldRender = true;
       }
     } else if (this.residencyDirty) {
-      if (this.uploadResumeTimer !== null) {
-        // Uploads are held, so nothing new has reached the GPU to draw. The
-        // timer dirties the loop again when they may go.
-        this.residencyDirty = false;
-      } else if (
+      if (
         now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS &&
         this.framePacer.mayDrawResidency(now, framesInFlight, this.deliveryBacklogged)
       ) {
@@ -1051,7 +1067,6 @@ export class RenderLoop implements TraceEnvironment {
     }
 
     this.scheduleTrailingRebuild();
-    this.scheduleUploadResume();
 
     // Recording is unconditional, and one subtraction is not a cost worth
     // gating.

@@ -93,7 +93,10 @@ export async function recoverDevice(
   ctx.post({ type: "gpuDeviceRestored" });
   const draws = [...state.draws.values()];
   for (const draw of draws) applyColdState(ctx, draw.cold);
-  for (const draw of draws) ctx.postWantedSet(draw.datasetId, undefined, draw.view);
+  // Now, not at the next frame: every pool is empty, and the page sends
+  // nothing until it hears what each view lacks.
+  for (const draw of draws) ctx.requestWantedSetReport(draw.datasetId, undefined, draw.view);
+  ctx.flushWantedSetReports();
   postGpuMemoryIfChanged(ctx);
 }
 

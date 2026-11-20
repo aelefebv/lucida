@@ -44,7 +44,7 @@ import {
 } from "./slice/index.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
-import { measureGpuMemory } from "./worker/gpuBudget.ts";
+import { measureGpuCapacity, measureGpuMemory, setGpuTotal } from "./worker/gpuBudget.ts";
 import { growViewSlots } from "./viewIndirection.ts";
 import type {
   Chunk,
@@ -94,7 +94,8 @@ function makeMockCtx(): { ctx: WorkerCtx; posts: WorkerToMainMessage[] } {
     device: makeMockDevice(),
     state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
-    postWantedSet() {},
+    requestWantedSetReport() {},
+    flushWantedSetReports() {},
   } as unknown as WorkerCtx;
   return { ctx, posts };
 }
@@ -356,6 +357,7 @@ describe("volume pool growth", () => {
   it("grows to its cap's grid and no further", () => {
     // 64 MiB of 32³ chunks: 1024 slots, in layers of 4×4.
     const { ctx, copies } = makeGrowthCtx(64 * 1024 * 1024);
+    (ctx.device as unknown as { limits: Partial<GPUSupportedLimits> }).limits = { maxBufferSize: 64 * 1024 * 1024 };
     const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
     expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([4, 4, 64]);
     // Doubling its rows: through its first layer's four, then whole layers.
@@ -365,6 +367,20 @@ describe("volume pool growth", () => {
     expect(atlas.totalSlots).toBe(1024);
     expect(copies).toHaveLength(8);
     expect(growVolumeAtlas(ctx.device, atlas, volumeRows(atlas) * 2)).toBe(false);
+  });
+
+  it("lays its grid out for the device's largest pool, so a raised total lets it grow on", () => {
+    // Under a 64 MiB total, on a device whose largest buffer is 256 MiB.
+    const { ctx } = makeGrowthCtx(64 * 1024 * 1024);
+    (ctx.device as unknown as { limits: Partial<GPUSupportedLimits> }).limits = { maxBufferSize: 256 * 1024 * 1024 };
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    expect(atlas.slotsX * atlas.slotsY * atlas.maxSlotsZ).toBe(4096);
+    const maxSlots = () => measureGpuCapacity(ctx).pools[0].maxSlots;
+    expect(maxSlots()).toBe(1024);
+    setGpuTotal(ctx, 256 * 1024 * 1024);
+    expect(maxSlots()).toBe(4096);
+    expect(growVolumeAtlas(ctx.device, atlas, atlas.slotsY * atlas.maxSlotsZ)).toBe(true);
+    expect(atlas.totalSlots).toBe(4096);
   });
 
   /** Hold the chunk at each grid cell of `imgA`'s 5×4×4 section in slot order, mapped, through a full first layer. */
@@ -641,7 +657,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
     layOut(viewOf(atlas), "imgA", [level0, level1]);
     viewOf(atlas).indirectionData = new Uint32Array(2 * 4 * 4 + 2 * 2).fill(0xFFFFFFFF);
     atlas.freeSlots = [2, 1, 0];
-    testDraw(ctx).targetLevels = new Map([["imgA", 0]]);
+    testDraw(ctx).finestLevels = new Map([["imgA", 0]]);
     applyViewHotState(ctx, { type: "viewHotState", epochs: epochs(), datasetId: "ds1", view: 0, rayHitsByEntity: [["imgA", [0, 0, 0]]] });
     const level1Msg = (chunks: Chunk[], t = 0) =>
       makeVolumeMsg("imgA", chunks, { level: 1, t, levelWidth: 64, levelHeight: 64, levelDepth: 32 });
@@ -663,7 +679,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
     layOut(viewOf(atlas), "imgA", [{ ...level1, offset: 0 }]);
     viewOf(atlas).indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
     remapIndirection(atlas, viewOf(atlas), 0, 0);
-    testDraw(ctx).targetLevels = new Map([["imgA", 1]]);
+    testDraw(ctx).finestLevels = new Map([["imgA", 1]]);
     expect(viewOf(atlas).slotGridIdx[atlas.slots.get(`imgA|${finer.key}`)!]).toBe(-1);
 
     posts.length = 0;
@@ -842,7 +858,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     layOut(viewOf(atlas), "imgA", [level0, level1]);
     viewOf(atlas).indirectionData = new Uint32Array(4 * 4 + 2 * 2).fill(0xFFFFFFFF);
     atlas.freeSlots = [2, 1, 0];
-    testDraw(ctx).targetLevels = new Map([["imgA", 0]]);
+    testDraw(ctx).finestLevels = new Map([["imgA", 0]]);
     setCameraUVForMember(ctx.state, 0, "imgA", [0.0, 0.0]);
     const level1Msg = (chunks: Chunk[], t = 0) =>
       makeSliceMsg("imgA", chunks, { level: 1, t, levelWidth: 64, levelHeight: 64 });
@@ -860,7 +876,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     layOut(viewOf(atlas), "imgA", [{ ...level1, offset: 0 }]);
     viewOf(atlas).indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
     remapSliceIndirection(atlas, viewOf(atlas), 0, 0, 0);
-    testDraw(ctx).targetLevels = new Map([["imgA", 1]]);
+    testDraw(ctx).finestLevels = new Map([["imgA", 1]]);
     expect(viewOf(atlas).slotGridIdx[atlas.slots.get(sk(finer.key))!]).toBe(-1);
 
     posts.length = 0;
@@ -915,7 +931,7 @@ describe("eviction kernel — findEvictionSlot", () => {
       slotGridIdx: new Int32Array(gridIdx),
       entityMetas: new Map([["memA", [makeVolumeMeta(2, 4, 4)]]]),
       cameraFor: corner,
-      targetLevelFor: () => 0,
+      finestLevelFor: () => 0,
       isWanted: all,
       sources: [],
       ...overrides,
@@ -985,7 +1001,7 @@ describe("eviction kernel — findEvictionSlot", () => {
     ];
     const options: PickOptions = {
       entityMetas: new Map([["memA", [level2]]]),
-      targetLevelFor: () => 2,
+      finestLevelFor: () => 2,
     };
     expect(pick(keys, [-1, -1, 3, -1], options)).toEqual({ key: `memA|5/0/0/0/0/0`, class: "unsampled", dist: Infinity });
     expect(pick([...keys].reverse(), [-1, 3, -1, -1], options)).toEqual({ key: `memA|5/0/0/0/0/0`, class: "unsampled", dist: Infinity });
@@ -994,7 +1010,7 @@ describe("eviction kernel — findEvictionSlot", () => {
   it("counts a chunk finer than the target as never sampled, even while still mapped", () => {
     const options: PickOptions = {
       entityMetas: new Map([["memA", [level2, { ...level2, level: 1 }]]]),
-      targetLevelFor: () => 2,
+      finestLevelFor: () => 2,
     };
     expect(pick([`memA|2/0/0/0/1/1`, `memA|1/0/0/0/0/0`], [3, 0], options)).toEqual({
       key: `memA|1/0/0/0/0/0`, class: "unsampled", dist: Infinity,
@@ -1006,7 +1022,7 @@ describe("eviction kernel — findEvictionSlot", () => {
     // chunk 0.75, the level-2 chunk at (1,1) 1.375 (squared, normalized).
     const options: PickOptions = {
       entityMetas: new Map([["memA", [level2, level3]]]),
-      targetLevelFor: () => 2,
+      finestLevelFor: () => 2,
       isWanted: (_member, chunkKey) => chunkKey.startsWith("2/"),
     };
     const fallback = pick([`memA|2/0/0/0/0/0`, `memA|3/0/0/0/0/0`, `memA|2/0/0/0/1/1`], [0, 4, 3], options)!;

@@ -31,11 +31,8 @@ import {
   type UploadTickStats,
 } from "./telemetry/upload.ts";
 import { buildColdState, buildColdStateDelta } from "./coldState/build.ts";
-import {
-  diffWantedChunks,
-  wantedChunksFromPlan,
-  type WantedChunksByMember,
-} from "./coldState/wanted.ts";
+import { WantedChunkCounts, wantedChunksFromPlan } from "./coldState/wanted.ts";
+import type { RequestDelta } from "../planning/types.ts";
 import { buildViewHotState } from "./coldState/hotState.ts";
 import { WorkerFeedback } from "./delivery/feedback.ts";
 import { ResendGuard, type HeldChunk } from "./delivery/resendGuard.ts";
@@ -58,12 +55,14 @@ import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent } from "../../trace/types.ts";
 import { debugLog } from "../../debug/logging.ts";
 import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
-import { HELD_UPLOAD_BUDGET_BYTES } from "./constants.ts";
+import { GESTURE_UPLOAD_AHEAD_MS, UPLOAD_AHEAD_MS } from "./constants.ts";
+import { UploadPacer } from "./pacing.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
   private readonly workerFeedback = new WorkerFeedback(this.resendGuard);
   private readonly workerResources = new WorkerResourceTracker();
+  private readonly pacer = new UploadPacer();
 
   readonly uploadTelemetry = new UploadTelemetry();
 
@@ -74,12 +73,12 @@ export class Uploader {
   private readonly lastViewEpochByDataset = new Map<string, Map<number, number>>();
 
   /**
-   * Per dataset, the wanted chunks each view's last cold state carried, which
-   * a delta diffs against.
+   * Per dataset, the wanted chunks each view's worker holds, as the last
+   * cold state or delta left them, which the next delta changes.
    */
-  private readonly wantedByDatasetView = new Map<string, Map<number, WantedChunksByMember>>();
+  private readonly wantedByDatasetView = new Map<string, Map<number, WantedChunkCounts>>();
 
-  private rememberWanted(datasetId: string, view: number, wanted: WantedChunksByMember): void {
+  private rememberWanted(datasetId: string, view: number, wanted: WantedChunkCounts): void {
     let byView = this.wantedByDatasetView.get(datasetId);
     if (!byView) {
       byView = new Map();
@@ -95,12 +94,6 @@ export class Uploader {
 
   /** Snapshotted by `sendColdState` so `deliverToWorker` can stamp chunks. */
   private lastEpochs: SceneEpochs | null = null;
-
-  /**
-   * A tick held chunks back since the last one that delivered everything it
-   * could; see {@link holdDelivery}.
-   */
-  private heldBacklog = false;
 
   /** Reset at the start of each `deliverToWorker`; mutated by the send loop. */
   private currentUploadStats: UploadTickStats = emptyUploadTickStats();
@@ -133,7 +126,7 @@ export class Uploader {
     labels: LabelForm[];
   }): ColdStateMessage {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.rememberWanted(args.datasetId, args.view, wanted);
+    this.rememberWanted(args.datasetId, args.view, new WantedChunkCounts(args.requests, wanted));
     const msg = buildColdState({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -199,7 +192,7 @@ export class Uploader {
     labels: LabelForm[];
   }): void {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.rememberWanted(args.datasetId, args.view, wanted);
+    this.rememberWanted(args.datasetId, args.view, new WantedChunkCounts(args.requests, wanted));
     args.ctx.client.coldStateSelection({
       type: "coldStateSelection",
       datasetId: args.datasetId,
@@ -228,6 +221,8 @@ export class Uploader {
     previousActiveSet: ActiveSetEntry[];
     /** The plan's requests; see {@link sendColdState}. */
     requests: readonly ChunkRequest[];
+    /** How `requests` differ from the requests the view's last cold state or delta carried, when the plan says. */
+    requestDelta?: RequestDelta;
     entities: EntitySnapshot[];
     selection: SelectionState;
     visibleRegion: VisibleRegion;
@@ -242,10 +237,15 @@ export class Uploader {
     /** See {@link sendColdState}. */
     labels: LabelForm[];
   }): ColdStateDeltaMessage {
-    const wanted = wantedChunksFromPlan(args.requests);
+    // A delta on the requests the worker's chunks were counted from changes
+    // what it changed; anything else is diffed whole.
     const held = this.wantedByDatasetView.get(args.datasetId)?.get(args.view);
-    const wantedChanges = diffWantedChunks(held ?? new Map(), wanted);
-    this.rememberWanted(args.datasetId, args.view, wanted);
+    let wantedChanges = held !== undefined && args.requestDelta !== undefined ? held.apply(args.requests, args.requestDelta) : null;
+    if (wantedChanges === null) {
+      const next = new WantedChunkCounts(args.requests);
+      wantedChanges = (held ?? new WantedChunkCounts([])).changesTo(next);
+      this.rememberWanted(args.datasetId, args.view, next);
+    }
     const msg = buildColdStateDelta({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -333,29 +333,30 @@ export class Uploader {
 
   // Per-tick upload (slicePath / volumePath)
 
-  /**
-   * Deliver nothing this tick. The chunks held back go at
-   * {@link HELD_UPLOAD_BUDGET_BYTES} a tick once delivery resumes, until a
-   * tick delivers all it can.
-   */
-  holdDelivery(): void {
-    this.heldBacklog = true;
+  /** The render worker's report of deliveries to the pools of `mode` it and the GPU are done with. */
+  noteUploadCost(mode: PoolMode, bytes: number, ms: number): void {
+    this.pacer.noteDone(mode, bytes, ms);
   }
 
   /**
    * Deliver cached, wanted, not-yet-sent chunks to the GPU worker in
-   * strict priority order. Budget is a one-item soft cap: the next
-   * priority item is sent while `remaining > 0`, even if oversized, and
-   * the loop stops after the send drives `remaining <= 0`.
+   * strict priority order, until the deliveries it has not reported done
+   * reach {@link GESTURE_UPLOAD_AHEAD_MS} of its time during a gesture, else
+   * {@link UPLOAD_AHEAD_MS}. Each delivery costs what the worker's reports
+   * say it takes the worker, and the loop also stops once it has taken that
+   * long of this thread. The budget is a one-item soft cap: the next
+   * priority item is sent while room remains, even if it costs more, and
+   * the loop stops after the send uses the rest.
    *
    * Each delivery goes to the pools of its mode, and to a slice pool cut at
    * the plane it names.
    */
-  deliverToWorker(ctx: TickContext, budget: number): boolean {
+  deliverToWorker(ctx: TickContext): boolean {
     const tickStart = performance.now();
-    if (this.heldBacklog) budget = Math.max(budget, HELD_UPLOAD_BUDGET_BYTES);
+    const aheadMs = ctx.gesture ? GESTURE_UPLOAD_AHEAD_MS : UPLOAD_AHEAD_MS;
+    const budgetMs = this.pacer.roomMs(aheadMs);
     this.currentUploadStats = emptyUploadTickStats();
-    this.currentUploadStats.bytesBudget = budget;
+    this.currentUploadStats.budgetMs = budgetMs;
 
     const epochs = this.lastEpochs ?? {
       content: 0, layout: 0, view: 0, selection: 0, request: 0,
@@ -375,15 +376,15 @@ export class Uploader {
     const deliverables = Array.from(ctx.cpuCache.getDeliverable());
     const tierDemand = this.computeChunkTierDemand(deliverables);
     const splitTierBudget = tierDemand.detail && tierDemand.coarse;
-    let detailRemaining = splitTierBudget ? Math.ceil(budget / 2) : budget;
-    let coarseRemaining = splitTierBudget ? Math.floor(budget / 2) : budget;
-    let remaining = budget;
+    let detailRemaining = splitTierBudget ? budgetMs / 2 : budgetMs;
+    let coarseRemaining = splitTierBudget ? budgetMs / 2 : budgetMs;
+    let remaining = budgetMs;
     let budgetExhausted = false;
     let sentAny = false;
 
     for (const delivery of deliverables) {
       if (this.resendGuard.isHeld(delivery)) continue;
-      if (remaining <= 0) {
+      if (remaining <= 0 || performance.now() - tickStart >= aheadMs) {
         budgetExhausted = true;
         break;
       }
@@ -413,14 +414,14 @@ export class Uploader {
       sentAny = true;
       this.currentUploadStats.bytesUploaded += sent;
       recordUpload(sent);
-      remaining -= sent;
-      if (splitTierBudget && chunkTier === "detail") detailRemaining -= sent;
-      if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= sent;
+      const costMs = this.pacer.posted(delivery.mode, sent);
+      remaining -= costMs;
+      if (splitTierBudget && chunkTier === "detail") detailRemaining -= costMs;
+      if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= costMs;
       if (remaining <= 0) budgetExhausted = true;
     }
 
     this.currentUploadStats.budgetExhausted = budgetExhausted;
-    if (!budgetExhausted) this.heldBacklog = false;
     if (telemetryActive) {
       this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
     }
@@ -459,8 +460,8 @@ export class Uploader {
 
     // Label overlays go to the r32uint label pool. The slice view sends one
     // Z-plane of each chunk and the volume view the whole chunk. Every
-    // dispatch reports the real bytes sent so the frame budget throttles
-    // uploads, and at least one always goes so labels never starve.
+    // dispatch reports the real bytes sent, which the worker's time is
+    // costed by, and at least one always goes so labels never starve.
     let sent: Dispatched | DispatchSkip;
     const { mode } = delivery;
     if (meta.isLabel) {

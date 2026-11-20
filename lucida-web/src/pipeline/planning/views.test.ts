@@ -71,7 +71,7 @@ function viewAt(id: number, z: number, targetLevel = 0, effectiveZoom = 1): View
 
 const noPrefetch = mergeConfig({ prefetchDepth: 0 });
 
-function keys(requests: ChunkRequest[]): string[] {
+function keys(requests: readonly ChunkRequest[]): string[] {
   return requests.map((req) => `${req.chunkKey} ${req.plane ?? "whole"}`).sort();
 }
 
@@ -136,7 +136,10 @@ describe("a plan for several views", () => {
       noPrefetch,
     );
     expect(activeSet).toEqual([
-      { kind: "tile", entityId: "vol", imageId: "img", detailLevels: [0, 1], coarseLevel: null },
+      {
+        kind: "tile", entityId: "vol", imageId: "img", targetLevel: 0, detailLevels: [0, 1], keepsCoarse: false,
+        coarseLevel: null,
+      },
     ]);
     expect(nextState.previousActiveSet).toBe(activeSet);
     // Each view keeps the set its own entities made.
@@ -144,18 +147,18 @@ describe("a plan for several views", () => {
     expect(nextState.views.get(1)?.activeSet[0]).toMatchObject({ detailLevels: [0] });
   });
 
-  it("remembers each view's own zoom and cut", () => {
+  it("remembers each view's own cut", () => {
     const first = plan(
-      createSyntheticSnapshot({ views: [viewAt(0, 40, 0, 1), viewAt(1, 60, 0, 1)] }),
+      createSyntheticSnapshot({ views: [viewAt(0, 40), viewAt(1, 60)] }),
       createSyntheticState(),
     );
-    // View 0 zooms in; view 1 holds still.
     const second = plan(
-      createSyntheticSnapshot({ views: [viewAt(0, 40, 0, 2), viewAt(1, 60, 0, 1)] }),
+      createSyntheticSnapshot({ views: [viewAt(0, 41), viewAt(1, 60)] }),
       first.nextState,
     );
-    expect(second.nextState.views.get(0)).toMatchObject({ zoomDirection: "in", previousCut: { index: 40 } });
-    expect(second.nextState.views.get(1)).toMatchObject({ zoomDirection: null, previousCut: { index: 60 } });
+    expect(first.nextState.views.get(0)).toMatchObject({ previousCut: { index: 40 } });
+    expect(second.nextState.views.get(0)).toMatchObject({ previousCut: { index: 41 } });
+    expect(second.nextState.views.get(1)).toMatchObject({ previousCut: { index: 60 } });
   });
 
   it("fetches whole a chunk two crossing slice views ask for planes of, each drawing its own plane", () => {
@@ -195,9 +198,10 @@ describe("a plan for several views", () => {
     const detail = (requests: readonly ChunkRequest[]) => requests.filter((req) => req.lane === "detail");
     // View 0 cuts the first chunk along Z, view 1 the third.
     const viewOf = (req: ChunkRequest) => (req.z === 0 ? 0 : 1);
-    // Without a gesture view 1's chunks happen to rank first; with view 0
-    // under one, every chunk of view 0 comes before any of view 1.
-    expect(detail(plain.requests).map(viewOf)).toEqual([1, 1, 1, 1, 0, 0, 0, 0]);
+    // Without a gesture the views' chunks interleave, each at its place in
+    // its own view's fetch order; with view 0 under one, every chunk of view
+    // 0 comes before any of view 1.
+    expect(detail(plain.requests).map(viewOf)).toEqual([0, 1, 0, 1, 0, 1, 0, 1]);
     expect(detail(led.requests).map(viewOf)).toEqual([0, 0, 0, 0, 1, 1, 1, 1]);
     expect(keys(led.requests)).toEqual(keys(plain.requests));
   });

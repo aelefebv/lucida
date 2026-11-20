@@ -134,13 +134,20 @@ export interface LayerInfo {
    */
   targetLevel: LevelRange | null;
   /**
+   * The levels the level selection chose for the dataset, the finest that
+   * fit the memory budget, or `null` before it chose any.
+   */
+  selectedLevel: LevelRange | null;
+  /**
    * The finest and coarsest level actually on screen for the dataset, or
-   * `null` while nothing is resident yet. Equals `targetLevel` once the
-   * target is resident everywhere it is visible.
+   * `null` while nothing is resident yet. Equals `selectedLevel` once the
+   * selection is resident everywhere it is visible.
    */
   displayedLevel: LevelRange | null;
   /** True while some visible pixel comes from a level coarser than its entity's target. */
   displayedCoarserThanTarget: boolean;
+  /** True when the selection draws some visible entity coarser than its target, to fit the budget. */
+  selectedCoarserThanTarget: boolean;
   /** The multiscale metadata's downsampling method, or `null` when it declares none. */
   downsamplingMethod: string | null;
   /**
@@ -860,7 +867,7 @@ function Advanced(props: LayerRowProps) {
                 <span
                   className="lc-level-readout lc-level-displayed"
                   aria-label={`${layer.name} displayed level`}
-                  title="The level on screen until the target is resident"
+                  title="The levels on screen"
                 >
                   {`showing ${levelNumbers(layer.displayedLevel)}`}
                 </span>

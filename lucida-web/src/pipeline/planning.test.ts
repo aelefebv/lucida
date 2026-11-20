@@ -28,6 +28,7 @@ import type { CreateSyntheticEntityOverrides, PlanningConfig } from "./planning/
 import type {
   ActiveSetEntry,
   ChunkRequest,
+  DatasetLevelSelection,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningState,
@@ -52,6 +53,17 @@ function asTile(entry: ActiveSetEntry) {
     );
   }
   return entry;
+}
+
+/** A level selection that draws each entity at its target level. */
+function atTarget(entities: EntitySnapshot[]): DatasetLevelSelection {
+  return {
+    entities: new Map(entities.map((entity) => [
+      entity.entityId,
+      { detail: [], lookahead: [], detailLevels: [entity.targetLevel], coarseCells: 0 },
+    ])),
+    budgetLimited: false,
+  };
 }
 
 function asInvisible(entry: ActiveSetEntry) {
@@ -107,7 +119,7 @@ describe("buildActiveSet", () => {
       levels: makeStubLevels(4),
     });
 
-    const [result] = buildActiveSet([entity]);
+    const [result] = buildActiveSet([entity], atTarget([entity]));
     const f = asTile(result);
     expect(f.detailLevels).toEqual([1]);
     expect(f.coarseLevel).toBeNull();
@@ -120,7 +132,7 @@ describe("buildActiveSet", () => {
       levels: makeStubLevels(1),
     });
 
-    const [result] = buildActiveSet([entity]);
+    const [result] = buildActiveSet([entity], atTarget([entity]));
     expect(asTile(result).detailLevels).toEqual([0]);
   });
 
@@ -132,7 +144,7 @@ describe("buildActiveSet", () => {
       levels: makeStubLevels(4),
     });
 
-    const [result] = buildActiveSet([entity]);
+    const [result] = buildActiveSet([entity], atTarget([entity]));
     expect(asTile(result).coarseLevel).toBe(3);
   });
 
@@ -144,7 +156,7 @@ describe("buildActiveSet", () => {
       levels: makeStubLevels(4),
     });
 
-    const [result] = buildActiveSet([entity]);
+    const [result] = buildActiveSet([entity], atTarget([entity]));
     expect(asTile(result).coarseLevel).toBeNull();
   });
 
@@ -154,7 +166,7 @@ describe("buildActiveSet", () => {
       { id: "fA2", image: "imgA2", px: 200 },
     ]);
 
-    const result = buildActiveSet(entities);
+    const result = buildActiveSet(entities, atTarget(entities));
     expect(result.map((e) => [e.kind, e.entityId])).toEqual([
       ["tile", "fA1"],
       ["tile", "fA2"],
@@ -168,9 +180,9 @@ describe("buildActiveSet", () => {
       { id: "fA3", image: "imgA3", px: 200 },
     ]);
     const order = (set: ReturnType<typeof buildActiveSet>) => set.map((e) => [e.kind, e.entityId]);
-    expect(order(buildActiveSet(entities))).toEqual([["tile", "fA1"], ["tile", "fA2"], ["tile", "fA3"]]);
+    expect(order(buildActiveSet(entities, atTarget(entities)))).toEqual([["tile", "fA1"], ["tile", "fA2"], ["tile", "fA3"]]);
     const moved = entities.map((e) => (e.entityId === "fA2" ? { ...e, visible: false } : e));
-    expect(order(buildActiveSet(moved))).toEqual([["tile", "fA1"], ["invisible", "fA2"], ["tile", "fA3"]]);
+    expect(order(buildActiveSet(moved, atTarget(moved)))).toEqual([["tile", "fA1"], ["invisible", "fA2"], ["tile", "fA3"]]);
   });
 
   it("invisible entity emits an InvisibleEntry at the coarsest level", () => {
@@ -179,7 +191,7 @@ describe("buildActiveSet", () => {
       levels: makeStubLevels(5),
     });
 
-    const [result] = buildActiveSet([entity]);
+    const [result] = buildActiveSet([entity], atTarget([entity]));
     expect(asInvisible(result).coarsestLod).toBe(4);
   });
 });
@@ -305,17 +317,20 @@ describe("chunk enumeration through the core", () => {
     const snapshot = oneImage(
       levels,
       { xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1] },
-      {},
+      { coarseLevel: 0 },
       { visibleChannels: [0, 1, 2] },
     );
     const { stats, requests } = plan(snapshot, createSyntheticState());
+    // The plan enumerates its coarse lane; the detail lane is the level
+    // selection's, which counts its own.
     expect(stats.culling).toEqual({
       considered: 64 * 3,
       afterXyBounds: 16 * 3,
       afterZRange: 4 * 3,
       afterFrustum: 4 * 3,
     });
-    expect(requests).toHaveLength(4 * 3);
+    expect(requests.filter((r) => r.lane === "detail")).toHaveLength(4 * 3);
+    expect(requests.filter((r) => r.lane === "coarse")).toHaveLength(4 * 3);
   });
 
   it("asks a slice view for the chunk along Z that the render worker maps the plane to", () => {
@@ -764,9 +779,10 @@ describe("plan()", () => {
 });
 
 describe("plan() — depth-bias focal plane", () => {
-  // A single entity whose detail grid is 1x1x4 along Z (X/Y are one
-  // chunk each), so the only thing that varies between detail chunks is
-  // depth. chunkWorldZ = 128; Z-chunk world centers are 64, 192, 320,
+  // A single entity whose grid is 1x1x4 along Z (X/Y are one chunk each),
+  // so the only thing that varies between its chunks is depth. The coarse
+  // lane enumerates it and orders by the focus; the detail lane takes the
+  // level selection's order, which the core biases the same way. chunkWorldZ = 128; Z-chunk world centers are 64, 192, 320,
   // 448 for z = 0..3. The visible Z range covers all four.
   function makeDepthSnapshot(
     sortCenterVox: [number, number, number] | null,
@@ -778,6 +794,7 @@ describe("plan() — depth-bias focal plane", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       targetLevel: 0,
+      coarseLevel: 0,
       levels: [level0],
       importance: 1.0,
       layoutPositionVox: [0, 0],
@@ -802,14 +819,14 @@ describe("plan() — depth-bias focal plane", () => {
     });
   }
 
-  /** Map of detail-chunk z-index → priority, for ordering assertions. */
+  /** Map of coarse-chunk z-index → priority, for ordering assertions. */
   function detailPriorityByZ(config: PlanningConfig): Map<number, number> {
     // centerZ = 256 sits exactly between the z=1 (192) and z=2 (320)
     // chunk centers, so the unbiased ordering is symmetric.
     const snapshot = makeDepthSnapshot([128, 128, 256]);
     const result = plan(snapshot, createSyntheticState(), config);
     const byZ = new Map<number, number>();
-    for (const req of result.requests.filter((r) => r.lane === "detail")) {
+    for (const req of result.requests.filter((r) => r.lane === "coarse")) {
       byZ.set(req.z, req.priority);
     }
     return byZ;
@@ -836,9 +853,9 @@ describe("plan() — depth-bias focal plane", () => {
     expect(explicitZero).toEqual(golden);
 
     // centerZ = 256; chunk centers 64/192/320/448 ⇒ |Δ| = 192/64/64/192.
-    // The nearest pair opens the detail band, and the farthest pair sits
+    // The nearest pair opens the coarse band, and the farthest pair sits
     // further in, short of the next whole number.
-    const lane = DEFAULT_PLANNING_CONFIG.detailLaneOffset;
+    const lane = DEFAULT_PLANNING_CONFIG.coarseLaneOffset;
     expect(golden.get(1)).toBe(lane);
     expect(golden.get(2)).toBe(lane);
     expect(golden.get(0)).toBe(golden.get(3));
@@ -1011,7 +1028,7 @@ describe("plan() — detail and coarse tiers", () => {
     ]);
   });
 
-  it("filters detail and coarse lanes with independent render radius knobs", () => {
+  it("filters the coarse lane with its own render radius knob", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
     const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
@@ -1040,7 +1057,8 @@ describe("plan() — detail and coarse tiers", () => {
       }),
     );
 
-    expect(result.requests.filter((r) => r.lane === "detail")).toHaveLength(4);
+    // The detail radius is the level selection's to apply, not the plan's.
+    expect(result.requests.filter((r) => r.lane === "detail")).toHaveLength(16);
     expect(result.requests.filter((r) => r.lane === "coarse")).toHaveLength(4);
   });
 });
@@ -1289,15 +1307,12 @@ describe("plan() edge cases", () => {
 // Prefetch lane: the next level in the zoom direction
 // ---------------------------------------------------------------------------
 
-describe("prefetch lane — the next level in the zoom direction", () => {
-  // A three-level pyramid in 256² chunks, viewed whole at target level 1:
-  // level 0 is 1024² (4x4 = 16 chunks), level 1 is 512² (2x2 = 4), and
-  // level 2 is 256² (1 chunk). `timepoints` sets the T extent of every
-  // level; the default of one leaves the timepoint prefetch nothing to do.
-  function makeZoomEntity(
-    overrides: CreateSyntheticEntityOverrides = {},
-    timepoints = 1,
-  ): EntitySnapshot {
+describe("prefetch lane — the level selection's lookahead", () => {
+  // A three-level pyramid in 256² chunks, viewed whole at level 1: level 0
+  // is 1024² (4x4 = 16 chunks), level 1 is 512² (2x2 = 4), and level 2 is
+  // 256² (1 chunk). `timepoints` sets the T extent of every level; the
+  // default of one leaves the timepoint prefetch nothing to do.
+  function makeZoomEntity(timepoints = 1): EntitySnapshot {
     return createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
@@ -1308,126 +1323,59 @@ describe("prefetch lane — the next level in the zoom direction", () => {
         makeLevelGeo(1, [timepoints, 1, 1, 512, 512], [1, 1, 1, 256, 256]),
         makeLevelGeo(2, [timepoints, 1, 1, 256, 256], [1, 1, 1, 256, 256]),
       ],
-      ...overrides,
     });
   }
 
-  function snapshotAtZoom(effectiveZoom: number, entity: EntitySnapshot): PlanningSnapshot {
-    return createSyntheticSnapshot({
-      entities: [entity],
-      visibleRegion: makeVisibleRegion({ effectiveZoom }),
-    });
+  /** The four level-1 chunks selected, and the four central level-0 chunks ahead of them. */
+  function selectionAhead(): DatasetLevelSelection {
+    const at = (level: number, x: number, y: number, rank: number) => ({ level, x, y, z: 0, rank });
+    return {
+      entities: new Map([["e0", {
+        detail: [at(1, 0, 0, 0), at(1, 1, 0, 1), at(1, 0, 1, 2), at(1, 1, 1, 3)],
+        lookahead: [at(0, 1, 1, 0), at(0, 2, 1, 1), at(0, 1, 2, 2), at(0, 2, 2, 3)],
+        detailLevels: [1],
+        coarseCells: 0,
+      }]]),
+      budgetLimited: true,
+    };
   }
 
-  function planAfterZoom(
-    from: number,
-    to: number,
-    entity: EntitySnapshot = makeZoomEntity(),
-    config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
-  ) {
-    const first = plan(snapshotAtZoom(from, entity), createSyntheticState(), config);
-    return plan(snapshotAtZoom(to, entity), first.nextState, config);
+  function planWith(entity: EntitySnapshot, levelSelection: DatasetLevelSelection, config = DEFAULT_PLANNING_CONFIG) {
+    return plan(createSyntheticSnapshot({ entities: [entity], levelSelection }), createSyntheticState(), config);
   }
 
   const prefetchOf = (result: ReturnType<typeof plan>) =>
     result.requests.filter((r) => r.lane === "prefetch");
 
-  it("prefetches the next finer level for the visible region after a zoom in", () => {
-    const prefetch = prefetchOf(planAfterZoom(1, 2));
-
-    expect(prefetch.length).toBeGreaterThan(0);
-    expect(new Set(prefetch.map((r) => r.level))).toEqual(new Set([0]));
+  it("asks for the lookahead in the detail tier at the current timepoint", () => {
+    const prefetch = prefetchOf(planWith(makeZoomEntity(), selectionAhead()));
+    expect(prefetch.map((r) => `${r.level}/${r.y}/${r.x}`).sort()).toEqual(["0/1/1", "0/1/2", "0/2/1", "0/2/2"]);
     expect(prefetch.every((r) => r.tier === "detail" && r.t === 0)).toBe(true);
   });
 
-  it("prefetches the next coarser level for the visible region after a zoom out", () => {
-    const prefetch = prefetchOf(planAfterZoom(2, 1));
-
-    expect(prefetch).toHaveLength(1);
-    expect(prefetch[0].level).toBe(2);
-    expect(prefetch[0].tier).toBe("detail");
-  });
-
-  it("keeps the lane within its budget: prefetchDepth target-level sets, nearest the view first", () => {
-    // Four target-level chunks are in view and the depth is 2, so the lane
-    // may hold 8 requests. With no future timepoint the whole budget goes to
-    // the finer level, which has 16 chunks in view. The 8 nearest the view
-    // center win, so the 4 central chunks are in and the 4 corners are out.
-    const prefetch = prefetchOf(planAfterZoom(1, 2));
-
-    expect(prefetch).toHaveLength(2 * 4);
-    const cells = new Set(prefetch.map((r) => `${r.y},${r.x}`));
-    for (const central of ["1,1", "1,2", "2,1", "2,2"]) expect(cells.has(central)).toBe(true);
-    for (const corner of ["0,0", "0,3", "3,0", "3,3"]) expect(cells.has(corner)).toBe(false);
-  });
-
-  it("gives the level step the lane's last step and the timepoints the ones before it", () => {
-    // Two future timepoints and depth 2: T+1 keeps the first step, the finer
-    // level takes the second, and T+2 drops out.
-    const twoAhead = prefetchOf(planAfterZoom(1, 2, makeZoomEntity({}, 3)));
-    const timepoint = twoAhead.filter((r) => r.level === 1);
-    const level = twoAhead.filter((r) => r.level === 0);
+  it("gives the lookahead the lane's last step and the timepoints the ones before it", () => {
+    // Two future timepoints and depth 2: T+1 keeps the first step, the
+    // lookahead takes the second, and T+2 drops out.
+    const prefetch = prefetchOf(planWith(makeZoomEntity(3), selectionAhead()));
+    const timepoint = prefetch.filter((r) => r.level === 1);
+    const ahead = prefetch.filter((r) => r.level === 0);
     expect(timepoint).toHaveLength(4);
     expect(timepoint.every((r) => r.t === 1)).toBe(true);
-    expect(level).toHaveLength(4);
-    expect(level.every((r) => r.t === 0)).toBe(true);
-    expect(twoAhead).toHaveLength(8);
+    expect(ahead).toHaveLength(4);
+    expect(ahead.every((r) => r.t === 0)).toBe(true);
+    expect(Math.min(...ahead.map((r) => r.priority))).toBeGreaterThan(Math.max(...timepoint.map((r) => r.priority)));
   });
 
-  it("ranks the level step behind the timepoint steps, though its chunks sit nearer the center", () => {
-    const prefetch = prefetchOf(planAfterZoom(1, 2, makeZoomEntity({}, 3)));
-    const timepoint = prefetch.filter((r) => r.level === 1);
-    const level = prefetch.filter((r) => r.level === 0);
-    expect(Math.min(...level.map((r) => r.priority))).toBeGreaterThan(
-      Math.max(...timepoint.map((r) => r.priority)),
-    );
+  it("gives the timepoints every step when the selection looks nowhere ahead", () => {
+    const entity = makeZoomEntity(3);
+    const prefetch = prefetchOf(plan(createSyntheticSnapshot({ entities: [entity] }), createSyntheticState()));
+    expect(prefetch).toHaveLength(2 * 4);
+    expect(prefetch.every((r) => r.level === 1 && (r.t === 1 || r.t === 2))).toBe(true);
   });
 
-  it("emits no level prefetch when the prefetch lane is off", () => {
-    const prefetch = prefetchOf(
-      planAfterZoom(1, 2, makeZoomEntity(), mergeConfig({ prefetchDepth: 0 })),
-    );
+  it("emits nothing ahead when the prefetch lane is off", () => {
+    const prefetch = prefetchOf(planWith(makeZoomEntity(3), selectionAhead(), mergeConfig({ prefetchDepth: 0 })));
     expect(prefetch).toHaveLength(0);
-  });
-
-  it("gives a pinned dataset no level prefetch, and its timepoints every step", () => {
-    expect(prefetchOf(planAfterZoom(1, 2, makeZoomEntity({ levelPinned: true })))).toHaveLength(0);
-
-    const timeseries = prefetchOf(planAfterZoom(1, 2, makeZoomEntity({ levelPinned: true }, 3)));
-    expect(timeseries).toHaveLength(2 * 4);
-    expect(timeseries.every((r) => r.level === 1 && (r.t === 1 || r.t === 2))).toBe(true);
-  });
-
-  it("knows no direction before the first zoom change", () => {
-    expect(prefetchOf(planAfterZoom(1, 1))).toHaveLength(0);
-  });
-
-  it("keeps the last zoom direction while the zoom is unchanged", () => {
-    const entity = makeZoomEntity();
-    const zoomedIn = planAfterZoom(1, 2, entity);
-    const panned = plan(snapshotAtZoom(2, entity), zoomedIn.nextState);
-
-    const prefetch = prefetchOf(panned);
-    expect(prefetch.length).toBeGreaterThan(0);
-    expect(prefetch.every((r) => r.level === 0)).toBe(true);
-  });
-
-  it("follows the latest zoom change when the direction reverses", () => {
-    const entity = makeZoomEntity();
-    const zoomedIn = planAfterZoom(1, 2, entity);
-    const zoomedOut = plan(snapshotAtZoom(1.5, entity), zoomedIn.nextState);
-
-    expect(prefetchOf(zoomedOut).map((r) => r.level)).toEqual([2]);
-  });
-
-  it("never prefetches a level outside the image's source levels", () => {
-    // Level 2 is a generated coarse level, so zooming out from target 1
-    // finds no coarser source level to prefetch.
-    const generatedCoarsest = makeZoomEntity({ sourceLevels: [0, 1] });
-    expect(prefetchOf(planAfterZoom(2, 1, generatedCoarsest))).toHaveLength(0);
-
-    const atFinest = makeZoomEntity({ targetLevel: 0 });
-    expect(prefetchOf(planAfterZoom(1, 2, atFinest))).toHaveLength(0);
   });
 });
 
@@ -1598,7 +1546,7 @@ describe("plan() honors config tunables", () => {
     expect(ts).toEqual(new Set([1, 2, 3, 4]));
   });
 
-  it("importanceWeight: 0 makes priority no longer depend on importance", () => {
+  it("importanceWeight: 0 makes coarse priority no longer depend on importance", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const high = createSyntheticEntity({
       entityId: "high",
@@ -1606,6 +1554,7 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       targetLevel: 0,
+      coarseLevel: 0,
       levels: [level0],
       importance: 1.0,
     });
@@ -1615,6 +1564,7 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       targetLevel: 0,
+      coarseLevel: 0,
       levels: [level0],
       importance: 0.0,
     });
@@ -1640,7 +1590,7 @@ describe("plan() honors config tunables", () => {
     // Default: importance weight is non-zero → priorities differ.
     const defaultResult = plan(snap, createSyntheticState());
     const defaultDetail = defaultResult.requests.filter(
-      (r) => r.lane === "detail",
+      (r) => r.lane === "coarse",
     );
     const defaultHigh = defaultDetail.find((r) => r.entityId === "high")!;
     const defaultLow = defaultDetail.find((r) => r.entityId === "low")!;
@@ -1648,13 +1598,13 @@ describe("plan() honors config tunables", () => {
 
     // With importanceWeight = 0, same-distance chunks have equal priority.
     const result = plan(snap, createSyntheticState(), mergeConfig({ importanceWeight: 0 }));
-    const detail = result.requests.filter((r) => r.lane === "detail");
+    const detail = result.requests.filter((r) => r.lane === "coarse");
     const hi = detail.find((r) => r.entityId === "high")!;
     const lo = detail.find((r) => r.entityId === "low")!;
     expect(hi.priority).toBe(lo.priority);
   });
 
-  it("distanceWeight: 0 removes distance from priority within a lane", () => {
+  it("distanceWeight: 0 removes distance from priority within the coarse lane", () => {
     // Two chunks at different distances from sortCenterVox, same importance.
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 1024], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
@@ -1662,6 +1612,7 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       targetLevel: 0,
+      coarseLevel: 0,
       levels: [level0],
       importance: 1.0,
     });
@@ -1687,7 +1638,7 @@ describe("plan() honors config tunables", () => {
     // Default: distance-based priority differs across columns.
     const defaultResult = plan(snap, createSyntheticState());
     const defaultDetail = defaultResult.requests.filter(
-      (r) => r.lane === "detail",
+      (r) => r.lane === "coarse",
     );
     const defaultPriorities = new Set(defaultDetail.map((r) => r.priority));
     expect(defaultPriorities.size).toBeGreaterThan(1);
@@ -1696,7 +1647,7 @@ describe("plan() honors config tunables", () => {
     // same priority because importance is identical and distance no
     // longer contributes.
     const result = plan(snap, createSyntheticState(), mergeConfig({ distanceWeight: 0 }));
-    const detail = result.requests.filter((r) => r.lane === "detail");
+    const detail = result.requests.filter((r) => r.lane === "coarse");
     expect(detail.length).toBe(4);
     const priorities = new Set(detail.map((r) => r.priority));
     expect(priorities.size).toBe(1);
@@ -2200,7 +2151,7 @@ describe("ActiveSetEntry variants", () => {
       { id: "fF", image: "imgF", px: 200 },
     ]);
 
-    const result = buildActiveSet(entities);
+    const result = buildActiveSet(entities, atTarget(entities));
     expect(result).toHaveLength(1);
     const entry = result[0];
 
@@ -2210,14 +2161,16 @@ describe("ActiveSetEntry variants", () => {
       expect(entry.imageId).toBe("imgF");
       expect(entry.detailLevels).toEqual([0]);
       expect(entry.coarseLevel).toBeNull();
-      // Surface check: the level list and the coarse level are the only
-      // level fields.
+      // Surface check: the screen's level, the selection's levels and the
+      // coarse level are the only level fields.
       expect(Object.keys(entry).sort()).toEqual([
         "coarseLevel",
         "detailLevels",
         "entityId",
         "imageId",
+        "keepsCoarse",
         "kind",
+        "targetLevel",
       ]);
     }
   });
@@ -2231,7 +2184,7 @@ describe("ActiveSetEntry variants", () => {
       levels: makeStubLevels(4),
     });
 
-    const result = buildActiveSet([entity]);
+    const result = buildActiveSet([entity], atTarget([entity]));
     expect(result).toHaveLength(1);
     const entry = result[0];
 

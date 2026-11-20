@@ -1,19 +1,14 @@
 /**
- * Memory budgets fitted to the device. The page reads the device's memory
- * once and hands it to the render worker, which fits its GPU total from it.
+ * Memory budgets fitted to the device.
+ *
+ * The GPU total is the one figure the device decides, and the CPU stores
+ * follow it. No browser reports how much memory the GPU has, so the total
+ * comes from what kind of device this is and how much memory it reports, and
+ * a person can set it in Settings (`pageBudgets.ts`).
  */
 
 const MIB = 1024 * 1024;
-
-/** Reported device memory, in GiB, from which every budget is at its ceiling. */
-export const FULL_BUDGET_MEMORY_GIB = 8;
-
-/**
- * What a touch-only device that doesn't report its memory is taken to have.
- * Safari reports none, and a phone given desktop budgets is the one the
- * system kills; a desktop that reports none keeps the ceiling.
- */
-export const ASSUMED_TOUCH_MEMORY_GIB = 4;
+const GIB = 1024 * MIB;
 
 export interface DeviceBudgets {
   /**
@@ -35,47 +30,204 @@ export interface DeviceBudgets {
   cpuBytesInFlight: number;
 }
 
-/** A capable desktop's budgets, which no device exceeds. */
-export const CEILING_BUDGETS: Readonly<DeviceBudgets> = {
-  gpuTotalBytes: 1536 * MIB,
-  labelVolumeBytes: 512 * MIB,
-  labelTotalVolumeBytes: 512 * MIB,
-  cpuMainBytes: 512 * MIB,
-  cpuOverviewBytes: 64 * MIB,
-  cpuBytesInFlight: 32 * MIB,
-};
-
-/** Below these a viewport stops fitting its own chunks, whatever the device. */
-const FLOOR_BUDGETS: Readonly<DeviceBudgets> = {
-  gpuTotalBytes: 192 * MIB,
-  labelVolumeBytes: 64 * MIB,
-  labelTotalVolumeBytes: 64 * MIB,
-  cpuMainBytes: 64 * MIB,
-  cpuOverviewBytes: 16 * MIB,
-  cpuBytesInFlight: 8 * MIB,
-};
+/** What the page can tell about the device it runs on. */
+export interface DeviceFacts {
+  /**
+   * The device's memory in GiB as the browser reports it, an assumed figure
+   * for a touch-only device that reports none, or null.
+   */
+  memoryGiB: number | null;
+  /** Touch is its only pointer: a phone, or a tablet with nothing attached. */
+  touchOnly: boolean;
+  /**
+   * Whether the WebGPU adapter is a software rasterizer, null while unknown
+   * or when the browser doesn't say. The adapter's vendor and architecture
+   * say nothing reliable about how much memory it has, or whether it shares
+   * the device's, so they aren't read.
+   */
+  fallbackAdapter: boolean | null;
+}
 
 /**
- * The budgets for a device with `memoryGiB` of memory, or the ceiling when
- * that is unknown. Each scales linearly below {@link FULL_BUDGET_MEMORY_GIB}
- * down to its floor.
+ * `desktop`: a hardware adapter with a fine pointer, whose GPU most likely
+ * has memory of its own. `constrained`: a phone, a tablet or a software
+ * adapter, whose GPU draws on the device's own memory, which the system takes
+ * back by ending the page.
  */
-export function fitBudgets(memoryGiB: number | null): DeviceBudgets {
-  const fraction = memoryGiB === null ? 1 : Math.min(1, Math.max(0, memoryGiB / FULL_BUDGET_MEMORY_GIB));
-  const fit = (key: keyof DeviceBudgets) =>
-    Math.max(FLOOR_BUDGETS[key], Math.floor((CEILING_BUDGETS[key] * fraction) / MIB) * MIB);
+export type DeviceClass = "desktop" | "constrained";
+
+export function deviceClassOf(facts: DeviceFacts): DeviceClass {
+  return facts.touchOnly || facts.fallbackAdapter === true ? "constrained" : "desktop";
+}
+
+/**
+ * A desktop's GPU total, however much memory it reports. The level selection
+ * fills its budget, and above this total a workstation GPU's gestures over a
+ * large volume fall behind the display's refreshes: marching finer levels
+ * doubles an unzoomed orbit's GPU time, and pools near the total grow while
+ * the view moves, each growth holding the GPU for tens of milliseconds. The
+ * device-sized default the budgets want is 4 GiB, half of a mid-range desktop
+ * GPU's 8 GB. A larger GPU is the person's to claim in Settings.
+ */
+const DESKTOP_GPU_TOTAL = 1536 * MIB;
+
+/**
+ * A constrained device's GPU total at 8 GiB of memory, the most a phone's
+ * browser reports. The detail store follows it, so the selection is no larger
+ * than the 512 MiB store gave it before. A desktop that has fallen back to a
+ * software adapter is as constrained as the phone the adapter stands in for.
+ */
+const CONSTRAINED_GPU_TOTAL = 512 * MIB;
+
+/**
+ * The share of a desktop's memory its detail store may take: a quarter, the
+ * share of physical memory V8 sets as a page's heap limit.
+ */
+const MEMORY_SHARE = 1 / 4;
+
+/**
+ * The share of the device's memory a GPU total set in Settings may draw CPU
+ * stores from. The person chose the total and the stores follow it, up to
+ * this, so a total set past what the device holds can't take its memory too.
+ */
+const SET_MEMORY_SHARE = 1 / 2;
+
+/**
+ * What a desktop that reports no memory is taken to have, as Safari and
+ * Firefox report none. A Mac shares it with its GPU, and an 8 GiB machine
+ * given a 16 GiB machine's budgets is the one that swaps.
+ */
+const ASSUMED_DESKTOP_MEMORY_GIB = 8;
+
+/**
+ * What a touch-only device that doesn't report its memory is taken to have.
+ * Safari reports none, and a phone given desktop budgets is the one the
+ * system kills.
+ */
+export const ASSUMED_TOUCH_MEMORY_GIB = 4;
+
+/**
+ * The smallest GPU total. Below it one viewport's chunks stop fitting.
+ */
+export const GPU_TOTAL_FLOOR_BYTES = 192 * MIB;
+
+/** The smallest detail store, for the same reason. */
+const CPU_MAIN_FLOOR_BYTES = 64 * MIB;
+
+/** The smallest label budget: one 256³ label level of 32-bit samples. */
+const LABEL_VOLUME_FLOOR_BYTES = 64 * MIB;
+
+/**
+ * The coarse overview store: the room the coarse tier keeps however much
+ * detail is wanted. Past it the coarse tier borrows from the detail store,
+ * so it need only hold the coarse levels of the datasets open at once, a few
+ * MiB each for a multichannel volume of 24 GiB.
+ */
+const CPU_OVERVIEW_BYTES = 64 * MIB;
+/** Enough for the coarse levels of two such volumes. */
+const CPU_OVERVIEW_FLOOR_BYTES = 16 * MIB;
+
+/**
+ * Fetched bytes outstanding. A move's first chunks wait behind what is in
+ * flight: on a broadband link these 32 MiB already take about two seconds.
+ * On one machine twice as much, enough for all 128 concurrent fetches of
+ * 64³ chunks, fills a store only about a tenth faster.
+ */
+const CPU_BYTES_IN_FLIGHT = 32 * MIB;
+/**
+ * Twice the bytes allowed before anything lands
+ * (`INITIAL_BYTES_IN_FLIGHT`), so the allowance still has room to grow.
+ */
+const CPU_BYTES_IN_FLIGHT_FLOOR = 8 * MIB;
+
+/**
+ * The memory below which a constrained device's GPU total, the overview store
+ * and the bytes in flight shrink in proportion. A phone reports at most this,
+ * shares it with its GPU, and is also the device on the slowest link.
+ */
+const SMALL_DEVICE_MEMORY_GIB = 8;
+
+/**
+ * Labels shown at once take at most a third of the GPU total, so the
+ * intensity pools beside them keep two thirds.
+ */
+const LABEL_SHARE = 1 / 3;
+
+/**
+ * One label level is one texture, and no texture may grow past the largest
+ * buffer a desktop adapter commonly allows, 2 GiB, as the chunk pools don't
+ * (`renderer/atlasSizing.ts`). A D3D12 device refuses a 4 GiB texture however
+ * much memory its GPU has.
+ */
+const LABEL_VOLUME_MAX_BYTES = 2 * GIB;
+
+/** `bytes` rounded down to whole MiB, and no less than `floor`. */
+function mib(bytes: number, floor: number): number {
+  return Math.max(floor, Math.floor(bytes / MIB) * MIB);
+}
+
+/** The memory the budgets are fitted to: the reported figure, or an assumed one. */
+function memoryOf(facts: DeviceFacts): number {
+  return facts.memoryGiB ?? ASSUMED_DESKTOP_MEMORY_GIB;
+}
+
+/** The GPU total the device starts at when no one has set one: its class's, or less when its memory is small. */
+export function deviceGpuTotal(facts: DeviceFacts): number {
+  return mib(fittedGpuTotal(facts), GPU_TOTAL_FLOOR_BYTES);
+}
+
+/** {@link deviceGpuTotal} before its floor. */
+function fittedGpuTotal(facts: DeviceFacts): number {
+  if (deviceClassOf(facts) === "desktop") {
+    // The detail store copies the whole total, so it alone counts against
+    // memory, which binds only below 6 GiB.
+    return Math.min(DESKTOP_GPU_TOTAL, memoryOf(facts) * GIB * MEMORY_SHARE);
+  }
+  return CONSTRAINED_GPU_TOTAL * smallDeviceFraction(facts);
+}
+
+function smallDeviceFraction(facts: DeviceFacts): number {
+  return Math.min(1, memoryOf(facts) / SMALL_DEVICE_MEMORY_GIB);
+}
+
+/**
+ * The budgets for `facts`, under a GPU total a person set, or the device's
+ * own when `gpuTotalSet` is null.
+ */
+export function fitBudgets(facts: DeviceFacts, gpuTotalSet: number | null = null): DeviceBudgets {
+  const gpuTotalBytes = gpuTotalSet === null ? deviceGpuTotal(facts) : mib(gpuTotalSet, GPU_TOTAL_FLOOR_BYTES);
+  const memory = memoryOf(facts) * GIB;
+  const storesShare = gpuTotalSet === null ? MEMORY_SHARE : SET_MEMORY_SHARE;
+  // The detail store holds a decoded copy of every chunk the GPU's pools
+  // hold, so it holds as much as the whole total. The total's share that
+  // render targets and labels take, and the share the level selection leaves
+  // unselected, are its room for what the GPU doesn't hold: prefetch, and
+  // chunks the GPU let go that may come back. It follows the total as the
+  // device fits it, before the total's floor, so a small phone's store is no
+  // larger than it was.
+  const followed = gpuTotalSet ?? fittedGpuTotal(facts);
+  const cpuMainBytes = mib(Math.min(followed, memory * storesShare), CPU_MAIN_FLOOR_BYTES);
+  const smallDevice = smallDeviceFraction(facts);
+  const labelVolumeBytes = mib(Math.min(LABEL_VOLUME_MAX_BYTES, gpuTotalBytes * LABEL_SHARE), LABEL_VOLUME_FLOOR_BYTES);
   return {
-    gpuTotalBytes: fit("gpuTotalBytes"),
-    labelVolumeBytes: fit("labelVolumeBytes"),
-    labelTotalVolumeBytes: fit("labelTotalVolumeBytes"),
-    cpuMainBytes: fit("cpuMainBytes"),
-    cpuOverviewBytes: fit("cpuOverviewBytes"),
-    cpuBytesInFlight: fit("cpuBytesInFlight"),
+    gpuTotalBytes,
+    labelVolumeBytes,
+    labelTotalVolumeBytes: labelVolumeBytes,
+    cpuMainBytes,
+    cpuOverviewBytes: mib(CPU_OVERVIEW_BYTES * smallDevice, CPU_OVERVIEW_FLOOR_BYTES),
+    cpuBytesInFlight: mib(CPU_BYTES_IN_FLIGHT * smallDevice, CPU_BYTES_IN_FLIGHT_FLOOR),
   };
 }
 
-/** The smallest GPU total. Below it one viewport's chunks stop fitting. */
-export const GPU_TOTAL_FLOOR_BYTES = FLOOR_BUDGETS.gpuTotalBytes;
+/**
+ * A desktop's budgets with plenty of memory: what the CPU cache and the
+ * render worker fall back to when no budgets are handed to them.
+ */
+export const DESKTOP_BUDGETS: Readonly<DeviceBudgets> = fitBudgets({
+  memoryGiB: 16,
+  touchOnly: false,
+  fallbackAdapter: false,
+});
 
 /**
  * The GPU total after the device ran out of memory under `bytes`: half, down
@@ -86,7 +238,7 @@ export function halvedGpuTotal(bytes: number): number {
   return Math.max(GPU_TOTAL_FLOOR_BYTES, Math.floor(bytes / 2 / MIB) * MIB);
 }
 
-/** The parts of the page {@link readDeviceMemoryGiB} reads, so a test can supply its own. */
+/** The parts of the page {@link readDeviceFacts} reads, so a test can supply its own. */
 export interface DeviceMemorySource {
   deviceMemory?: unknown;
   matchMedia?: (query: string) => { matches: boolean };
@@ -101,28 +253,23 @@ function pageSource(): DeviceMemorySource {
   return source;
 }
 
+function isTouchOnly(source: DeviceMemorySource): boolean {
+  const media = source.matchMedia;
+  return media !== undefined && media("(pointer: coarse)").matches && !media("(any-pointer: fine)").matches;
+}
+
 /**
  * The device's memory in GiB as the browser reports it, an assumed figure for
  * a touch-only device that reports none, or null when neither applies.
+ * Chrome reports up to 32 on a desktop and 8 on a phone.
  */
 export function readDeviceMemoryGiB(source: DeviceMemorySource = pageSource()): number | null {
   const reported = source.deviceMemory;
   if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) return reported;
-  const media = source.matchMedia;
-  if (media && media("(pointer: coarse)").matches && !media("(any-pointer: fine)").matches) {
-    return ASSUMED_TOUCH_MEMORY_GIB;
-  }
-  return null;
+  return isTouchOnly(source) ? ASSUMED_TOUCH_MEMORY_GIB : null;
 }
 
-let pageBudgets: DeviceBudgets | null = null;
-
-/**
- * The page's own budgets, from its memory alone. Read once: the reading
- * doesn't change while the page lives, and the fetch planner and the
- * renderer must agree on the label caps from it.
- */
-export function pageDeviceBudgets(): DeviceBudgets {
-  pageBudgets ??= fitBudgets(readDeviceMemoryGiB());
-  return pageBudgets;
+/** What the page reads of the device synchronously: everything but the adapter. */
+export function readDeviceFacts(source: DeviceMemorySource = pageSource()): Omit<DeviceFacts, "fallbackAdapter"> {
+  return { memoryGiB: readDeviceMemoryGiB(source), touchOnly: isTouchOnly(source) };
 }

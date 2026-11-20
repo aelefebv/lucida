@@ -51,6 +51,8 @@ def test_the_catalog_has_every_shape_the_matrix_needs() -> None:
     assert traits["collection"] == {"collection", "channels"}
     assert traits["labeled-volume"] == {"volume", "labels"}
     assert traits["physical-volume"] == {"volume", "physical"}
+    assert traits["large-aniso-volume"] == {"volume", "channels", "physical"}
+    assert traits["huge-volume"] == {"volume", "channels"}
     for name in ("single-level", "sharded", "float32", "anisotropic", "sparse"):
         assert name in CATALOG
 
@@ -159,6 +161,7 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "slice-zoom",
         "slice-zoomed-pan",
         "large-canvas-orbit",
+        "large-canvas-orbit-cold",
         "settle-then-orbit",
         "phone-settle-then-orbit",
         "minimap-navigate",
@@ -178,9 +181,10 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
 def test_every_scenario_is_short_enough_for_each_step_to_keep_its_run() -> None:
     # The recorder drops its oldest runs under its memory cap; 13 steps on a
     # 3-channel volume lost the first step's run before export.
-    # A target step only points the gestures after it, so it opens no run.
+    # A target step only points the gestures after it, and a wait or a hold
+    # only lets time pass, so none of them opens a run.
     for name, scenario in SCENARIOS.items():
-        assert len([step for step in scenario.steps if step["kind"] != "target"]) <= 4, name
+        assert len([step for step in scenario.steps if step["kind"] not in ("target", "wait", "hold")]) <= 4, name
 
 
 def test_a_scenario_that_adds_a_dataset_names_it_and_never_runs_on_it(tmp_path: Path) -> None:
@@ -438,6 +442,17 @@ def test_the_phone_suite_opens_cold_on_a_phone_at_ratio_3_on_both_pages() -> Non
     assert perf.viewport_args(SCENARIOS["cold-open"]) == []
 
 
+def test_the_large_3d_suite_runs_the_volumes_larger_than_memory_at_ratio_2_and_nothing_quicker_does() -> None:
+    cases, _ = plan(suite="large-3d")
+    assert [case.id for case in cases] == [
+        f"{dataset}.{scenario}.dpr2"
+        for dataset in ("deep-volume", "large-aniso-volume", "huge-volume")
+        for scenario in ("volume-open", "volume-zoom", "large-canvas-orbit", "orbit-sustained")
+    ]
+    for suite in ("quick", "gate"):
+        assert not {"large-aniso-volume", "huge-volume"} & set(SUITES[suite].datasets), suite
+
+
 def test_the_trace_gate_workflow_runs_every_gate_dataset_once() -> None:
     workflow = yaml.safe_load((perf.REPO / ".github" / "workflows" / "trace-gate.yml").read_text(encoding="utf-8"))
     legs = workflow["jobs"]["gate"]["strategy"]["matrix"]["include"]
@@ -550,6 +565,7 @@ def lag(p95: float, longest: float, dropped: int | None) -> dict:
         "inputs": 40,
         "inputToFrame": {"samples": 40, "p50Ms": p95 / 2, "p95Ms": p95, "maxMs": p95 * 2},
         "firstInputMs": p95 * 2,
+        "gpuIdleMs": p95 * 10,
         "unanswered": 0,
         "longTasks": {"count": 1 if longest else 0, "longestMs": longest, "totalMs": longest},
         "frames": {"presented": 80, "dropped": dropped, "displayIntervalMs": 17.6},
@@ -600,11 +616,11 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
     assert fields["topLimiter"] == "fetch.wire"
     assert fields["verdict"] == "clear"
     assert fields["sourceThrottle"] == REMOTE
-    assert (fields["firstInputMs"], fields["inputToFrameP95Ms"]) == (56.8, 28.4)
+    assert (fields["gpuIdleMs"], fields["firstInputMs"], fields["inputToFrameP95Ms"]) == (284.0, 56.8, 28.4)
     assert (fields["longestTaskMs"], fields["droppedFrames"]) == (61, 2)
     # Every error the allow list does not name, repeats included, wherever it fell.
     assert fields["errors"] == 4
-    no_lag = {"firstInputMs": None, "inputToFrameP95Ms": None, "longestTaskMs": None, "droppedFrames": None}
+    no_lag = dict.fromkeys(("gpuIdleMs", "firstInputMs", "inputToFrameP95Ms", "longestTaskMs", "droppedFrames"))
     no_load = dict.fromkeys(
         ("firstFrameMs", "settleMs", "prefetchMs", "bytesFetched", "bytesWire", "chunksFetched", "chunksShort", "topLimiter")
     )
@@ -638,6 +654,7 @@ def test_a_row_is_read_off_the_run_files_diagnostic(tmp_path: Path) -> None:
             "verdict": "bound",
             "durationMs": None,
             **no_load,
+            "gpuIdleMs": 284.0,
             "firstInputMs": 56.8,
             "inputToFrameP95Ms": 28.4,
             "longestTaskMs": 61,
@@ -665,7 +682,8 @@ def test_a_field_the_diagnostic_lacks_is_a_dash_not_a_number(tmp_path: Path) -> 
     assert cells["first frame"] == cells["settle"] == cells["prefetch"] == cells["fetched"] == "-"
     assert cells["short"] == cells["top limiter"] == "-"
     # A run that took no input has no lag reading, not one of zeros.
-    assert cells["first input to frame"] == cells["input to frame p95"] == cells["longest task"] == cells["dropped"] == "-"
+    assert cells["GPU idle"] == cells["first input to frame"] == cells["input to frame p95"] == "-"
+    assert cells["longest task"] == cells["dropped"] == "-"
     assert cells["errors"] == "0"
     assert cells["verdict"] == "unsettled"
     assert cells["run"] == "run.json"
@@ -691,7 +709,7 @@ def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path
     assert lines[0] == "adapter: nvidia ampere (hardware adapter)"
     assert (
         "| image | cold-open | 1 | - | 212 ms | 1,840 ms | 2,410 ms | - | 12.4 MB | 5.1 MB | 96 | 7 | 512 "
-        "| fetch.wire (attributed) | - | - | - | - | 0 | clear |"
+        "| fetch.wire (attributed) | - | - | - | - | - | 0 | clear |"
     ) in markdown
     assert "| error: the server refused \\| the open |" in markdown
     # The header, its rule, and one row per run.

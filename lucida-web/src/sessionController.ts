@@ -25,7 +25,7 @@ import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/ind
 import { levelChunkSizes } from "./pipeline/fetch/contentSource.ts";
 import { compileCodecModule } from "./pipeline/fetch/codecModule.ts";
 import { readCacheKnobs, subscribeCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
-import { pageDeviceBudgets } from "./deviceBudget.ts";
+import { pageDeviceBudgets, subscribePageBudgets } from "./pageBudgets.ts";
 import type {
   WireGeneratedAvailabilityByDataset,
   WireGeneratedAvailabilityDelta,
@@ -287,6 +287,7 @@ export class SessionController {
   /** Unsubscribes this controller from the scene-call guard on destroy. */
   private readonly stopObservingSceneCalls: () => void;
   private readonly stopFollowingCacheKnobs: () => void;
+  private readonly stopFollowingBudgets: () => void;
   private readonly cpuCache: CpuCache;
 
   constructor(deps: SessionControllerDeps) {
@@ -323,6 +324,14 @@ export class SessionController {
     // first request already runs under them.
     this.cpuCache.applyKnobs(readCacheKnobs());
     this.stopFollowingCacheKnobs = subscribeCacheKnobs((knobs) => this.cpuCache.applyKnobs(knobs));
+    this.stopFollowingBudgets = subscribePageBudgets(() => {
+      const next = pageDeviceBudgets();
+      this.cpuCache.setOwnValues({
+        mainBudgetBytes: next.cpuMainBytes,
+        overviewBudgetBytes: next.cpuOverviewBytes,
+        maxBytesInFlight: next.cpuBytesInFlight,
+      });
+    });
     const bridge = new Bridge(this.buildHandlers(), workspaceSocketUrl(deps.workspaceId));
     this.session = new Session({
       bridge,
@@ -364,6 +373,7 @@ export class SessionController {
     this.destroyed = true;
     this.stopObservingSceneCalls();
     this.stopFollowingCacheKnobs();
+    this.stopFollowingBudgets();
     // The stream's socket is going with the session, so the toggle goes off
     // rather than pointing a successor controller's watcher at a dead bridge.
     watchStream.detach();

@@ -1,0 +1,10 @@
+{
+  "description": "switch the slice view to the volume view, back, and to the volume view again, whose chunks the CPU cache still holds, so its uploads alone set the pace",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "mode", "to": "3d" },
+    { "kind": "mode", "to": "2d" },
+    { "kind": "mode", "to": "3d" }
+  ]
+}

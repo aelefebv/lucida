@@ -291,7 +291,7 @@ impl ReplayPlan {
         let planning = match header.planning.as_object() {
             Some(fields) if !fields.is_empty() => Ok(KnobSettings {
                 planning: fields.clone().into_iter().collect(),
-                cache: Default::default(),
+                ..Default::default()
             }),
             _ => Err(
                 "the header carries no planning configuration; the page's defaults run".to_string(),

@@ -67,7 +67,8 @@ function makeCtx(): WorkerCtx {
     ensureOffscreenPool: () => [],
     getOrCreateLUT: () => ({} as GPUTexture),
     post: () => {},
-    postWantedSet: () => {},
+    requestWantedSetReport: () => {},
+    flushWantedSetReports: () => {},
     lookupEntityDescriptor: () => null,
   };
 }
@@ -181,7 +182,7 @@ describe("applyColdStateDelta", () => {
     expect(patched.epochs.view).toBe(2);
   });
 
-  it("patches the retained wanted chunks with the delta's changed entries, as a full cold state would carry them", () => {
+  it("patches the retained wanted chunks with the delta's changes, as a full cold state would carry them", () => {
     const ctx = makeCtx();
     const cold1: ColdStateMessage = {
       ...makeCold([tile("a", "img-a", 1), tile("b", "img-b", 1)]),
@@ -203,8 +204,8 @@ describe("applyColdStateDelta", () => {
       currentZ: 0,
       visibleRegion: cold1.visibleRegion,
       wantedChunks: [
-        { memberId: "img-a", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
-        { memberId: "img-b", tier: "detail", chunkKeys: [] },
+        { memberId: "img-a", tier: "detail", added: ["1/0/0/0/0/1"], removed: ["1/0/0/0/0/0"] },
+        { memberId: "img-b", tier: "detail", added: [], removed: ["1/0/0/0/0/0"] },
       ],
       removedEntityIds: ["b"],
       upserts: [],
@@ -246,8 +247,8 @@ describe("applyColdStateDelta", () => {
         sortCenterVox: null, frustumPlanes: null,
       },
       wantedChunks: [
-        { memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
-        { memberId: "img-b:ch0", tier: "detail", chunkKeys: [] },
+        { memberId: "img-a:ch0", tier: "detail", added: ["1/0/0/0/0/1"], removed: ["1/0/0/0/0/0"] },
+        { memberId: "img-b:ch0", tier: "detail", added: [], removed: ["1/0/0/0/0/0"] },
       ],
       removedEntityIds: [],
       upserts: [],
@@ -363,6 +364,39 @@ describe("applyColdStateDelta", () => {
     expect(buffer).toBeDefined();
   });
 
+  it("keeps the view's sections, by identity, for an entry replaced without a change to what it lays out", () => {
+    const ctx = makeCtx();
+    applyColdState(ctx, makeCold([tile("a", "img-a"), tile("b", "img-b")]));
+    const draw = drawOf(ctx.state, "ds1", 0)!;
+    const view = [...ctx.state.volumeAtlases.values()][0].views.get(0)!;
+    const sections = view.entityMetas;
+    const sectionsOfA = sections.get("img-a:ch0");
+    // Another contrast: the descriptor entry changes, the sections do not.
+    const restyled: ColdStateActiveEntry = {
+      ...tile("a", "img-a"),
+      displayStateByChannel: { 0: { contrastMin: 0, contrastMax: 2, gamma: 1, opacity: 1, colormapName: "gray", channelMask: 1 } },
+    };
+    applyColdStateDelta(ctx, {
+      type: "coldStateDelta",
+      labels: [],
+      view: 0,
+      drawnViews: [0],
+      datasetId: "ds1",
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: draw.cold.visibleRegion,
+      wantedChunks: [],
+      removedEntityIds: [],
+      upserts: [restyled],
+      activeSetOrder: ["a", "b"],
+    });
+    expect(view.entityMetas).toBe(sections);
+    expect(view.entityMetas.get("img-a:ch0")).toBe(sectionsOfA);
+    const fresh = buildDescriptorBuffer(makeMockDevice(), draw.cold, draw.sources);
+    expect(new Uint8Array(draw.descriptor!.bytes)).toEqual(new Uint8Array(fresh.bytes));
+  });
+
   it("re-ingests in full while failed chunks are marked, since the marks follow the wanted set", () => {
     const ctx = makeCtx();
     const cold1 = makeCold([tile("a", "img-a", 1)]);
@@ -380,7 +414,7 @@ describe("applyColdStateDelta", () => {
       currentT: 0,
       currentZ: 0,
       visibleRegion: cold1.visibleRegion,
-      wantedChunks: [{ memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] }],
+      wantedChunks: [{ memberId: "img-a:ch0", tier: "detail", added: ["1/0/0/0/0/0"], removed: [] }],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: ["a"],

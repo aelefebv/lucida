@@ -57,8 +57,10 @@ function layer(overrides: Partial<LayerInfo> = {}): LayerInfo {
     levelPin: null,
     levelPinOptions: [],
     targetLevel: null,
+    selectedLevel: null,
     displayedLevel: null,
     displayedCoarserThanTarget: false,
+    selectedCoarserThanTarget: false,
     downsamplingMethod: null,
     physicalScale: true,
     userTransform: null,
@@ -721,6 +723,30 @@ describe("LayerPanel level readout", () => {
     });
     expect(screen.getByLabelText("original.zarr target level").textContent).toBe("1-3");
     expect(levelNotice()?.textContent).toBe("Displaying levels 1-4 where levels 1-3 are the target.");
+  });
+
+  it("says the levels drawn are the finest that fit in memory when the selection is coarser than the target", async () => {
+    await renderLevels({
+      targetLevel: { min: 0, max: 0 },
+      selectedLevel: { min: 2, max: 3 },
+      displayedLevel: { min: 2, max: 3 },
+      displayedCoarserThanTarget: true,
+      selectedCoarserThanTarget: true,
+    });
+    expect(levelNotice()?.textContent).toBe("Displaying levels 2-3, the finest that fit in memory, where level 0 is the target.");
+  });
+
+  it("says which levels stand in while the ones that fit in memory load", async () => {
+    await renderLevels({
+      targetLevel: { min: 0, max: 0 },
+      selectedLevel: { min: 2, max: 3 },
+      displayedLevel: { min: 3, max: 4 },
+      displayedCoarserThanTarget: true,
+      selectedCoarserThanTarget: true,
+    });
+    expect(levelNotice()?.textContent).toBe(
+      "Displaying levels 3-4 while levels 2-3, the finest that fit in memory, load. Level 0 is the target.",
+    );
   });
 
   it("shows no level row before the worker has reported one", async () => {

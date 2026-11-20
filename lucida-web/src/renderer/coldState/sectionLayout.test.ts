@@ -105,6 +105,15 @@ describe("relayMember", () => {
     expect(wantsRepack(space)).toBe(false);
   });
 
+  it("hands back the sections a member holds, as they are, when it asks for them again", () => {
+    const first = layoutSections(new Map(), [request("a", 0, 4), request("a", 1, 2)]);
+    const held = first.metas.get("a")!;
+    const again = relayMember(held, [request("a", 0, 4), request("a", 1, 2)], first.space, 3);
+    expect(again.metas).toBe(held);
+    expect(again.added).toEqual([]);
+    expect(again.removed).toEqual([]);
+  });
+
   it("joins a freed stretch with the gaps on both sides", () => {
     const first = layoutSections(new Map(), ["a", "b", "c", "d"].map((id) => request(id, 0, 40_000)));
     const space = first.space;

@@ -23,19 +23,21 @@ export interface BaseEntitySnapshot {
   projectedAreaPx2: number;
   centroidWorld: [number, number, number];
   /**
-   * The level the detail tier requests: the dataset's level pin if set,
+   * The level the screen calls for: the dataset's level pin if set,
    * otherwise the core's choice in `lucida-core/src/target_level.rs`, the
-   * coarsest level with at least one sample under every device pixel,
-   * held across a boundary by hysteresis. Always a source level, never a
-   * generated coarse level. The core resolves it and the browser copies
-   * it. It is in the quantized set the view-query delta tracks, so a move
-   * arrives as a `changed` record. Memory pressure is not an input.
+   * coarsest level with at least one sample under every device pixel where
+   * the center ray meets the entity, held across a boundary by hysteresis.
+   * Always a source level, never a generated coarse level. The core
+   * resolves it and the browser copies it. It is in the quantized set the
+   * view-query delta tracks, so a move arrives as a `changed` record.
+   * Memory pressure is not an input. The level selection, which reads the
+   * budget, may draw coarser, and the view says so against this.
    */
   targetLevel: number;
   /**
    * True when {@link targetLevel} is the dataset's level pin rather than
-   * the screen's choice. A pinned target never moves with the zoom, so
-   * the prefetch lane requests no neighboring level for the entity.
+   * the screen's choice. The level selection refines a pinned entity to its
+   * pin, whatever the screen calls for.
    */
   levelPinned: boolean;
   /**
@@ -135,6 +137,48 @@ export interface ViewSnapshot {
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
   selection: SelectionState;
+  /**
+   * The chunks, each at a level, that the view draws the dataset's
+   * entities from within the memory budget: the core's level selection
+   * (`levelSelection.ts`). The detail lane asks for exactly these.
+   */
+  levelSelection: DatasetLevelSelection;
+}
+
+/** What one view sees of a dataset before the level selection has chosen its chunks. */
+export type ViewSnapshotBase = Omit<ViewSnapshot, "levelSelection">;
+
+/** One chunk cell the level selection chose, and where it ranks in the view's fetch order. */
+export interface SelectedCell {
+  level: number;
+  x: number;
+  y: number;
+  z: number;
+  /** Lower first: coarser levels, then larger on screen, then nearer the focus. */
+  rank: number;
+}
+
+/** What the level selection chose for one entity in one view. */
+export interface EntityLevelSelection {
+  /** Cells the detail tier holds, in fetch order. */
+  detail: SelectedCell[];
+  /** Cells beyond the selection worth fetching ahead, in order. */
+  lookahead: SelectedCell[];
+  /** The levels of {@link detail}, finest first. */
+  detailLevels: number[];
+  /** How many of the entity's cells the selection left at the coarse tier's level, which the coarse tier draws. */
+  coarseCells: number;
+}
+
+/** What the level selection chose for one dataset in one view. */
+export interface DatasetLevelSelection {
+  /** By entity id. A visible entity it lists nothing for draws from the coarse tier. */
+  entities: ReadonlyMap<string, EntityLevelSelection>;
+  /**
+   * Whether the budget stopped the view's refinement short of the levels
+   * the screen calls for. Every dataset the view draws shares it.
+   */
+  budgetLimited: boolean;
 }
 
 /** One dataset as one view sees it: what each lane plans from. */
@@ -183,31 +227,69 @@ export interface PlanningState {
 
 /**
  * What one view's plan leaves for the next: its own active set, which a
- * request-only replan reuses, and the zoom and cut memory the prefetch lane
- * reads to pick the next level and to tell a step.
+ * request-only replan reuses, the cut the prefetch lane reads to tell a
+ * step, and the requests its lanes emitted, which the next plan carries
+ * forward where nothing they depend on changed.
  */
 export interface ViewPlanningState {
   activeSet: ActiveSetEntry[];
-  /**
-   * `visibleRegion.effectiveZoom` as the previous plan saw it, or `null`
-   * before the first plan. The core reports device pixels per level-0
-   * sample here in both view modes, so a change in it is a change in
-   * the measure the target level is chosen from.
-   */
-  previousEffectiveZoom: number | null;
-  /**
-   * Direction of the last zoom change the planner observed, or `null`
-   * until it observes one. Kept across plans whose zoom is unchanged, so
-   * a pan or a scrub after a zoom still prefetches in the zoom's
-   * direction.
-   */
-  zoomDirection: ZoomDirection | null;
   /**
    * `selection.cut` as the previous plan saw it, or `null` before the first
    * plan. A move of a few planes from it along the same axis is a step,
    * after which the slice view fetches the whole chunks its plane lies in.
    */
   previousCut: SliceCut | null;
+  /** What the view's lanes emitted when it alone planned the dataset; null otherwise. */
+  lanes: LaneMemory | null;
+}
+
+/**
+ * What the lanes of a view that alone plans its dataset emitted, so the
+ * next plan keeps each request whose chunk and lane inputs held, the same
+ * object at the same priority, and emits only for what changed
+ * (`laneMemory.ts`).
+ */
+export interface LaneMemory {
+  /** What every request depends on beyond its own chunk; a change emits every request again. */
+  scope: LaneScope;
+  /** The detail lane's requests, by entity, then by cell (`cellKey`), one per channel. */
+  detail: ReadonlyMap<string, EntityDetailRequests>;
+  /** The other lanes' requests, by entity, then chunk key, each with the band it asks in. */
+  others: ReadonlyMap<string, ReadonlyMap<string, readonly { req: ChunkRequest; band: number }[]>>;
+  /** The plan's requests in planner order, which held every request above. */
+  requests: readonly ChunkRequest[];
+}
+
+/** What every request of a view's lanes depends on beyond its own chunk. */
+export interface LaneScope {
+  datasetId: string;
+  content: number;
+  layout: number;
+  t: number;
+  visibleChannels: readonly number[];
+  renderMode: SelectionState["renderMode"];
+  cut: SliceCut;
+  /** The config the requests were emitted under, which sets the bands and the slice band. */
+  config: object;
+}
+
+/** One entity's detail requests, and the level geometry they were emitted from. */
+export interface EntityDetailRequests {
+  levels: readonly LevelGeometry[];
+  cells: ReadonlyMap<number, readonly ChunkRequest[]>;
+}
+
+/**
+ * How a plan's requests differ from the previous plan's, when it carried
+ * that plan's forward: every request of `base` but those `removed`, and
+ * those `added`. A request kept is the same object, at the same priority.
+ */
+export interface RequestDelta {
+  /** The previous plan's requests, as it returned them, which a consumer checks it holds. */
+  base: readonly ChunkRequest[];
+  /** In planner order. */
+  added: readonly ChunkRequest[];
+  removed: readonly ChunkRequest[];
 }
 
 /** Which way the last zoom change moved: toward level 0 or away from it. */
@@ -218,17 +300,20 @@ export function initialPlanningState(): PlanningState {
   return { previousActiveSet: [], views: new Map() };
 }
 
-/** A view's state before its first plan: nothing held, no zoom seen. */
+/** A view's state before its first plan: nothing held, no cut seen. */
 export function initialViewPlanningState(): ViewPlanningState {
-  return { activeSet: [], previousEffectiveZoom: null, zoomDirection: null, previousCut: null };
+  return { activeSet: [], previousCut: null, lanes: null };
 }
 
 export interface RequestPlan {
   /**
    * Every lane's chunk requests, sorted ascending by `priority` (lower
-   * is more urgent). A fresh array, so the caller may mutate it.
+   * is more urgent). A fresh array, which the caller must not change: the
+   * next plan's {@link delta} names it as its base, and keeps its requests.
    */
-  requests: ChunkRequest[];
+  requests: readonly ChunkRequest[];
+  /** How {@link requests} differ from the previous plan's, when this plan carried them forward. */
+  delta?: RequestDelta;
   /** One entry per visible tile, plus invisible-entity pass-throughs. */
   activeSet: ActiveSetEntry[];
   epochs: SceneEpochs;
@@ -259,9 +344,9 @@ export interface RequestPlan {
 }
 
 /**
- * Per-plan accumulator. Counters are summed across the chunks each lane
- * reads (detail, every prefetch step, and coarse), across all entities and
- * channels.
+ * Per-plan accumulator. Counters are summed across the chunks the plan
+ * enumerates for its coarse lane, across all entities and channels. The
+ * level selection's enumeration, which the budget bounds, is not counted.
  */
 export interface PlanStats {
   /** Frustum / visible-region culling stages. */
@@ -346,12 +431,21 @@ export interface TileEntry {
   /** The tile's owning image id (matches `EntitySnapshot.imageId`). */
   imageId: string;
   /**
-   * Levels the detail tier requests, target level first; today only the
-   * target. Cold state and the worker read the detail tier's levels from
-   * here. The worker keeps sections for `detailLevels[0]` and the coarser
-   * levels under it, and never samples a finer level.
+   * The level the screen calls for ({@link BaseEntitySnapshot.targetLevel}).
+   * Absent: the finest of {@link detailLevels}, as an entry the selection
+   * did not build reads.
+   */
+  targetLevel?: number;
+  /**
+   * Levels the detail tier requests, finest first: the levels of the
+   * entity's chunks in the level selection. Cold state and the worker read
+   * the detail tier's levels from here. The worker keeps sections for
+   * `detailLevels[0]` and the coarser levels under it, and never samples a
+   * finer level. Empty when every chunk stays at the coarse tier's level.
    */
   detailLevels: number[];
+  /** Whether the level selection left some of the entity's chunks at the coarse tier's level. Absent: no. */
+  keepsCoarse?: boolean;
   /**
    * Level the coarse tier holds for this entity, or `null` when the
    * image has no coarse level that is at least as coarse as the detail

@@ -13,12 +13,19 @@ export interface DatasetLevels {
    */
   target: LevelRange;
   /**
+   * The levels the level selection chose across the visible entities, the
+   * finest that fit the memory budget, or `null` before it chose any.
+   */
+  selected: LevelRange | null;
+  /**
    * The finest and coarsest level on screen across the visible entities, or
    * `null` while no visible entity has a resident level yet.
    */
   displayed: LevelRange | null;
   /** True while some visible entity draws any pixel from a level coarser than its own target. */
   coarserThanTarget: boolean;
+  /** True when the selection draws some visible entity coarser than its target, to fit the budget. */
+  selectedCoarserThanTarget: boolean;
 }
 
 /**
@@ -38,13 +45,20 @@ export function summarizeDatasetLevels(
   const displayed = visible
     .map((e) => e.displayed)
     .filter((d) => d !== null);
+  const selected = visible
+    .map((e) => e.selected ?? null)
+    .filter((s) => s !== null);
   return {
     target: rangeOf(targetScope.map((e) => e.targetLevel)),
+    selected: selected.length === 0 ? null : rangeOf(selected.flatMap((s) => [s.min, s.max])),
     displayed: displayed.length === 0
       ? null
       : rangeOf(displayed.flatMap((d) => [d.min, d.max])),
     coarserThanTarget: visible.some(
       (e) => e.displayed !== null && e.displayed.max > e.targetLevel,
+    ),
+    selectedCoarserThanTarget: visible.some(
+      (e) => e.selected !== undefined && e.selected !== null && e.selected.max > e.targetLevel,
     ),
   };
 }
@@ -58,8 +72,10 @@ export function sameDatasetLevels(a: DatasetLevels | null, b: DatasetLevels | nu
   if (a === b) return true;
   if (a === null || b === null) return false;
   return sameRange(a.target, b.target)
+    && sameRange(a.selected, b.selected)
     && sameRange(a.displayed, b.displayed)
-    && a.coarserThanTarget === b.coarserThanTarget;
+    && a.coarserThanTarget === b.coarserThanTarget
+    && a.selectedCoarserThanTarget === b.selectedCoarserThanTarget;
 }
 
 function sameRange(a: LevelRange | null, b: LevelRange | null): boolean {

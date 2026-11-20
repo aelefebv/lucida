@@ -106,9 +106,19 @@ The level the screen calls for in one entity, or the level a level pin names.
 It depends on the camera and level geometry, never on what is resident.
 _Avoid_: detail level (the detail tier holds several levels)
 
+**Level selection**:
+The chunks a view draws, each at a level, within the memory budget. Every
+visible chunk starts at the coarse tier's level, and the chunk whose samples
+look largest on screen refines first, until each chunk's samples span a device
+pixel or the budget is spent, so a near chunk can draw finer than a far one
+and a view too deep for its target level draws coarser
+(`lucida-core/src/level_selection.rs`).
+_Avoid_: selection (unqualified; selector state such as the current z)
+
 **Displayed level**:
-The level the renderer sampled for an entity's pixels: the target level once its
-chunks are resident, and a coarser resident level or the coarse tier until then.
+The level the renderer sampled for an entity's pixels: the level the selection
+chose once its chunks are resident, and a coarser resident level or the coarse
+tier until then.
 
 **Level pin**:
 A per-dataset choice that holds the target level at one level. The scene field
@@ -125,7 +135,8 @@ Which concurrent stream of planner work a request belongs to: `detail`,
 _Avoid_: track (a display track is a timeline row), channel (an image axis)
 
 **Wanted set**:
-The chunks the current view calls for. Demand, not possession.
+The chunks the current view calls for: its level selection and the coarse tier
+under it. Demand, not possession.
 
 **Settled**:
 A view once quiescent has held: covering its whole wanted set, or covering

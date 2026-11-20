@@ -25,6 +25,7 @@ import {
 } from "./fixtures.ts";
 import { RULESET } from "./ruleset.ts";
 import { renderDiagnostic } from "./renderText.ts";
+import { describeSteadyStateFinding } from "./steadyState.ts";
 import type { DiagnosticDocument, Finding } from "./types.ts";
 
 const RULES = RULESET.steadyState;
@@ -157,6 +158,82 @@ describe("a budget-bound tier", () => {
 
     expect(budgetFindings(diagnoseRun(filling))).toEqual([]);
     expect(diagnoseRun(filling).steadyState.tiers[1].budgetBound).toBe(false);
+  });
+});
+
+describe("a level selection the budget stopped", () => {
+  /** A settled volume drawn a level or two coarser than the screen calls for, every selected chunk resident. */
+  function selectedRun(budgetLimited: boolean) {
+    const run = budgetBoundCoarseRun();
+    return {
+      ...run,
+      header: {
+        ...run.header,
+        outstandingAtSettle: {
+          ...run.header.outstandingAtSettle,
+          desiredDetailChunks: 810,
+          residentDetailChunks: 810,
+          detailBytes: 405 * 1024 * 1024,
+        },
+        selectionAtSettle: {
+          datasets: [{
+            datasetId: "ds",
+            target: { min: 0, max: 0 },
+            levels: [{ level: 1, chunks: 48 }, { level: 2, chunks: 762 }],
+            coarseChunks: 0,
+            coarseLevel: 4,
+            budgetLimited,
+          }],
+          usedBytes: 405 * 1024 * 1024,
+          shareBytes: 410 * 1024 * 1024,
+        },
+      },
+    };
+  }
+
+  function selectionFindings(document: DiagnosticDocument): Finding[] {
+    return document.findings.filter((finding) => finding.rule === RULES.levelSelection.id);
+  }
+
+  it("names the levels drawn, the level the screen calls for, and how much is resident, as a note", () => {
+    const document = diagnoseRun(selectedRun(true));
+    const [finding] = selectionFindings(document);
+    expect(finding.severity).toBe("note");
+    expect(finding.observed.levels).toEqual([{ level: 1, chunks: 48 }, { level: 2, chunks: 762 }]);
+    expect(finding.observed.target).toEqual({ min: 0, max: 0 });
+    expect(finding.observed.resident).toBe(810);
+    expect(document.verdict.kind).toBe("clear");
+    expect(describeSteadyStateFinding(finding)).toContain(
+      "the view draws ds at levels 1-2 (48 at 1, 762 at 2) where the screen calls for level 0",
+    );
+    expect(document.steadyState.selection?.wanted).toBe(810);
+  });
+
+  it("says nothing when the selection reached the levels the screen calls for", () => {
+    expect(selectionFindings(diagnoseRun(selectedRun(false)))).toEqual([]);
+  });
+
+  it("speaks for the detail tier in place of its budget-bound reading", () => {
+    const run = selectedRun(true);
+    const short = {
+      ...run,
+      header: {
+        ...run.header,
+        outstandingAtSettle: {
+          ...run.header.outstandingAtSettle,
+          desiredDetailChunks: 900,
+          residentDetailChunks: 810,
+          detailBytes: 500 * 1024 * 1024,
+        },
+      },
+    };
+    const subjects = budgetFindings(diagnoseRun(short)).map((finding) => finding.subject);
+    expect(subjects).not.toContain("detail tier");
+  });
+
+  it("prints the levels each dataset draws at on a line of its own", () => {
+    const text = renderDiagnostic(diagnoseRun(selectedRun(true))).text;
+    expect(text).toContain("levels    ds: 48 at 1, 762 at 2 where the screen calls for level 0 · the budget stopped it");
   });
 });
 

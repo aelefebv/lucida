@@ -9,6 +9,13 @@ import {
 } from "./labelRequests.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../../manifestTypes.ts";
 
+// These tests reason about a 512 MiB label budget: what a 1536 MiB GPU total gives.
+vi.mock("../../pageBudgets.ts", async () => {
+  const { fitBudgets } = await import("../../deviceBudget.ts");
+  const budgets = fitBudgets({ memoryGiB: 16, touchOnly: false, fallbackAdapter: false }, 1536 * 1024 * 1024);
+  return { pageDeviceBudgets: () => budgets };
+});
+
 /** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
  *  default), so a test that needs every mask shown must turn them on. */
 function allOn(n: number): { visible: boolean; opacity: number }[] {

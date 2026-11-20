@@ -13,11 +13,21 @@ export interface InitMessage {
   type: "init";
   canvas: OffscreenCanvas;
   /**
-   * The page's reading of the device's memory, in GiB, or null when unknown.
-   * The page reads it because only it can tell a touch-only device that
-   * reports none; the worker fits its atlas budgets from it.
+   * The GPU total the page's budgets give the worker. The page fits them,
+   * since only it knows the device, the person's setting, and the CPU stores
+   * that follow the total. Absent, the worker takes a desktop's.
    */
-  deviceMemoryGiB?: number | null;
+  gpuTotalBytes?: number;
+}
+
+/**
+ * A new GPU total from the page, as its budgets change. A total lower than
+ * what is held takes the excess back from the pools, as running out of
+ * memory does.
+ */
+export interface GpuTotalMessage {
+  type: "gpuTotal";
+  bytes: number;
 }
 
 export interface ResizeMessage {
@@ -602,16 +612,20 @@ export interface ColdStateActiveEntry {
     levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
   /**
-   * Levels the detail tier requests, target level first (the planner's
-   * `TileEntry.detailLevels`). The worker allocates detail sections for
-   * the target and the next coarser levels (see
-   * `entitySources.detailTierLevels`), reports missing chunks at these
-   * levels, and samples the target first, then coarser resident levels,
-   * never a finer one.
+   * Levels the detail tier requests, finest first (the planner's
+   * `TileEntry.detailLevels`, the levels the level selection chose). The
+   * worker allocates detail sections for the finest and the next coarser
+   * levels (see `entitySources.detailTierLevels`), reports missing chunks at
+   * these levels, and samples the finest first, then coarser resident
+   * levels, never a finer one.
    */
   detailLevels: number[];
   /** Level the coarse tier holds for this entity, or `null` for none. */
   coarseLevel: number | null;
+  /** The level the screen calls for, which the level readout reports against. Absent: the finest detail level. */
+  targetLevel?: number;
+  /** Whether the level selection left some of the entity's chunks at {@link coarseLevel}. Absent: no. */
+  keepsCoarse?: boolean;
   /**
    * Column-major model matrix from the entity's `[0,1]^3` unit cube to
    * world space. The worker writes it straight into the descriptor buffer;
@@ -729,6 +743,19 @@ export interface WantedMemberChunks {
 }
 
 /**
+ * How one member's wanted chunks in one tier changed: the chunks it wants
+ * now and did not, and those it no longer wants. A move changes a few of a
+ * member's thousands, so a delta carries these rather than the member's keys.
+ */
+export interface WantedChunkChanges {
+  /** See {@link SliceChunkDataMessage.memberId}. */
+  memberId: string;
+  tier: ResidencyTier;
+  added: string[];
+  removed: string[];
+}
+
+/**
  * Camera-ray pick coordinates for chunk eviction priority, sent once per
  * dataset when `epochs.view` advances. CPU-side residency only; the shader
  * never reads them. The worker stores them per view in `rayHits` for
@@ -808,12 +835,8 @@ export interface ColdStateDeltaMessage {
     detail: number;
     coarse: number;
   };
-  /**
-   * The (member, tier) entries of {@link ColdStateMessage.wantedChunks} that
-   * changed, each replacing the retained one. An entry with no keys removes
-   * it.
-   */
-  wantedChunks: WantedMemberChunks[];
+  /** How the (member, tier) entries of {@link ColdStateMessage.wantedChunks} changed, each only where it did. */
+  wantedChunks: WantedChunkChanges[];
   /** Entity ids that left the active set since the retained cold state. */
   removedEntityIds: string[];
   /** Descriptors for entities new to the active set or whose descriptor changed. */
@@ -891,6 +914,7 @@ export type MainToWorkerMessage =
   | ColdStateDeltaMessage
   | FailedChunksMessage
   | DatasetUnplannedMessage
+  | GpuTotalMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
   | AbandonFrameMessage
@@ -1035,10 +1059,11 @@ export type MissingChunk = {
 };
 
 /**
- * What the worker wants and lacks for one dataset, from the cold state's
- * {@link ColdStateMessage.wantedChunks}. Every chunk loss is reported on its
- * own, so a missing chunk the page's residency mirror holds is a
- * disagreement between the two records.
+ * What changed in what the worker wants and lacks for one view's draw of a
+ * dataset, from the cold state's {@link ColdStateMessage.wantedChunks}. At
+ * most one a frame, and none when nothing changed. Every chunk loss is
+ * reported on its own, so a missing chunk the page's residency mirror holds
+ * is a disagreement between the two records.
  */
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
@@ -1046,6 +1071,11 @@ export interface WantedSetDeltaMessage {
   /** The pools whose cold state named the wanted chunks. */
   viewMode: PoolMode;
   epochs: SceneEpochs;
+  /**
+   * The wanted chunks lacking that no earlier delta named: wanted since the
+   * last one, or whose slot was held or let go since it. One lacking since
+   * an earlier delta is not named again until its slot changes.
+   */
   missing: MissingChunk[];
 }
 
@@ -1070,14 +1100,21 @@ export interface LevelRange {
  */
 export interface EntityLevelReport {
   entityId: string;
+  /** The level the screen calls for. */
   targetLevel: number;
+  /**
+   * The levels the level selection chose to draw the entity at, the coarse
+   * tier's included when it kept some. Absent or null before it chose any.
+   */
+  selected?: LevelRange | null;
   visible: boolean;
+  /** The levels on screen now: the selected ones once resident, coarser ones until then. */
   displayed: LevelRange | null;
 }
 
 /**
- * Posted alongside every {@link WantedSetDeltaMessage}: what the wanted
- * target-level chunks say about which level is on screen. Feeds the layer
+ * What the wanted target-level chunks say about which level is on screen,
+ * posted with the wanted-set report whenever it changes. Feeds the layer
  * panel's level readout.
  */
 export interface EntityLevelsMessage {
@@ -1198,6 +1235,18 @@ export interface FrameDoneMessage {
   doneAtMs?: number;
 }
 
+/**
+ * Chunk deliveries to the pools of `mode` the worker and the GPU are done
+ * with since its last report: the bytes they carried and the time the worker
+ * spent on them. The page paces its uploads by it.
+ */
+export interface UploadCostMessage {
+  type: "uploadCost";
+  mode: PoolMode;
+  bytes: number;
+  ms: number;
+}
+
 /** Why a frame could not be read: the error's name and message, as the bundle's reason carries them. */
 export interface CaptureFailure {
   name: string;
@@ -1291,6 +1340,7 @@ export type WorkerToMainMessage =
   | GpuCapacityMessage
   | MinimapOverviewsLostMessage
   | FrameDoneMessage
+  | UploadCostMessage
   | FrameCapturedMessage
   | ProbeResultMessage
   | GpuErrorMessage

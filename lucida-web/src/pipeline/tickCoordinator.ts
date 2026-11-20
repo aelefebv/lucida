@@ -43,22 +43,34 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests, labelFormsFor } from "./planning/labelRequests.ts";
-import { admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
+import { AdmissionLedger, admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
 import { tallyViewCoverage, type ViewCoverage } from "./planning/viewCoverage.ts";
 import { requestIdentity } from "./planning/plan.ts";
-import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
-import { pageDeviceBudgets } from "../deviceBudget.ts";
+import { gpuChunkRoomBytes, gpuSlotsFor, slotsReadFrom } from "./planning/gpuCapacity.ts";
+import {
+  initialLevelSelectionMemory,
+  selectLevels,
+  type LevelSelectionMemory,
+  type LevelSelectionResult,
+  type SelectionBytes,
+  type SelectionDataset,
+  type ViewSelectionSummary,
+} from "./planning/levelSelection.ts";
+import { pageDeviceBudgets } from "../pageBudgets.ts";
 import type {
   ActiveSetEntry,
+  DatasetLevelSelection,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningState,
   ChunkRequest,
   PlanStats,
+  RequestDelta,
   RequestPlan,
   PlanningSnapshot,
   SelectionState,
   ViewSnapshot,
+  ViewSnapshotBase,
 } from "./planning/index.ts";
 import type { SceneEpochs } from "./epochs.ts";
 import type { VisibleRegion } from "./viewport.ts";
@@ -71,6 +83,7 @@ import { regionInWorkerFrame, workerCutAxis, workerCutIndex } from "./upload/col
 import { computeActiveSetIndexMap } from "./upload/coldState/build.ts";
 import type { Uploader } from "./upload/uploader.ts";
 import { traceRecorder } from "../trace/recorder.ts";
+import type { DatasetSelectionAtSettle, SelectionAtSettle } from "../trace/types.ts";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -126,6 +139,84 @@ function leadLayers(ctx: TickContext, layersByView: ReadonlyMap<number, Resolved
   return lead;
 }
 
+/** What the level selection chose for a dataset a view draws none of. */
+const NOTHING_CHOSEN: DatasetLevelSelection = { entities: new Map(), budgetLimited: false };
+
+/**
+ * The bytes the level selection selects within: the CPU cache's detail
+ * store, and what the GPU's chunk pools may hold as the worker's latest
+ * report gives it.
+ */
+function selectionBudget(ctx: TickContext, report: GpuCapacityReport | null): SelectionBytes {
+  return {
+    cpu: ctx.cpuCache.tierCapacity().detail,
+    gpu: gpuChunkRoomBytes(report, pageDeviceBudgets().gpuTotalBytes),
+  };
+}
+
+/** Whether a selection the budget stopped was stopped by the GPU side, so more GPU room would change it. */
+function gpuBound(summaries: ReadonlyMap<number, ViewSelectionSummary>): boolean {
+  for (const { limit, used, share } of summaries.values()) {
+    // A refused refinement fits neither side's remainder, so the bound side
+    // is the one within a refinement of its share.
+    if (limit !== null && used.gpu >= GPU_BOUND_FILL * share.gpu) return true;
+  }
+  return false;
+}
+
+/** How full the GPU side of a stopped selection is when it, not the CPU side, stopped it. */
+const GPU_BOUND_FILL = 0.9;
+
+/** The datasets a selection ran over, each with the views that draw it, the drawn view first. */
+type SelectedDatasets = readonly { dsId: string; views: readonly { view: TickView; snapshot: ViewSnapshotBase }[] }[];
+
+/**
+ * What a selection chose, as the trace keeps it: for each dataset, in the
+ * first view that draws it, the detail chunks by level, the chunks left at
+ * the coarse tier's level, and the level the screen calls for.
+ */
+function selectionReading(datasets: SelectedDatasets, selection: LevelSelectionResult): SelectionAtSettle {
+  const readings: DatasetSelectionAtSettle[] = [];
+  for (const { dsId, views } of datasets) {
+    const drawn = views[0];
+    if (drawn === undefined) continue;
+    const chosen = selection.byView.get(drawn.view.id)?.get(dsId);
+    const channels = drawn.snapshot.selection.visibleChannels.length;
+    const byLevel = new Map<number, number>();
+    let coarseChunks = 0;
+    let coarseLevel: number | null = null;
+    let targetMin = Infinity;
+    let targetMax = -Infinity;
+    for (const entity of drawn.snapshot.entities) {
+      if (!entity.visible || entity.kind === "Group") continue;
+      targetMin = Math.min(targetMin, entity.targetLevel);
+      targetMax = Math.max(targetMax, entity.targetLevel);
+      const cells = chosen?.entities.get(entity.entityId);
+      if (cells === undefined) continue;
+      for (const cell of cells.detail) byLevel.set(cell.level, (byLevel.get(cell.level) ?? 0) + channels);
+      if (cells.coarseCells > 0) {
+        coarseChunks += cells.coarseCells * channels;
+        coarseLevel = entity.coarseLevel;
+      }
+    }
+    readings.push({
+      datasetId: dsId,
+      target: targetMin === Infinity ? null : { min: targetMin, max: targetMax },
+      levels: [...byLevel].sort(([a], [b]) => a - b).map(([level, chunks]) => ({ level, chunks })),
+      coarseChunks,
+      coarseLevel,
+      budgetLimited: chosen?.budgetLimited ?? false,
+    });
+  }
+  let usedBytes = 0;
+  let shareBytes = 0;
+  for (const summary of selection.summaries.values()) {
+    usedBytes += summary.used.cpu;
+    shareBytes += summary.share.cpu;
+  }
+  return { datasets: readings, usedBytes: Math.round(usedBytes), shareBytes: Math.floor(shareBytes) };
+}
+
 /** One view of a planned dataset. */
 interface PlannedView {
   view: TickView;
@@ -140,6 +231,14 @@ interface PlannedView {
   layer: ResolvedLayer | undefined;
   /** Whether the selection stepped along its cut since the view's previous plan ({@link isCutStep}). */
   cutStep: boolean;
+}
+
+/** A dataset ready to plan once the level selection has run: its views, before the selection. */
+interface PreparedDataset {
+  dsId: string;
+  dsSettings: SceneSettings["allSettings"][string] | undefined;
+  planningState: PlanningState;
+  views: (Omit<PlannedView, "snapshot"> & { snapshot: ViewSnapshotBase })[];
 }
 
 interface PlannedDataset {
@@ -207,13 +306,6 @@ const VIEW_REPLAN_INTERVAL_MS = 200;
  * value always renders.
  */
 const SELECTION_COALESCE_INTERVAL_MS = 150;
-
-/**
- * How long a view holds still before it counts as stopped: a few display
- * frames past the last input of a drag, the gap at which a pause is no
- * longer the interval between two inputs.
- */
-export const VIEW_STILL_MS = 100;
 
 /**
  * Per-dataset carry-forward captured at each full rebuild. Lets the next
@@ -445,42 +537,8 @@ function displayStatesEqual(
 interface DatasetRequests {
   dsId: string;
   requests: readonly ChunkRequest[];
-  /** The views that asked for each of its detail and coarse requests, with several views. */
-  viewsOf?: (req: ChunkRequest) => readonly number[];
-}
-
-/**
- * Which views asked for each of a dataset's detail and coarse requests:
- * every view its plan lists them under, or the one view that plans it.
- */
-function viewsAsking(planned: { views: readonly PlannedView[]; result: RequestPlan }): (req: ChunkRequest) => readonly number[] {
-  const own = (req: ChunkRequest): boolean => req.lane === "detail" || req.lane === "coarse";
-  const byView = planned.result.byView;
-  if (!byView) {
-    const only = [planned.views[0].view.id];
-    return (req) => (own(req) ? only : []);
-  }
-  const asking = new Map<string, number[]>();
-  for (const [view, requests] of byView) {
-    for (const req of requests) {
-      const id = requestIdentity(req);
-      const views = asking.get(id);
-      if (views === undefined) asking.set(id, [view]);
-      else if (!views.includes(view)) views.push(view);
-    }
-  }
-  // Admission asks for each request several times, so its views are found once.
-  const ofRequest = new Map<ChunkRequest, readonly number[]>();
-  for (const req of planned.result.requests) {
-    if (own(req)) ofRequest.set(req, asking.get(requestIdentity(req)) ?? []);
-  }
-  return (req) => ofRequest.get(req) ?? [];
-}
-
-/** Each view's area on the canvas, which its share of the budgets is weighed by, with several views. */
-function viewAreas(ctx: TickContext): Map<number, number> {
-  if (ctx.views.length < 2) return new Map();
-  return new Map(ctx.views.map((view) => [view.id, Math.max(0, view.rect[2]) * Math.max(0, view.rect[3])]));
+  /** How the requests differ from the dataset's last plan's, when the planner carried them. */
+  delta?: RequestDelta;
 }
 
 /**
@@ -496,19 +554,17 @@ function admitDatasetPlans(
 ): Admission[] {
   const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
   return admitPlans(
-    plans.map(({ dsId, requests, viewsOf }) => {
+    plans.map(({ dsId, requests }) => {
       const manifest = ctx.datasets.get(dsId)!.manifest;
       return {
         requests,
         bytesOf: chunkBytesFor(manifest),
         heldWhole: (req: ChunkRequest) => ctx.cpuCache.holdsWhole(req),
         slotOf: gpuSlotsFor(manifest, report, gpuTotalBytes),
-        viewsOf,
       };
     }),
     ctx.cpuCache.tierCapacity(),
     gpuChunkRoomBytes(report, gpuTotalBytes),
-    viewAreas(ctx),
   );
 }
 
@@ -522,7 +578,7 @@ function emitViewerInterestHint(
   datasetId: string,
   selection: SelectionState,
   visibleRegion: VisibleRegion,
-  requests: ChunkRequest[],
+  requests: readonly ChunkRequest[],
   generation: number,
 ): void {
   if (!ctx.sendViewerInterest) return;
@@ -618,11 +674,6 @@ export class TickCoordinator {
   private pendingDeferredRebuild = false;
   /** The coalescing window the owed rebuild waits out, from {@link lastRebuildAt}. */
   private deferredRebuildIntervalMs = 0;
-  /** Only the view moved since the rebuild the owed one follows. */
-  private deferredViewOnly = false;
-  /** The view epoch the last tick read, and when it last changed. */
-  private lastSeenViewEpoch: number | null = null;
-  private lastViewMoveAt = Number.NEGATIVE_INFINITY;
   /**
    * Scene scalars captured at the last full rebuild, for the fast-path
    * proofs. The z-range lives per dataset in {@link DatasetRebuildSignature}
@@ -752,11 +803,84 @@ export class TickCoordinator {
   private lastAdmission: { plans: readonly DatasetRequests[]; report: GpuCapacityReport | null; short: number } | null = null;
   /** A capacity report would admit part of the last shortfall, and no plan has used it yet. */
   private capacityReplanOwed = false;
+  /** What the last admission charged, which the next carries where the plans say how they changed. */
+  private readonly admission = new AdmissionLedger();
 
-  /** Admit against the worker's latest report, and keep what {@link noteGpuCapacity} weighs. */
+  /** What the last level selection chose, which the next leans toward. */
+  private levelMemory: LevelSelectionMemory = initialLevelSelectionMemory();
+  /** The budget the last selection ran within, what each view spent of it, and what the trace reads of it. */
+  private lastSelection: {
+    budget: SelectionBytes;
+    summaries: ReadonlyMap<number, ViewSelectionSummary>;
+    reading: SelectionAtSettle;
+  } | null = null;
+
+  /** What the last selection the plans used chose, for a run closing now. Null before the first. */
+  selectionAtSettle(): SelectionAtSettle | null {
+    return this.lastSelection?.reading ?? null;
+  }
+
+  /**
+   * The level selection for every view, over every dataset each draws, from
+   * the memory the last selection left. It changes nothing here: the caller
+   * {@link commitSelection}s it once it plans from it.
+   */
+  private selectLevels(
+    ctx: TickContext,
+    datasets: SelectedDatasets,
+  ): LevelSelectionResult & { budget: SelectionBytes; datasets: SelectedDatasets } {
+    const byView = new Map<number, SelectionDataset[]>();
+    for (const { dsId, views } of datasets) {
+      const manifest = ctx.datasets.get(dsId)!.manifest;
+      for (const { view, snapshot } of views) {
+        const of = byView.get(view.id) ?? [];
+        of.push({ datasetId: dsId, view: snapshot, manifest });
+        byView.set(view.id, of);
+      }
+    }
+    const rects = new Map(ctx.views.map((view) => [view.id, view.rect]));
+    const views = [...byView].map(([view, of]) => {
+      const rect = rects.get(view);
+      return { view, datasets: of, area: rect ? Math.max(0, rect[2]) * Math.max(0, rect[3]) : 0 };
+    });
+    const budget = selectionBudget(ctx, ctx.client.gpuCapacity());
+    return { ...selectLevels(views, budget, this.levelMemory, configStore.get()), budget, datasets };
+  }
+
+  /**
+   * Keep what a selection the plans used chose: for the next to lean toward,
+   * for capacity reports to weigh, and for the trace to read when a run closes.
+   */
+  private commitSelection(selection: LevelSelectionResult & { budget: SelectionBytes; datasets: SelectedDatasets }): void {
+    this.levelMemory = selection.memory;
+    this.lastSelection = {
+      budget: selection.budget,
+      summaries: selection.summaries,
+      reading: selectionReading(selection.datasets, selection),
+    };
+  }
+
+  /**
+   * Admit against the worker's latest report, carried from the last
+   * admission where the plans say how they changed, and keep what
+   * {@link noteGpuCapacity} weighs.
+   */
   private admit(ctx: TickContext, plans: readonly DatasetRequests[]): Admission[] {
     const report = ctx.client.gpuCapacity();
-    const admissions = admitDatasetPlans(ctx, plans, report);
+    const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
+    const manifests = plans.map(({ dsId }) => ctx.datasets.get(dsId)!.manifest);
+    const admissions = this.admission.admit(
+      plans.map(({ requests, delta }, i) => ({
+        requests,
+        ...(delta && { delta }),
+        bytesOf: chunkBytesFor(manifests[i]),
+        heldWhole: (req: ChunkRequest) => ctx.cpuCache.holdsWhole(req),
+        slotOf: gpuSlotsFor(manifests[i], report, gpuTotalBytes),
+      })),
+      ctx.cpuCache.tierCapacity(),
+      gpuChunkRoomBytes(report, gpuTotalBytes),
+      [slotsReadFrom(report), gpuTotalBytes, ...manifests],
+    );
     this.lastAdmission = { plans, report, short: shortfallOf(admissions) };
     return admissions;
   }
@@ -770,10 +894,19 @@ export class TickCoordinator {
     if (this.capacityReplanOwed) return true;
     const last = this.lastAdmission;
     const report = ctx.client.gpuCapacity();
-    if (!last || last.short === 0 || report === last.report) return false;
+    if (!last || report === last.report) return false;
     // A removed dataset plans again on its own.
     if (last.plans.some(({ dsId }) => !ctx.datasets.has(dsId))) return false;
-    if (shortfallOf(admitDatasetPlans(ctx, last.plans, report)) >= last.short) return false;
+    // A selection the GPU side stopped selects again within the new room.
+    // Otherwise only a shortfall the report would admit some of is worth a
+    // plan. The plans are the selection's, which the budget bounds, so
+    // admitting them again costs what the view holds, not what it shows.
+    const selection = this.lastSelection;
+    const roomMoved = selection !== null && gpuBound(selection.summaries) &&
+      selectionBudget(ctx, report).gpu !== selection.budget.gpu;
+    if (!roomMoved && (last.short === 0 || shortfallOf(admitDatasetPlans(ctx, last.plans, report)) >= last.short)) {
+      return false;
+    }
     this.capacityReplanOwed = true;
     return true;
   }
@@ -797,9 +930,18 @@ export class TickCoordinator {
     this.configStoreUnsub();
   }
 
+  /**
+   * Plan the tick, or serve the plan before when nothing it depends on
+   * changed or a coalesced change waits its turn.
+   *
+   * With `frameWaiting`, a change of the camera alone also waits: the tick's
+   * frame draws from the plan before, which a camera move leaves drawable,
+   * and the caller plans again once the frame is on its way.
+   */
   planAndFetch(
     ctx: TickContext,
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
+    frameWaiting = false,
   ): TickCoordinatorResult | null {
     const tickStart = performance.now();
     // Opens the `plan` phase: everything from here to the submit that hands
@@ -815,11 +957,6 @@ export class TickCoordinator {
       selection: rawEpochs.selection,
       request: this.requestEpoch,
     };
-    if (currentEpochs.view !== this.lastSeenViewEpoch) {
-      this.lastSeenViewEpoch = currentEpochs.view;
-      this.lastViewMoveAt = tickStart;
-    }
-
     // Diff against last epochs — drives both the cache-hit decision and
     // per-epoch cause attribution published to coldState telemetry.
     const hasPrior = this.lastEpochs !== null && this.cachedResult !== null;
@@ -853,15 +990,14 @@ export class TickCoordinator {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
           : VIEW_REPLAN_INTERVAL_MS;
-        const viewOnly = causes.every((c) => c === "view");
-        if (tickStart < this.deferredRebuildDue(interval, viewOnly)) {
+        const cameraOnly = causes.every((cause) => cause === "view");
+        if (tickStart < this.lastRebuildAt + interval || (frameWaiting && cameraOnly)) {
           coalescedSkip = true;
           // Leave `lastEpochs` stale so the change is re-detected next
           // tick, and flag the deferral so the render loop ticks again
           // once the window elapses and the trailing rebuild lands.
           this.pendingDeferredRebuild = true;
           this.deferredRebuildIntervalMs = interval;
-          this.deferredViewOnly = viewOnly;
         }
       }
     }
@@ -904,12 +1040,14 @@ export class TickCoordinator {
     // set's inputs are unchanged, so only the requests need emitting again.
     const requestsOnly =
       !structural && causes.every((c) => c === "selection" || c === "minimap");
-    // A pure view move: only the camera moved, so the active set is a pure
-    // function of the new view. This is the sole gate for the view-move
-    // cold-state delta. Anything bundled with the view change, bar a display
-    // edit patched below, fails it and takes the full rebuild, so the delta's
-    // retained descriptors are safe.
-    let viewOnly = !structural && causes.length === 1 && causes[0] === "view";
+    // Only the camera moved, the worker's room changed, or the minimap asked
+    // for chunks, so the active set is a pure function of the view and the
+    // budget, and the descriptors' inputs held. This is the sole gate for the
+    // view-move cold-state delta. Anything else, bar a display edit patched
+    // below, fails it and takes the full rebuild, so the delta's retained
+    // descriptors are safe.
+    let viewOnly = !structural && causes.length > 0 &&
+      causes.every((cause) => cause === "view" || cause === "capacity" || cause === "minimap");
 
     // Display-only fast path: a per-channel intensity edit with nothing else
     // changed. The active set and residency are then identical, so push a
@@ -960,14 +1098,10 @@ export class TickCoordinator {
     this.pendingDeferredRebuild = false;
     this.capacityReplanOwed = false;
 
-    // CpuCache owns wanted-generation and delivery/rejection state, so the
-    // rebuild lifecycle advances there exactly once before the per-dataset
-    // loop.
-    ctx.cpuCache.onPlanRebuildStart();
-
     const memberRosterByDatasetView = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDatasetView = new Map<string, Map<string, number>>();
     const plannedDatasets: PlannedDataset[] = [];
+    const preparedDatasets: PreparedDataset[] = [];
 
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
@@ -982,7 +1116,7 @@ export class TickCoordinator {
 
       const planningStateForDataset = this.planningState.get(dsId)
         ?? initialPlanningState();
-      const plannedViewsOfDataset: PlannedView[] = [];
+      const preparedViews: PreparedDataset["views"] = [];
       for (const view of viewsOfDataset) {
         // Fold the view delta instead of re-running `view_query`: O(delta)
         // rather than O(N members) on a camera move, a level change included.
@@ -1008,10 +1142,26 @@ export class TickCoordinator {
         if (!snapshot) continue;
         const previousCut = planningStateForDataset.views.get(view.id)?.previousCut ?? null;
         const cutStep = isCutStep(previousCut, snapshot.selection, planningConfig.sliceBandPlanes);
-        plannedViewsOfDataset.push({ view, mode, snapshot, layer, cutStep });
+        preparedViews.push({ view, mode, snapshot, layer, cutStep });
       }
+      if (preparedViews.length === 0) continue;
+      preparedDatasets.push({ dsId, dsSettings, planningState: planningStateForDataset, views: preparedViews });
+    }
+
+    // The level selection runs once over every dataset each view draws, so
+    // they share the budget, before any dataset plans from it.
+    const levelSelection = this.selectLevels(ctx, preparedDatasets);
+    this.commitSelection(levelSelection);
+
+    for (const { dsId, dsSettings, planningState: planningStateForDataset, views: preparedViews } of preparedDatasets) {
+      const plannedViewsOfDataset: PlannedView[] = preparedViews.map((prepared) => ({
+        ...prepared,
+        snapshot: {
+          ...prepared.snapshot,
+          levelSelection: levelSelection.byView.get(prepared.view.id)?.get(dsId) ?? NOTHING_CHOSEN,
+        },
+      }));
       const drawnOfDataset = plannedViewsOfDataset[0];
-      if (drawnOfDataset === undefined) continue;
       const { entities, visibleRegion, selection } = drawnOfDataset.snapshot;
 
       // Plan. Opaque carry-forward state travels via {@link PlanningState};
@@ -1059,9 +1209,40 @@ export class TickCoordinator {
       plannedDatasets.map((planned) => ({
         dsId: planned.dsId,
         requests: planned.result.requests,
-        viewsOf: views.length > 1 ? viewsAsking(planned) : undefined,
+        ...(planned.result.delta && { delta: planned.result.delta }),
       })),
     );
+
+    // Categorical label overlays are invisible to the WASM planner
+    // (labels live outside `manifest.images`/`entities`), so their chunk
+    // requests are synthesized here from the label's own geometry and
+    // merged into the fetch plan. In `slice` mode the planes around the
+    // label's plane the view cuts are fetched, as the image's are; in `volume`
+    // mode the whole label volume (every z-chunk) is fetched for the 3D
+    // first-hit surface. Scoped under each label's own image id, so they
+    // never perturb intensity-chunk eviction. Each view asks for its own.
+    const labelRequests = plannedDatasets.map((planned) => planned.views.filter(drawsLabels).flatMap((view) => computeLabelChunkRequests({
+      datasetId: planned.dsId,
+      manifest: ctx.datasets.get(planned.dsId)!.manifest,
+      t: view.snapshot.selection.t,
+      cut: view.snapshot.selection.cut,
+      // Fetch only the labels the render path will draw (visible +
+      // eligible), so a hidden label is neither fetched nor drawn.
+      labelSettings: planned.dsSettings?.label_settings,
+      mode: view.view.mode,
+      config: planningConfig,
+      cutStep: view.cutStep,
+    })));
+    // CpuCache owns wanted-generation and delivery/rejection state, so the
+    // rebuild lifecycle advances there exactly once before the submits. A
+    // plan every dataset of which carried its requests, and admitted whole,
+    // updates the cache over what changed, on the arrays the last plan
+    // submitted. A dataset with label overlays submits them beside its
+    // plan's requests in a fresh array, so it is submitted whole.
+    const submitDeltas = admissions.map((admission, index) => (labelRequests[index].length === 0 ? admission.delta : undefined));
+    const carried = submitDeltas.every((delta) => delta !== undefined) &&
+      ctx.cpuCache.beginCarriedPlan(submitDeltas.map((delta) => delta!.base));
+    if (!carried) ctx.cpuCache.onPlanRebuildStart();
     // With several views, how much of what each asks for admission let in.
     const viewCoverage = views.length > 1 ? new Map<number, ViewCoverage>() : null;
     for (const [index, planned] of plannedDatasets.entries()) {
@@ -1154,7 +1335,11 @@ export class TickCoordinator {
         const visibleChannels = snapshot.selection.visibleChannels;
         let indexByMember: Map<string, number>;
         if (viewOnly && heldForView?.mode === mode && heldForView.activeSet.length > 0) {
-          this.uploader.sendColdStateDelta({ ...coldArgs, previousActiveSet: heldForView.activeSet });
+          this.uploader.sendColdStateDelta({
+            ...coldArgs,
+            previousActiveSet: heldForView.activeSet,
+            ...(share.requests === result.requests && admission.delta && { requestDelta: admission.delta }),
+          });
           // The worker rebuilds its descriptor buffer from the reordered active
           // set in the same canonical order this walks, so the indices agree.
           // A move that leaves every member where it was keeps them.
@@ -1184,36 +1369,15 @@ export class TickCoordinator {
         held.set(view.id, { mode, activeSet: share.activeSet, visibleChannels, indexByMember });
       }
 
-      // Categorical label overlays are invisible to the WASM planner
-      // (labels live outside `manifest.images`/`entities`), so their chunk
-      // requests are synthesized here from the label's own geometry and
-      // merged into the fetch plan. In `slice` mode the planes around the
-      // label's plane the view cuts are fetched, as the image's are; in `volume`
-      // mode the whole label volume (every z-chunk) is fetched for the 3D
-      // first-hit surface. Scoped under each label's own image id, so they
-      // never perturb intensity-chunk eviction. Each view asks for its own.
-      const labelRequests = planned.views.filter(drawsLabels).flatMap((view) => computeLabelChunkRequests({
-        datasetId: dsId,
-        manifest: ctx.datasets.get(dsId)!.manifest,
-        t: view.snapshot.selection.t,
-        cut: view.snapshot.selection.cut,
-        // Fetch only the labels the render path will draw (visible +
-        // eligible), so a hidden label is neither fetched nor drawn.
-        labelSettings: dsSettings?.label_settings,
-        mode: view.view.mode,
-        config: planningConfig,
-        cutStep: view.cutStep,
-      }));
-      const requestsWithLabels =
-        labelRequests.length > 0
-          ? [...result.requests, ...labelRequests]
-          : result.requests;
+      const labels = labelRequests[index];
+      const requestsWithLabels = labels.length > 0 ? [...result.requests, ...labels] : result.requests;
 
       // Submit image and label chunks in a single call so they don't cancel
       // each other. Cancellation contract: a request omitted by the
       // next plan has its in-flight fetch aborted.
       ctx.cpuCache.submit({
         requests: requestsWithLabels,
+        ...(carried && { delta: submitDeltas[index] }),
         activeSet: result.activeSet,
         epochs: result.epochs,
         stats: result.stats,
@@ -1540,11 +1704,11 @@ export class TickCoordinator {
       visibleRegion: VisibleRegion;
       selection: SelectionState;
       planningState: PlanningState;
-      requests: ChunkRequest[];
+      requests: readonly ChunkRequest[];
       stats: PlanStats;
       cutStep: boolean;
     }
-    const planned: ScrubPlanned[] = perDataset.map((pd) => {
+    const scrubbedViews = perDataset.map((pd) => {
       const visibleRegion = withCutRange(pd.cachedRegion, pd.newCut.range);
       // Each layer scrubs to the scene's t and z clamped into it.
       const selection: SelectionState = {
@@ -1555,10 +1719,29 @@ export class TickCoordinator {
         renderMode: "slice",
         interactionState: "idle",
       };
+      const view: ViewSnapshotBase = { view: drawn.id, entities: pd.entities, visibleRegion, selection };
+      return { dsId: pd.dsId, views: [{ view: drawn, snapshot: view }] };
+    });
+    // The cut picks the chunks along it, so the selection runs again. The
+    // cached active set holds only while it keeps every entity's levels.
+    const levelSelection = this.selectLevels(ctx, scrubbedViews);
+    const chosenOf = (dsId: string) => levelSelection.byView.get(drawn.id)?.get(dsId) ?? NOTHING_CHOSEN;
+    const keepsLevels = perDataset.every((pd) => (pd.planningState.views.get(drawn.id)?.activeSet ?? []).every((entry) => {
+      if (entry.kind !== "tile") return true;
+      const chosen = chosenOf(pd.dsId).entities.get(entry.entityId);
+      return numberArraysEqual(chosen?.detailLevels ?? [], entry.detailLevels) &&
+        (chosen === undefined || chosen.coarseCells > 0) === (entry.keepsCoarse ?? false);
+    }));
+    if (!keepsLevels) return false;
+    this.commitSelection(levelSelection);
+
+    const planned: ScrubPlanned[] = perDataset.map((pd, index) => {
+      const view = scrubbedViews[index].views[0].snapshot;
+      const { visibleRegion, selection } = view;
       const snapshot: PlanningSnapshot = {
         datasetId: pd.dsId,
         epochs: scrubEpochs,
-        views: [{ view: drawn.id, entities: pd.entities, visibleRegion, selection }],
+        views: [{ ...view, levelSelection: chosenOf(pd.dsId) }],
         minimapPending: minimapPendingFetch,
       };
       const stats = emptyPlanStats();
@@ -1860,34 +2043,6 @@ export class TickCoordinator {
    */
   msUntilPendingRebuild(now: number): number | null {
     if (!this.pendingDeferredRebuild) return null;
-    return Math.max(0, this.deferredRebuildDue(this.deferredRebuildIntervalMs, this.deferredViewOnly) - now);
-  }
-
-  /**
-   * When an owed rebuild may run: once its window from the last rebuild has
-   * passed, or, for a view the budgets cut short that only moved, once it
-   * has stopped. Uploads for that view wait for it to stop, so the plan they
-   * follow should be its last.
-   */
-  private deferredRebuildDue(intervalMs: number, viewOnly: boolean): number {
-    const due = this.lastRebuildAt + intervalMs;
-    if (!viewOnly || (this.lastAdmission?.short ?? 0) === 0) return due;
-    return Math.min(due, this.lastViewMoveAt + VIEW_STILL_MS);
-  }
-
-  /**
-   * How long chunk uploads wait, or null when they may go. They wait while
-   * a view the budgets cut short moves, until it has held still for
-   * {@link VIEW_STILL_MS}. Each replan of such a view admits a different
-   * part of it, so an upload during the move takes a full pool's slot from
-   * a chunk the frame draws, for one the view has often moved past by the
-   * time it lands, and the worker searches the pool for that slot first.
-   * Planning and fetching go on, so the chunks are in the cache when the
-   * view stops.
-   */
-  msUntilUploadsResume(now: number): number | null {
-    if ((this.lastAdmission?.short ?? 0) === 0) return null;
-    const wait = this.lastViewMoveAt + VIEW_STILL_MS - now;
-    return wait > 0 ? wait : null;
+    return Math.max(0, this.lastRebuildAt + this.deferredRebuildIntervalMs - now);
   }
 }

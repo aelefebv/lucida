@@ -3,8 +3,9 @@
  * overview cache, whose entries are sacrificial; {@link TieredPolicy}
  * serves the main (detail) cache.
  *
- * Policies are pure: they take entries and return victims. The cache owns
- * removal, byte budgets, and the eviction-burst log.
+ * Policies are pure: they order entries. The store keeps the order between
+ * inserts (`evictionQueue.ts`) and owns removal, byte budgets, and the
+ * eviction-burst log.
  */
 
 import type { CacheEntry, EvictionTier } from "./types.ts";
@@ -20,31 +21,57 @@ export interface EvictableEntry {
   sizeBytes: number;
 }
 
+/** Negative when `a` is evicted before `b`. */
+export type EvictionCompare<T> = (a: T, b: T) => number;
+
 /**
- * Picks victims from a flat list of evictable entries until enough
- * bytes are freed. Pure: must not mutate `entries` or hold state across
- * calls beyond the policy's own configuration.
+ * The order a store evicts its entries in. Pure: it reads the entries and
+ * the policy's own inputs and holds no state across calls beyond its
+ * configuration.
  */
 export interface EvictionPolicy<T extends EvictableEntry = CacheEntry> {
+  /**
+   * The order as it stands: valid until an entry's fields or one of the
+   * inputs {@link stamp} names changes.
+   */
+  comparator(): EvictionCompare<T>;
+  /** The inputs the order reads besides the entries, compared element by element. */
+  stamp(): readonly unknown[];
+  /** Entries in eviction order until their bytes reach `bytesNeeded`. Does not mutate `entries`. */
   selectVictims(entries: readonly T[], bytesNeeded: number): T[];
 }
 
-/**
- * Insertion-order LRU. Oldest `insertedAt` goes first; pick until the
- * running freed-bytes sum reaches `bytesNeeded`.
- */
+function victimsInOrder<T extends EvictableEntry>(
+  entries: readonly T[],
+  bytesNeeded: number,
+  compare: EvictionCompare<T>,
+): T[] {
+  if (bytesNeeded <= 0) return [];
+  const sorted = [...entries].sort(compare);
+  const victims: T[] = [];
+  let freed = 0;
+  for (const entry of sorted) {
+    if (freed >= bytesNeeded) break;
+    victims.push(entry);
+    freed += entry.sizeBytes;
+  }
+  return victims;
+}
+
+const NO_INPUTS: readonly unknown[] = [];
+
+/** Insertion-order LRU: oldest `insertedAt` first. */
 export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements EvictionPolicy<T> {
+  comparator(): EvictionCompare<T> {
+    return (a, b) => a.insertedAt - b.insertedAt;
+  }
+
+  stamp(): readonly unknown[] {
+    return NO_INPUTS;
+  }
+
   selectVictims(entries: readonly T[], bytesNeeded: number): T[] {
-    if (bytesNeeded <= 0) return [];
-    const sorted = [...entries].sort((a, b) => a.insertedAt - b.insertedAt);
-    const victims: T[] = [];
-    let freed = 0;
-    for (const entry of sorted) {
-      if (freed >= bytesNeeded) break;
-      victims.push(entry);
-      freed += entry.sizeBytes;
-    }
-    return victims;
+    return victimsInOrder(entries, bytesNeeded, this.comparator());
   }
 }
 
@@ -61,29 +88,30 @@ export class WantedLastPolicy implements EvictionPolicy {
     this.currentTick = currentTick;
   }
 
-  selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
-    if (bytesNeeded <= 0) return [];
+  comparator(): EvictionCompare<CacheEntry> {
     const tick = this.currentTick();
-    const wanted = (entry: CacheEntry): number => (entry.lastSeenTick === tick ? 1 : 0);
-    const sorted = [...entries].sort(
-      (a, b) =>
-        wanted(a) - wanted(b) ||
-        (wanted(a) === 1 ? b.priority - a.priority : 0) ||
-        a.insertedAt - b.insertedAt,
-    );
-    const victims: CacheEntry[] = [];
-    let freed = 0;
-    for (const entry of sorted) {
-      if (freed >= bytesNeeded) break;
-      victims.push(entry);
-      freed += entry.sizeBytes;
-    }
-    return victims;
+    return (a, b) => {
+      const wantedA = a.lastSeenTick === tick ? 1 : 0;
+      const wantedB = b.lastSeenTick === tick ? 1 : 0;
+      return wantedA - wantedB || (wantedA === 1 ? b.priority - a.priority : 0) || a.insertedAt - b.insertedAt;
+    };
+  }
+
+  stamp(): readonly unknown[] {
+    return [this.currentTick()];
+  }
+
+  selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
+    return victimsInOrder(entries, bytesNeeded, this.comparator());
   }
 }
 
+/** {@link TieredPolicy}'s classes, in the order it takes them. */
+const FINER = 0;
+const WANTED = 4;
+
 /**
- * The detail cache's policy. Three passes:
+ * The detail cache's policy. Three classes, taken in turn:
  *
  *  1. Chunks finer than their entity's target level, whatever their tier.
  *     Planning requests only the target level, the renderer
@@ -119,52 +147,32 @@ export class TieredPolicy implements EvictionPolicy {
     this.currentTick = currentTick;
   }
 
-  selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
-    if (bytesNeeded <= 0) return [];
-    const victims: CacheEntry[] = [];
-    let freed = 0;
-    const take = (entry: CacheEntry): void => {
-      victims.push(entry);
-      freed += entry.sizeBytes;
-    };
-
+  comparator(): EvictionCompare<CacheEntry> {
     const tick = this.currentTick();
-    const finer: CacheEntry[] = [];
-    const unwanted: CacheEntry[] = [];
-    const wanted: CacheEntry[] = [];
-    for (const entry of entries) {
-      const target = this.targetLevelFor(entry.entityId);
-      if (target !== undefined && entry.level < target) finer.push(entry);
-      else if (entry.lastSeenTick !== tick) unwanted.push(entry);
-      else wanted.push(entry);
-    }
-    finer.sort((a, b) => a.level - b.level || byDistanceFromView(a, b));
-    for (const entry of finer) {
-      if (freed >= bytesNeeded) return victims;
-      take(entry);
-    }
+    const tiers = getTierOrder(this.modeProvider());
+    const targetLevelFor = this.targetLevelFor;
+    const classOf = (entry: CacheEntry): number => {
+      const target = targetLevelFor(entry.entityId);
+      if (target !== undefined && entry.level < target) return FINER;
+      if (entry.lastSeenTick !== tick) return 1 + tiers.indexOf(entry.tier);
+      return WANTED;
+    };
+    return (a, b) => {
+      const classA = classOf(a);
+      const order = classA - classOf(b);
+      if (order !== 0) return order;
+      if (classA === FINER) return a.level - b.level || byDistanceFromView(a, b);
+      if (classA === WANTED) return b.priority - a.priority || a.insertedAt - b.insertedAt;
+      return a.tier === "active-detail" ? byDistanceFromView(a, b) : a.insertedAt - b.insertedAt;
+    };
+  }
 
-    for (const tier of getTierOrder(this.modeProvider())) {
-      if (freed >= bytesNeeded) return victims;
-      const tierEntries = unwanted.filter(e => e.tier === tier);
-      if (tier === "active-detail") {
-        tierEntries.sort(byDistanceFromView);
-      } else {
-        tierEntries.sort((a, b) => a.insertedAt - b.insertedAt);
-      }
-      for (const entry of tierEntries) {
-        if (freed >= bytesNeeded) break;
-        take(entry);
-      }
-    }
+  stamp(): readonly unknown[] {
+    return [this.currentTick(), this.modeProvider()];
+  }
 
-    wanted.sort((a, b) => b.priority - a.priority || a.insertedAt - b.insertedAt);
-    for (const entry of wanted) {
-      if (freed >= bytesNeeded) break;
-      take(entry);
-    }
-
-    return victims;
+  selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
+    return victimsInOrder(entries, bytesNeeded, this.comparator());
   }
 }
 

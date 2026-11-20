@@ -12,7 +12,7 @@ import { Axis } from "../../axes.ts";
 import { labelFootprint, labelLevelPlane, labelTimeIndex, type Level0 } from "../../renderer/labelLayout.ts";
 import { labelPaddedVolumeBytes } from "../../renderer/volume/atlas.ts";
 import { isUint32 } from "../../renderer/dataTypeUtil.ts";
-import { pageDeviceBudgets } from "../../deviceBudget.ts";
+import { pageDeviceBudgets } from "../../pageBudgets.ts";
 import type {
   DatasetManifest,
   ImageSpec,

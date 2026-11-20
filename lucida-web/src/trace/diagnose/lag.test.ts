@@ -100,6 +100,14 @@ describe("the lag reading", () => {
     expect(diagnoseRun(withLag(interactionRunFor("pan"), unanswered)).lag!.firstInputMs).toBeNull();
   });
 
+  it("carries the GPU's idle time before the run's first input, which a window of the run does not", () => {
+    const run = withLag(interactionRunFor("pan"), { ...steadyDrag(20, 12), gpuIdleUs: 12_400 * MS });
+    expect(diagnoseRun(run).lag!.gpuIdleMs).toBe(12_400);
+    expect(diagnoseRun(run, { window: { startMs: 200, endMs: 400 } }).lag!.gpuIdleMs).toBeNull();
+    // A trace recorded before the idle time was kept.
+    expect(diagnoseRun(withLag(interactionRunFor("pan"), steadyDrag(5, 12))).lag!.gpuIdleMs).toBeNull();
+  });
+
   it("reads only the inputs inside a window, and the part of each long task inside it", () => {
     const run = withLag(interactionRunFor("pan"), {
       ...steadyDrag(20, 12),

@@ -53,14 +53,14 @@ export interface EvictionView {
    */
   cameraFor: (memberId: string) => [number, number] | [number, number, number];
   /**
-   * Per-entity target level of the view's cold state, or `undefined` when it
-   * has none for the member. The view samples no resident chunk finer.
+   * Per-entity finest level the view's cold state draws from, or `undefined`
+   * when it has none for the member. The view samples no resident chunk finer.
    */
-  targetLevelFor: (memberId: string) => number | undefined;
+  finestLevelFor: (memberId: string) => number | undefined;
   /** Whether the planner wants a resident chunk for this view. */
   isWanted: (memberId: string, chunkKey: string) => boolean;
   /**
-   * What `cameraFor`, `targetLevelFor` and `isWanted` answer from. Each is
+   * What `cameraFor`, `finestLevelFor` and `isWanted` answer from. Each is
    * replaced rather than changed in place, or is a revision that moves with
    * it, so while every one is the same the answers are too, and a pool's
    * `EvictionOrder` need not classify its slots again.
@@ -204,7 +204,7 @@ export function classifySlot(
   let dist = Infinity;
   for (const view of params.views) {
     if (view.slotGridIdx[slotIdx] < 0) continue;
-    const target = view.targetLevelFor(slot.memberId);
+    const target = view.finestLevelFor(slot.memberId);
     if (target !== undefined && chunk.level < target) continue;
     const lodMeta = view.entityMetas.get(slot.memberId)?.find(m => m.level === chunk.level);
     if (!lodMeta) continue;

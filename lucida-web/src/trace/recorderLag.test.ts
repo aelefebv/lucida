@@ -189,6 +189,37 @@ describe("the lag tier", () => {
     )).toBe(true);
   });
 
+  it("records how long the GPU sat idle before the run's first input, from the last frame finished", () => {
+    const rig = makeRig();
+    // A frame finishes with no run open, and the GPU then sits idle.
+    rig.recorder.noteFrameDispatched(1);
+    rig.at(1_020);
+    rig.recorder.noteFrameDone(1, 1_020);
+    rig.at(4_992);
+    rig.recorder.noteInput("orbit", 4_990);
+    rig.at(4_994);
+    rig.recorder.noteFrameDispatched(2);
+    rig.at(5_030);
+    rig.recorder.noteFrameDone(2, 5_030);
+    // A later input of the same run measures nothing new.
+    rig.at(5_040);
+    rig.recorder.noteInput("orbit", 5_040);
+
+    const { run, diagnostic } = exportRun(rig);
+    expect(run.lag!.gpuIdleUs).toBe(3_970_000);
+    expect(diagnostic.lag!.gpuIdleMs).toBe(3_970);
+    expect(renderDiagnostic(diagnostic).text).toMatch(/^lag .* · GPU idle 3970 ms before the first input$/m);
+  });
+
+  it("records no GPU idle time before any frame has finished", () => {
+    const rig = makeRig();
+    rig.recorder.noteInput("orbit", 1_000);
+    const { run, diagnostic } = exportRun(rig);
+    expect(run.lag!.gpuIdleUs).toBeNull();
+    expect(diagnostic.lag!.gpuIdleMs).toBeNull();
+    expect(renderDiagnostic(diagnostic).text).not.toContain("GPU idle");
+  });
+
   it("carries no lag tier for a run that took no input, and no lag reading or line in its diagnostic", () => {
     const rig = makeRig();
     rig.recorder.openRun({ epoch: "content", dirtyKind: "interactive", source: "dataset_added" });

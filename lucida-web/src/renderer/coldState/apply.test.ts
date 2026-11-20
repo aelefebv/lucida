@@ -91,7 +91,8 @@ function makeCtx(device: GPUDevice): WorkerCtx {
     ensureOffscreenPool: () => [],
     getOrCreateLUT: () => ({} as GPUTexture),
     post: () => {},
-    postWantedSet: () => {},
+    requestWantedSetReport: () => {},
+    flushWantedSetReports: () => {},
     lookupEntityDescriptor: () => null,
   };
 }
@@ -657,13 +658,13 @@ describe("Suite A — applyColdState", () => {
       makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [2], levels: HALVING_PYRAMID }),
     ]);
     applyColdState(ctx, cold);
-    expect(draw0(ctx.state).targetLevels.get("imgA:ch0")).toBe(2);
-    expect(draw0(ctx.state).targetLevels.has("grp")).toBe(false);
+    expect(draw0(ctx.state).finestLevels.get("imgA:ch0")).toBe(2);
+    expect(draw0(ctx.state).finestLevels.has("grp")).toBe(false);
 
     applyColdState(ctx, makeCold([
       makeEntry({ entityId: "imgA", imageId: "imgA", detailLevels: [0], levels: HALVING_PYRAMID }),
     ]));
-    expect(draw0(ctx.state).targetLevels.get("imgA:ch0")).toBe(0);
+    expect(draw0(ctx.state).finestLevels.get("imgA:ch0")).toBe(0);
   });
 
   // Pins the four-level bound from the eviction side. The bound itself is

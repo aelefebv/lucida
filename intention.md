@@ -46,8 +46,9 @@ rank in this order.
 1. Stay within memory. GPU and CPU memory caps are hardware limits, so every
    policy is bounded, and anything that holds memory ships with a budget, an
    eviction policy, and a defined behavior for when eviction can't keep up.
-   This wins every tie. Under pressure the view covers less and says so, and it
-   never lowers the level it asks for.
+   This wins every tie. Within the budget, the view draws the finest levels it
+   can hold and says which: where the level the screen calls for does not fit,
+   that part of the view draws coarser rather than going without.
 2. Within the bound, the smoother render beats the cheaper fetch. Between two
    equally correct policies, pick the one that doesn't flicker, even if it
    fetches a little more.
@@ -64,7 +65,8 @@ ends as stalled and says why.
 Planning is a pure function of a snapshot: state carried between ticks is an
 explicit input and output, never a hidden cache, so two strategies can be
 compared on identical inputs. It does no view math of its own. What is visible,
-and at what apparent size, is computed once in `lucida-core` for every client.
+at what apparent size, and at which levels it fits the budget, is computed once
+in `lucida-core` for every client.
 If planning needs a number the snapshot lacks, grow the snapshot.
 
 When a change can't satisfy all of these, don't soften one to fit. Say in the PR

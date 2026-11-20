@@ -55,14 +55,13 @@ function makeCtx(views: TickView[]) {
     resolutionScale: 1,
   } as unknown as TickContext;
   const coordinator = {
-    planAndFetch: () => ({
+    planAndFetch: (_ctx?: unknown, _minimap?: unknown, _frameWaiting?: boolean) => ({
       layers: new Map(),
       memberRosterByDatasetMode: new Map(),
       entityIndexByDatasetMode: new Map(),
     }),
-    msUntilUploadsResume: () => null,
   };
-  const uploader = { deliverToWorker: vi.fn(() => false), holdDelivery: vi.fn() };
+  const uploader = { deliverToWorker: vi.fn((): boolean => false) };
   return { ctx, client, camera, epochs, coordinator, uploader };
 }
 
@@ -101,6 +100,26 @@ describe("a tick of every view", () => {
       { view: 0, rect: [0, 0, 400, 600] },
       { view: 1, rect: [400, 0, 400, 600] },
     ]);
+  });
+
+  it("hands the worker a gesture's frame ahead of the tick's replan and uploads, and any other frame behind them", () => {
+    const h = makeCtx([{ ...LEFT, rect: [0, 0, 800, 600] }]);
+    const planned = h.coordinator.planAndFetch;
+    h.coordinator.planAndFetch = (_ctx: unknown, _minimap: unknown, frameWaiting = false) => {
+      rendered.push([frameWaiting ? "plan before" : "plan", -1]);
+      return planned();
+    };
+    h.uploader.deliverToWorker.mockImplementation(() => {
+      rendered.push(["uploads", -1]);
+      return true;
+    });
+    expect(tick(h, new ViewRedraws())).toBe(true);
+    expect(rendered).toEqual([["plan", -1], ["uploads", -1], ["volume", 0]]);
+
+    rendered.length = 0;
+    (h.ctx as { gesture?: boolean }).gesture = true;
+    expect(tick(h, new ViewRedraws())).toBe(true);
+    expect(rendered).toEqual([["plan before", -1], ["volume", 0], ["plan", -1], ["uploads", -1]]);
   });
 });
 

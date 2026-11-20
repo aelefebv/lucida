@@ -3,7 +3,8 @@
  * function gets a valid case and a propagation smoke test.
  */
 
-import { describe, it, expect } from "vitest";
+import { beforeAll, describe, it, expect } from "vitest";
+import { loadWasm } from "../../viewProperties.ts";
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import {
   createSyntheticEntity,
@@ -25,6 +26,8 @@ import {
   checkVisibleRegionBounds,
   validatePlanningInputs,
 } from "./validate.ts";
+
+beforeAll(loadWasm);
 
 /** Build a 5D LevelGeometry with the given shape + chunk_shape. */
 function makeLevel(
