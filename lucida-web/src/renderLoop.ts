@@ -46,6 +46,9 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 /** The inputs that move a view: a gesture, while they keep landing. */
 const GESTURE_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "scrub", "plane"];
 
+/** The inputs that move a view's camera. */
+const CAMERA_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit"];
+
 export interface LucidaCaptureReadyState {
   ready: boolean;
   reason: string;
@@ -172,6 +175,8 @@ export class RenderLoop implements TraceEnvironment {
   private inputSinceFrame = false;
   /** When the last pan, zoom, orbit or step along the cut landed. */
   private lastGestureAt = -Infinity;
+  /** When the last pan, zoom or orbit landed. */
+  private lastCameraInputAt = -Infinity;
   /** The last frame dispatched at full quality: what it takes is what a settled frame costs. */
   private fullQualitySeq = 0;
   /**
@@ -675,6 +680,7 @@ export class RenderLoop implements TraceEnvironment {
   markInput(input: InputKind, atMs?: number): void {
     if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
     if (GESTURE_INPUTS.includes(input)) this.lastGestureAt = performance.now();
+    if (CAMERA_INPUTS.includes(input)) this.lastCameraInputAt = performance.now();
     settleSignal.restart();
     this.resolution.noteInput(this.client.lastFrameSeq(), this.gpuIdleMs());
     this.inputSinceFrame = true;
@@ -704,6 +710,11 @@ export class RenderLoop implements TraceEnvironment {
     if (this.datasets.size === 0) return;
     traceRecorder.noteInput("hover", atMs);
     this.republishSettle();
+  }
+
+  /** Whether a pan, zoom or orbit has landed since `atMs`, on the `performance.now()` clock. */
+  cameraMovedSince(atMs: number): boolean {
+    return this.lastCameraInputAt >= atMs;
   }
 
   /**

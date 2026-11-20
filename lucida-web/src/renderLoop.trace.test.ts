@@ -121,6 +121,17 @@ describe("render loop trace wiring", () => {
     expect(doc.runs[1].header.cause).toEqual(interactionCause("orbit"));
   });
 
+  it("says whether a pan, zoom or orbit landed since a time, for the readout to tell a camera drag", () => {
+    const { loop } = makeLoop();
+    const pressed = performance.now();
+    loop.markInput("scrub");
+    loop.markInput("contrast");
+    expect(loop.cameraMovedSince(pressed)).toBe(false);
+    loop.markInput("orbit");
+    expect(loop.cameraMovedSince(pressed)).toBe(true);
+    expect(loop.cameraMovedSince(performance.now() + 1)).toBe(false);
+  });
+
   it("opens no run on an input over an empty page, so the open that follows keeps its cause", () => {
     const { loop } = makeLoop();
     loop.markInput("pan");

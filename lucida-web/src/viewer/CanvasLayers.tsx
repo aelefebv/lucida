@@ -297,7 +297,7 @@ export function CanvasLayers({
             datasets={datasets}
             layers={layers}
             hover={hover}
-            trace={engine.loop}
+            loop={engine.loop}
           />
         </AboveControls>
       )}
