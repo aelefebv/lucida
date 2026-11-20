@@ -7,7 +7,7 @@
     "importanceWeight": 500,
     "distanceWeight": 10,
     "depthBiasView": 0,
-    "selectionShare": 0.8,
+    "selectionShare": 0.9,
     "ancestorLevels": 2,
     "detailRenderRadiusView": 2,
     "coarseRenderRadiusView": 2,
