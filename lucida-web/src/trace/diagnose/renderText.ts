@@ -725,7 +725,9 @@ function lagOf(document: DiagnosticDocument, p: PrintNumber): string | null {
       ? `${p("lag.frames.presented", frames.presented)} frames, drops not counted`
       : `${p("lag.frames.presented", frames.presented)} frames, ${p("lag.frames.dropped", frames.dropped)} dropped ` +
         `against a ${p("lag.frames.displayIntervalMs", frames.displayIntervalMs!)} ms refresh`;
-  return `${toFrame} · ${longTasks} · ${dropped}`;
+  const idle =
+    lag.gpuIdleMs === null ? "" : ` · GPU idle ${p("lag.gpuIdleMs", lag.gpuIdleMs)} ms before the first input`;
+  return `${toFrame} · ${longTasks} · ${dropped}${idle}`;
 }
 
 /**

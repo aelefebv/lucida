@@ -1083,11 +1083,12 @@ def _metric(signals: list[dict[str, Any]] | None, name: str) -> Any:
 
 
 def _lag(lag: Any) -> dict[str, Any]:
-    """Input to frame for the first input and at p95, the longest main-thread
-    task and the frames dropped, from a lag reading; each None when the run
-    took no input."""
+    """How long the GPU sat idle before the first input, input to frame for
+    the first input and at p95, the longest main-thread task and the frames
+    dropped, from a lag reading; each None when the run took no input."""
     lag = lag or {}
     return {
+        "gpuIdleMs": lag.get("gpuIdleMs"),
         "firstInputMs": lag.get("firstInputMs"),
         "inputToFrameP95Ms": (lag.get("inputToFrame") or {}).get("p95Ms"),
         "longestTaskMs": (lag.get("longTasks") or {}).get("longestMs"),
@@ -1192,6 +1193,7 @@ COLUMNS = [
     "evicted",
     "short",
     "top limiter",
+    "GPU idle",
     "first input to frame",
     "input to frame p95",
     "longest task",
@@ -1242,6 +1244,7 @@ def step_outcome(step: dict[str, Any]) -> str:
 READINGS = {
     "prefetch": ("prefetchMs", _ms),
     "wire": ("bytesWire", _bytes),
+    "GPU idle": ("gpuIdleMs", _ms),
     "first input to frame": ("firstInputMs", _ms),
     "input to frame p95": ("inputToFrameP95Ms", _ms),
     "longest task": ("longestTaskMs", _ms),

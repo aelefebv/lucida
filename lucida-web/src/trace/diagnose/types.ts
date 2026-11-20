@@ -583,6 +583,14 @@ export interface LagReading {
    * the run closed.
    */
   firstInputMs: number | null;
+  /**
+   * How long the GPU had been idle when the run's first input landed, from
+   * the render worker finishing its last frame. A GPU left idle drops its
+   * clocks, so this says which clock state a gesture started on. Null when
+   * no frame had finished, in a window of the run, or in a trace recorded
+   * before it was kept.
+   */
+  gpuIdleMs: number | null;
   /** Inputs whose frame had not finished when the run closed, left out of the timing. */
   unanswered: number;
   longTasks: {
