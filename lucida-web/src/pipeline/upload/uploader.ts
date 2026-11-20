@@ -31,11 +31,8 @@ import {
   type UploadTickStats,
 } from "./telemetry/upload.ts";
 import { buildColdState, buildColdStateDelta } from "./coldState/build.ts";
-import {
-  diffWantedChunks,
-  wantedChunksFromPlan,
-  type WantedChunksByMember,
-} from "./coldState/wanted.ts";
+import { WantedChunkCounts, wantedChunksFromPlan } from "./coldState/wanted.ts";
+import type { RequestDelta } from "../planning/types.ts";
 import { buildViewHotState } from "./coldState/hotState.ts";
 import { WorkerFeedback } from "./delivery/feedback.ts";
 import { ResendGuard, type HeldChunk } from "./delivery/resendGuard.ts";
@@ -76,12 +73,12 @@ export class Uploader {
   private readonly lastViewEpochByDataset = new Map<string, Map<number, number>>();
 
   /**
-   * Per dataset, the wanted chunks each view's last cold state carried, which
-   * a delta diffs against.
+   * Per dataset, the wanted chunks each view's worker holds, as the last
+   * cold state or delta left them, which the next delta changes.
    */
-  private readonly wantedByDatasetView = new Map<string, Map<number, WantedChunksByMember>>();
+  private readonly wantedByDatasetView = new Map<string, Map<number, WantedChunkCounts>>();
 
-  private rememberWanted(datasetId: string, view: number, wanted: WantedChunksByMember): void {
+  private rememberWanted(datasetId: string, view: number, wanted: WantedChunkCounts): void {
     let byView = this.wantedByDatasetView.get(datasetId);
     if (!byView) {
       byView = new Map();
@@ -129,7 +126,7 @@ export class Uploader {
     labels: LabelForm[];
   }): ColdStateMessage {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.rememberWanted(args.datasetId, args.view, wanted);
+    this.rememberWanted(args.datasetId, args.view, new WantedChunkCounts(args.requests, wanted));
     const msg = buildColdState({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -195,7 +192,7 @@ export class Uploader {
     labels: LabelForm[];
   }): void {
     const wanted = wantedChunksFromPlan(args.requests);
-    this.rememberWanted(args.datasetId, args.view, wanted);
+    this.rememberWanted(args.datasetId, args.view, new WantedChunkCounts(args.requests, wanted));
     args.ctx.client.coldStateSelection({
       type: "coldStateSelection",
       datasetId: args.datasetId,
@@ -224,6 +221,8 @@ export class Uploader {
     previousActiveSet: ActiveSetEntry[];
     /** The plan's requests; see {@link sendColdState}. */
     requests: readonly ChunkRequest[];
+    /** How `requests` differ from the requests the view's last cold state or delta carried, when the plan says. */
+    requestDelta?: RequestDelta;
     entities: EntitySnapshot[];
     selection: SelectionState;
     visibleRegion: VisibleRegion;
@@ -238,10 +237,15 @@ export class Uploader {
     /** See {@link sendColdState}. */
     labels: LabelForm[];
   }): ColdStateDeltaMessage {
-    const wanted = wantedChunksFromPlan(args.requests);
+    // A delta on the requests the worker's chunks were counted from changes
+    // what it changed; anything else is diffed whole.
     const held = this.wantedByDatasetView.get(args.datasetId)?.get(args.view);
-    const wantedChanges = diffWantedChunks(held ?? new Map(), wanted);
-    this.rememberWanted(args.datasetId, args.view, wanted);
+    let wantedChanges = held !== undefined && args.requestDelta !== undefined ? held.apply(args.requests, args.requestDelta) : null;
+    if (wantedChanges === null) {
+      const next = new WantedChunkCounts(args.requests);
+      wantedChanges = (held ?? new WantedChunkCounts([])).changesTo(next);
+      this.rememberWanted(args.datasetId, args.view, next);
+    }
     const msg = buildColdStateDelta({
       datasetId: args.datasetId,
       activeSet: args.activeSet,

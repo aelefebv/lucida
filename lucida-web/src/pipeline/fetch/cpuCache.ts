@@ -14,6 +14,7 @@ import type {
   ChunkRequest,
   CacheStateSnapshot,
 } from "../planning/index.ts";
+import { compareChunkRequests, type RequestDelta } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { InteractionModeDetector } from "./interactionMode.ts";
 import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
@@ -318,7 +319,20 @@ export class CpuCache {
    * The request arrays submitted since the last plan rebuild, one per
    * dataset: the wanted set {@link reconcile} drives toward resident.
    */
-  private wantedRequests: ChunkRequest[][] = [];
+  private wantedRequests: (readonly ChunkRequest[])[] = [];
+  /**
+   * The request arrays the last plan submitted, which a plan carrying its
+   * wanted set names as the bases of its deltas ({@link beginCarriedPlan}).
+   */
+  private readonly submittedPlans = new Set<readonly ChunkRequest[]>();
+  /** Whether the plan under way carries the last one's wanted set. */
+  private carrying = false;
+  /**
+   * Chunks the plan under way judges again though no delta names them: the
+   * ones the last plan refused or the worker rejected, which a full submit
+   * would ask for again.
+   */
+  private readonly recheck = new Map<string, ChunkAt>();
   /**
    * The one timer that wakes {@link reconcile}, and the `now()` it is due
    * at. Armed only while a wanted chunk waits out a backoff or an
@@ -352,6 +366,8 @@ export class CpuCache {
   private queueHeldByRebuild = false;
   /** Wanted chunks asked for again after an eviction since the last rebuild. */
   private retriedThisPlan = new Set<string>();
+  /** The chunk of each key in {@link refusedThisPlan}, which a carried plan judges again. */
+  private readonly refusedChunks = new Map<string, ChunkAt>();
 
   private lruCounter = 0;
 
@@ -527,6 +543,15 @@ export class CpuCache {
    * one dataset's, so it stands for that dataset's fetches from then on.
    */
   submit(plan: RequestPlan, chunkBytes?: (req: ChunkRequest) => number): void {
+    if (this.carrying) {
+      const delta = plan.delta;
+      if (delta === undefined || !this.submittedPlans.has(delta.base)) {
+        throw new Error("CpuCache.submit: a carried plan submits a delta on one of its bases");
+      }
+      this.submitCarried(plan, delta, chunkBytes);
+      return;
+    }
+    this.submittedPlans.add(plan.requests);
     this.currentEpochs = plan.epochs;
     if (plan.requests.length > 0) {
       const datasetId = plan.requests[0].datasetId;
@@ -602,96 +627,275 @@ export class CpuCache {
     // Dropped, it would be wanted and never asked for.
     const carried = this.queueHeldByRebuild ? this.chunkScheduler.pendingSnapshot() : [];
     this.queueHeldByRebuild = true;
-    const pendingChunks: ChunkRequest[] = [];
-    const pendingKeys = new Set(carried.map((req) => this.inFlightKey(req)));
-    const enqueueNow = performance.now();
-    let nextRetryAt = Infinity;
-    for (let i = 0; i < requests.length; i++) {
-      const req = requests[i];
-      const key = keys[i];
-
-      this.counters.recordRequest();
-
-      // Worker-rejected under the current camera. Skip without
-      // refreshing `lastSeenTick` so the cached copy can be evicted.
-      if (this.rejectionTracker.has(req.entityId, req.chunkKey)) {
-        continue;
-      }
-      if (this.refusedThisPlan.has(key)) continue;
-
-      // Refresh lane/tier/priority/lastSeenTick on cached entries so
-      // deliverability and eviction reflect the current plan. The lane
-      // is demand-resolved: a chunk the view's coarse lane also wants
-      // this tick must not end up labelled "minimap" (undeliverable)
-      // just because the minimap request happened to be processed last.
-      const cachedEntry = this.lookupCachedEntry(req);
-      if (cachedEntry) {
-        this.counters.recordHit();
-        // The whole chunk a step along Z prefetches is the one whose plane
-        // the view draws, which asked first and keeps it the view's.
-        if (
-          req.lane === "prefetch" &&
-          cachedEntry.lane !== "prefetch" &&
-          cachedEntry.lastSeenTick === this.currentSubmitTick
-        ) {
-          continue;
-        }
-        const lane = this.resolveDemandLane(req.lane, key);
-        cachedEntry.lane = lane;
-        cachedEntry.residencyTier = req.tier;
-        cachedEntry.tier = this.laneToTier(lane);
-        // A relabelled minimap request must not overwrite the view's
-        // own (more urgent) delivery priority for the same chunk.
-        cachedEntry.priority = lane === req.lane
-          ? req.priority
-          : Math.min(cachedEntry.priority, req.priority);
-        cachedEntry.lastSeenTick = this.currentSubmitTick;
-        if (cachedEntry.wantedAtMs !== undefined && Number.isNaN(cachedEntry.wantedAtMs) && wantedByView(cachedEntry)) {
-          cachedEntry.wantedAtMs = enqueueNow;
-        }
-        this.residents.touch(cachedEntry);
-        continue;
-      }
-
-      const covering = coveringFetch(inFlight.get(key), req);
-      if (covering !== null) {
-        // A second demand attaching to a fetch already on the wire. The
-        // attach itself is below the clock floor, so it is counted per tick;
-        // the one fetch keeps the one row.
-        traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
-        this.rememberInFlightChunk(covering, req, { ...this.currentEpochs });
-        continue;
-      }
-      // The view does not wait behind a whole chunk prefetched after a step
-      // along Z, but that chunk lands as the view's when it comes.
-      const whole = req.plane === undefined ? undefined : inFlight.get(key)?.find((fetch) => !fetch.request.planes);
-      if (whole) this.rememberInFlightChunk(whole.key, req, { ...this.currentEpochs });
-
-      // Permanent failures stay excluded until reset or cancelDataset.
-      // Transient and pending records self-heal, and the reconcile timer is
-      // armed for the earliest one so the view need not plan again.
-      const failure = this.excludingFailure(key);
-      if (failure) {
-        nextRetryAt = Math.min(nextRetryAt, failure.eligibleAt);
-        continue;
-      }
-
-      // The minimap and coarse lanes can demand the same chunk (shared
-      // residency tier + key); one fetch serves both. The first occurrence
-      // keeps the queue slot, and plans arrive priority-sorted, so it is the
-      // most urgent.
-      const fetchKey = fetchKeyFor(key, req);
-      if (pendingKeys.has(fetchKey)) {
-        traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
-        continue;
-      }
-      pendingKeys.add(fetchKey);
-      pendingChunks.push(req);
-    }
+    const walk = this.beginWalk(inFlight, carried);
+    for (let i = 0; i < requests.length; i++) this.walkRequest(requests[i], keys[i], walk);
     // The loop refreshed cached entries' lanes, tiers, priorities and plan
     // ticks in place, which eviction's order reads.
     this.chunkStore.invalidateOrder();
     this.overviewStore.invalidateOrder();
+    this.enqueueWalk(walk, (ordered) => (carried.length > 0 ? [...carried, ...ordered] : ordered));
+  }
+
+  /**
+   * Start a plan that carries the last one's wanted set: the plan's submits
+   * each give a {@link RequestDelta} on one of `bases`, the request arrays
+   * the last plan submitted, and the cache updates over what each changed.
+   * Every chunk the deltas leave alone stays wanted as the last plan wanted
+   * it, so the plan costs what changed rather than what is wanted. Returns
+   * false, changing nothing, unless `bases` are every array the last plan
+   * submitted; the caller then starts a full rebuild
+   * ({@link onPlanRebuildStart}).
+   */
+  beginCarriedPlan(bases: readonly (readonly ChunkRequest[])[]): boolean {
+    if (bases.length !== this.submittedPlans.size || bases.some((base) => !this.submittedPlans.has(base))) return false;
+    this.carrying = true;
+    // A full submit asks again for what the last plan refused or the worker
+    // rejected, so a carried plan judges those chunks again.
+    for (const key of this.refusedThisPlan) {
+      const at = this.refusedChunks.get(key);
+      if (at !== undefined) this.recheck.set(key, at);
+    }
+    for (const [entityId, chunkKey] of this.rejectionTracker.entries()) {
+      for (const tier of ["detail", "coarse"] as const) {
+        this.recheck.set(chunkSchedulerKey({ entityId, chunkKey }, tier), { entityId, tier, chunkKey });
+      }
+    }
+    this.rejectionTracker.clear();
+    this.refusedThisPlan.clear();
+    this.retriedThisPlan.clear();
+    this.refusedChunks.clear();
+    this.plansAdmitted = false;
+    this.shortfallThisPlan = { detail: 0, coarse: 0 };
+    this.coarseLoanThisPlan = 0;
+    return true;
+  }
+
+  /**
+   * One submit of a carried plan: the demand forgets what `delta` removed
+   * and notes what it added, and each chunk either names is judged again
+   * from the requests that want it now, as a full submit judges every chunk.
+   */
+  private submitCarried(plan: RequestPlan, delta: RequestDelta, chunkBytes?: (req: ChunkRequest) => number): void {
+    this.currentEpochs = plan.epochs;
+    const datasetId = plan.requests[0]?.datasetId ?? delta.base[0]?.datasetId;
+    if (chunkBytes && datasetId !== undefined) this.chunkBytesByDataset.set(datasetId, chunkBytes);
+    this.interactionDetector.push(plan.epochs);
+    this.submittedPlans.delete(delta.base);
+    this.submittedPlans.add(plan.requests);
+    const at = this.wantedRequests.indexOf(delta.base);
+    if (at >= 0) this.wantedRequests[at] = plan.requests;
+    else this.wantedRequests.push(plan.requests);
+
+    const submit = ++this.submits;
+    const targetsMoved = this.stampActiveSet(plan, submit);
+    let lastEntityId: string | undefined;
+    for (const req of delta.added) {
+      if (req.entityId === lastEntityId) continue;
+      lastEntityId = req.entityId;
+      this.entityPlannedAt.set(req.entityId, submit);
+    }
+
+    const affected = new Map<string, ChunkAt>();
+    for (const req of delta.removed) {
+      const key = chunkSchedulerKey(req, req.tier);
+      this.demand.forget(key, req);
+      affected.set(key, req);
+    }
+    for (const req of delta.added) {
+      const key = chunkSchedulerKey(req, req.tier);
+      this.demand.note(key, req);
+      affected.set(key, req);
+    }
+    for (const [key, chunk] of this.recheck) {
+      if (this.demand.wants(key)) affected.set(key, chunk);
+    }
+    this.recheck.clear();
+    // A full submit refreshes a chunk several requests ask for with each in
+    // turn, which an arrival does not, so such a chunk is judged again.
+    for (const key of this.demand.shared()) {
+      if (affected.has(key)) continue;
+      const req = this.demand.requestsOf(key)[0];
+      if (req.datasetId === datasetId) affected.set(key, req);
+    }
+    // A full submit stamps every wanted fetch with the plan's epochs, which
+    // an arrival reads to tell a fetch the selection has left behind.
+    for (const meta of this.inFlightChunkMeta.values()) {
+      if (meta.lastSeenTick === this.currentSubmitTick) meta.epochs = { ...this.currentEpochs };
+    }
+
+    if (plan.shortfall) {
+      this.plansAdmitted = true;
+      this.shortfallThisPlan.detail += plan.shortfall.detail;
+      this.shortfallThisPlan.coarse += plan.shortfall.coarse;
+    }
+    this.coarseLoanThisPlan += plan.coarseLoanBytes ?? 0;
+    this.applyElasticTierBudgets();
+    if (affected.size === 0) {
+      if (targetsMoved) this.chunkStore.invalidateOrder();
+      return;
+    }
+
+    const inFlight = this.inFlightByChunk();
+    // The queue keeps what no delta touched; each chunk a delta names is
+    // queued again below if it is still wanted and missing.
+    const queued = this.chunkScheduler.pendingSnapshot().filter((req) => !affected.has(chunkSchedulerKey(req, req.tier)));
+    const walk = this.beginWalk(inFlight, queued);
+    for (const [key, chunk] of affected) {
+      this.unseeChunk(key, chunk, inFlight);
+      const requests = [...this.demand.requestsOf(key)].sort(compareChunkRequests);
+      for (const req of requests) this.walkRequest(req, key, walk);
+      this.cancelUnwantedFetches(key, requests, inFlight);
+    }
+    this.chunkStore.invalidateOrder();
+    this.overviewStore.invalidateOrder();
+    this.enqueueWalk(walk, (ordered) => mergeQueues(queued, ordered));
+  }
+
+  /**
+   * Note `plan`'s active set as planned by submit `submit`, and each tile's
+   * finest level as its target. Returns whether any target moved.
+   */
+  private stampActiveSet(plan: RequestPlan, submit: number): boolean {
+    let moved = false;
+    for (const entry of plan.activeSet) {
+      this.entityPlannedAt.set(entry.entityId, submit);
+      if (entry.kind === "tile" && entry.detailLevels.length > 0) {
+        const target = entry.detailLevels[0];
+        if (this.targetLevelByEntity.get(entry.entityId) !== target) moved = true;
+        this.targetLevelByEntity.set(entry.entityId, target);
+      }
+    }
+    return moved;
+  }
+
+  /**
+   * Mark the chunk at `key` as one the plan under way has not judged yet:
+   * its resident entry and the fetches bringing it, as a new rebuild's tick
+   * leaves every entry until a submit refreshes it.
+   */
+  private unseeChunk(key: string, chunk: ChunkAt, inFlight: Map<string, InFlightFetch[]>): void {
+    const store = chunk.tier === "coarse" ? this.overviewStore : this.chunkStore;
+    const entry = store.get(chunk.entityId, chunk.chunkKey);
+    if (entry !== undefined && entry.lastSeenTick === this.currentSubmitTick) {
+      entry.lastSeenTick = this.currentSubmitTick - 1;
+      this.residents.touch(entry);
+    }
+    for (const fetch of inFlight.get(key) ?? []) {
+      const meta = this.inFlightChunkMeta.get(fetch.key);
+      if (meta !== undefined && meta.lastSeenTick === this.currentSubmitTick) meta.lastSeenTick = this.currentSubmitTick - 1;
+    }
+  }
+
+  /**
+   * Abort each fetch of the chunk at `key` that none of `requests` waits on,
+   * as a full submit aborts the fetches its plan left out: a chunk still
+   * wanted keeps its whole fetch, and any fetch of planes that holds a plane
+   * one of them draws.
+   */
+  private cancelUnwantedFetches(key: string, requests: readonly ChunkRequest[], inFlight: Map<string, InFlightFetch[]>): void {
+    const unwanted = new Set<string>();
+    for (const fetch of inFlight.get(key) ?? []) {
+      const wanted = requests.length > 0 && (fetch.key === key || requests.some((req) => holdsPlane(fetch.request, req)));
+      if (!wanted) unwanted.add(fetch.key);
+    }
+    this.cancelOmittedChunkWork(unwanted);
+  }
+
+  /** A walk over a submit's requests, with `queued` already in the queue it adds to. */
+  private beginWalk(inFlight: Map<string, InFlightFetch[]>, queued: readonly ChunkRequest[]): SubmitWalk {
+    return {
+      inFlight,
+      pendingKeys: new Set(queued.map((req) => this.inFlightKey(req))),
+      pending: [],
+      enqueueNow: performance.now(),
+      nextRetryAt: Infinity,
+    };
+  }
+
+  /**
+   * Judge one request as a submit does: refresh the resident entry it wants,
+   * attach it to a fetch already bringing its chunk, or queue it.
+   */
+  private walkRequest(req: ChunkRequest, key: string, walk: SubmitWalk): void {
+    this.counters.recordRequest();
+
+    // Worker-rejected under the current camera. Skip without
+    // refreshing `lastSeenTick` so the cached copy can be evicted.
+    if (this.rejectionTracker.has(req.entityId, req.chunkKey)) return;
+    if (this.refusedThisPlan.has(key)) return;
+
+    // Refresh lane/tier/priority/lastSeenTick on cached entries so
+    // deliverability and eviction reflect the current plan. The lane
+    // is demand-resolved: a chunk the view's coarse lane also wants
+    // this tick must not end up labelled "minimap" (undeliverable)
+    // just because the minimap request happened to be processed last.
+    const cachedEntry = this.lookupCachedEntry(req);
+    if (cachedEntry) {
+      this.counters.recordHit();
+      // The whole chunk a step along Z prefetches is the one whose plane
+      // the view draws, which asked first and keeps it the view's.
+      if (
+        req.lane === "prefetch" &&
+        cachedEntry.lane !== "prefetch" &&
+        cachedEntry.lastSeenTick === this.currentSubmitTick
+      ) {
+        return;
+      }
+      const lane = this.resolveDemandLane(req.lane, key);
+      cachedEntry.lane = lane;
+      cachedEntry.residencyTier = req.tier;
+      cachedEntry.tier = this.laneToTier(lane);
+      // A relabelled minimap request must not overwrite the view's
+      // own (more urgent) delivery priority for the same chunk.
+      cachedEntry.priority = lane === req.lane
+        ? req.priority
+        : Math.min(cachedEntry.priority, req.priority);
+      cachedEntry.lastSeenTick = this.currentSubmitTick;
+      if (cachedEntry.wantedAtMs !== undefined && Number.isNaN(cachedEntry.wantedAtMs) && wantedByView(cachedEntry)) {
+        cachedEntry.wantedAtMs = walk.enqueueNow;
+      }
+      this.residents.touch(cachedEntry);
+      return;
+    }
+
+    const covering = coveringFetch(walk.inFlight.get(key), req);
+    if (covering !== null) {
+      // A second demand attaching to a fetch already on the wire. The
+      // attach itself is below the clock floor, so it is counted per tick;
+      // the one fetch keeps the one row.
+      traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
+      this.rememberInFlightChunk(covering, req, { ...this.currentEpochs });
+      return;
+    }
+    // The view does not wait behind a whole chunk prefetched after a step
+    // along Z, but that chunk lands as the view's when it comes.
+    const whole = req.plane === undefined ? undefined : walk.inFlight.get(key)?.find((fetch) => !fetch.request.planes);
+    if (whole) this.rememberInFlightChunk(whole.key, req, { ...this.currentEpochs });
+
+    // Permanent failures stay excluded until reset or cancelDataset.
+    // Transient and pending records self-heal, and the reconcile timer is
+    // armed for the earliest one so the view need not plan again.
+    const failure = this.excludingFailure(key);
+    if (failure) {
+      walk.nextRetryAt = Math.min(walk.nextRetryAt, failure.eligibleAt);
+      return;
+    }
+
+    // The minimap and coarse lanes can demand the same chunk (shared
+    // residency tier + key); one fetch serves both. The first occurrence
+    // keeps the queue slot, and plans arrive priority-sorted, so it is the
+    // most urgent.
+    const fetchKey = fetchKeyFor(key, req);
+    if (walk.pendingKeys.has(fetchKey)) {
+      traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
+      return;
+    }
+    walk.pendingKeys.add(fetchKey);
+    walk.pending.push(req);
+  }
+
+  /** Hand the walk's queue, as `queue` orders it with what was queued before, to the scheduler. */
+  private enqueueWalk(walk: SubmitWalk, queue: (ordered: ChunkRequest[]) => ChunkRequest[]): void {
     // Closes the plan phase at the exact instant the scheduler took the
     // requests, so a row's plan end and its queue start are one number rather
     // than two readings of the clock that nearly agree.
@@ -700,12 +904,11 @@ export class CpuCache {
     // enqueues no chunks has no row to attribute, and would otherwise close a
     // plan pass that a tick opened long ago and publish the gap between them
     // as plan time.
-    if (pendingChunks.length > 0) traceRecorder.notePlanEnqueue(enqueueNow);
-    const ordered = orderChunkRequestsForTierAllocation(pendingChunks);
-    this.chunkScheduler.enqueue(carried.length > 0 ? [...carried, ...ordered] : ordered, enqueueNow);
+    if (walk.pending.length > 0) traceRecorder.notePlanEnqueue(walk.enqueueNow);
+    this.chunkScheduler.enqueue(queue(orderChunkRequestsForTierAllocation(walk.pending)), walk.enqueueNow);
 
     this.drainScheduler();
-    this.armReconcile(nextRetryAt);
+    this.armReconcile(walk.nextRetryAt);
   }
 
   /**
@@ -874,6 +1077,8 @@ export class CpuCache {
    */
   cancelDataset(datasetId: string, entityIds: string[]): void {
     this.residents.invalidate();
+    // The wanted set no longer holds what the last plan submitted.
+    this.submittedPlans.clear();
     const entityIdSet = new Set(entityIds);
 
     this.chunkScheduler.cancelDataset(
@@ -969,6 +1174,10 @@ export class CpuCache {
   }
 
   onPlanRebuildStart(): void {
+    this.carrying = false;
+    this.submittedPlans.clear();
+    this.recheck.clear();
+    this.refusedChunks.clear();
     for (const [entityId, submit] of this.entityPlannedAt) {
       if (submit >= this.rebuildFirstSubmit) continue;
       this.entityPlannedAt.delete(entityId);
@@ -1617,6 +1826,10 @@ export class CpuCache {
   reset(): void {
     this.residents.invalidate();
     this.submittedThisRebuild.clear();
+    this.submittedPlans.clear();
+    this.carrying = false;
+    this.recheck.clear();
+    this.refusedChunks.clear();
     this.chunkScheduler.reset();
 
     this.chunkStore.reset();
@@ -1905,7 +2118,7 @@ export class CpuCache {
       cacheEntry.wantedAtMs = Number.NaN;
     }
     if (!store.insert(cacheEntry)) {
-      this.refuseArrival(chunk, traceRow);
+      this.refuseArrival(chunk, traceRow, { entityId: cacheEntry.entityId, tier: cacheEntry.residencyTier, chunkKey: cacheEntry.chunkKey });
       return;
     }
     if (resident) this.residents.forget(resident);
@@ -1973,8 +2186,9 @@ export class CpuCache {
   }
 
   /** An arrival its store refused: the row ends, and the plan stops asking for it. */
-  private refuseArrival(key: string, traceRow: number): void {
+  private refuseArrival(key: string, traceRow: number, chunk: ChunkAt): void {
     this.refusedThisPlan.add(key);
+    this.refusedChunks.set(key, chunk);
     traceRecorder.finishRow(traceRow, RowOutcome.Retired);
     this.drainScheduler();
   }
@@ -1993,6 +2207,7 @@ export class CpuCache {
     // admission reckoned, so the chunk is short rather than asked for again.
     if (this.retriedThisPlan.has(key)) {
       this.refusedThisPlan.add(key);
+      this.refusedChunks.set(key, { entityId: entry.entityId, tier: entry.residencyTier, chunkKey: entry.chunkKey });
       return;
     }
     this.retriedThisPlan.add(key);
@@ -2333,6 +2548,44 @@ function fetchKeyFor(chunk: string, req: Pick<ChunkRequest, "planes" | "planeAxi
  */
 function wantedByView(entry: CacheEntry): boolean {
   return entry.lane === "detail" || entry.lane === "coarse";
+}
+
+/** A chunk in one residency tier, as a scheduler key names it. */
+interface ChunkAt {
+  entityId: string;
+  tier: ResidencyTier;
+  chunkKey: string;
+}
+
+/** What one submit's walk over its requests gathers: the fetches to queue, and the soonest backoff to wake for. */
+interface SubmitWalk {
+  inFlight: Map<string, InFlightFetch[]>;
+  pendingKeys: Set<string>;
+  pending: ChunkRequest[];
+  enqueueNow: number;
+  nextRetryAt: number;
+}
+
+/**
+ * The queue a carried submit leaves: what was queued before, its tiers each
+ * in their order, merged with `added` tier by tier and the two tiers
+ * interleaved again, the order a full submit queues the same requests in.
+ */
+function mergeQueues(queued: readonly ChunkRequest[], added: readonly ChunkRequest[]): ChunkRequest[] {
+  if (added.length === 0) return [...queued];
+  const byTier = (requests: readonly ChunkRequest[], tier: ResidencyTier) => requests.filter((req) => req.tier === tier);
+  const merge = (a: ChunkRequest[], b: ChunkRequest[]): ChunkRequest[] => {
+    const out: ChunkRequest[] = [];
+    let i = 0;
+    let j = 0;
+    while (i < a.length && j < b.length) out.push(compareChunkRequests(b[j], a[i]) < 0 ? b[j++] : a[i++]);
+    while (i < a.length) out.push(a[i++]);
+    while (j < b.length) out.push(b[j++]);
+    return out;
+  };
+  const detail = merge(byTier(queued, "detail"), byTier(added, "detail"));
+  const coarse = merge(byTier(queued, "coarse"), byTier(added, "coarse"));
+  return orderChunkRequestsForTierAllocation([...detail, ...coarse]);
 }
 
 /** One fetch in flight, as {@link CpuCache} indexes them by chunk. */

@@ -15,6 +15,7 @@ import {
   isCutStep,
   LaneRequests,
 } from "./emit.ts";
+import { LaneCarry, laneScope } from "./laneMemory.ts";
 import { buildActiveSet } from "./activeSet.ts";
 import {
   emptyPlanStats,
@@ -22,6 +23,8 @@ import {
   type ActiveSetEntry,
   type ChunkRequest,
   type EntitySnapshot,
+  type LaneMemory,
+  type RequestDelta,
   type PlanningSnapshot,
   type PlanStats,
   type PlanningState,
@@ -44,18 +47,36 @@ function viewState(state: PlanningState, view: ViewSnapshot): ViewPlanningState 
   return state.views.get(view.view) ?? initialViewPlanningState();
 }
 
+/** What {@link emitLanes} makes of every view's lanes. */
+interface EmittedLanes {
+  requests: readonly ChunkRequest[];
+  byView?: Map<number, ChunkRequest[]>;
+  /** How the requests differ from the previous plan's, when they were carried from it. */
+  delta?: RequestDelta;
+  /** What the next plan of the one view carries from; absent with several views. */
+  memory?: LaneMemory;
+}
+
 /**
  * Every view's lanes into one request list, sorted ascending by priority.
  * The minimap lane follows them once for the dataset, from the first view's
  * members, since every view lists every member.
+ *
+ * With `memory`, a view that plans the dataset alone carries what its lanes
+ * emitted last time from `memory.previous`, and records what the next plan
+ * carries (`laneMemory.ts`).
  */
 function emitLanes(
   snapshot: PlanningSnapshot,
   views: readonly ViewLanes[],
   stats: PlanStats,
   config: PlanningConfig,
-): { requests: ChunkRequest[]; byView?: Map<number, ChunkRequest[]> } {
-  const lanes = new LaneRequests();
+  memory?: { previous: LaneMemory | null },
+): EmittedLanes {
+  const carry = memory !== undefined && views.length === 1
+    ? new LaneCarry(memory.previous, laneScope({ ...views[0].view, datasetId: snapshot.datasetId }, snapshot.epochs, config))
+    : undefined;
+  const lanes = new LaneRequests(carry);
   // With several views, what each asks for of its own, which its coverage
   // is counted against: its detail and coarse lanes, before two views'
   // requests for one chunk fold into one.
@@ -66,7 +87,7 @@ function emitLanes(
     for (const entity of view.entities) entityById.set(entity.entityId, entity);
     const chunks = enumeratePlanChunks(activeSet, input, entityById, config);
     const from = lanes.count;
-    emitDetailLane(chunks, input, lanes, config);
+    emitDetailLane(chunks, input, lanes, config, carry);
     emitPrefetchLane(chunks, input, lanes, config, cutStep);
     emitCoarseLane(chunks, input, stats, lanes, config);
     if (view.view === snapshot.leadingView) lanes.lead(from);
@@ -85,6 +106,7 @@ function emitLanes(
   );
 
   const requests = lanes.finish();
+  if (carry !== undefined) return carry.finish(requests);
   if (!byView) return { requests };
   fetchContestedChunksWhole(requests);
   return { requests: distinctRequests(requests), byView };
@@ -193,7 +215,7 @@ export function emitPlanRequests(
   state: PlanningState,
   stats: PlanStats,
   config: PlanningConfig,
-): ChunkRequest[] {
+): readonly ChunkRequest[] {
   const views = snapshot.views.map((view): ViewLanes => {
     const before = viewState(state, view);
     return {
@@ -207,12 +229,14 @@ export function emitPlanRequests(
 
 /**
  * `state` after {@link emitPlanRequests} served `snapshot`: each view
- * remembers the cut it now stands at, and keeps its active set.
+ * remembers the cut it now stands at, and keeps its active set. What its
+ * lanes emitted before is not what the stages after the plan now hold, so
+ * the next plan emits every request again.
  */
 export function scrubbedPlanningState(snapshot: PlanningSnapshot, state: PlanningState): PlanningState {
   const views = new Map(state.views);
   for (const view of snapshot.views) {
-    views.set(view.view, { ...viewState(state, view), previousCut: view.selection.cut });
+    views.set(view.view, { ...viewState(state, view), previousCut: view.selection.cut, lanes: null });
   }
   return { previousActiveSet: state.previousActiveSet, views };
 }
@@ -223,8 +247,10 @@ export function scrubbedPlanningState(snapshot: PlanningSnapshot, state: Plannin
  *
  * Postconditions:
  *   - `requests` is sorted ascending by `priority` (lower = more urgent).
- *   - Output objects are freshly allocated; the caller may mutate them.
- *     Every request carries `datasetId` from {@link PlanningSnapshot.datasetId}.
+ *   - A request a view carried from its previous plan is that plan's object,
+ *     at its priority; every other is freshly allocated. The caller never
+ *     mutates them. Every request carries `datasetId` from
+ *     {@link PlanningSnapshot.datasetId}.
  *   - `epochs.request` = input + 1; other epoch tiles forwarded unchanged.
  *   - `stats` reflects this call only.
  */
@@ -242,14 +268,16 @@ export function plan(
   const lanes = snapshot.views.map((view): ViewLanes => {
     const before = viewState(state, view);
     const activeSet = buildActiveSet(view.entities, view.levelSelection);
-    views.set(view.view, { activeSet, previousCut: view.selection.cut });
+    views.set(view.view, { activeSet, previousCut: view.selection.cut, lanes: null });
     return {
       view,
       activeSet,
       cutStep: isCutStep(before.previousCut, view.selection, config.sliceBandPlanes),
     };
   });
-  const { requests, byView } = emitLanes(snapshot, lanes, stats, config);
+  const previous = lanes.length === 1 ? viewState(state, lanes[0].view).lanes : null;
+  const { requests, byView, delta, memory } = emitLanes(snapshot, lanes, stats, config, { previous });
+  if (memory !== undefined) views.set(lanes[0].view.view, { ...views.get(lanes[0].view.view)!, lanes: memory });
   const activeSet = mergeActiveSets(lanes.map((view) => view.activeSet));
 
   const epochs: SceneEpochs = {
@@ -258,5 +286,5 @@ export function plan(
   };
 
   const nextState: PlanningState = { previousActiveSet: activeSet, views };
-  return { requests, activeSet, epochs, stats, nextState, ...(byView && { byView }) };
+  return { requests, activeSet, epochs, stats, nextState, ...(byView && { byView }), ...(delta && { delta }) };
 }

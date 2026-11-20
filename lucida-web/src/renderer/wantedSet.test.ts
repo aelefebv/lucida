@@ -798,8 +798,8 @@ describe("a WantedSetTracker kept from one update to the next", () => {
 
     w.want("a:ch0", [...level0Keys(0).slice(0, 2), level0Keys(0)[3]]);
     expect(w.update(tracker).missing.map(id)).toEqual([`a:ch0 detail ${level0Keys(0)[3]}`]);
-    expect(tracker.lacking().filter((m) => m.memberId === "a:ch0").map((m) => m.chunkKey))
-      .toEqual([...level0Keys(0).slice(0, 2), level0Keys(0)[3], level1Key(0)]);
+    expect(tracker.lacking().filter((m) => m.memberId === "a:ch0").map((m) => m.chunkKey).sort())
+      .toEqual([...level0Keys(0).slice(0, 2), level0Keys(0)[3], level1Key(0)].sort());
   });
 
   it("plans every member again when T moves", () => {

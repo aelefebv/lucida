@@ -10,12 +10,19 @@
  * without. That is what still lets a view settle when a pool's slots, the
  * coarse tier, or prefetch would otherwise evict one wanted chunk for
  * another forever.
+ *
+ * A replan during a gesture changes a few of a plan's thousands of
+ * requests, and a plan that fits is admitted whole. So the
+ * {@link AdmissionLedger} keeps what the last admission charged, and when
+ * it admitted everything, it charges and refunds only what each plan's
+ * {@link RequestDelta} changed: when everything still fits, the walk in
+ * priority order would admit everything too.
  */
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
 import { decodedBytesPerSample } from "../../renderer/dataTypeUtil.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
-import type { ChunkRequest } from "./types.ts";
+import type { ChunkRequest, RequestDelta } from "./types.ts";
 import { planesKeySuffix } from "../fetch/contentSource.ts";
 import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 
@@ -36,11 +43,19 @@ export interface PlanToAdmit {
   heldWhole?: (req: ChunkRequest) => boolean;
   /** The GPU slot pool a request's chunk lands in, or null for a lane that never uploads. */
   slotOf?: (req: ChunkRequest) => GpuSlot | null;
+  /** How `requests` differ from those of the plan admitted last in its place, when the planner carried them. */
+  delta?: RequestDelta;
 }
 
 export interface Admission {
-  /** The admitted requests, in the order they arrived. */
-  admitted: ChunkRequest[];
+  /** The admitted requests, in the order they arrived: the plan's own array when it admitted all of them. */
+  admitted: readonly ChunkRequest[];
+  /**
+   * How `admitted` differs from what the last admission admitted of the
+   * plan in its place, when both admitted the whole plan and the plan says
+   * how it changed.
+   */
+  delta?: RequestDelta;
   /**
    * Requests of the view's own lanes that did not fit, per tier. Prefetch
    * is speculative, so a prefetch request that does not fit is dropped
@@ -75,6 +90,15 @@ export function admitPlans(
   capacity: Readonly<PerTier>,
   gpuRoom: number = Infinity,
 ): Admission[] {
+  return admitWhole(plans, capacity, gpuRoom).admissions;
+}
+
+/** {@link admitPlans}, and, when it admitted every request, the charges it made, for a ledger to carry. */
+function admitWhole(
+  plans: readonly PlanToAdmit[],
+  capacity: Readonly<PerTier>,
+  gpuRoom: number,
+): { admissions: Admission[]; charges: Charges | null } {
   const used: PerTier = { detail: 0, coarse: 0 };
   const slotsUsed = new Map<string, number>();
   let gpuUsed = 0;
@@ -151,18 +175,220 @@ export function admitPlans(
   const borrowed = Math.max(0, used.coarse - capacity.coarse);
   for (const state of states) admit(state, "detail", capacity.detail - borrowed, speculative);
 
-  // What each plan's coarse chunks took beyond the coarse tier's own room,
-  // its charges counted after the plans before it.
-  let coarseSoFar = 0;
-  return states.map((state) => {
-    const loanBefore = Math.max(0, coarseSoFar - capacity.coarse);
-    coarseSoFar += state.coarseBytes;
+  const loans = borrowedByPlan(states.map((state) => state.coarseBytes), capacity.coarse);
+  const admissions = states.map((state, i): Admission => {
+    const whole = state.admitted.size === state.plan.requests.length;
     return {
-      admitted: state.plan.requests.filter((req) => state.admitted.has(req)),
+      admitted: whole ? state.plan.requests : state.plan.requests.filter((req) => state.admitted.has(req)),
       shortfall: state.shortfall,
-      borrowed: Math.max(0, coarseSoFar - capacity.coarse) - loanBefore,
+      borrowed: loans[i],
     };
   });
+  if (admissions.some((admission, i) => admission.admitted !== plans[i].requests)) return { admissions, charges: null };
+
+  const charges = new Charges(plans.length);
+  states.forEach((state, plan) => {
+    state.plan.requests.forEach((req, i) => {
+      charges.charge(plan, req, state.keys[i], state.slots[i], bytesOf(state, i));
+    });
+  });
+  return { admissions, charges };
+}
+
+/**
+ * What each plan's coarse chunks took beyond the coarse tier's own room,
+ * its charges counted after the plans before it.
+ */
+function borrowedByPlan(coarseBytes: readonly number[], coarseCapacity: number): number[] {
+  let coarseSoFar = 0;
+  return coarseBytes.map((bytes) => {
+    const loanBefore = Math.max(0, coarseSoFar - coarseCapacity);
+    coarseSoFar += bytes;
+    return Math.max(0, coarseSoFar - coarseCapacity) - loanBefore;
+  });
+}
+
+/** One chunk charged to a tier, and how many admitted requests hold it there. */
+interface Charge {
+  tier: ResidencyTier;
+  bytes: number;
+  /** Requests of the view's own lanes, which the detail pass charges before prefetch. */
+  view: number;
+  all: number;
+}
+
+/**
+ * What an admission of every request charged: each chunk once per tier, each
+ * request's slot, and the totals the passes check, kept so that a request
+ * added or removed charges or refunds its share alone.
+ */
+class Charges {
+  private readonly byKey = new Map<string, Charge>();
+  private readonly held = new Map<ChunkRequest, { plan: number; key: string; slot: GpuSlot | null }>();
+  private readonly slotsUsed = new Map<string, { used: number; slots: number }>();
+  /** Pools holding more than their slots. */
+  private overfull = 0;
+  private gpuUsed = 0;
+  /** The view's detail chunks, what the detail pass checks. */
+  private detailView = 0;
+  /** Every detail chunk, prefetch included, what the prefetch pass checks. */
+  private detailAll = 0;
+  private coarse = 0;
+  private readonly coarseByPlan: number[];
+
+  constructor(plans: number) {
+    this.coarseByPlan = new Array<number>(plans).fill(0);
+  }
+
+  charge(plan: number, req: ChunkRequest, key: string, slot: GpuSlot | null, bytes: number): void {
+    const scoped = `${plan}|${key}`;
+    let charge = this.byKey.get(scoped);
+    if (charge === undefined) {
+      charge = { tier: req.tier, bytes, view: 0, all: 0 };
+      this.byKey.set(scoped, charge);
+      if (req.tier === "coarse") {
+        this.coarse += bytes;
+        this.coarseByPlan[plan] += bytes;
+      } else {
+        this.detailAll += bytes;
+      }
+    }
+    if (req.tier === "detail" && req.lane !== "prefetch" && charge.view++ === 0) this.detailView += charge.bytes;
+    charge.all++;
+    if (slot !== null) {
+      let pool = this.slotsUsed.get(slot.pool);
+      if (pool === undefined) this.slotsUsed.set(slot.pool, (pool = { used: 0, slots: slot.slots }));
+      if (++pool.used === pool.slots + 1) this.overfull++;
+      this.gpuUsed += slot.slotBytes;
+    }
+    this.held.set(req, { plan, key: scoped, slot });
+  }
+
+  /** Refund what `req` was charged; false when it was never charged. */
+  refund(req: ChunkRequest): boolean {
+    const held = this.held.get(req);
+    if (held === undefined) return false;
+    this.held.delete(req);
+    const charge = this.byKey.get(held.key)!;
+    if (req.tier === "detail" && req.lane !== "prefetch" && --charge.view === 0) this.detailView -= charge.bytes;
+    if (--charge.all === 0) {
+      this.byKey.delete(held.key);
+      if (charge.tier === "coarse") {
+        this.coarse -= charge.bytes;
+        this.coarseByPlan[held.plan] -= charge.bytes;
+      } else {
+        this.detailAll -= charge.bytes;
+      }
+    }
+    if (held.slot !== null) {
+      const pool = this.slotsUsed.get(held.slot.pool)!;
+      if (pool.used-- === pool.slots + 1) this.overfull--;
+      this.gpuUsed -= held.slot.slotBytes;
+    }
+    return true;
+  }
+
+  /** Whether the walk in priority order would admit everything charged, as {@link admitPlans} passes over it. */
+  fits(capacity: Readonly<PerTier>, gpuRoom: number): boolean {
+    const borrowed = Math.max(0, this.coarse - capacity.coarse);
+    return (
+      this.overfull === 0 &&
+      this.gpuUsed <= gpuRoom &&
+      this.detailView <= capacity.detail &&
+      this.coarse <= capacity.coarse + Math.max(0, capacity.detail - this.detailView) &&
+      this.detailAll <= capacity.detail - borrowed
+    );
+  }
+
+  borrowed(capacity: Readonly<PerTier>): number[] {
+    return borrowedByPlan(this.coarseByPlan, capacity.coarse);
+  }
+}
+
+/**
+ * Admission carried from one replan to the next. While the last admission
+ * took every request, a plan that says how it changed is charged for what
+ * it added and refunded for what it removed, and when everything still fits
+ * the room it has now, it is admitted whole without walking it. Anything
+ * else, new pools, a plan with no delta, or a change that no longer fits,
+ * admits every plan again.
+ */
+export class AdmissionLedger {
+  private held: {
+    charges: Charges;
+    sources: readonly unknown[];
+    admitted: readonly (readonly ChunkRequest[])[];
+  } | null = null;
+
+  /**
+   * {@link admitPlans}, carried from the last call. `sources` are what the
+   * plans' bytes and slots are read from, such as the manifests and what
+   * the worker reports of its pools; the ledger carries only while every
+   * one is the same. The capacity and the GPU room may move: what is
+   * charged is checked against them as they are now.
+   */
+  admit(
+    plans: readonly PlanToAdmit[],
+    capacity: Readonly<PerTier>,
+    gpuRoom: number,
+    sources: readonly unknown[],
+  ): Admission[] {
+    const before = this.held;
+    let admissions = before !== null && sameSources(before.sources, sources)
+      ? applyDeltas(before.charges, before.admitted, plans, capacity, gpuRoom)
+      : null;
+    if (admissions !== null) {
+      this.held = { ...before!, admitted: plans.map((plan) => plan.requests) };
+    } else {
+      const whole = admitWhole(plans, capacity, gpuRoom);
+      admissions = whole.admissions;
+      this.held = whole.charges === null ? null : {
+        charges: whole.charges, sources, admitted: admissions.map((admission) => admission.admitted),
+      };
+    }
+    return admissions.map((admission, i) => {
+      const delta = plans[i].delta;
+      const carried = delta !== undefined && admission.admitted === plans[i].requests && before?.admitted[i] === delta.base;
+      return carried ? { ...admission, delta } : admission;
+    });
+  }
+}
+
+function sameSources(a: readonly unknown[], b: readonly unknown[]): boolean {
+  return a.length === b.length && a.every((source, i) => source === b[i]);
+}
+
+/**
+ * Charge each plan's delta to `charges`, which admitted `admitted` whole,
+ * and the admissions when everything fits after; null when a plan says
+ * nothing of how it changed from what was admitted, or it no longer fits.
+ * `charges` is then in no state to carry, and the caller admits again.
+ */
+function applyDeltas(
+  charges: Charges,
+  admitted: readonly (readonly ChunkRequest[])[],
+  plans: readonly PlanToAdmit[],
+  capacity: Readonly<PerTier>,
+  gpuRoom: number,
+): Admission[] | null {
+  if (plans.length !== admitted.length) return null;
+  for (let i = 0; i < plans.length; i++) {
+    const delta = plans[i].delta;
+    if (delta === undefined || delta.base !== admitted[i]) return null;
+  }
+  for (let i = 0; i < plans.length; i++) {
+    const plan = plans[i];
+    const delta = plan.delta!;
+    for (const req of delta.removed) if (!charges.refund(req)) return null;
+    for (const req of delta.added) {
+      const whole = req.planes === undefined || (plan.heldWhole?.(req) ?? false);
+      const key = `${req.tier}/${req.entityId}/${req.chunkKey}${whole ? "" : planesKeySuffix(req.planes, req.planeAxis)}`;
+      charges.charge(i, req, key, plan.slotOf?.(req) ?? null, plan.bytesOf(req, whole));
+    }
+  }
+  if (!charges.fits(capacity, gpuRoom)) return null;
+  const borrowed = charges.borrowed(capacity);
+  return plans.map((plan, i) => ({ admitted: plan.requests, shortfall: { detail: 0, coarse: 0 }, borrowed: borrowed[i] }));
 }
 
 /**
@@ -187,6 +413,19 @@ export interface GpuSlot {
  * whole chunk.
  */
 export function chunkBytesFor(manifest: DatasetManifest): (req: ChunkRequest, whole?: boolean) => number {
+  let bytesOf = chunkBytesByManifest.get(manifest);
+  if (bytesOf === undefined) chunkBytesByManifest.set(manifest, (bytesOf = priceChunks(manifest)));
+  return bytesOf;
+}
+
+/**
+ * {@link chunkBytesFor} by manifest. A replan prices every dataset's chunks
+ * twice, and a collection's manifest holds hundreds of images; a manifest is
+ * replaced, never changed, so its prices hold while it does.
+ */
+const chunkBytesByManifest = new WeakMap<DatasetManifest, (req: ChunkRequest, whole?: boolean) => number>();
+
+function priceChunks(manifest: DatasetManifest): (req: ChunkRequest, whole?: boolean) => number {
   const byImage = new Map<string, { levels: number[]; depths: Record<SpatialAxis, number>[]; fallback: number }>();
   for (const image of [...manifest.images, ...(manifest.labels ?? []).map((label) => label.image)]) {
     const sample = decodedBytesPerSample(image.multiscale.data_type);

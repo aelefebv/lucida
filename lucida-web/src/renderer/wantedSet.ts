@@ -159,7 +159,7 @@ interface MemberPlan {
   detail: ReadonlySet<string> | undefined;
   coarse: ReadonlySet<string> | undefined;
   reads: SectionReads;
-  /** By {@link lookupId}, in tier order and then the wanted sets' order. */
+  /** By {@link lookupId}, in the order they were planned. */
   lookups: Map<string, ChunkLookup>;
 }
 
@@ -258,16 +258,10 @@ export class WantedSetTracker {
       plans.set(entry, byChannel);
       for (const channel of coldState.visibleChannels) {
         const prior = this.plans.get(entry)?.get(channel);
-        const plan = this.plan(scope, entry, channel, wanted, atlases, poolFor, prior);
+        const { plan, added, dropped } = this.plan(scope, entry, channel, wanted, atlases, poolFor, prior);
         byChannel.set(channel, plan);
-        if (plan === prior) continue;
-        if (prior) {
-          for (const [id, lookup] of prior.lookups) {
-            if (plan.lookups.get(id) !== lookup) this.drop(lookup, tally);
-          }
-        }
-        for (const [id, lookup] of plan.lookups) {
-          if (prior?.lookups.get(id) === lookup) continue;
+        for (const lookup of dropped) this.drop(lookup, tally);
+        for (const lookup of added) {
           this.add(lookup, tally, atlases);
           name(lookup);
         }
@@ -302,7 +296,7 @@ export class WantedSetTracker {
     return { missing, levels: changed ? levels : null };
   }
 
-  /** Every wanted chunk lacking as last read, in active-set order. */
+  /** Every wanted chunk lacking as last read, member by member in active-set order. */
   lacking(): MissingChunk[] {
     const out: MissingChunk[] = [];
     for (const byChannel of this.plans.values()) {
@@ -320,6 +314,12 @@ export class WantedSetTracker {
     this.covering.clear();
   }
 
+  /**
+   * The member's plan now, and the lookups it gained and lost since `prior`.
+   * A plan whose reads still hold keeps its lookups and changes only those
+   * of the chunks its wanted sets gained or lost, so a move costs what it
+   * changed rather than what the member wants.
+   */
   private plan(
     scope: PlanScope,
     entry: ColdStateActiveEntry,
@@ -328,12 +328,40 @@ export class WantedSetTracker {
     atlases: ReadonlyMap<string, AtlasSnapshot>,
     poolFor: SourcePoolResolver,
     prior: MemberPlan | undefined,
-  ): MemberPlan {
+  ): { plan: MemberPlan; added: Iterable<ChunkLookup>; dropped: Iterable<ChunkLookup> } {
     if (!prior || !prior.reads.stillHold(atlases, poolFor)) {
-      return planMember(scope, entry, channel, wanted, atlases, poolFor, null);
+      const plan = planMember(scope, entry, channel, wanted, atlases, poolFor);
+      return { plan, added: plan.lookups.values(), dropped: prior?.lookups.values() ?? [] };
     }
-    if (prior.detail === wanted.get(prior.detailKey) && prior.coarse === wanted.get(prior.coarseKey)) return prior;
-    return planMember(scope, entry, channel, wanted, atlases, poolFor, prior);
+    const detail = wanted.get(prior.detailKey);
+    const coarse = wanted.get(prior.coarseKey);
+    if (prior.detail === detail && prior.coarse === coarse) return { plan: prior, added: [], dropped: [] };
+    const added: ChunkLookup[] = [];
+    const dropped: ChunkLookup[] = [];
+    const lookups = new Map(prior.lookups);
+    const plan: MemberPlan = { ...prior, detail, coarse, lookups };
+    const planner = new MemberPlanner(scope, entry, channel, atlases, poolFor, prior.reads);
+    for (const tier of RESIDENCY_TIERS) {
+      const before = tier === "detail" ? prior.detail : prior.coarse;
+      const after = tier === "detail" ? detail : coarse;
+      if (before === after) continue;
+      for (const chunkKey of before ?? []) {
+        if (after?.has(chunkKey)) continue;
+        const id = lookupId(tier, chunkKey);
+        const lookup = lookups.get(id);
+        if (lookup === undefined) continue;
+        lookups.delete(id);
+        dropped.push(lookup);
+      }
+      for (const chunkKey of after ?? []) {
+        if (before?.has(chunkKey)) continue;
+        const lookup = planner.lookup(tier, chunkKey);
+        if (lookup === null) continue;
+        lookups.set(lookupId(tier, chunkKey), lookup);
+        added.push(lookup);
+      }
+    }
+    return { plan, added, dropped };
   }
 
   private add(lookup: ChunkLookup, tally: LevelTally, atlases: ReadonlyMap<string, AtlasSnapshot>): void {
@@ -483,11 +511,7 @@ class SectionReads {
   }
 }
 
-/**
- * Work out the lookups one member's wanted chunks need. With `prior`, a plan
- * of the same member whose reads still hold, the lookups of chunks it
- * already wanted are its own, read state and all.
- */
+/** Work out the lookups one member's wanted chunks need, from nothing kept. */
 function planMember(
   scope: PlanScope,
   entry: ColdStateActiveEntry,
@@ -495,82 +519,116 @@ function planMember(
   wanted: WantedChunkIndex,
   atlases: ReadonlyMap<string, AtlasSnapshot>,
   poolFor: SourcePoolResolver,
-  prior: MemberPlan | null,
 ): MemberPlan {
   const memberId = memberIdForColdEntry(entry, channel);
-  const detailKey = prior?.detailKey ?? wantedEntryKey("detail", memberId);
-  const coarseKey = prior?.coarseKey ?? wantedEntryKey("coarse", memberId);
+  const detailKey = wantedEntryKey("detail", memberId);
+  const coarseKey = wantedEntryKey("coarse", memberId);
   const keys = { detail: wanted.get(detailKey), coarse: wanted.get(coarseKey) };
-  const reads = prior?.reads ?? new SectionReads(memberId);
-  const section = (tier: ResidencyTier, level: number) => reads.section(tier, level, atlases, poolFor);
-  const grids = new Map<number, LevelGrid | undefined>();
-  const gridOf = (level: number): LevelGrid | undefined => {
-    if (!grids.has(level)) grids.set(level, levelGrid(entry, level));
-    return grids.get(level);
-  };
-  const finest = finestLevelOf(entry);
-  let sampled: SampledLevel[] | null = null;
-  const sampledLevels = (): SampledLevel[] =>
-    (sampled ??= finest === undefined ? [] : resolveSampledLevels(entry, section, gridOf));
+  const planner = new MemberPlanner(scope, entry, channel, atlases, poolFor, new SectionReads(memberId));
   const lookups = new Map<string, ChunkLookup>();
-
   for (const tier of RESIDENCY_TIERS) {
-    const tierKeys = tier === "detail" ? keys.detail : keys.coarse;
-    if (tierKeys === undefined) continue;
-    for (const chunkKey of tierKeys) {
-      const id = lookupId(tier, chunkKey);
-      const kept = prior?.lookups.get(id);
-      if (kept) {
-        lookups.set(id, kept);
-        continue;
-      }
-      const chunk = parsePlaneChunkKey(chunkKey, scope.sliceAxis);
-      if (chunk === null) continue;
-      const held = section(tier, chunk.level);
-      if (held === undefined) continue;
-      const grid = gridOf(chunk.level);
-      if (grid === undefined) continue;
-
-      const context: SampleContext = {
-        memberId,
-        channel,
-        t: scope.t,
-        viewMode: scope.viewMode,
-        sliceZ: held.atlas.z ?? 0,
-        sliceAxis: scope.sliceAxis,
-      };
-      const plane = context.viewMode === "slice" ? currentPlane(grid, context) : null;
-      lookups.set(id, {
-        poolKey: held.poolKey,
-        slotKey: makeCompositeKey(memberId, chunkKey),
-        plane,
-        missing: {
-          datasetId: scope.datasetId,
-          tier,
-          entityId: entry.entityId,
-          memberId,
-          c: channel,
-          chunkKey,
-          ...(plane !== null ? { cut: { axis: scope.sliceAxis, plane } } : {}),
-        },
-        // A wanted chunk is served by its own level once resident, or a
-        // coarser one until then, or by the level one finer the selection
-        // just coarsened it from, still resident. Levels finer than that
-        // are left out: a chunk's cover two levels down runs to dozens.
-        serving: tier === "detail"
-          ? coverages(
-            sampledLevels().filter((level) => level.grid.level >= chunk.level - 1),
-            grid, [chunk.x, chunk.y, chunk.z], context,
-          )
-          : null,
-        held: false,
-        servedBy: null,
-        tally: null,
-      });
+    for (const chunkKey of (tier === "detail" ? keys.detail : keys.coarse) ?? []) {
+      const lookup = planner.lookup(tier, chunkKey);
+      if (lookup !== null) lookups.set(lookupId(tier, chunkKey), lookup);
     }
   }
+  return { detailKey, coarseKey, detail: keys.detail, coarse: keys.coarse, reads: planner.reads, lookups };
+}
 
-  return { detailKey, coarseKey, detail: keys.detail, coarse: keys.coarse, reads, lookups };
+/** The lookup of each of one member's wanted chunks, sharing what the member's chunks read alike. */
+class MemberPlanner {
+  readonly reads: SectionReads;
+  private readonly scope: PlanScope;
+  private readonly entry: ColdStateActiveEntry;
+  private readonly channel: number;
+  private readonly memberId: string;
+  private readonly atlases: ReadonlyMap<string, AtlasSnapshot>;
+  private readonly poolFor: SourcePoolResolver;
+  private readonly grids = new Map<number, LevelGrid | undefined>();
+  private sampled: SampledLevel[] | null = null;
+
+  constructor(
+    scope: PlanScope,
+    entry: ColdStateActiveEntry,
+    channel: number,
+    atlases: ReadonlyMap<string, AtlasSnapshot>,
+    poolFor: SourcePoolResolver,
+    reads: SectionReads,
+  ) {
+    this.scope = scope;
+    this.entry = entry;
+    this.channel = channel;
+    this.memberId = memberIdForColdEntry(entry, channel);
+    this.atlases = atlases;
+    this.poolFor = poolFor;
+    this.reads = reads;
+  }
+
+  /** The lookup of one wanted chunk, or null when the view lays out no section for it. */
+  lookup(tier: ResidencyTier, chunkKey: string): ChunkLookup | null {
+    const { scope, entry, memberId } = this;
+    const chunk = parsePlaneChunkKey(chunkKey, scope.sliceAxis);
+    if (chunk === null) return null;
+    const held = this.section(tier, chunk.level);
+    if (held === undefined) return null;
+    const grid = this.gridOf(chunk.level);
+    if (grid === undefined) return null;
+
+    const context: SampleContext = {
+      memberId,
+      channel: this.channel,
+      t: scope.t,
+      viewMode: scope.viewMode,
+      sliceZ: held.atlas.z ?? 0,
+      sliceAxis: scope.sliceAxis,
+    };
+    const plane = context.viewMode === "slice" ? currentPlane(grid, context) : null;
+    return {
+      poolKey: held.poolKey,
+      slotKey: makeCompositeKey(memberId, chunkKey),
+      plane,
+      missing: {
+        datasetId: scope.datasetId,
+        tier,
+        entityId: entry.entityId,
+        memberId,
+        c: this.channel,
+        chunkKey,
+        ...(plane !== null ? { cut: { axis: scope.sliceAxis, plane } } : {}),
+      },
+      // A wanted chunk is served by its own level once resident, or a
+      // coarser one until then, or by the level one finer the selection
+      // just coarsened it from, still resident. Levels finer than that
+      // are left out: a chunk's cover two levels down runs to dozens.
+      serving: tier === "detail"
+        ? coverages(
+          this.sampledLevels().filter((level) => level.grid.level >= chunk.level - 1),
+          grid, [chunk.x, chunk.y, chunk.z], context,
+        )
+        : null,
+      held: false,
+      servedBy: null,
+      tally: null,
+    };
+  }
+
+  private section(tier: ResidencyTier, level: number) {
+    return this.reads.section(tier, level, this.atlases, this.poolFor);
+  }
+
+  private gridOf(level: number): LevelGrid | undefined {
+    if (!this.grids.has(level)) this.grids.set(level, levelGrid(this.entry, level));
+    return this.grids.get(level);
+  }
+
+  private sampledLevels(): SampledLevel[] {
+    if (this.sampled === null) {
+      this.sampled = finestLevelOf(this.entry) === undefined
+        ? []
+        : resolveSampledLevels(this.entry, (tier, level) => this.section(tier, level), (level) => this.gridOf(level));
+    }
+    return this.sampled;
+  }
 }
 
 /** Whether the atlas holds this slot key, at `plane` in a slice pool that tracks planes. */

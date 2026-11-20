@@ -10,51 +10,95 @@ const COARSE_LANE = 8;
 
 interface KeyDemand {
   flags: number;
-  /** The view's detail and coarse requests for the chunk, held bare when there is one. */
-  view: ChunkRequest | ChunkRequest[] | undefined;
+  /** The requests for the chunk, held bare when there is one. */
+  requests: ChunkRequest | ChunkRequest[];
+}
+
+function flagsOf(req: ChunkRequest): number {
+  if (req.tier === "detail") return req.lane === "prefetch" ? DETAIL : DETAIL | VIEW_DETAIL;
+  return req.lane === "coarse" ? COARSE | COARSE_LANE : COARSE;
+}
+
+/** Whether the view's own lanes ask for the chunk where `req` wants it delivered. */
+function viewAsks(req: ChunkRequest): boolean {
+  return req.lane === "detail" || req.lane === "coarse";
 }
 
 /**
- * What the plans since the last rebuild ask of each chunk, by its scheduler
- * key: which tier wants it, whether the view or only prefetch and the minimap
- * do, and the view's own requests, each naming where it wants the chunk
- * delivered.
+ * What the plans ask of each chunk, by its scheduler key: which tier wants
+ * it, whether the view or only prefetch and the minimap do, and the requests
+ * themselves, the view's each naming where it wants the chunk delivered.
  *
  * A submit notes every request of a dataset's whole wanted set, tens of
  * thousands of them a few times a second, so a chunk costs one map entry
- * whatever its tier and lanes, and however many views ask for it.
+ * whatever its tier and lanes, and however many views ask for it. A replan
+ * that carries the last one's requests notes what it added and forgets what
+ * it removed.
  */
 export class TickDemand {
   private readonly byKey = new Map<string, KeyDemand>();
+  /** Keys more than one request asks for. */
+  private readonly sharedKeys = new Set<string>();
   private detail = 0;
   private viewDetail = 0;
   private coarse = 0;
 
   note(key: string, req: ChunkRequest): void {
-    let flags: number;
-    if (req.tier === "detail") flags = req.lane === "prefetch" ? DETAIL : DETAIL | VIEW_DETAIL;
-    else flags = req.lane === "coarse" ? COARSE | COARSE_LANE : COARSE;
-    const viewAsks = req.lane === "detail" || req.lane === "coarse";
+    const flags = flagsOf(req);
     const held = this.byKey.get(key);
     if (held === undefined) {
-      this.byKey.set(key, { flags, view: viewAsks ? req : undefined });
-      this.count(flags);
+      this.byKey.set(key, { flags, requests: req });
+      this.count(flags, 1);
       return;
     }
     const added = flags & ~held.flags;
     if (added !== 0) {
       held.flags |= added;
-      this.count(added);
+      this.count(added, 1);
     }
-    if (!viewAsks) return;
-    if (held.view === undefined) held.view = req;
-    else if (Array.isArray(held.view)) held.view.push(req);
-    else held.view = [held.view, req];
+    if (Array.isArray(held.requests)) held.requests.push(req);
+    else held.requests = [held.requests, req];
+    this.sharedKeys.add(key);
+  }
+
+  /** `req` no longer asks for the chunk at `key`. */
+  forget(key: string, req: ChunkRequest): void {
+    const held = this.byKey.get(key);
+    if (held === undefined) return;
+    if (!Array.isArray(held.requests)) {
+      if (held.requests !== req) return;
+      this.byKey.delete(key);
+      this.count(held.flags, -1);
+      return;
+    }
+    const at = held.requests.indexOf(req);
+    if (at < 0) return;
+    held.requests.splice(at, 1);
+    if (held.requests.length === 1) {
+      held.requests = held.requests[0];
+      this.sharedKeys.delete(key);
+    }
+    let flags = 0;
+    for (const other of Array.isArray(held.requests) ? held.requests : [held.requests]) flags |= flagsOf(other);
+    this.count(held.flags & ~flags, -1);
+    held.flags = flags;
   }
 
   /** Whether a plan wants the chunk in either tier. */
   wants(key: string): boolean {
     return this.byKey.has(key);
+  }
+
+  /** Every request for the chunk, in the order they were noted. */
+  requestsOf(key: string): readonly ChunkRequest[] {
+    const requests = this.byKey.get(key)?.requests;
+    if (requests === undefined) return [];
+    return Array.isArray(requests) ? requests : [requests];
+  }
+
+  /** The keys more than one request asks for. */
+  shared(): ReadonlySet<string> {
+    return this.sharedKeys;
   }
 
   /** Whether the view's own lanes want the detail chunk. */
@@ -87,14 +131,15 @@ export class TickDemand {
    * delivered, by `deliveryTarget`, once, with a request that names it.
    */
   forEachViewTarget(key: string, visit: (target: string, req: ChunkRequest) => void): void {
-    const view = this.byKey.get(key)?.view;
-    if (view === undefined) return;
-    if (!Array.isArray(view)) {
-      visit(deliveryTarget(view.mode, view.cut), view);
+    const requests = this.byKey.get(key)?.requests;
+    if (requests === undefined) return;
+    if (!Array.isArray(requests)) {
+      if (viewAsks(requests)) visit(deliveryTarget(requests.mode, requests.cut), requests);
       return;
     }
     const seen = new Set<string>();
-    for (const req of view) {
+    for (const req of requests) {
+      if (!viewAsks(req)) continue;
       const target = deliveryTarget(req.mode, req.cut);
       if (seen.has(target)) continue;
       seen.add(target);
@@ -116,14 +161,15 @@ export class TickDemand {
 
   clear(): void {
     this.byKey.clear();
+    this.sharedKeys.clear();
     this.detail = 0;
     this.viewDetail = 0;
     this.coarse = 0;
   }
 
-  private count(added: number): void {
-    if (added & DETAIL) this.detail++;
-    if (added & VIEW_DETAIL) this.viewDetail++;
-    if (added & COARSE) this.coarse++;
+  private count(flags: number, sign: 1 | -1): void {
+    if (flags & DETAIL) this.detail += sign;
+    if (flags & VIEW_DETAIL) this.viewDetail += sign;
+    if (flags & COARSE) this.coarse += sign;
   }
 }
