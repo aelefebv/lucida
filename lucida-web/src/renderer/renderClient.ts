@@ -7,6 +7,7 @@ import type {
   Chunk,
   InitMessage,
   GpuTotalMessage,
+  GestureMessage,
   VolumeLayerParams,
   SliceLayerParams,
   MinimapLayersMessage,
@@ -648,6 +649,11 @@ export class RenderClient implements UploadClient {
 
   datasetUnplanned(msg: DatasetUnplannedMessage) {
     this.worker.postMessage(msg);
+  }
+
+  /** Tell the worker a gesture started or ended, ahead of the deliveries made under it. */
+  gesture(running: boolean) {
+    this.worker.postMessage({ type: "gesture", running } satisfies GestureMessage);
   }
 
   /**

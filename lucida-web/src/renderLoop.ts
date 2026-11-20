@@ -196,6 +196,8 @@ export class RenderLoop implements TraceEnvironment {
   private trailingRebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private minimapDisplayTimer: ReturnType<typeof setTimeout> | null = null;
   private fitResumeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Armed while a gesture runs, to tell the render worker when it ends. */
+  private gestureEndTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly framePacer = new FramePacer();
   /** The last tick left decoded chunks undelivered for want of upload budget. */
   private deliveryBacklogged = false;
@@ -376,9 +378,15 @@ export class RenderLoop implements TraceEnvironment {
       clearTimeout(this.fitResumeTimer);
       this.fitResumeTimer = null;
     }
+    if (this.gestureEndTimer !== null) {
+      clearTimeout(this.gestureEndTimer);
+      this.gestureEndTimer = null;
+      this.client.gesture(false);
+    }
     this.client.onChunkResidency = null;
     this.client.onUploadCost = null;
     this.client.onGpuPassTime = null;
+    this.client.onPoolGrowth = null;
     this.client.onWantedSetDelta = null;
     this.client.onMinimapOverviewsLost = null;
     this.client.onGpuCapacity = null;
@@ -680,7 +688,10 @@ export class RenderLoop implements TraceEnvironment {
    */
   markInput(input: InputKind, atMs?: number): void {
     if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
-    if (GESTURE_INPUTS.includes(input)) this.lastGestureAt = performance.now();
+    if (GESTURE_INPUTS.includes(input)) {
+      this.lastGestureAt = performance.now();
+      this.noteGestureRunning();
+    }
     if (CAMERA_INPUTS.includes(input)) this.lastCameraInputAt = performance.now();
     settleSignal.restart();
     this.resolution.noteInput(this.client.lastFrameSeq(), this.gpuIdleMs());
@@ -766,6 +777,30 @@ export class RenderLoop implements TraceEnvironment {
       if (due === null) return;
       if (due > 0) this.scheduleTrailingRebuild();
       else this.setDirty("interactive", "pending_residency_rebuild");
+    }, wait);
+  }
+
+  /**
+   * Tell the render worker a gesture runs, and again once it ends: no chunk
+   * pool grows meanwhile, since a growth copies the pool and the frames
+   * queued behind the copy wait for it. The end is the moment
+   * `TickContext.gesture` turns false.
+   */
+  private noteGestureRunning(): void {
+    if (this.gestureEndTimer !== null) return;
+    this.client.gesture(true);
+    this.scheduleGestureEnd();
+  }
+
+  private scheduleGestureEnd(): void {
+    const wait = Math.max(0, this.lastGestureAt + GESTURE_HOLD_MS - performance.now());
+    this.gestureEndTimer = setTimeout(() => {
+      if (performance.now() - this.lastGestureAt < GESTURE_HOLD_MS) {
+        this.scheduleGestureEnd();
+        return;
+      }
+      this.gestureEndTimer = null;
+      this.client.gesture(false);
     }, wait);
   }
 

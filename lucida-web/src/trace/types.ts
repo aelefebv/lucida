@@ -1093,6 +1093,7 @@ const CHUNK_FEEDBACK_REASONS = [
   "upload-failed",
   "out-of-memory",
   "replaced",
+  "deferred",
 ] as const satisfies readonly ChunkFeedbackReason[];
 
 /** The GPU's own error kinds. `out-of-memory` is shared with the chunk feedback above. */

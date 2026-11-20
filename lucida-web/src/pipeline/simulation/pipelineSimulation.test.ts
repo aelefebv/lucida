@@ -338,6 +338,8 @@ describe("a pan and zoom across a full atlas", () => {
 
 describe("a view that moves away and back", () => {
   // Room for everything, so every chunk the worker acknowledged stays held.
+  // Its pool grows only once a gesture ends, so a chunk it put off meanwhile
+  // goes once more.
   const scenario = describeScenario({
     name: "pan away and back",
     dataset: singleImage({ id: "still", pyramid: IMAGE_1024 }),
@@ -347,7 +349,9 @@ describe("a view that moves away and back", () => {
     it(`settles at device pixel ratio ${dpr}, never resending a chunk the worker holds`, async () => {
       const run = await runScenario(scenario, { dpr });
       expectSettled(run);
-      for (const phase of run.phases) expect(phase.chunksSent, phase.label).toBe(phase.distinctChunksSent);
+      for (const phase of run.phases) {
+        expect(phase.chunksSent, phase.label).toBe(phase.distinctChunksSent + phase.chunksDeferred);
+      }
       expect(run.phases[run.phases.length - 1].chunksSent).toBe(0);
     });
   }

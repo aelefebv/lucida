@@ -46,6 +46,7 @@ import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
 import { measureGpuCapacity, measureGpuMemory, setGpuTotal } from "./worker/gpuBudget.ts";
 import { growViewSlots } from "./viewIndirection.ts";
+import { dispatchMessage } from "./worker/dispatch.ts";
 import type {
   Chunk,
   ChunkResidencyChange,
@@ -435,6 +436,82 @@ describe("volume pool growth", () => {
     expect(copies).toHaveLength(1);
     expect(held.every((key) => atlas.slots.has(`imgA|${key}`))).toBe(true);
     expect(reports(posts, "lost")).toEqual([]);
+  });
+
+  it("takes a slot the planner doesn't want rather than grow while a gesture runs", () => {
+    const { ctx, posts, copies } = makeGrowthCtx();
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    const held = holdLayer(atlas);
+    const incoming = makeChunk(0, 0, 0, 4, 0, 0);
+    want(ctx, "imgA", [...held.slice(1), incoming.key]);
+    ctx.state.gesture = true;
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+
+    expect(copies).toEqual([]);
+    expect(atlas.slots.get(`imgA|${incoming.key}`)).toBe(0);
+    expect(reports(posts, "lost").map((r) => [r.reason, r.keys])).toEqual([["evicted", [held[0]]]]);
+  });
+
+  it("puts off a chunk that needs more room while a gesture runs, and refuses it once the gesture ends", async () => {
+    const { ctx, posts, copies } = makeGrowthCtx();
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    const held = holdLayer(atlas);
+    const incoming = makeChunk(0, 0, 0, 4, 0, 0);
+    want(ctx, "imgA", [...held, incoming.key]);
+    await dispatchMessage(ctx, { type: "gesture", running: true });
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+
+    // Unanswered, so the page waits on it rather than settle without it.
+    expect(copies).toEqual([]);
+    expect(reports(posts)).toEqual([]);
+
+    await dispatchMessage(ctx, { type: "gesture", running: false });
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([["refused", "deferred", [incoming.key]]]);
+
+    // Sent again, it lands in a pool free to grow.
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+    expect(copies).toHaveLength(1);
+    expect(atlas.slots.has(`imgA|${incoming.key}`)).toBe(true);
+  });
+
+  it("refuses nothing it holds by the gesture's end", async () => {
+    const { ctx, posts } = makeGrowthCtx();
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    const held = holdLayer(atlas);
+    const incoming = makeChunk(0, 0, 0, 4, 0, 0);
+    want(ctx, "imgA", [...held, incoming.key]);
+    ctx.state.gesture = true;
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+    // A lost device has the page send everything again, and the copy lands.
+    ctx.state.gesture = false;
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+    posts.length = 0;
+
+    await dispatchMessage(ctx, { type: "gesture", running: false });
+
+    expect(atlas.slots.has(`imgA|${incoming.key}`)).toBe(true);
+    expect(reports(posts)).toEqual([]);
+  });
+
+  it("grows once it fills while no gesture runs, so the next gesture finds room", () => {
+    /** Fill the pool's last slot, in a gesture or not, and say how many copies that made. */
+    const fillLast = (gesture: boolean): number => {
+      const { ctx, copies } = makeGrowthCtx();
+      const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+      const held = holdLayer(atlas);
+      const last = held.pop()!;
+      atlas.slots.delete(`imgA|${last}`);
+      atlas.freeSlots = [atlas.totalSlots - 1];
+      want(ctx, "imgA", [...held, last]);
+      ctx.state.gesture = gesture;
+      handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [makeChunk(0, 0, 0, 3, 3, 3)], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+      expect(atlas.slots.has(`imgA|${last}`)).toBe(true);
+      return copies.length;
+    };
+    expect(fillLast(false)).toBe(1);
+    expect(fillLast(true)).toBe(0);
   });
 
   it("reports each growth, its texture before and after, once the GPU is through it", async () => {
@@ -856,6 +933,29 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
     expect(viewOf(atlas).indirectionData[0]).toBe(drawn);
     expect([...atlas.planesByChunk.get(`imgA|${chunk.key}`)!]).toEqual([[4, drawn], [5, other]]);
     expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
+  });
+
+  it("puts off a plane that needs more room while a gesture runs, and refuses it at its plane once the gesture ends", async () => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = slicePool(ctx);
+    // Two slots, both taken by wanted planes before the third arrives.
+    atlas.totalSlots = 2;
+    atlas.freeSlots = [1, 0];
+    const chunks = [0, 1, 2].map((x) => makeSliceChunk(0, 0, 0, 0, 0, x));
+    want(ctx, "imgA", chunks.map((chunk) => chunk.key));
+    ctx.state.gesture = true;
+
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", chunks), epochs(), "ds1", "imgA");
+
+    const last = chunks[2];
+    expect(atlas.totalSlots).toBe(2);
+    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunks[0].key, chunks[1].key]]]);
+
+    posts.length = 0;
+    await dispatchMessage(ctx, { type: "gesture", running: false });
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys, r.cut])).toEqual([
+      ["refused", "deferred", [last.key], { axis: "z", plane: 0 }],
+    ]);
   });
 
   it("refuses a batch with no slice atlas", () => {

@@ -57,4 +57,14 @@ describe("WorkerFeedback residency reconciliation", () => {
       ["img-0", 0, "slice", "b", "evicted"],
     ]);
   });
+
+  it("sends a chunk put off until a gesture ended again at once, as a first send", () => {
+    const guard = new ResendGuard();
+    const noteDeferred = vi.spyOn(guard, "noteDeferred");
+    const feedback = new WorkerFeedback(guard);
+
+    expect(feedback.handleChunkResidency("img-0:ch1", "volume", "coarse", "refused", ["a"], makeCpuCache(), "deferred"))
+      .toBe(true);
+    expect(noteDeferred).toHaveBeenCalledWith("img-0", 1, "volume", "coarse", "a");
+  });
 });

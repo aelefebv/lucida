@@ -233,6 +233,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       postGpuMemoryIfChanged(ctx);
       return;
 
+    case "gesture":
+      ctx.state.gesture = msg.running;
+      if (!msg.running) ctx.state.deferredChunks.release(ctx);
+      return;
+
     case "removeLayerResources":
       removeDatasetResources(ctx, msg.datasetId);
       postGpuMemoryIfChanged(ctx);

@@ -28,6 +28,7 @@ import { createMinimapRendererState, type MinimapRendererState } from "../minima
 import type { ViewResources } from "./viewResources.ts";
 import type { ViewIndirection } from "../viewIndirection.ts";
 import { CameraRefs } from "../cameraRefs.ts";
+import { DeferredChunks } from "./deferredChunks.ts";
 
 /** GPU errors of one kind folded into the next report while the last one's spacing runs. */
 export interface GpuErrorReport {
@@ -104,6 +105,10 @@ export interface RendererState {
    * under it (`worker/gpuBudget.ts`).
    */
   gpuTotalBytes: number;
+  /** Whether a gesture runs in the page, during which no chunk pool grows. */
+  gesture: boolean;
+  /** Chunks pools put off while the gesture ran, answered once it ends. */
+  deferredChunks: DeferredChunks;
   /** poolKey → volume atlas pool state. */
   volumeAtlases: Map<string, AtlasState>;
   /** poolKey → slice atlas pool state. */
@@ -206,6 +211,8 @@ export function createInitialState(gpuTotalBytes: number = DESKTOP_BUDGETS.gpuTo
     gpuTotalBytes,
     memberToDataset: new Map(),
     draws: new Map(),
+    gesture: false,
+    deferredChunks: new DeferredChunks(),
     volumeAtlases: new Map(),
     sliceAtlases: new Map(),
     labelSlicePools: new Map(),

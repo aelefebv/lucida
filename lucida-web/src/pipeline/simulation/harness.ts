@@ -184,6 +184,11 @@ export interface PhaseOutcome {
   chunksSent: number;
   /** Distinct chunks among them; equal to `chunksSent` when none went twice. */
   distinctChunksSent: number;
+  /**
+   * Chunks the worker put off while a gesture ran and refused once it ended,
+   * as `deferred`, in this phase. Each goes to the worker again.
+   */
+  chunksDeferred: number;
   /** Chunks the page sent the worker from a gesture's first input to its last, before the phase. */
   chunksSentDuringInput: number;
   /** Auto-contrast fits handed out from a gesture's first input to its last, before the phase. */
@@ -318,6 +323,8 @@ class Simulation {
   /** Chunks sent between the last gesture's first input and its last. */
   private sentDuringInput = 0;
   private fitsDuringInput = 0;
+  /** Chunks the worker refused as `deferred` since the open. */
+  private deferred = 0;
   private readonly fits: ContrastFitRecord[] = [];
 
   constructor(scenario: Scenario, dpr: number) {
@@ -330,6 +337,7 @@ class Simulation {
     );
     this.worker.onPost = (msg) => {
       if (msg.type !== "chunkResidency" || msg.change === "held") return;
+      if (msg.reason === "deferred") this.deferred += msg.keys.length;
       const reason = `${msg.change} ${msg.reason ?? ""}`.trim();
       for (const key of msg.keys) {
         const id = `${msg.memberId}/${key}`;
@@ -604,6 +612,7 @@ class Simulation {
     const fitsBefore = this.fits.length;
     const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, { ...d }]));
     const heldBefore = this.held.length;
+    const deferredBefore = this.deferred;
     const quietSteps = Math.ceil(QUIET_MS / FRAME_MS);
     let fixedSince: number | null = null;
     let requestsAtFixed = this.source.requestCount;
@@ -613,11 +622,11 @@ class Simulation {
       if (ranFrame || !this.atFixedPoint() || this.source.requestCount !== requestsAtFixed) {
         fixedSince = null;
         requestsAtFixed = this.source.requestCount;
-        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, drawnBefore, fitsBefore, sentBefore, heldBefore);
+        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, drawnBefore, fitsBefore, sentBefore, heldBefore, deferredBefore);
         continue;
       }
       fixedSince ??= i;
-      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, drawnBefore, fitsBefore, sentBefore, heldBefore);
+      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, drawnBefore, fitsBefore, sentBefore, heldBefore, deferredBefore);
     }
   }
 
@@ -630,6 +639,7 @@ class Simulation {
     fitsBefore: number,
     sentBefore: Map<string, ChunkDeliveries>,
     heldBefore: number,
+    deferredBefore: number,
   ): PhaseOutcome {
     const q = this.cpuCache.settleInputs(createSettleState());
     const page = pageSettle();
@@ -674,6 +684,7 @@ class Simulation {
       framesDrawn: this.worker.framesDispatched - drawnBefore,
       chunksSent,
       distinctChunksSent,
+      chunksDeferred: this.deferred - deferredBefore,
       chunksSentDuringInput: this.sentDuringInput,
       fitsDuringInput: this.fitsDuringInput,
       bytesSent,

@@ -30,6 +30,17 @@ export interface GpuTotalMessage {
   bytes: number;
 }
 
+/**
+ * A gesture started or ended in the page: a pan, zoom, orbit or step along
+ * the cut landed within the page's hold after its last input. Sent as it
+ * changes, ahead of the deliveries made under it. While a gesture runs no
+ * chunk pool grows.
+ */
+export interface GestureMessage {
+  type: "gesture";
+  running: boolean;
+}
+
 export interface ResizeMessage {
   type: "resize";
   width: number;
@@ -915,6 +926,7 @@ export type MainToWorkerMessage =
   | FailedChunksMessage
   | DatasetUnplannedMessage
   | GpuTotalMessage
+  | GestureMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
   | AbandonFrameMessage
@@ -956,9 +968,10 @@ export interface ThumbnailResultMessage {
 /**
  * Why the worker refused a chunk or stopped holding one. A refusal is
  * `stale`, `unwanted`, `wrong-slice`, a `missing-*` routing gap,
- * `atlas-policy`, or `upload-failed`; a loss is `evicted`, `freed`,
- * `out-of-memory`, `wrong-slice`, or `replaced` (a label cell rewritten in
- * place with another chunk, such as the next timepoint's).
+ * `atlas-policy`, `upload-failed`, or `deferred` (its pool would have had to
+ * grow while a gesture ran, so the worker answered once it ended); a loss is
+ * `evicted`, `freed`, `out-of-memory`, `wrong-slice`, or `replaced` (a label
+ * cell rewritten in place with another chunk, such as the next timepoint's).
  */
 export type ChunkFeedbackReason =
   | "evicted"
@@ -972,7 +985,8 @@ export type ChunkFeedbackReason =
   | "missing-lod-meta"
   | "atlas-policy"
   | "upload-failed"
-  | "out-of-memory";
+  | "out-of-memory"
+  | "deferred";
 
 /**
  * What the GPU reported: the device was lost, or an error no error scope
