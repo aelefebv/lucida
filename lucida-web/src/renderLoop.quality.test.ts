@@ -41,7 +41,7 @@ import type { DecodePool } from "./pipeline/fetch/decodePool.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 import type { Session } from "./session.ts";
 import { MAX_BANDS } from "./framePacing.ts";
-import { MAX_MARCH_COARSENING, MIN_ADAPTIVE_SCALE, RESTORE_AFTER_MS } from "./renderResolution.ts";
+import { GPU_IDLE_MS, IDLE_START_SCALE, MAX_MARCH_COARSENING, MIN_ADAPTIVE_SCALE, RESTORE_AFTER_MS } from "./renderResolution.ts";
 import { INTERACTION_MARCH_STEP_SCALE } from "./volumePath.ts";
 
 /**
@@ -71,6 +71,7 @@ function makeLoop() {
     setCanvasColors: () => {},
     abandonFrame: vi.fn(),
     onFrameDone: null as ((frameSeq: number, doneAtMs: number) => void) | null,
+    onGpuPassTime: null as ((gpuPassUs: number) => void) | null,
     onGpuStatus: () => () => {},
   };
   const loop = new RenderLoop({
@@ -142,6 +143,42 @@ describe("volume frames on a GPU too slow for full quality", () => {
     const { loop, finish } = makeLoop();
     tick();
     finish(2, 30);
+
+    loop.setRenderScale(0.5);
+    loop.markInput("orbit");
+    tick();
+    expect(drawn.at(-1)).toMatchObject({ renderScale: 0.5, resolutionScale: 1, marchStepScale: INTERACTION_MARCH_STEP_SCALE });
+  });
+
+  it("starts a gesture after the GPU idled at its cheapest settings, and draws input at the warm ones once a frame's pass leaves room", () => {
+    const { loop, client, finish } = makeLoop();
+    tick();
+    finish(2, 30);
+    vi.advanceTimersByTime(GPU_IDLE_MS);
+
+    loop.setRenderScale(0.5);
+    loop.markInput("orbit");
+    tick();
+    expect(drawn.at(-1)).toMatchObject({
+      renderScale: 0.5,
+      resolutionScale: IDLE_START_SCALE,
+      marchStepScale: INTERACTION_MARCH_STEP_SCALE * MAX_MARCH_COARSENING,
+    });
+
+    // The clocks are back. The input under way is drawn at the warm
+    // settings rather than held at the frame before's.
+    client.onGpuPassTime?.(100);
+    finish(3, 8);
+    loop.markInput("orbit");
+    tick();
+    expect(drawn.at(-1)).toMatchObject({ renderScale: 0.5, resolutionScale: 1, marchStepScale: INTERACTION_MARCH_STEP_SCALE });
+  });
+
+  it("starts a gesture after less GPU idle as a warm GPU would", () => {
+    const { loop, finish } = makeLoop();
+    tick();
+    finish(2, 30);
+    vi.advanceTimersByTime(GPU_IDLE_MS - 100);
 
     loop.setRenderScale(0.5);
     loop.markInput("orbit");

@@ -3,6 +3,9 @@ import {
   AdaptiveResolution,
   cappedPixelRatioScale,
   GESTURE_START_STEP_UP,
+  GPU_IDLE_MS,
+  IDLE_CLIMB_PASS_MS,
+  IDLE_START_SCALE,
   LONG_FRAME_MS,
   MAX_MARCH_COARSENING,
   MIN_ADAPTIVE_SCALE,
@@ -62,13 +65,54 @@ describe("AdaptiveResolution", () => {
     expect(res.scale).toBeCloseTo(0.5, 6);
   });
 
-  it("never steps below the floor, however long the frame", () => {
+  it("never steps below the floors, however long the frame", () => {
     const c = clock();
     const res = new AdaptiveResolution(c.now);
     res.noteInput(0);
     expect(res.noteFrame(1, 400, 1)).toBe(true);
     expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
     expect(res.noteFrame(2, 400, 2)).toBe(false);
+  });
+
+  it("coarsens the march past the resolution's floor only as far as the frame there needs", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    // At the floor a quarter of the pixels: 88 / 4 is 22 ms.
+    expect(res.noteFrame(1, 88, 1)).toBe(true);
+    expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBeCloseTo(22 / TARGET_FRAME_MS, 6);
+  });
+
+  it("leaves the march alone where the resolution alone brings a frame to the target", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    expect(res.noteFrame(1, TARGET_FRAME_MS * 3, 1)).toBe(true);
+    expect(res.scale).toBeGreaterThan(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(1);
+  });
+
+  it("coarsens the march when frames at the floor still run long, as on a GPU that idled", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    // Down to the floor, where a frame like it would just keep up.
+    expect(res.noteFrame(1, LONG_FRAME_MS * 4, 2)).toBe(true);
+    expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(1);
+    // Frame 2 left before the step; frame 3, at the floor, still takes 36 ms.
+    expect(res.noteFrame(2, 36, 3)).toBe(false);
+    c.advance(16);
+    res.noteInput(3);
+    expect(res.noteFrame(3, 36, 4)).toBe(true);
+    expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+    // Restored with the resolution.
+    c.advance(RESTORE_AFTER_MS);
+    expect(res.restoreIfIdle()).toBe(true);
+    expect(res.marchCoarsening).toBe(1);
   });
 
   it("leaves a frame no longer than a display frame and the trip alone", () => {
@@ -191,6 +235,86 @@ describe("AdaptiveResolution", () => {
       const res = new AdaptiveResolution(c.now);
       res.noteFullQualityFrame(LONG_FRAME_MS / SHARE);
       res.noteInput(5);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(1);
+    });
+
+    it("climbs back from its idle start as fast as the frames' GPU passes leave room, the march first", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      // A warm GPU would start at full: 80 ms / 8 is 10 ms.
+      res.noteFullQualityFrame(80);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(IDLE_START_SCALE);
+      expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+      // On idle clocks even the cheapest frame takes about the target on the GPU.
+      res.noteGpuPass(TARGET_FRAME_MS);
+      expect(res.noteFrame(6, 30, 6)).toBe(false);
+      // The clocks come back: a pass with room for four times the cost.
+      res.noteGpuPass(IDLE_CLIMB_PASS_MS / 4);
+      expect(res.noteFrame(7, 14, 7)).toBe(true);
+      // The coarsening goes first, then the scale takes the rest.
+      expect(res.marchCoarsening).toBe(1);
+      expect(res.scale).toBeCloseTo(Math.sqrt((4 * IDLE_START_SCALE * IDLE_START_SCALE) / MAX_MARCH_COARSENING), 6);
+      // No new pass since the step: nothing to climb on.
+      expect(res.noteFrame(8, 14, 8)).toBe(false);
+      // A pass with room to spare reaches the warm settings and ends the idle start.
+      res.noteGpuPass(0.1);
+      expect(res.noteFrame(9, 14, 9)).toBe(true);
+      expect(res.scale).toBe(1);
+      expect(res.marchCoarsening).toBe(1);
+      // From here a long frame steps down as ever, and a short pass climbs no further.
+      res.noteGpuPass(0.1);
+      expect(res.noteFrame(10, TARGET_FRAME_MS * 2, 10)).toBe(true);
+      expect(res.scale).toBeCloseTo(Math.SQRT1_2, 6);
+    });
+
+    it("starts at its cheapest settings after the GPU idled, and without pass times takes the fitted ones back once a frame keeps up", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      // 200 ms / 8 is 25 ms: a warm GPU would start a little below full.
+      res.noteFullQualityFrame(200);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(IDLE_START_SCALE);
+      expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+      // Frame 6, the first, runs long on the idle clocks: no step, it is as cheap as it gets.
+      expect(res.noteFrame(6, 30, 7)).toBe(false);
+      // Frame 7 is within the target: the clocks are back.
+      expect(res.noteFrame(7, TARGET_FRAME_MS, 8)).toBe(true);
+      expect(res.scale).toBeCloseTo(Math.sqrt(TARGET_FRAME_MS / 25), 6);
+      expect(res.marchCoarsening).toBe(1);
+      // Frame 8 left before that; a long frame after it steps down as ever.
+      expect(res.noteFrame(8, 9, 9)).toBe(false);
+      expect(res.noteFrame(9, 22, 10)).toBe(true);
+      expect(res.scale).toBeCloseTo(Math.sqrt(TARGET_FRAME_MS / 25) * Math.sqrt(TARGET_FRAME_MS / 22), 6);
+    });
+
+    it("starts as a warm GPU would after less idle than that", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(200);
+      res.noteInput(5, GPU_IDLE_MS - 1);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBeCloseTo(Math.sqrt(TARGET_FRAME_MS / 25), 6);
+      expect(res.marchCoarsening).toBe(1);
+    });
+
+    it("starts the next gesture from the fitted settings when one ends before a frame kept up", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(LONG_FRAME_MS / SHARE);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(IDLE_START_SCALE);
+      expect(res.noteFrame(6, 40, 6)).toBe(false);
+      c.advance(RESTORE_AFTER_MS);
+      expect(res.restoreIfIdle()).toBe(true);
+      expect(res.scale).toBe(1);
+      expect(res.marchCoarsening).toBe(1);
+      // Warm now, it starts where the idle one would have, at full.
+      res.noteInput(7);
       res.fitGestureStart(SHARE);
       expect(res.scale).toBe(1);
     });
