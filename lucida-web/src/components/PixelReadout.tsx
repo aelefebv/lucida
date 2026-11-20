@@ -9,8 +9,9 @@
  * The render worker reads the samples from what it draws (`worker/probe.ts`).
  * One read of every point is in flight at a time, and a new one goes out only
  * when a point moved or a frame was drawn since the last, so the readout
- * follows arriving data without asking for frames of its own. The crosshairs
- * are worked out on the same animation frame, from the cameras as they stand.
+ * follows arriving data without asking for frames of its own. A drag that
+ * moves a camera reads nothing until its button lifts. The crosshairs are
+ * worked out on the same animation frame, from the cameras as they stand.
  */
 
 import { isViewPane } from "../viewer/viewPane.ts";
@@ -37,10 +38,16 @@ export interface PixelReadoutHandle {
   pressAt(at: ClientPoint): void;
 }
 
-/** What the readout tells the trace of a hover: that one landed, and that its readouts are drawn. */
-export interface HoverTrace {
+/**
+ * What the readout has of the render loop: it tells the trace of a hover,
+ * that one landed and that its readouts are drawn, and hears whether a
+ * camera moved.
+ */
+export interface ReadoutLoop {
   markHover(atMs: number): void;
   noteHoverDrawn(throughMs: number, dispatchedMs: number): void;
+  /** Whether a pan, zoom or orbit has landed since `atMs`, on the `performance.now()` clock. */
+  cameraMovedSince(atMs: number): boolean;
 }
 
 interface Props {
@@ -57,8 +64,8 @@ interface Props {
   layers: ResolvedLayers;
   /** Where the pointer rests, and the crosshairs it puts in the other views. */
   hover: Hover;
-  /** Where hovers are traced, once the page has a render loop. */
-  trace?: () => HoverTrace | null;
+  /** The render loop, once the page has one. */
+  loop?: () => ReadoutLoop | null;
   ref?: Ref<PixelReadoutHandle>;
 }
 
@@ -80,14 +87,28 @@ interface Shown {
 /** Gap between the point and the card, in CSS pixels. */
 const OFFSET = 14;
 
-export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layers, hover, trace, ref }: Props) {
+export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layers, hover, loop, ref }: Props) {
   const [shown, setShown] = useState<Shown | null>(null);
   const probe = useRef({
     inFlight: false,
     probedKey: "",
     probedFrame: -1,
+    /** When a mouse or pen button went down over the views, while it stays down. */
+    pressedAt: null as number | null,
+    /** The drag under way moves a camera, so its card is gone. */
+    cameraDrag: false,
     linger: undefined as ReturnType<typeof setTimeout> | undefined,
   });
+
+  /**
+   * Whether a mouse or pen drag is moving a camera: a pan, orbit or zoom has
+   * landed since its button went down. A drag that draws a mark leaves the
+   * camera still, and the readout goes on reading under it.
+   */
+  const movingCamera = () => {
+    const { pressedAt } = probe.current;
+    return pressedAt !== null && (loop?.()?.cameraMovedSince(pressedAt) ?? false);
+  };
 
   const point = (at: HoverPointer | null) => {
     const state = probe.current;
@@ -113,18 +134,28 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
       // Over a marker drawn on a view, as off the canvas, nothing is read.
       const pane = isViewPane(e.target) ? (e.target as HTMLElement) : null;
       point(pointerOver(pane, canvas, e, false, e.timeStamp));
-      // A drag is the pan or orbit it moves, not a hover.
-      if (pane && e.buttons === 0) trace?.()?.markHover(e.timeStamp);
+      if (e.buttons === 0) state.pressedAt = null;
+      else state.pressedAt ??= performance.now();
+      // A drag is whatever it moves or draws, not a hover.
+      if (pane && e.buttons === 0) loop?.()?.markHover(e.timeStamp);
     };
     const onLeave = (e: PointerEvent) => {
       if (e.pointerType !== "touch") point(null);
     };
-    // A finger that lands again starts over; one that lifts leaves the card a moment.
+    // A finger that lands again starts over, so a touch gesture reads nothing,
+    // as a drag that moves a camera doesn't; one that lifts leaves the card a
+    // moment.
     const onDown = (e: PointerEvent) => {
-      if (e.pointerType === "touch" && hover.getPointer()?.touch) point(null);
+      if (e.pointerType !== "touch") state.pressedAt = performance.now();
+      else if (hover.getPointer()?.touch) point(null);
     };
     const onUp = (e: PointerEvent) => {
-      if (e.pointerType !== "touch" || !hover.getPointer()?.touch) return;
+      if (e.pointerType !== "touch") {
+        state.pressedAt = null;
+        frameClock.wake();
+        return;
+      }
+      if (!hover.getPointer()?.touch) return;
       clearTimeout(state.linger);
       state.linger = setTimeout(() => point(null), REVEAL_LINGER_MS);
     };
@@ -143,7 +174,7 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
     };
     // `point` reads only refs, the hover and the scene.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canvas, eventRoot, hover, trace]);
+  }, [canvas, eventRoot, hover, loop]);
 
   useEffect(() => {
     const state = probe.current;
@@ -153,6 +184,19 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
     };
     return frameClock.subscribe(() => {
       const marks = hover.refresh(scene);
+      // A drag that moves a camera reads nothing: each of its frames would be
+      // read in the render worker ahead of the next. Its card goes, as the
+      // view moves under it, and once the button lifts the point the drag
+      // ended on is read.
+      if (movingCamera()) {
+        if (!state.cameraDrag) {
+          state.cameraDrag = true;
+          state.probedKey = "";
+          setShown(null);
+        }
+        return;
+      }
+      state.cameraDrag = false;
       const pointer = hover.getPointer();
       if (!pointer || state.inFlight) return;
       if (canvas.clientWidth === 0 || canvas.clientHeight === 0) return;
@@ -166,20 +210,22 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
       const dispatchedMs = performance.now();
       void Promise.all(points.map((at) => client.probe(at.x, at.y, at.world && [...at.world]))).then((read) => {
         state.inFlight = false;
-        // The pointer may have left while the read was out.
-        if (hover.getPointer()) {
+        // The pointer may have left, or begun moving a camera, while the read was out.
+        if (hover.getPointer() && !movingCamera()) {
           setShown({ cards: points.map((at, i) => ({ point: at, samples: read[i] })), throughMs: pointer.atMs, dispatchedMs });
         }
         // A point that moved while the read was out is read next.
         frameClock.wake();
       });
     });
-  }, [client, canvas, scene, hover]);
+    // `movingCamera` reads only refs and the loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, canvas, scene, hover, loop]);
 
   // Once the cards are on the page, the hovers they read are answered.
   useLayoutEffect(() => {
-    if (shown) trace?.()?.noteHoverDrawn(shown.throughMs, shown.dispatchedMs);
-  }, [shown, trace]);
+    if (shown) loop?.()?.noteHoverDrawn(shown.throughMs, shown.dispatchedMs);
+  }, [shown, loop]);
 
   const context = useMemo(() => readoutContext(scene, datasets, layers), [scene, datasets, layers]);
   const cards = useMemo(

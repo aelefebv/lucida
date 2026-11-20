@@ -29,22 +29,28 @@ import { memberIdForColdEntry, resolveMemberPools } from "../descriptorBuffer.ts
 import { selectEntitySources } from "../entitySources.ts";
 import { fromPlaneFrame } from "../slicePlane.ts";
 import {
+  ANY_PIXEL,
   betweenCubes,
   clipPlaneHit,
   cubePoint,
+  inBounds,
   levelZeroPosition,
   locateSample,
   marchSamples,
   marchSpan,
   pickIntensitySample,
   pickLabelSample,
+  pixelRay,
+  screenBounds,
   cutHits, sliceHits,
   texelValue,
   type MarchSpan,
   type MarchStep,
   type MarchedValue,
+  type PixelRay,
   type ProbeAtlas,
   type ProbeSource,
+  type ScreenBounds,
   type SliceHit,
 } from "../probe.ts";
 
@@ -103,32 +109,49 @@ export function handleProbe(ctx: WorkerCtx, probe: ProbeMessage): void {
     });
     for (const hit of hits) {
       if (hit.label) probeSliceLabel(ctx, frame.view, hit, samples, reads);
-      else probeMember(ctx, hit.memberId, hit.uv, samples, reads, frame.view, "slice");
+      else probeMember(ctx, memberOf(ctx, hit.memberId, frame.view), hit.uv, samples, reads, "slice");
     }
     // A tilted cut samples its member's bricks, as a volume view's clip face does.
     const cuts = cutHits(frame, msg.x, msg.y, (memberId) => memberOf(ctx, memberId, frame.view)?.entry.invModelMatrix);
-    for (const cut of cuts) probeMember(ctx, cut.memberId, cut.local, samples, reads, frame.view, "volume");
-  } else if (frame?.type === "volumeRenderMultiPass" && probe.point) {
-    for (const layer of frame.layers) probeVolumeLayerAt(ctx, frame.view, layer, probe.point, samples, reads);
+    for (const cut of cuts) probeMember(ctx, memberOf(ctx, cut.memberId, frame.view), cut.local, samples, reads, "volume");
   } else if (frame?.type === "volumeRenderMultiPass") {
-    for (const layer of frame.layers) {
-      if (layer.isLabel) {
-        probeVolumeLabel(ctx, frame, layer, msg, samples, reads);
-        continue;
+    const layers = probedLayers(ctx, frame);
+    if (probe.point) {
+      for (const layer of layers) probeVolumeLayerAt(ctx, frame.view, layer, probe.point, samples, reads);
+    } else {
+      // A collection's frame has a layer for every tile and channel, and the
+      // point is over a few of them.
+      const ray = pixelRay(frame, msg.x, msg.y);
+      for (const layer of layers) {
+        if (inBounds(layer.bounds, ray)) probeVolumeLayer(ctx, frame, layer, ray, samples, reads);
       }
-      const member = memberOf(ctx, layer.datasetId, frame.view);
-      if (!member) continue;
-      const invModel = member.entry.invModelMatrix;
-      const face = clipPlaneHit(frame, msg.x, msg.y, invModel);
-      if (face) {
-        probeMember(ctx, layer.datasetId, face, samples, reads, frame.view, "volume");
-        continue;
-      }
-      const span = marchSpan(frame, msg.x, msg.y, invModel);
-      if (span) marchMember(ctx, layer.datasetId, frame.view, span, layer.renderMode, samples, reads);
     }
   }
   reads.submit(ctx, msg.id, samples);
+}
+
+/** Read one layer of a volume frame under a pixel, as its march drew it. */
+function probeVolumeLayer(
+  ctx: WorkerCtx,
+  frame: VolumeRenderMultiPassMessage,
+  { layer, member }: ProbedLayer,
+  ray: PixelRay,
+  samples: ProbeSample[],
+  reads: TexelReads,
+): void {
+  if (layer.isLabel) {
+    probeVolumeLabel(ctx, frame, layer, ray, samples, reads);
+    return;
+  }
+  if (!member) return;
+  const invModel = member.entry.invModelMatrix;
+  const face = clipPlaneHit(frame, ray, invModel);
+  if (face) {
+    probeMember(ctx, member, face, samples, reads, "volume");
+    return;
+  }
+  const span = marchSpan(frame, ray, invModel);
+  if (span) marchMember(ctx, member, span, layer.renderMode, samples, reads);
 }
 
 /**
@@ -210,10 +233,9 @@ class TexelReads {
  */
 function memberSources(
   ctx: WorkerCtx,
-  memberId: string,
   member: ColdMember,
 ): { levels: ProbeSource<ProbeAtlasState>[]; coarse: ProbeSource<ProbeAtlasState> | null } | null {
-  const { draw } = member;
+  const { draw, memberId } = member;
   const sources = draw.sources.get(memberId);
   if (!draw.descriptor || !sources) return null;
   const atlases: Map<string, SliceAtlasState | AtlasState> =
@@ -252,16 +274,14 @@ function levelZeroDims(entry: ColdStateActiveEntry): [number, number, number] | 
  */
 function probeMember(
   ctx: WorkerCtx,
-  memberId: string,
+  member: ColdMember | null,
   pos: readonly number[],
   samples: ProbeSample[],
   reads: TexelReads,
-  view: number,
   mode: "slice" | "volume",
 ): void {
-  const member = memberOf(ctx, memberId, view);
   if (!member) return;
-  const sources = memberSources(ctx, memberId, member);
+  const sources = memberSources(ctx, member);
   const dims = levelZeroDims(member.entry);
   if (!sources || !dims) return;
   const location = locateSample(sources.levels, sources.coarse, pos, mode);
@@ -298,16 +318,13 @@ function probeMember(
  */
 function marchMember(
   ctx: WorkerCtx,
-  memberId: string,
-  view: number,
+  member: ColdMember,
   span: MarchSpan,
   renderMode: VolumeLayerParams["renderMode"],
   samples: ProbeSample[],
   reads: TexelReads,
 ): void {
-  const member = memberOf(ctx, memberId, view);
-  if (!member) return;
-  const sources = memberSources(ctx, memberId, member);
+  const sources = memberSources(ctx, member);
   const dims = levelZeroDims(member.entry);
   const window = member.entry.displayStateByChannel[member.channel];
   if (!sources || !dims || !window) return;
@@ -431,12 +448,12 @@ function probeVolumeLabel(
   ctx: WorkerCtx,
   frame: VolumeRenderMultiPassMessage,
   layer: VolumeLayerParams,
-  msg: ProbeMessage,
+  ray: PixelRay,
   samples: ProbeSample[],
   reads: TexelReads,
 ): void {
   const label = labelVolumeRead(ctx, frame.view, layer);
-  const span = label && marchSpan(frame, msg.x, msg.y, label.invModel);
+  const span = label && marchSpan(frame, ray, label.invModel);
   if (!label || !span) return;
   const steps = marchSamples([label.source], null, span, MARCH_STEPS.label);
   const sample: ProbeSample = {
@@ -505,15 +522,14 @@ function labelVolumeRead(ctx: WorkerCtx, view: number, layer: VolumeLayerParams)
 function probeVolumeLayerAt(
   ctx: WorkerCtx,
   view: number,
-  layer: VolumeLayerParams,
+  { layer, member }: ProbedLayer,
   point: readonly number[],
   samples: ProbeSample[],
   reads: TexelReads,
 ): void {
   if (!layer.isLabel) {
-    const invModel = memberOf(ctx, layer.datasetId, view)?.entry.invModelMatrix;
-    const local = invModel && cubePoint(point, invModel);
-    if (local) probeMember(ctx, layer.datasetId, local, samples, reads, view, "volume");
+    const local = member && cubePoint(point, member.entry.invModelMatrix);
+    if (local) probeMember(ctx, member, local, samples, reads, "volume");
     return;
   }
   const label = labelVolumeRead(ctx, view, layer);
@@ -538,6 +554,7 @@ function probeVolumeLayerAt(
 }
 
 interface ColdMember {
+  memberId: string;
   datasetId: string;
   /** The draw of the member's dataset in the probed view. */
   draw: ViewDraw;
@@ -547,22 +564,81 @@ interface ColdMember {
 }
 
 /** Each active set's members by id, so a hover over a large collection is no scan. */
-const membersByActiveSet = new WeakMap<ColdStateActiveEntry[], Map<string, { entry: ColdStateActiveEntry; channel: number }>>();
+const membersByActiveSet = new WeakMap<ColdStateActiveEntry[], { draw: ViewDraw; members: Map<string, ColdMember> }>();
+
+/** The members `draw`'s cold state lays out, by id. */
+function membersOf(draw: ViewDraw): ReadonlyMap<string, ColdMember> {
+  const { cold, datasetId } = draw;
+  const kept = membersByActiveSet.get(cold.activeSet);
+  if (kept?.draw === draw) return kept.members;
+  const members = new Map<string, ColdMember>();
+  for (const entry of cold.activeSet) {
+    for (const channel of cold.visibleChannels) {
+      const memberId = memberIdForColdEntry(entry, channel);
+      members.set(memberId, { memberId, datasetId, draw, cold, entry, channel });
+    }
+  }
+  membersByActiveSet.set(cold.activeSet, { draw, members });
+  return members;
+}
 
 /** A member as `view`'s cold state for its dataset lays it out. */
 function memberOf(ctx: WorkerCtx, memberId: string, view: number): ColdMember | null {
   const datasetId = ctx.state.memberToDataset.get(memberId);
   const draw = datasetId ? drawOf(ctx.state, datasetId, view) : undefined;
-  if (!datasetId || !draw) return null;
-  const cold = draw.cold;
-  let members = membersByActiveSet.get(cold.activeSet);
-  if (!members) {
-    members = new Map();
-    for (const entry of cold.activeSet) {
-      for (const channel of cold.visibleChannels) members.set(memberIdForColdEntry(entry, channel), { entry, channel });
-    }
-    membersByActiveSet.set(cold.activeSet, members);
+  return (draw && membersOf(draw).get(memberId)) ?? null;
+}
+
+/** One layer of a volume frame as its probes find it. */
+interface ProbedLayer {
+  layer: VolumeLayerParams;
+  /** The member an intensity layer draws; null for a label overlay, or a member its view no longer lays out. */
+  member: ColdMember | null;
+  bounds: ScreenBounds;
+}
+
+/** A volume frame's layers as its probes find them, and the layout their members were read from. */
+interface ProbedFrame {
+  layers: ProbedLayer[];
+  /** Each draw the members came from, with the active set it held then. */
+  from: { draw: ViewDraw; activeSet: ColdStateActiveEntry[] }[];
+}
+
+/**
+ * Keyed by a frame's layers, which the copy {@link frameAt} makes of a view
+ * that doesn't cover the canvas shares with the message drawn.
+ */
+const probedFrames = new WeakMap<readonly VolumeLayerParams[], ProbedFrame>();
+
+/**
+ * A volume frame's layers with their members and screen bounds, worked out
+ * at the frame's first probe and kept for the rest: a pointer moving over a
+ * still view probes one frame many times. A cold state that lays the
+ * members out again in between has them read afresh.
+ */
+function probedLayers(ctx: WorkerCtx, frame: VolumeRenderMultiPassMessage): ProbedLayer[] {
+  const { view } = frame;
+  const kept = probedFrames.get(frame.layers);
+  if (kept?.from.every(({ draw, activeSet }) => drawOf(ctx.state, draw.datasetId, view) === draw && draw.cold.activeSet === activeSet)) {
+    return kept.layers;
   }
-  const member = members.get(memberId);
-  return member ? { datasetId, draw, cold, ...member } : null;
+  const draws = new Map<string, ViewDraw | undefined>();
+  // An entity's channels are layers of one cube.
+  const entityBounds = new Map<ColdStateActiveEntry, ScreenBounds>();
+  const layers = frame.layers.map((layer): ProbedLayer => {
+    if (layer.isLabel) {
+      return { layer, member: null, bounds: layer.modelMatrix ? screenBounds(frame, layer.modelMatrix) : ANY_PIXEL };
+    }
+    const datasetId = ctx.state.memberToDataset.get(layer.datasetId);
+    if (datasetId !== undefined && !draws.has(datasetId)) draws.set(datasetId, drawOf(ctx.state, datasetId, view));
+    const draw = datasetId === undefined ? undefined : draws.get(datasetId);
+    const member = (draw && membersOf(draw).get(layer.datasetId)) ?? null;
+    if (!member) return { layer, member, bounds: ANY_PIXEL };
+    let bounds = entityBounds.get(member.entry);
+    if (!bounds) entityBounds.set(member.entry, (bounds = screenBounds(frame, member.entry.modelMatrix)));
+    return { layer, member, bounds };
+  });
+  const from = [...draws.values()].flatMap((draw) => (draw ? [{ draw, activeSet: draw.cold.activeSet }] : []));
+  probedFrames.set(frame.layers, { layers, from });
+  return layers;
 }

@@ -15,6 +15,7 @@ import type { SliceLayerParams, SliceRenderMultiPassMessage, VolumeRenderMultiPa
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
+import { computeScissorRect } from "../pipeline/upload/scissor.ts";
 
 /** What locating a sample needs of a pool. Slice pools have no `slotsZ`. */
 export interface ProbeAtlas {
@@ -210,19 +211,18 @@ export function sliceHits(
 }
 
 /**
- * Where a volume frame's ray under `(fx, fy)` meets the plane-mode clip plane
+ * Where a volume frame's ray under a pixel meets the plane-mode clip plane
  * inside one entity, in its unit cube, or null when the clip plane does not
  * cut the entity there. Only that cut face is a plane of samples: elsewhere a
  * ray composites many, and no one value is under the pointer.
  */
 export function clipPlaneHit(
   msg: VolumeRenderMultiPassMessage,
-  fx: number,
-  fy: number,
+  pixel: PixelRay,
   invModel: ArrayLike<number>,
 ): [number, number, number] | null {
   if (!((msg.clipDistance ?? 0) > 0) || (msg.clipMode ?? 0) >= 0.5 || !msg.camForward) return null;
-  const ray = entityRay(msg, fx, fy, invModel);
+  const ray = entityRay(pixel, invModel);
   if (!ray) return null;
   const localT = clipPlaneT(msg, ray, invModel);
   // The plane must be what starts the march: past the cube's entry, before its exit.
@@ -241,24 +241,67 @@ interface EntityRay {
   tFar: number;
 }
 
-/** The ray under `(fx, fy)` through one entity, or null where it misses the entity's cube. */
-function entityRay(
-  msg: VolumeRenderMultiPassMessage,
-  fx: number,
-  fy: number,
-  invModel: ArrayLike<number>,
-): EntityRay | null {
-  const ndcX = (pixelCenter(fx, msg.canvasW) / msg.canvasW) * 2 - 1;
-  const ndcY = 1 - (pixelCenter(fy, msg.canvasH) / msg.canvasH) * 2;
+/**
+ * The ray under one render pixel of a volume frame, in world space: the same
+ * for every entity, which each carries into its own cube.
+ */
+export interface PixelRay {
+  /** The center of the render pixel, in the frame's pixels. */
+  px: number;
+  py: number;
+  worldRo: Vec3;
+  worldRd: Vec3;
+}
+
+/**
+ * The ray under the canvas point `(fx, fy)`, fractions of the frame, as
+ * volume.wgsl's `fs` builds it before any entity's transform. The point
+ * lands on the render pixel it falls in, and the ray runs through its center.
+ */
+export function pixelRay(msg: VolumeRenderMultiPassMessage, fx: number, fy: number): PixelRay {
+  const px = pixelCenter(fx, msg.canvasW);
+  const py = pixelCenter(fy, msg.canvasH);
+  const ndcX = (px / msg.canvasW) * 2 - 1;
+  const ndcY = 1 - (py / msg.canvasH) * 2;
   const near = project(msg.invViewProj, [ndcX, ndcY, -1, 1]);
   const far = project(msg.invViewProj, [ndcX, ndcY, 1, 1]);
-  const worldRo = near;
-  const worldRd = normalize(sub(far, near));
+  return { px, py, worldRo: near, worldRd: normalize(sub(far, near)) };
+}
+
+/** A pixel's ray through one entity, or null where it misses the entity's cube. */
+function entityRay({ worldRo, worldRd }: PixelRay, invModel: ArrayLike<number>): EntityRay | null {
   const ro = transform(invModel, [...worldRo, 1]);
   const rd = normalize(transform(invModel, [...worldRd, 0]));
   const [tNear, tFar] = intersectUnitCube(ro, rd);
   if (tNear >= tFar || tFar < 0) return null;
   return { worldRo, worldRd, ro, rd, tNear, tFar };
+}
+
+/** The pixels a layer can draw, `[x0, y0, x1, y1]` in a frame's pixels. */
+export type ScreenBounds = readonly [number, number, number, number];
+
+/** Bounds for a layer the frame gives no way to place: every pixel. */
+export const ANY_PIXEL: ScreenBounds = [-Infinity, -Infinity, Infinity, Infinity];
+
+/** Bounds for a layer wholly off the frame. */
+const NO_PIXEL: ScreenBounds = [0, 0, 0, 0];
+
+/**
+ * The pixels a volume frame can draw of an entity whose cube `model` places:
+ * the scissor the frame confines its march to, as its rectangle holds it
+ * before a comparison narrows it. Every pixel whose ray meets the cube is
+ * inside, so a probe need only carry the ray into the cubes whose bounds
+ * hold its pixel.
+ */
+export function screenBounds(msg: VolumeRenderMultiPassMessage, model: Float32Array): ScreenBounds {
+  if (!msg.viewProj) return ANY_PIXEL;
+  const rect = computeScissorRect(model, msg.viewProj, msg.canvasW, msg.canvasH);
+  return rect ? [rect[0], rect[1], rect[0] + rect[2], rect[1] + rect[3]] : NO_PIXEL;
+}
+
+/** Whether `bounds` hold the pixel `ray` runs through, as the scissor test passes its fragment. */
+export function inBounds(bounds: ScreenBounds, { px, py }: PixelRay): boolean {
+  return px > bounds[0] && px < bounds[2] && py > bounds[1] && py < bounds[3];
 }
 
 /** Where the plane-mode clip plane meets the ray, as the cube's ray parameter; null where it doesn't, ahead of the eye. */
@@ -303,17 +346,16 @@ export interface MarchSpan {
 }
 
 /**
- * What a volume frame marches of the ray under `(fx, fy)` through one entity:
+ * What a volume frame marches of the ray under a pixel through one entity:
  * from where the ray enters the cube, or leaves the clip plane or sphere if
  * that is later, to where it leaves the cube. Null where nothing is marched.
  */
 export function marchSpan(
   msg: VolumeRenderMultiPassMessage,
-  fx: number,
-  fy: number,
+  pixel: PixelRay,
   invModel: ArrayLike<number>,
 ): MarchSpan | null {
-  const ray = entityRay(msg, fx, fy, invModel);
+  const ray = entityRay(pixel, invModel);
   if (!ray) return null;
   let tStart = Math.max(ray.tNear, 0);
   if ((msg.clipDistance ?? 0) > 0) {

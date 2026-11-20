@@ -2,15 +2,19 @@ import { describe, expect, it } from "vitest";
 import { axisAlignedQuad } from "./sliceQuad.ts";
 import {
   clipPlaneHit,
+  inBounds,
   levelZeroPosition,
   locateSample,
   marchSamples,
   marchSpan,
   pickIntensitySample,
   pickLabelSample,
+  pixelRay,
+  screenBounds,
   sliceHits,
   texelValue,
   type MarchedValue,
+  type PixelRay,
   type ProbeAtlas,
 } from "./probe.ts";
 import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
@@ -259,11 +263,47 @@ function volumeFrame(clipDistance: number, clipMode = 0): VolumeRenderMultiPassM
 /** World to the cube's local [0,1]^3: shift by a half. */
 const INV_MODEL = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0.5, 0.5, 1]);
 
+/** A frame and the ray under the point `(fx, fy)` of it. */
+function under(frame: VolumeRenderMultiPassMessage, fx: number, fy: number): [VolumeRenderMultiPassMessage, PixelRay] {
+  return [frame, pixelRay(frame, fx, fy)];
+}
+
+describe("screenBounds", () => {
+  // A cube 0.8 on a side turned 30 degrees about Z, centered on the origin.
+  const [c, s, k] = [Math.cos(Math.PI / 6), Math.sin(Math.PI / 6), 0.8];
+  const model = new Float32Array([k * c, k * s, 0, 0, -k * s, k * c, 0, 0, 0, 0, k, 0, 0, 0, 0, 1]);
+  model.set([-k * 0.5 * (c - s), -k * 0.5 * (s + c), -k * 0.5], 12);
+  const invModel = new Float32Array([c / k, -s / k, 0, 0, s / k, c / k, 0, 0, 0, 0, 1 / k, 0, 0.5, 0.5, 0.5, 1]);
+
+  it("holds every pixel whose ray meets the cube, and only the cube's rectangle", () => {
+    const frame = { ...volumeFrame(0), viewProj: volumeFrame(0).invViewProj };
+    const bounds = screenBounds(frame, model);
+    let met = 0;
+    for (let y = 0; y < frame.canvasH; y++) {
+      for (let x = 0; x < frame.canvasW; x++) {
+        const ray = pixelRay(frame, (x + 0.5) / frame.canvasW, (y + 0.5) / frame.canvasH);
+        if (!marchSpan(frame, ray, invModel)) continue;
+        met++;
+        expect(inBounds(bounds, ray)).toBe(true);
+      }
+    }
+    // 40 pixels on a side, turned.
+    expect(met).toBeGreaterThan(1500);
+    // The turned square reaches 0.4 * (cos 30 + sin 30) = 0.546 from its center along X and Y: pixels 22.7 to 77.3.
+    expect(bounds).toEqual([22, 22, 78, 78]);
+  });
+
+  it("holds every pixel when the frame carries no projection", () => {
+    const frame = volumeFrame(0);
+    expect(inBounds(screenBounds(frame, model), pixelRay(frame, 0, 0))).toBe(true);
+  });
+});
+
 describe("clipPlaneHit", () => {
   it("is where the ray meets the clip plane inside the entity", () => {
     // The plane sits 0.9 in front of the eye at z -1: world z -0.1, local 0.4.
     // Canvas pixel (60, 40) has its center at NDC (0.21, 0.19).
-    const hit = clipPlaneHit(volumeFrame(0.9), 0.6, 0.4, INV_MODEL);
+    const hit = clipPlaneHit(...under(volumeFrame(0.9), 0.6, 0.4), INV_MODEL);
     expect(hit).not.toBeNull();
     const [x, y, z] = hit!;
     expect(x).toBeCloseTo(0.71, 5);
@@ -272,32 +312,32 @@ describe("clipPlaneHit", () => {
   });
 
   it("is nothing without a plane-mode clip plane, or where the plane misses the entity", () => {
-    expect(clipPlaneHit(volumeFrame(0), 0.5, 0.5, INV_MODEL)).toBeNull();
-    expect(clipPlaneHit(volumeFrame(0.9, 1), 0.5, 0.5, INV_MODEL)).toBeNull();
+    expect(clipPlaneHit(...under(volumeFrame(0), 0.5, 0.5), INV_MODEL)).toBeNull();
+    expect(clipPlaneHit(...under(volumeFrame(0.9, 1), 0.5, 0.5), INV_MODEL)).toBeNull();
     // In front of the cube, the march starts at its face, not the plane.
-    expect(clipPlaneHit(volumeFrame(0.3), 0.5, 0.5, INV_MODEL)).toBeNull();
+    expect(clipPlaneHit(...under(volumeFrame(0.3), 0.5, 0.5), INV_MODEL)).toBeNull();
     // Behind it, nothing is drawn.
-    expect(clipPlaneHit(volumeFrame(1.7), 0.5, 0.5, INV_MODEL)).toBeNull();
+    expect(clipPlaneHit(...under(volumeFrame(1.7), 0.5, 0.5), INV_MODEL)).toBeNull();
   });
 });
 
 describe("marchSpan", () => {
   it("runs from where the ray enters the cube, or leaves the clip, to where it leaves", () => {
     // The center pixel's ray runs down +Z from local z -0.5: it enters at t 0.5 and leaves at 1.5.
-    const open = marchSpan(volumeFrame(0), 0.5, 0.5, INV_MODEL)!;
+    const open = marchSpan(...under(volumeFrame(0), 0.5, 0.5), INV_MODEL)!;
     expect(open.tStart).toBeCloseTo(0.5, 5);
     expect(open.tEnd).toBeCloseTo(1.5, 5);
     expect(open.rd[2]).toBeCloseTo(1, 5);
     // The clip plane 0.9 ahead of the eye and the sphere of that radius both start it at t 0.9.
-    expect(marchSpan(volumeFrame(0.9), 0.5, 0.5, INV_MODEL)!.tStart).toBeCloseTo(0.9, 5);
-    expect(marchSpan(volumeFrame(0.9, 1), 0.5, 0.5, INV_MODEL)!.tStart).toBeCloseTo(0.9, 3);
+    expect(marchSpan(...under(volumeFrame(0.9), 0.5, 0.5), INV_MODEL)!.tStart).toBeCloseTo(0.9, 5);
+    expect(marchSpan(...under(volumeFrame(0.9, 1), 0.5, 0.5), INV_MODEL)!.tStart).toBeCloseTo(0.9, 3);
     // A clip in front of the cube changes nothing.
-    expect(marchSpan(volumeFrame(0.3), 0.5, 0.5, INV_MODEL)!.tStart).toBeCloseTo(0.5, 5);
+    expect(marchSpan(...under(volumeFrame(0.3), 0.5, 0.5), INV_MODEL)!.tStart).toBeCloseTo(0.5, 5);
   });
 
   it("is nothing where the ray misses the cube or the clip leaves none of it", () => {
-    expect(marchSpan(volumeFrame(0), 0.99, 0.5, INV_MODEL)).toBeNull();
-    expect(marchSpan(volumeFrame(1.7), 0.5, 0.5, INV_MODEL)).toBeNull();
+    expect(marchSpan(...under(volumeFrame(0), 0.99, 0.5), INV_MODEL)).toBeNull();
+    expect(marchSpan(...under(volumeFrame(1.7), 0.5, 0.5), INV_MODEL)).toBeNull();
   });
 });
 
@@ -312,7 +352,7 @@ describe("marchSamples", () => {
       atlas: pool,
     };
   }
-  const span = () => marchSpan(volumeFrame(0), 0.5, 0.5, INV_MODEL)!;
+  const span = () => marchSpan(...under(volumeFrame(0), 0.5, 0.5), INV_MODEL)!;
 
   it("steps by two thirds of a sample of the level that answers, as the shader marches", () => {
     const steps = marchSamples([resident(0, 16)], null, span(), 512);

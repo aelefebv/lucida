@@ -462,6 +462,31 @@ describe("the worker's pixel probe in 3D with no clip plane", () => {
     await dispatchMessage(ctx, center);
     expect((await settle()).samples).toEqual([{ ...sample, state: "none", along: "first" }]);
   });
+
+  it("reads a layer wherever its cube is on screen, though a comparison narrows its scissor", async () => {
+    const { ctx, settle } = drewVolume("translucent", { contrastMin: 100, contrastMax: 1100 });
+    const frame = ctx.state.lastFrames.get(0) as VolumeRenderMultiPassMessage;
+    frame.viewProj = frame.invViewProj;
+    // A swipe leaves the layer only the left tenth of the view.
+    frame.layers[0].scissorRect = [0, 0, 10, 100];
+    await dispatchMessage(ctx, center);
+    expect((await settle()).samples).toEqual([{ ...sample, position: [8, 8, 9], state: "value", value: 600, level: 0, along: "first" }]);
+  });
+
+  it("reads the layout of a cold state that came after the frame", async () => {
+    const { ctx, posts, settle } = drewVolume("translucent", { contrastMin: 100, contrastMax: 1100 });
+    await dispatchMessage(ctx, center);
+    expect((await settle()).samples).toHaveLength(1);
+    // The entity moves off the point before the next frame is drawn.
+    const draw = ctx.state.draws.get("ds|0")!;
+    const [entry] = draw.cold.activeSet;
+    const moved = new Float32Array(entry.invModelMatrix);
+    moved[12] = 5;
+    draw.cold = { ...draw.cold, activeSet: [{ ...entry, invModelMatrix: moved }] };
+    posts.length = 0;
+    await dispatchMessage(ctx, center);
+    expect(posts).toEqual([{ type: "probeResult", id: 1, samples: [] }]);
+  });
 });
 
 /**
