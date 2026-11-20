@@ -61,27 +61,26 @@ export function deviceClassOf(facts: DeviceFacts): DeviceClass {
 }
 
 /**
- * The most a desktop's GPU total starts at. A GPU asked for more than it has
- * may page rather than fail, as Windows does, so a total sized for a large GPU
- * slows a smaller one down instead of erroring. This is half of a mid-range
- * desktop GPU's 8 GB, leaving the other half to the desktop, the browser and
- * other applications. A larger GPU is the person's to claim in Settings.
+ * A desktop's GPU total, however much memory it reports. The level selection
+ * fills its budget, and the work every replan of a gesture does grows with
+ * what it selects, so a larger total lags a gesture. The device-sized default
+ * the budgets want is 4 GiB, half of a mid-range desktop GPU's 8 GB; it waits
+ * for replans that cost what changed. A larger GPU is the person's to claim in
+ * Settings.
  */
-const DESKTOP_GPU_TOTAL = 4 * GIB;
+const DESKTOP_GPU_TOTAL = 1536 * MIB;
 
 /**
- * The most a constrained device's GPU total starts at: what a phone gets at
- * 8 GiB, the most a phone's browser reports. A desktop that has fallen back
- * to a software adapter is as constrained as the phone the adapter stands in
- * for.
+ * A constrained device's GPU total at 8 GiB of memory, the most a phone's
+ * browser reports. The detail store follows it, so the selection is no larger
+ * than the 512 MiB store gave it before. A desktop that has fallen back to a
+ * software adapter is as constrained as the phone the adapter stands in for.
  */
-const CONSTRAINED_GPU_TOTAL = 1 * GIB;
+const CONSTRAINED_GPU_TOTAL = 512 * MIB;
 
 /**
- * The share of the device's memory the budgets that live in it may take: a
- * quarter, the share of physical memory V8 sets as a page's heap limit. On a
- * desktop that is the detail store; on a constrained device the GPU total
- * lives there too.
+ * The share of a desktop's memory its detail store may take: a quarter, the
+ * share of physical memory V8 sets as a page's heap limit.
  */
 const MEMORY_SHARE = 1 / 4;
 
@@ -141,9 +140,9 @@ const CPU_BYTES_IN_FLIGHT = 32 * MIB;
 const CPU_BYTES_IN_FLIGHT_FLOOR = 8 * MIB;
 
 /**
- * The memory below which the overview store and the bytes in flight shrink
- * in proportion. Neither grows with the detail the GPU holds, and a phone,
- * which reports at most this, is also the device on the slowest link.
+ * The memory below which a constrained device's GPU total, the overview store
+ * and the bytes in flight shrink in proportion. A phone reports at most this,
+ * shares it with its GPU, and is also the device on the slowest link.
  */
 const SMALL_DEVICE_MEMORY_GIB = 8;
 
@@ -171,18 +170,23 @@ function memoryOf(facts: DeviceFacts): number {
   return facts.memoryGiB ?? ASSUMED_DESKTOP_MEMORY_GIB;
 }
 
-/**
- * The GPU total the device starts at when no one has set one: its class's
- * most, or less when its memory can't hold the stores that follow it.
- */
+/** The GPU total the device starts at when no one has set one: its class's, or less when its memory is small. */
 export function deviceGpuTotal(facts: DeviceFacts): number {
-  const memory = memoryOf(facts) * GIB;
+  return mib(fittedGpuTotal(facts), GPU_TOTAL_FLOOR_BYTES);
+}
+
+/** {@link deviceGpuTotal} before its floor. */
+function fittedGpuTotal(facts: DeviceFacts): number {
   if (deviceClassOf(facts) === "desktop") {
-    // The detail store copies the whole total, so it alone counts.
-    return mib(Math.min(DESKTOP_GPU_TOTAL, memory * MEMORY_SHARE), GPU_TOTAL_FLOOR_BYTES);
+    // The detail store copies the whole total, so it alone counts against
+    // memory, which binds only below 6 GiB.
+    return Math.min(DESKTOP_GPU_TOTAL, memoryOf(facts) * GIB * MEMORY_SHARE);
   }
-  // The total and its copy both live in the device's memory.
-  return mib(Math.min(CONSTRAINED_GPU_TOTAL, (memory * MEMORY_SHARE) / 2), GPU_TOTAL_FLOOR_BYTES);
+  return CONSTRAINED_GPU_TOTAL * smallDeviceFraction(facts);
+}
+
+function smallDeviceFraction(facts: DeviceFacts): number {
+  return Math.min(1, memoryOf(facts) / SMALL_DEVICE_MEMORY_GIB);
 }
 
 /**
@@ -197,9 +201,12 @@ export function fitBudgets(facts: DeviceFacts, gpuTotalSet: number | null = null
   // hold, so it holds as much as the whole total. The total's share that
   // render targets and labels take, and the share the level selection leaves
   // unselected, are its room for what the GPU doesn't hold: prefetch, and
-  // chunks the GPU let go that may come back.
-  const cpuMainBytes = mib(Math.min(gpuTotalBytes, memory * storesShare), CPU_MAIN_FLOOR_BYTES);
-  const smallDevice = Math.min(1, memoryOf(facts) / SMALL_DEVICE_MEMORY_GIB);
+  // chunks the GPU let go that may come back. It follows the total as the
+  // device fits it, before the total's floor, so a small phone's store is no
+  // larger than it was.
+  const followed = gpuTotalSet ?? fittedGpuTotal(facts);
+  const cpuMainBytes = mib(Math.min(followed, memory * storesShare), CPU_MAIN_FLOOR_BYTES);
+  const smallDevice = smallDeviceFraction(facts);
   const labelVolumeBytes = mib(Math.min(LABEL_VOLUME_MAX_BYTES, gpuTotalBytes * LABEL_SHARE), LABEL_VOLUME_FLOOR_BYTES);
   return {
     gpuTotalBytes,

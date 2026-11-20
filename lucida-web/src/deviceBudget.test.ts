@@ -22,13 +22,13 @@ const phone = (memoryGiB: number): DeviceFacts => ({ memoryGiB, touchOnly: true,
 const software = (memoryGiB: number | null): DeviceFacts => ({ memoryGiB, touchOnly: false, fallbackAdapter: true });
 
 describe("fitBudgets", () => {
-  it("gives a desktop with a hardware adapter and 16 GiB or more a 4 GiB GPU total", () => {
-    for (const memory of [16, 32]) {
+  it("gives a desktop with a hardware adapter a 1536 MiB GPU total and a detail store as large", () => {
+    for (const memory of [8, 16, 32, null]) {
       expect(fitBudgets(desktop(memory))).toEqual({
-        gpuTotalBytes: 4 * GIB,
-        labelVolumeBytes: 1365 * MIB,
-        labelTotalVolumeBytes: 1365 * MIB,
-        cpuMainBytes: 4 * GIB,
+        gpuTotalBytes: 1536 * MIB,
+        labelVolumeBytes: 512 * MIB,
+        labelTotalVolumeBytes: 512 * MIB,
+        cpuMainBytes: 1536 * MIB,
         cpuOverviewBytes: 64 * MIB,
         cpuBytesInFlight: 32 * MIB,
       });
@@ -36,25 +36,38 @@ describe("fitBudgets", () => {
     expect(fitBudgets(desktop(32))).toEqual(DESKTOP_BUDGETS);
   });
 
-  it("halves a desktop's budgets at 8 GiB, and takes a desktop that reports nothing for one", () => {
-    expect(fitBudgets(desktop(8)).gpuTotalBytes).toBe(2 * GIB);
-    expect(fitBudgets(desktop(8)).cpuMainBytes).toBe(2 * GIB);
-    expect(fitBudgets(desktop(null))).toEqual(fitBudgets(desktop(8)));
+  it("keeps a small desktop's detail store to a quarter of its memory", () => {
+    expect(fitBudgets(desktop(4))).toMatchObject({ gpuTotalBytes: 1 * GIB, cpuMainBytes: 1 * GIB });
   });
 
-  it("keeps a phone, a tablet and a software adapter to what a phone holds", () => {
-    expect(fitBudgets(phone(8))).toMatchObject({ gpuTotalBytes: 1 * GIB, cpuMainBytes: 1 * GIB });
-    // Safari reports nothing, which a touch-only device reads as 4 GiB.
-    expect(fitBudgets(phone(4))).toEqual({
+  it("keeps a phone, a tablet and a software adapter to the detail store a phone had", () => {
+    expect(fitBudgets(phone(8))).toEqual({
       gpuTotalBytes: 512 * MIB,
       labelVolumeBytes: 170 * MIB,
       labelTotalVolumeBytes: 170 * MIB,
       cpuMainBytes: 512 * MIB,
+      cpuOverviewBytes: 64 * MIB,
+      cpuBytesInFlight: 32 * MIB,
+    });
+    // Safari reports nothing, which a touch-only device reads as 4 GiB.
+    expect(fitBudgets(phone(4))).toEqual({
+      gpuTotalBytes: 256 * MIB,
+      labelVolumeBytes: 85 * MIB,
+      labelTotalVolumeBytes: 85 * MIB,
+      cpuMainBytes: 256 * MIB,
       cpuOverviewBytes: 32 * MIB,
       cpuBytesInFlight: 16 * MIB,
     });
     expect(fitBudgets(software(32))).toEqual(fitBudgets(phone(8)));
     expect(fitBudgets(software(null))).toEqual(fitBudgets(phone(8)));
+  });
+
+  it("gives no phone, tablet or software adapter a larger detail store than the 512 MiB at 8 GiB it had", () => {
+    for (const memory of [8, 4, 2, 1, 0.5, 0.25]) {
+      const before = Math.max(64 * MIB, Math.floor((512 * MIB * Math.min(1, memory / 8)) / MIB) * MIB);
+      expect(fitBudgets(phone(memory)).cpuMainBytes, String(memory)).toBeLessThanOrEqual(before);
+      expect(fitBudgets(software(memory)).cpuMainBytes, String(memory)).toBeLessThanOrEqual(before);
+    }
   });
 
   it("stops at a floor on the smallest devices", () => {
@@ -70,7 +83,10 @@ describe("fitBudgets", () => {
     for (const facts of [desktop(32), desktop(16), desktop(8), desktop(4), phone(8), phone(4), phone(2), software(16)]) {
       const budgets = fitBudgets(facts);
       const label = JSON.stringify(facts);
-      expect(budgets.cpuMainBytes, label).toBeGreaterThanOrEqual(budgets.gpuTotalBytes);
+      // At the total's floor the store stays what the device fits.
+      if (budgets.gpuTotalBytes > GPU_TOTAL_FLOOR_BYTES) {
+        expect(budgets.cpuMainBytes, label).toBeGreaterThanOrEqual(budgets.gpuTotalBytes);
+      }
       const inMemory = deviceClassOf(facts) === "desktop"
         ? budgets.cpuMainBytes
         : budgets.cpuMainBytes + budgets.gpuTotalBytes;
@@ -84,6 +100,8 @@ describe("fitBudgets", () => {
     // Lower than the device's own, on a desktop and on a phone.
     expect(fitBudgets(desktop(32), 1 * GIB)).toMatchObject({ gpuTotalBytes: 1 * GIB, cpuMainBytes: 1 * GIB });
     expect(fitBudgets(phone(8), 256 * MIB)).toMatchObject({ gpuTotalBytes: 256 * MIB, cpuMainBytes: 256 * MIB });
+    // Higher than the device's own, as a workstation's owner would.
+    expect(fitBudgets(desktop(32), 4 * GIB)).toMatchObject({ gpuTotalBytes: 4 * GIB, cpuMainBytes: 4 * GIB });
     expect(fitBudgets(desktop(32), 1).gpuTotalBytes).toBe(GPU_TOTAL_FLOOR_BYTES);
   });
 

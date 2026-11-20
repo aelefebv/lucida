@@ -28,7 +28,6 @@ import {
   viewLayerTargets,
 } from "./viewResources.ts";
 import { GpuRoom, grantGrowth, handleGpuOutOfMemory, measureGpuCapacity, measureGpuMemory, setGpuTotal } from "./gpuBudget.ts";
-import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import { wantNothingOf } from "../coldState/apply.ts";
 
 const MIB = 1024 * 1024;
@@ -373,8 +372,9 @@ describe("running out of memory", () => {
     expect(b.keys.slice(0, 64).every((key) => b.atlas.slots.has(`imgB|${key}`))).toBe(true);
   });
 
-  it("halves a desktop's total again on each failure, down to the floor, keeping every wanted chunk", () => {
-    const { ctx } = makeCtx(DESKTOP_BUDGETS.gpuTotalBytes);
+  it("halves a 4 GiB total again on each failure, down to the floor, keeping every wanted chunk", () => {
+    // A total a workstation's owner sets in Settings.
+    const { ctx } = makeCtx(4096 * MIB);
     // Twelve pools of 60 layers of 4 MiB, nearly 3 GiB, each wanting one layer's chunks.
     const pools = Array.from({ length: 12 }, (_, i) => heldPool(ctx, `ds1:ch${i}:32x32x32:detail`, `img${i}`, 60));
     pools.forEach(({ keys }, i) => want(ctx, `img${i}`, keys.slice(0, 64)));
