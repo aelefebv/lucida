@@ -62,12 +62,12 @@ export function deviceClassOf(facts: DeviceFacts): DeviceClass {
 
 /**
  * A desktop's GPU total, however much memory it reports. The level selection
- * fills its budget, and a gesture's frames grow with the detail it holds:
- * above this total, a workstation GPU's orbit of a large volume falls behind
- * the display's refreshes, though its replans cost what changed. The
+ * fills its budget, and above this total a workstation GPU's gestures over a
+ * large volume fall behind the display's refreshes: marching finer levels
+ * doubles an unzoomed orbit's GPU time, and pools near the total grow while
+ * the view moves, each growth holding the GPU for tens of milliseconds. The
  * device-sized default the budgets want is 4 GiB, half of a mid-range desktop
- * GPU's 8 GB; it waits for gesture frames that keep up at it. A larger GPU is
- * the person's to claim in Settings.
+ * GPU's 8 GB. A larger GPU is the person's to claim in Settings.
  */
 const DESKTOP_GPU_TOTAL = 1536 * MIB;
 
