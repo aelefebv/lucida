@@ -8,7 +8,6 @@
   "steps": [
     { "kind": "zoom", "factor": 4, "durationMs": 1000 },
     { "kind": "orbit", "theta": 40, "phi": 10, "durationMs": 1500 },
-    { "kind": "wait" },
     { "kind": "orbit", "theta": -40, "phi": -10, "durationMs": 1500 }
   ]
 }

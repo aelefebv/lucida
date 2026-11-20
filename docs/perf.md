@@ -152,12 +152,12 @@ A desktop GPU drops its clocks when it sits idle. A workstation GPU steps down o
 to 4 s, and on its lowest clocks a volume frame takes about 15 times as long, until they come
 back about 300 ms into a gesture. A gesture after a pause of a few seconds starts on whichever
 side of a step the pause left it, so its lag reads the clocks, not the code. So a gesture that
-follows another step waits for the view to settle and starts straight after, about a second
-after the last frame, on top clocks: `large-canvas-orbit`, `volume-zoomed-orbit`,
-`slice-zoomed-pan`, `settle-then-orbit` and `phone-settle-then-orbit` do. A `wait` step
-already holds the page's quiescence window, so they add no hold of their own.
-`large-canvas-orbit-cold` holds 12 s after the settle instead, past the lowest step on a
-desktop GPU, so its orbit starts on idle clocks. The `GPU idle` column says
+follows another step starts as soon as that step's run settles, about 0.8 s after the last
+frame, on top clocks: `large-canvas-orbit`, `volume-zoomed-orbit`, `slice-zoomed-pan`,
+`settle-then-orbit` and `phone-settle-then-orbit` do. They take no `wait` step, which would
+add the page's half-second quiescence hold, since each gesture step already waits for its
+run to settle. `large-canvas-orbit-cold` waits and then holds 12 s instead, past the lowest
+step on a desktop GPU, so its orbit starts on idle clocks. The `GPU idle` column says
 how long each step's GPU had been idle, and so which state it started in.
 
 ## Builds
