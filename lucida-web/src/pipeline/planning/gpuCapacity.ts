@@ -31,6 +31,24 @@ const MIN_LIMITS: DeviceLimits = {
   maxBufferSize: 256 * 1024 * 1024,
 };
 
+/**
+ * What admission reads of a report, as one value: the total, the device's
+ * limits, and each pool's slot size and the slots it may grow to. A report
+ * comes each time a pool grows by a slot, which changes none of these, so
+ * admission carried from the last plan compares this rather than the report.
+ */
+export function slotsReadFrom(report: GpuCapacityReport | null): string {
+  if (report === null) return "";
+  const { maxTextureDimension2D, maxTextureDimension3D, maxStorageBufferBindingSize, maxBufferSize } = limitsOf(report);
+  const pools = report.pools.map((pool) => `${pool.poolKey}:${pool.maxSlots}:${pool.slotBytes}`).sort().join(",");
+  return `${report.budgetBytes}|${maxTextureDimension2D}|${maxTextureDimension3D}|${maxStorageBufferBindingSize}|${maxBufferSize}|${pools}`;
+}
+
+/** The device limits a report gives, or the WebGPU minimums before the first. */
+function limitsOf(report: GpuCapacityReport | null): DeviceLimits {
+  return report?.limits ?? MIN_LIMITS;
+}
+
 /** The bytes the chunk pools may hold between them. */
 export function gpuChunkRoomBytes(report: GpuCapacityReport | null, fallbackTotalBytes: number): number {
   return report ? Math.max(0, report.budgetBytes - report.reservedBytes) : fallbackTotalBytes;
@@ -51,7 +69,7 @@ export function gpuSlotsFor(
 ): (req: ChunkRequest) => GpuSlot | null {
   const reported = new Map(report?.pools.map((pool) => [pool.poolKey, pool]) ?? []);
   const texel = bytesPerTexel(datasetSampleFormat(manifest));
-  const limits = report?.limits ?? MIN_LIMITS;
+  const limits = limitsOf(report);
   const cap = poolCapBytes(limits, report?.budgetBytes ?? fallbackTotalBytes);
   const chunkDims = new Map<string, Map<number, [number, number, number]>>();
   for (const image of manifest.images) {

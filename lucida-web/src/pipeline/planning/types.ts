@@ -227,8 +227,9 @@ export interface PlanningState {
 
 /**
  * What one view's plan leaves for the next: its own active set, which a
- * request-only replan reuses, and the cut the prefetch lane reads to tell a
- * step.
+ * request-only replan reuses, the cut the prefetch lane reads to tell a
+ * step, and the requests its lanes emitted, which the next plan carries
+ * forward where nothing they depend on changed.
  */
 export interface ViewPlanningState {
   activeSet: ActiveSetEntry[];
@@ -238,6 +239,57 @@ export interface ViewPlanningState {
    * after which the slice view fetches the whole chunks its plane lies in.
    */
   previousCut: SliceCut | null;
+  /** What the view's lanes emitted when it alone planned the dataset; null otherwise. */
+  lanes: LaneMemory | null;
+}
+
+/**
+ * What the lanes of a view that alone plans its dataset emitted, so the
+ * next plan keeps each request whose chunk and lane inputs held, the same
+ * object at the same priority, and emits only for what changed
+ * (`laneMemory.ts`).
+ */
+export interface LaneMemory {
+  /** What every request depends on beyond its own chunk; a change emits every request again. */
+  scope: LaneScope;
+  /** The detail lane's requests, by entity, then by cell (`cellKey`), one per channel. */
+  detail: ReadonlyMap<string, EntityDetailRequests>;
+  /** The other lanes' requests, by entity, then chunk key, each with the band it asks in. */
+  others: ReadonlyMap<string, ReadonlyMap<string, readonly { req: ChunkRequest; band: number }[]>>;
+  /** The plan's requests in planner order, which held every request above. */
+  requests: readonly ChunkRequest[];
+}
+
+/** What every request of a view's lanes depends on beyond its own chunk. */
+export interface LaneScope {
+  datasetId: string;
+  content: number;
+  layout: number;
+  t: number;
+  visibleChannels: readonly number[];
+  renderMode: SelectionState["renderMode"];
+  cut: SliceCut;
+  /** The config the requests were emitted under, which sets the bands and the slice band. */
+  config: object;
+}
+
+/** One entity's detail requests, and the level geometry they were emitted from. */
+export interface EntityDetailRequests {
+  levels: readonly LevelGeometry[];
+  cells: ReadonlyMap<number, readonly ChunkRequest[]>;
+}
+
+/**
+ * How a plan's requests differ from the previous plan's, when it carried
+ * that plan's forward: every request of `base` but those `removed`, and
+ * those `added`. A request kept is the same object, at the same priority.
+ */
+export interface RequestDelta {
+  /** The previous plan's requests, as it returned them, which a consumer checks it holds. */
+  base: readonly ChunkRequest[];
+  /** In planner order. */
+  added: readonly ChunkRequest[];
+  removed: readonly ChunkRequest[];
 }
 
 /** Which way the last zoom change moved: toward level 0 or away from it. */
@@ -250,15 +302,18 @@ export function initialPlanningState(): PlanningState {
 
 /** A view's state before its first plan: nothing held, no cut seen. */
 export function initialViewPlanningState(): ViewPlanningState {
-  return { activeSet: [], previousCut: null };
+  return { activeSet: [], previousCut: null, lanes: null };
 }
 
 export interface RequestPlan {
   /**
    * Every lane's chunk requests, sorted ascending by `priority` (lower
-   * is more urgent). A fresh array, so the caller may mutate it.
+   * is more urgent). A fresh array, which the caller must not change: the
+   * next plan's {@link delta} names it as its base, and keeps its requests.
    */
-  requests: ChunkRequest[];
+  requests: readonly ChunkRequest[];
+  /** How {@link requests} differ from the previous plan's, when this plan carried them forward. */
+  delta?: RequestDelta;
   /** One entry per visible tile, plus invisible-entity pass-throughs. */
   activeSet: ActiveSetEntry[];
   epochs: SceneEpochs;

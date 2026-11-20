@@ -43,10 +43,10 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests, labelFormsFor } from "./planning/labelRequests.ts";
-import { admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
+import { AdmissionLedger, admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
 import { tallyViewCoverage, type ViewCoverage } from "./planning/viewCoverage.ts";
 import { requestIdentity } from "./planning/plan.ts";
-import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
+import { gpuChunkRoomBytes, gpuSlotsFor, slotsReadFrom } from "./planning/gpuCapacity.ts";
 import {
   initialLevelSelectionMemory,
   selectLevels,
@@ -65,6 +65,7 @@ import type {
   PlanningState,
   ChunkRequest,
   PlanStats,
+  RequestDelta,
   RequestPlan,
   PlanningSnapshot,
   SelectionState,
@@ -536,6 +537,8 @@ function displayStatesEqual(
 interface DatasetRequests {
   dsId: string;
   requests: readonly ChunkRequest[];
+  /** How the requests differ from the dataset's last plan's, when the planner carried them. */
+  delta?: RequestDelta;
 }
 
 /**
@@ -575,7 +578,7 @@ function emitViewerInterestHint(
   datasetId: string,
   selection: SelectionState,
   visibleRegion: VisibleRegion,
-  requests: ChunkRequest[],
+  requests: readonly ChunkRequest[],
   generation: number,
 ): void {
   if (!ctx.sendViewerInterest) return;
@@ -800,6 +803,8 @@ export class TickCoordinator {
   private lastAdmission: { plans: readonly DatasetRequests[]; report: GpuCapacityReport | null; short: number } | null = null;
   /** A capacity report would admit part of the last shortfall, and no plan has used it yet. */
   private capacityReplanOwed = false;
+  /** What the last admission charged, which the next carries where the plans say how they changed. */
+  private readonly admission = new AdmissionLedger();
 
   /** What the last level selection chose, which the next leans toward. */
   private levelMemory: LevelSelectionMemory = initialLevelSelectionMemory();
@@ -855,10 +860,27 @@ export class TickCoordinator {
     };
   }
 
-  /** Admit against the worker's latest report, and keep what {@link noteGpuCapacity} weighs. */
+  /**
+   * Admit against the worker's latest report, carried from the last
+   * admission where the plans say how they changed, and keep what
+   * {@link noteGpuCapacity} weighs.
+   */
   private admit(ctx: TickContext, plans: readonly DatasetRequests[]): Admission[] {
     const report = ctx.client.gpuCapacity();
-    const admissions = admitDatasetPlans(ctx, plans, report);
+    const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
+    const manifests = plans.map(({ dsId }) => ctx.datasets.get(dsId)!.manifest);
+    const admissions = this.admission.admit(
+      plans.map(({ requests, delta }, i) => ({
+        requests,
+        ...(delta && { delta }),
+        bytesOf: chunkBytesFor(manifests[i]),
+        heldWhole: (req: ChunkRequest) => ctx.cpuCache.holdsWhole(req),
+        slotOf: gpuSlotsFor(manifests[i], report, gpuTotalBytes),
+      })),
+      ctx.cpuCache.tierCapacity(),
+      gpuChunkRoomBytes(report, gpuTotalBytes),
+      [slotsReadFrom(report), gpuTotalBytes, ...manifests],
+    );
     this.lastAdmission = { plans, report, short: shortfallOf(admissions) };
     return admissions;
   }
@@ -1008,12 +1030,14 @@ export class TickCoordinator {
     // set's inputs are unchanged, so only the requests need emitting again.
     const requestsOnly =
       !structural && causes.every((c) => c === "selection" || c === "minimap");
-    // A pure view move: only the camera moved, so the active set is a pure
-    // function of the new view. This is the sole gate for the view-move
-    // cold-state delta. Anything bundled with the view change, bar a display
-    // edit patched below, fails it and takes the full rebuild, so the delta's
-    // retained descriptors are safe.
-    let viewOnly = !structural && causes.length === 1 && causes[0] === "view";
+    // Only the camera moved, the worker's room changed, or the minimap asked
+    // for chunks, so the active set is a pure function of the view and the
+    // budget, and the descriptors' inputs held. This is the sole gate for the
+    // view-move cold-state delta. Anything else, bar a display edit patched
+    // below, fails it and takes the full rebuild, so the delta's retained
+    // descriptors are safe.
+    let viewOnly = !structural && causes.length > 0 &&
+      causes.every((cause) => cause === "view" || cause === "capacity" || cause === "minimap");
 
     // Display-only fast path: a per-channel intensity edit with nothing else
     // changed. The active set and residency are then identical, so push a
@@ -1063,11 +1087,6 @@ export class TickCoordinator {
     // `lastRebuildAt` is stamped at completion below, not here.
     this.pendingDeferredRebuild = false;
     this.capacityReplanOwed = false;
-
-    // CpuCache owns wanted-generation and delivery/rejection state, so the
-    // rebuild lifecycle advances there exactly once before the per-dataset
-    // loop.
-    ctx.cpuCache.onPlanRebuildStart();
 
     const memberRosterByDatasetView = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDatasetView = new Map<string, Map<string, number>>();
@@ -1180,8 +1199,40 @@ export class TickCoordinator {
       plannedDatasets.map((planned) => ({
         dsId: planned.dsId,
         requests: planned.result.requests,
+        ...(planned.result.delta && { delta: planned.result.delta }),
       })),
     );
+
+    // Categorical label overlays are invisible to the WASM planner
+    // (labels live outside `manifest.images`/`entities`), so their chunk
+    // requests are synthesized here from the label's own geometry and
+    // merged into the fetch plan. In `slice` mode the planes around the
+    // label's plane the view cuts are fetched, as the image's are; in `volume`
+    // mode the whole label volume (every z-chunk) is fetched for the 3D
+    // first-hit surface. Scoped under each label's own image id, so they
+    // never perturb intensity-chunk eviction. Each view asks for its own.
+    const labelRequests = plannedDatasets.map((planned) => planned.views.filter(drawsLabels).flatMap((view) => computeLabelChunkRequests({
+      datasetId: planned.dsId,
+      manifest: ctx.datasets.get(planned.dsId)!.manifest,
+      t: view.snapshot.selection.t,
+      cut: view.snapshot.selection.cut,
+      // Fetch only the labels the render path will draw (visible +
+      // eligible), so a hidden label is neither fetched nor drawn.
+      labelSettings: planned.dsSettings?.label_settings,
+      mode: view.view.mode,
+      config: planningConfig,
+      cutStep: view.cutStep,
+    })));
+    // CpuCache owns wanted-generation and delivery/rejection state, so the
+    // rebuild lifecycle advances there exactly once before the submits. A
+    // plan every dataset of which carried its requests, and admitted whole,
+    // updates the cache over what changed, on the arrays the last plan
+    // submitted. A dataset with label overlays submits them beside its
+    // plan's requests in a fresh array, so it is submitted whole.
+    const submitDeltas = admissions.map((admission, index) => (labelRequests[index].length === 0 ? admission.delta : undefined));
+    const carried = submitDeltas.every((delta) => delta !== undefined) &&
+      ctx.cpuCache.beginCarriedPlan(submitDeltas.map((delta) => delta!.base));
+    if (!carried) ctx.cpuCache.onPlanRebuildStart();
     // With several views, how much of what each asks for admission let in.
     const viewCoverage = views.length > 1 ? new Map<number, ViewCoverage>() : null;
     for (const [index, planned] of plannedDatasets.entries()) {
@@ -1274,7 +1325,11 @@ export class TickCoordinator {
         const visibleChannels = snapshot.selection.visibleChannels;
         let indexByMember: Map<string, number>;
         if (viewOnly && heldForView?.mode === mode && heldForView.activeSet.length > 0) {
-          this.uploader.sendColdStateDelta({ ...coldArgs, previousActiveSet: heldForView.activeSet });
+          this.uploader.sendColdStateDelta({
+            ...coldArgs,
+            previousActiveSet: heldForView.activeSet,
+            ...(share.requests === result.requests && admission.delta && { requestDelta: admission.delta }),
+          });
           // The worker rebuilds its descriptor buffer from the reordered active
           // set in the same canonical order this walks, so the indices agree.
           // A move that leaves every member where it was keeps them.
@@ -1304,36 +1359,15 @@ export class TickCoordinator {
         held.set(view.id, { mode, activeSet: share.activeSet, visibleChannels, indexByMember });
       }
 
-      // Categorical label overlays are invisible to the WASM planner
-      // (labels live outside `manifest.images`/`entities`), so their chunk
-      // requests are synthesized here from the label's own geometry and
-      // merged into the fetch plan. In `slice` mode the planes around the
-      // label's plane the view cuts are fetched, as the image's are; in `volume`
-      // mode the whole label volume (every z-chunk) is fetched for the 3D
-      // first-hit surface. Scoped under each label's own image id, so they
-      // never perturb intensity-chunk eviction. Each view asks for its own.
-      const labelRequests = planned.views.filter(drawsLabels).flatMap((view) => computeLabelChunkRequests({
-        datasetId: dsId,
-        manifest: ctx.datasets.get(dsId)!.manifest,
-        t: view.snapshot.selection.t,
-        cut: view.snapshot.selection.cut,
-        // Fetch only the labels the render path will draw (visible +
-        // eligible), so a hidden label is neither fetched nor drawn.
-        labelSettings: dsSettings?.label_settings,
-        mode: view.view.mode,
-        config: planningConfig,
-        cutStep: view.cutStep,
-      }));
-      const requestsWithLabels =
-        labelRequests.length > 0
-          ? [...result.requests, ...labelRequests]
-          : result.requests;
+      const labels = labelRequests[index];
+      const requestsWithLabels = labels.length > 0 ? [...result.requests, ...labels] : result.requests;
 
       // Submit image and label chunks in a single call so they don't cancel
       // each other. Cancellation contract: a request omitted by the
       // next plan has its in-flight fetch aborted.
       ctx.cpuCache.submit({
         requests: requestsWithLabels,
+        ...(carried && { delta: submitDeltas[index] }),
         activeSet: result.activeSet,
         epochs: result.epochs,
         stats: result.stats,
@@ -1660,7 +1694,7 @@ export class TickCoordinator {
       visibleRegion: VisibleRegion;
       selection: SelectionState;
       planningState: PlanningState;
-      requests: ChunkRequest[];
+      requests: readonly ChunkRequest[];
       stats: PlanStats;
       cutStep: boolean;
     }

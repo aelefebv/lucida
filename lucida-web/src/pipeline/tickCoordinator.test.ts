@@ -44,6 +44,8 @@ function createMockCpuCache(): CpuCache {
   return {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
+    // A full rebuild every plan, unless a test carries one.
+    beginCarriedPlan: vi.fn(() => false),
     tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
     holdsWhole: vi.fn(() => false),
     getDeliverable: vi.fn(function* () {}),
@@ -1001,7 +1003,7 @@ describe("display-only fast path", () => {
       expect(cpuCache.onPlanRebuildStart).toHaveBeenCalledTimes(1);
       // The submitted requests target the NEW timepoint (t = 5): a level-0
       // detail chunk key is "level/t/c/z/y/x", so it starts "0/5/".
-      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as {
+      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as unknown as {
         requests: { t: number; chunkKey: string }[];
       };
       expect(submitted.requests.length).toBeGreaterThan(0);
@@ -1051,7 +1053,7 @@ describe("display-only fast path", () => {
       expect(planSpy).not.toHaveBeenCalled();
       expect(coldState).not.toHaveBeenCalled();
       expect(cpuCache.submit).toHaveBeenCalledTimes(1);
-      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as {
+      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as unknown as {
         requests: { lane: string; chunkKey: string }[];
       };
       expect(submitted.requests).toContainEqual(
@@ -1233,7 +1235,7 @@ describe("display-only fast path", () => {
         frustum_planes: null,
       });
       const submittedPrefetch = (call: number) => {
-        const submitted = vi.mocked(cpuCache.submit).mock.calls[call][0] as {
+        const submitted = vi.mocked(cpuCache.submit).mock.calls[call][0] as unknown as {
           requests: { lane: string; level: number; t: number }[];
         };
         return submitted.requests.filter((r) => r.lane === "prefetch");
@@ -2371,6 +2373,83 @@ describe("incremental delta fold", () => {
       expect(detailLevels(second)).toEqual([1, 1, 1, 1]);
       // No lane wants a level finer than the target.
       expect(second.requests.some((r) => r.level === 0)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("carries a move's plan through admission, the cache and the cold state, costing what changed", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2) }],
+      ]);
+      const orch = makeOrch();
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [
+          fullPayload([foldRow({ target_level: 0 })]),
+          deltaPayload([], [], []),
+          deltaPayload([], [], [foldRow({ target_level: 1 })]),
+        ],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      let zoom = 1;
+      const scene = {
+        ...fold.scene,
+        visible_region: () => JSON.stringify({
+          xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: zoom, sort_center: null, frustum_planes: null,
+        }),
+      };
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = () =>
+        ({ ...(makeCtx(scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
+      const submitted = (call: number) => vi.mocked(cpuCache.submit).mock.calls[call][0] as RequestPlan;
+
+      // The first plan has nothing to carry: a full rebuild and a full cold state.
+      orch.planAndFetch(ctx(), emptyMinimap);
+      expect(cpuCache.beginCarriedPlan).toHaveBeenCalledTimes(0);
+      expect(cpuCache.onPlanRebuildStart).toHaveBeenCalledTimes(1);
+      const first = submitted(0);
+      expect(first.delta).toBeUndefined();
+
+      // A move that leaves the selection where it was hands on the same
+      // requests: the cache carries them on what it last took, and the cold
+      // state's delta names no wanted chunk.
+      vi.advanceTimersByTime(500);
+      fold.setView(2);
+      orch.planAndFetch(ctx(), emptyMinimap);
+      expect(cpuCache.beginCarriedPlan).toHaveBeenLastCalledWith([first.requests]);
+      expect(cpuCache.onPlanRebuildStart).toHaveBeenCalledTimes(1);
+      const second = submitted(1);
+      expect(second.requests).toBe(first.requests);
+      expect(second.delta).toEqual({ base: first.requests, added: [], removed: [] });
+      const held = client.coldStateDelta.mock.calls[0][0] as ColdStateDeltaMessage;
+      expect(held.wantedChunks).toEqual([]);
+
+      // A zoom moves the selection a level: the cache and the worker hear what changed.
+      vi.advanceTimersByTime(500);
+      fold.setView(3);
+      zoom = 0.4;
+      orch.planAndFetch(ctx(), emptyMinimap);
+      const third = submitted(2);
+      expect(third.delta?.base).toBe(second.requests);
+      expect(third.delta?.removed.filter((r) => r.lane === "detail").map((r) => r.level)).toEqual(new Array(16).fill(0));
+      expect(third.delta?.added.filter((r) => r.lane === "detail").map((r) => r.level)).toEqual([1, 1, 1, 1]);
+      const moved = client.coldStateDelta.mock.calls[1][0] as ColdStateDeltaMessage;
+      const detail = moved.wantedChunks.find((change) => change.tier === "detail")!;
+      expect(detail.removed).toHaveLength(16);
+      expect(detail.added).toHaveLength(4);
     } finally {
       vi.useRealTimers();
     }

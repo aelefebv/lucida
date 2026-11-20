@@ -33,7 +33,7 @@ interface Case {
   mode: "slice" | "volume";
   /** Applied after the open fits the camera. */
   commands: object[];
-  /** In nominal microseconds, about twice the typical figure. */
+  /** In nominal microseconds, about twice the typical figure, for a plan from nothing and a replan alike. */
   budgetUs: number;
 }
 
@@ -94,8 +94,8 @@ function snapshotFor(c: Case, dpr: number): { base: ViewSnapshotBase; scene: Was
   return { base: built, scene };
 }
 
-/** One pass: the level selection, then the plan from it. */
-function planPass(c: Case, base: ViewSnapshotBase, memory: LevelSelectionMemory) {
+/** One pass: the level selection, then the plan from it, carrying `state`'s requests. */
+function planPass(c: Case, base: ViewSnapshotBase, memory: LevelSelectionMemory, state = initialPlanningState()) {
   const views = [{ view: base.view, datasets: [{ datasetId: c.dataset.datasetId, view: base, manifest: c.dataset.manifest }], area: 1 }];
   const selected = selectLevels(views, BUDGET, memory, DEFAULT_PLANNING_CONFIG);
   const snapshot: PlanningSnapshot = {
@@ -104,7 +104,7 @@ function planPass(c: Case, base: ViewSnapshotBase, memory: LevelSelectionMemory)
     views: [{ ...base, levelSelection: selected.byView.get(base.view)!.get(c.dataset.datasetId)! }],
     minimapPending: new Map(),
   };
-  return { plan: plan(snapshot, initialPlanningState()), memory: selected.memory };
+  return { plan: plan(snapshot, state), memory: selected.memory };
 }
 
 describe("planning cost per pass", () => {
@@ -121,6 +121,14 @@ describe("planning cost per pass", () => {
           const timing = timeStep(() => planPass(c, base, memory), { samples: 60, warmup: 10 });
           console.log(`[plan] ${c.name} @${dpr}x, ${requests} requests: ${describeTiming(timing, c.budgetUs)}`);
           expectWithinBudget(`${c.name} @${dpr}x`, timing, c.budgetUs);
+
+          // A replan of a view that held still, as a gesture's replans mostly
+          // are: the selection chooses what it chose, and the plan carries
+          // every request from the last.
+          const held = planPass(c, base, memory).plan.nextState;
+          const carried = timeStep(() => planPass(c, base, memory, held), { samples: 60, warmup: 10 });
+          console.log(`[plan] ${c.name} @${dpr}x, replanned: ${describeTiming(carried, c.budgetUs)}`);
+          expectWithinBudget(`${c.name} @${dpr}x replanned`, carried, c.budgetUs);
         } finally {
           scene.free();
         }

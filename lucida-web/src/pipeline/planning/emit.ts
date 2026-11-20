@@ -19,6 +19,8 @@ import {
   type PlanningConfig,
 } from "./config.ts";
 import { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
+import type { LaneCarry } from "./laneMemory.ts";
+import { cellKey } from "./laneMemory.ts";
 import type {
   ActiveSetEntry,
   ChunkRequest,
@@ -172,6 +174,11 @@ export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
  * Requests as the lanes emit them. `priority` holds the lane's band until
  * {@link LaneRequests.finish} adds each request's in-lane term, which needs
  * every key in the band.
+ *
+ * With a {@link LaneCarry}, a request the previous plan made alike is kept
+ * as that plan made it ({@link keep}): its key still counts toward its
+ * band's spread, so the requests emitted anew spread over the same range as
+ * a plan emitting every request would, and it keeps its priority.
  */
 export class LaneRequests {
   private readonly requests: ChunkRequest[] = [];
@@ -180,12 +187,36 @@ export class LaneRequests {
   /** Whether each request leads its band: see {@link lead}. */
   private readonly leading: boolean[] = [];
   private highestBand = -Infinity;
+  /** The least and greatest key of each band's kept requests. */
+  private readonly keptRange = new Map<number, [number, number]>();
+  private readonly carry: LaneCarry | undefined;
 
+  constructor(carry?: LaneCarry) {
+    this.carry = carry;
+  }
+
+  /**
+   * A request of `req.priority`'s band. Outside the detail lane, which keeps
+   * by cell itself, one the previous plan made alike is kept in its place.
+   */
   push(req: ChunkRequest, key: number): void {
+    if (this.carry !== undefined && req.lane !== "detail" && this.carry.takeOther(req, req.priority) !== undefined) {
+      this.keep(req.priority, key);
+      return;
+    }
     this.requests.push(req);
     this.keys.push(key);
     this.leading.push(false);
     if (req.priority > this.highestBand) this.highestBand = req.priority;
+  }
+
+  /** Requests of `band` the previous plan made, kept with their priorities, whose in-lane key is `key`. */
+  keep(band: number, key: number): void {
+    const range = this.keptRange.get(band);
+    if (range === undefined) this.keptRange.set(band, [key, key]);
+    else if (key < range[0]) range[0] = key;
+    else if (key > range[1]) range[1] = key;
+    if (band > this.highestBand) this.highestBand = band;
   }
 
   /**
@@ -222,6 +253,12 @@ export class LaneRequests {
     const range = new Map<string, [number, number]>();
     const split = new Map<number, number>();
     const group = (i: number): string => `${this.requests[i].priority}|${this.leading[i] ? 1 : 0}`;
+    // Kept requests never lead: a view that leads plans beside another, and
+    // such a plan keeps nothing.
+    for (const [band, keys] of this.keptRange) {
+      range.set(`${band}|0`, [keys[0], keys[1]]);
+      split.set(band, 2);
+    }
     for (let i = 0; i < this.requests.length; i++) {
       const band = this.requests[i].priority;
       split.set(band, (split.get(band) ?? 0) | (this.leading[i] ? 1 : 2));
@@ -384,12 +421,23 @@ function emitCells(
   for (const cell of cells) {
     let target = targets.get(cell.level);
     if (target === undefined) {
-      const slice = slicePlaneAt(entity, cell.level, snapshot, config);
-      target = { ...lane, slice, whole, cut: poolCutAt(entity, cell.level, snapshot) };
+      target = laneTarget(entity, cell.level, snapshot, config, lane, whole);
       targets.set(cell.level, target);
     }
     emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, push);
   }
+}
+
+/** Where one lane's requests for `entity`'s chunks at `level` go. */
+function laneTarget(
+  entity: EntitySnapshot,
+  level: number,
+  snapshot: DatasetView,
+  config: PlanningConfig,
+  lane: Omit<LaneTarget, "slice" | "whole" | "cut">,
+  whole: boolean,
+): LaneTarget {
+  return { ...lane, slice: slicePlaneAt(entity, level, snapshot, config), whole, cut: poolCutAt(entity, level, snapshot) };
 }
 
 /** Add a query's culling counts once per channel. */
@@ -466,21 +514,82 @@ export function emitMinimapLane(
  * Detail lane: the chunks the level selection chose for each visible tile,
  * in the selection's fetch order: coarser levels first, so a slow link fills
  * the whole view before it sharpens, then larger on screen, then nearer the
- * focus.
+ * focus. With `carry`, a cell the previous plan asked for keeps its requests.
  */
 export function emitDetailLane(
   chunks: PlanChunks,
   snapshot: DatasetView,
   out: LaneRequests,
   config: PlanningConfig,
+  carry?: LaneCarry,
 ): void {
+  const lane = { lane: "detail", tier: "detail", band: config.detailLaneOffset, t: snapshot.selection.t } as const;
   const push: Push = (req, key) => out.push(req, key);
   for (const { entity, chosen } of chunks.tiles) {
     if (chosen === undefined) continue;
-    emitCells(entity, chosen.detail, snapshot, config, {
-      lane: "detail", tier: "detail", band: config.detailLaneOffset, t: snapshot.selection.t,
-    }, push);
+    if (carry === undefined) {
+      emitCells(entity, chosen.detail, snapshot, config, lane, push);
+      continue;
+    }
+    const previous = carry.detailOf(entity);
+    // An entity whose cells all held keeps its requests whole, as the last
+    // plan recorded them; most entities of a wide collection do.
+    if (previous !== undefined && previous.size === chosen.detail.length && keepsEvery(previous, chosen.detail, lane.band, out)) {
+      carry.setDetail(entity, previous);
+      continue;
+    }
+    const cells = new Map<number, readonly ChunkRequest[]>();
+    const targets = new Map<number, LaneTarget>();
+    let emitted: ChunkRequest[] = [];
+    const collect: Push = (req, rank) => {
+      emitted.push(req);
+      out.push(req, rank);
+    };
+    for (const cell of chosen.detail) {
+      const key = cellKey(cell.level, cell.x, cell.y, cell.z);
+      const kept = previous?.get(key);
+      if (kept !== undefined) {
+        out.keep(lane.band, cell.rank);
+        cells.set(key, kept);
+        continue;
+      }
+      let target = targets.get(cell.level);
+      if (target === undefined) {
+        target = laneTarget(entity, cell.level, snapshot, config, lane, false);
+        targets.set(cell.level, target);
+      }
+      emitted = [];
+      emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, collect);
+      cells.set(key, emitted);
+    }
+    carry.setDetail(entity, cells);
   }
+}
+
+/**
+ * Whether `previous` holds requests for every one of `cells`, keeping them
+ * in `out` when it does; with as many cells as `previous` holds, the two are
+ * the same cells. Only the band's least and greatest key matter to a kept
+ * request, so the cells' extremes are kept for them all.
+ */
+function keepsEvery(
+  previous: ReadonlyMap<number, readonly ChunkRequest[]>,
+  cells: readonly SelectedCell[],
+  band: number,
+  out: LaneRequests,
+): boolean {
+  let least = Infinity;
+  let greatest = -Infinity;
+  for (const cell of cells) {
+    if (!previous.has(cellKey(cell.level, cell.x, cell.y, cell.z))) return false;
+    if (cell.rank < least) least = cell.rank;
+    if (cell.rank > greatest) greatest = cell.rank;
+  }
+  if (cells.length > 0) {
+    out.keep(band, least);
+    out.keep(band, greatest);
+  }
+  return true;
 }
 
 /**

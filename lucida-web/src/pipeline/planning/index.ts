@@ -22,6 +22,7 @@ export {
   type PlanningSnapshot,
   type PlanningState,
   type PlanStats,
+  type RequestDelta,
   type RequestPlan,
   type SelectionState,
   type ViewPlanningState,

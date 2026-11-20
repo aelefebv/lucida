@@ -68,7 +68,7 @@ function snapshot(selection: Partial<SelectionState>, sourceLevels?: number[]): 
 
 const noPrefetch = mergeConfig({ prefetchDepth: 0 });
 
-function lane(requests: ChunkRequest[], name: ChunkRequest["lane"]): ChunkRequest[] {
+function lane(requests: readonly ChunkRequest[], name: ChunkRequest["lane"]): ChunkRequest[] {
   return requests.filter((req) => req.lane === name);
 }
 

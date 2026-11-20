@@ -182,7 +182,7 @@ describe("applyColdStateDelta", () => {
     expect(patched.epochs.view).toBe(2);
   });
 
-  it("patches the retained wanted chunks with the delta's changed entries, as a full cold state would carry them", () => {
+  it("patches the retained wanted chunks with the delta's changes, as a full cold state would carry them", () => {
     const ctx = makeCtx();
     const cold1: ColdStateMessage = {
       ...makeCold([tile("a", "img-a", 1), tile("b", "img-b", 1)]),
@@ -204,8 +204,8 @@ describe("applyColdStateDelta", () => {
       currentZ: 0,
       visibleRegion: cold1.visibleRegion,
       wantedChunks: [
-        { memberId: "img-a", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
-        { memberId: "img-b", tier: "detail", chunkKeys: [] },
+        { memberId: "img-a", tier: "detail", added: ["1/0/0/0/0/1"], removed: ["1/0/0/0/0/0"] },
+        { memberId: "img-b", tier: "detail", added: [], removed: ["1/0/0/0/0/0"] },
       ],
       removedEntityIds: ["b"],
       upserts: [],
@@ -247,8 +247,8 @@ describe("applyColdStateDelta", () => {
         sortCenterVox: null, frustumPlanes: null,
       },
       wantedChunks: [
-        { memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
-        { memberId: "img-b:ch0", tier: "detail", chunkKeys: [] },
+        { memberId: "img-a:ch0", tier: "detail", added: ["1/0/0/0/0/1"], removed: ["1/0/0/0/0/0"] },
+        { memberId: "img-b:ch0", tier: "detail", added: [], removed: ["1/0/0/0/0/0"] },
       ],
       removedEntityIds: [],
       upserts: [],
@@ -381,7 +381,7 @@ describe("applyColdStateDelta", () => {
       currentT: 0,
       currentZ: 0,
       visibleRegion: cold1.visibleRegion,
-      wantedChunks: [{ memberId: "img-a:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] }],
+      wantedChunks: [{ memberId: "img-a:ch0", tier: "detail", added: ["1/0/0/0/0/0"], removed: [] }],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: ["a"],

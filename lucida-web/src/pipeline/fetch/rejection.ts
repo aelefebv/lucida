@@ -34,6 +34,13 @@ export class RejectionTracker {
     return this.rejectedKeys.get(entityId)?.has(chunkKey) ?? false;
   }
 
+  /** Every rejected (entityId, chunkKey). */
+  *entries(): IterableIterator<[string, string]> {
+    for (const [entityId, keys] of this.rejectedKeys) {
+      for (const chunkKey of keys) yield [entityId, chunkKey];
+    }
+  }
+
   /**
    * Drop every rejection. Called by the orchestrator on every
    * cold-state rebuild and by `CpuCache.reset()`.

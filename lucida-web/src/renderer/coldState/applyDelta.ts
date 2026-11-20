@@ -83,9 +83,10 @@ export function applyColdStateDelta(
     nextActiveSet.push(entry);
   }
 
+  const wanted = patchWantedIndex(draw.wanted, msg.wantedChunks);
   cold.activeSet = nextActiveSet;
   cold.visibleRegion = msg.visibleRegion;
-  cold.wantedChunks = patchWantedChunks(cold.wantedChunks, msg.wantedChunks);
+  cold.wantedChunks = patchWantedChunks(cold.wantedChunks, msg.wantedChunks, wanted);
   cold.currentT = msg.currentT;
   cold.currentZ = msg.currentZ;
   cold.renderRadiusView = msg.renderRadiusView;
@@ -95,7 +96,7 @@ export function applyColdStateDelta(
   ctx.state.currentColdState = cold;
   ctx.state.currentEpochs = msg.epochs;
   if (inPlace && relayChangedMembers(ctx, draw, msg.upserts)) {
-    draw.wanted = patchWantedIndex(draw.wanted, msg.wantedChunks);
+    if (msg.wantedChunks.length > 0) draw.wanted = wanted;
     syncLabelPools(ctx, msg.datasetId);
     return;
   }

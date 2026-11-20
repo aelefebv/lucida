@@ -71,7 +71,7 @@ function viewAt(id: number, z: number, targetLevel = 0, effectiveZoom = 1): View
 
 const noPrefetch = mergeConfig({ prefetchDepth: 0 });
 
-function keys(requests: ChunkRequest[]): string[] {
+function keys(requests: readonly ChunkRequest[]): string[] {
   return requests.map((req) => `${req.chunkKey} ${req.plane ?? "whole"}`).sort();
 }
 

@@ -743,6 +743,19 @@ export interface WantedMemberChunks {
 }
 
 /**
+ * How one member's wanted chunks in one tier changed: the chunks it wants
+ * now and did not, and those it no longer wants. A move changes a few of a
+ * member's thousands, so a delta carries these rather than the member's keys.
+ */
+export interface WantedChunkChanges {
+  /** See {@link SliceChunkDataMessage.memberId}. */
+  memberId: string;
+  tier: ResidencyTier;
+  added: string[];
+  removed: string[];
+}
+
+/**
  * Camera-ray pick coordinates for chunk eviction priority, sent once per
  * dataset when `epochs.view` advances. CPU-side residency only; the shader
  * never reads them. The worker stores them per view in `rayHits` for
@@ -822,12 +835,8 @@ export interface ColdStateDeltaMessage {
     detail: number;
     coarse: number;
   };
-  /**
-   * The (member, tier) entries of {@link ColdStateMessage.wantedChunks} that
-   * changed, each replacing the retained one. An entry with no keys removes
-   * it.
-   */
-  wantedChunks: WantedMemberChunks[];
+  /** How the (member, tier) entries of {@link ColdStateMessage.wantedChunks} changed, each only where it did. */
+  wantedChunks: WantedChunkChanges[];
   /** Entity ids that left the active set since the retained cold state. */
   removedEntityIds: string[];
   /** Descriptors for entities new to the active set or whose descriptor changed. */

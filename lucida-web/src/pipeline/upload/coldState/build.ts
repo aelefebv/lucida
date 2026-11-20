@@ -9,6 +9,7 @@ import type {
   ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
+  WantedChunkChanges,
   WantedMemberChunks,
 } from "../../../renderer/workerProtocol.ts";
 import type { ResolvedLayer } from "../../../resolvedLayers.ts";
@@ -238,8 +239,8 @@ export function buildColdStateDelta(args: {
   selection: SelectionState;
   visibleRegion: VisibleRegion;
   renderRadiusView?: { detail: number; coarse: number };
-  /** The changed entries; see `ColdStateDeltaMessage.wantedChunks`. */
-  wantedChunks: WantedMemberChunks[];
+  /** What changed; see `ColdStateDeltaMessage.wantedChunks`. */
+  wantedChunks: WantedChunkChanges[];
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   layer: ResolvedLayer | undefined;
