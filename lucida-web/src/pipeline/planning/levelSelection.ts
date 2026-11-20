@@ -109,8 +109,9 @@ export interface LevelSelectionResult {
 
 /**
  * Select the levels every view draws at, within `budget`. Each view selects
- * to `config.selectionShare` of its share, which leaves the rest for the
- * chunks a refinement replaces while the finer ones load, and for prefetch.
+ * to `config.selectionShare` of its share, ancestors included, which leaves
+ * the rest for the chunks it lets go of while their replacements load, and
+ * for prefetch.
  */
 export function selectLevels(
   views: readonly SelectionView[],

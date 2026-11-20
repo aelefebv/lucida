@@ -762,7 +762,7 @@ function levelsOf(document: DiagnosticDocument, p: PrintNumber): string[] {
       ? ` · holds ${p(`${base}.usedBytes`, selection.usedBytes.toLocaleString())} B of the ` +
         `${p(`${base}.shareBytes`, selection.shareBytes.toLocaleString())} B it may · ` +
         `${p(`${base}.resident`, selection.resident.toLocaleString())} of ` +
-        `${p(`${base}.wanted`, selection.wanted.toLocaleString())} selected chunk(s) resident`
+        `${p(`${base}.wanted`, selection.wanted.toLocaleString())} detail chunk(s) resident`
       : "";
     return `${dataset.datasetId}: ${parts.length > 0 ? parts.join(", ") : "nothing selected"}${kept} where ${target}` +
       `${dataset.budgetLimited ? " · the budget stopped it" : ""}${held}`;

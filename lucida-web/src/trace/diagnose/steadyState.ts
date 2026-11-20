@@ -497,8 +497,8 @@ export function describeSteadyStateFinding(finding: SteadyStateFinding | Finding
       return (
         `the view draws ${observed.datasetId} at ${describeSelectedLevels(observed)} where the screen calls for ` +
         `${called}, the finest that fit the ${count(observed.budgetBytes)} B the selection may hold; it holds ` +
-        `${count(observed.residentBytes)} B, and ${count(observed.resident)} of ${count(observed.wanted)} ` +
-        `selected chunk(s) are resident`
+        `${count(observed.residentBytes)} B, and ${count(observed.resident)} of the ${count(observed.wanted)} ` +
+        `detail chunk(s) it wants are resident`
       );
     }
     case rules.replans.id:

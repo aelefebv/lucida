@@ -97,11 +97,16 @@ export const DISTANCE_WEIGHT = 10;
 export const DEPTH_BIAS_VIEW = 0;
 
 /**
- * The share of the memory budget the level selection selects to. The rest
- * holds the coarser chunks a refinement replaces until the finer ones
- * arrive, and the prefetch lane.
+ * The share of the memory budget the level selection selects to, the
+ * ancestors a volume view keeps included. The rest holds the chunks a view
+ * lets go of until the ones that replace them arrive, and the prefetch lane.
+ * A volume view's refinement keeps the chunk it refines inside the share, as
+ * an ancestor, so the rest need not hold it. Lower, the ancestors' eighth
+ * or more would come out of what the selection draws; higher would leave
+ * too little for a moving view's chunks. A slice view's selection is one
+ * band of planes, bounded by the screen, and seldom reaches the share.
  */
-export const SELECTION_SHARE = 0.8;
+export const SELECTION_SHARE = 0.9;
 
 /**
  * How many coarser levels a volume view keeps resident above each chunk its
