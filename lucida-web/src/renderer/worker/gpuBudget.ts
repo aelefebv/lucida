@@ -270,10 +270,18 @@ export function grantGrowth(
  */
 export function handleGpuOutOfMemory(ctx: WorkerCtx): boolean {
   const before = ctx.state.gpuTotalBytes;
-  ctx.state.gpuTotalBytes = halvedGpuTotal(before);
+  setGpuTotal(ctx, halvedGpuTotal(before));
+  return ctx.state.gpuTotalBytes < before;
+}
+
+/**
+ * Run under a new total. The pools give back what a lower one no longer
+ * covers, fallback first; a higher one lets them grow on.
+ */
+export function setGpuTotal(ctx: WorkerCtx, bytes: number): void {
+  ctx.state.gpuTotalBytes = bytes;
   const over = -gpuBytesFree(ctx.state);
   if (over > 0) reclaimGpuBytes(ctx, over);
-  return ctx.state.gpuTotalBytes < before;
 }
 
 /** A chunk pool that could shrink, and by how much. */

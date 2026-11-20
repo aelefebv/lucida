@@ -23,7 +23,7 @@ import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
 import type { PendingFrameCapture } from "./captureFrame.ts";
 import type { WantedChunkIndex } from "../wantedChunks.ts";
-import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import { createMinimapRendererState, type MinimapRendererState } from "../minimapHandlers.ts";
 import type { ViewResources } from "./viewResources.ts";
 import type { ViewIndirection } from "../viewIndirection.ts";
@@ -99,9 +99,9 @@ export interface RendererState {
   draws: Map<string, ViewDraw>;
 
   /**
-   * The one GPU budget every holder counts against, fitted to the device at
-   * init and halved, down to its floor, whenever the device runs out of
-   * memory under it (`worker/gpuBudget.ts`).
+   * The one GPU budget every holder counts against: what the page's budgets
+   * give, halved, down to its floor, whenever the device runs out of memory
+   * under it (`worker/gpuBudget.ts`).
    */
   gpuTotalBytes: number;
   /** poolKey → volume atlas pool state. */
@@ -201,7 +201,7 @@ export interface RemapInputs {
 }
 
 /** Build an empty {@link RendererState}. Called once in `case "init"`. */
-export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTotalBytes): RendererState {
+export function createInitialState(gpuTotalBytes: number = DESKTOP_BUDGETS.gpuTotalBytes): RendererState {
   return {
     gpuTotalBytes,
     memberToDataset: new Map(),

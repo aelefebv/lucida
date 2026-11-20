@@ -2,10 +2,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import type { ClientId, PresenceState } from "../bridge.ts";
 import { minimapCardPreference } from "../components/canvasCards.ts";
 import { PeerStore } from "../peerStore.ts";
+import { gpuBudgetPreference, pageDeviceBudgets } from "../pageBudgets.ts";
 import { themePreference } from "../theme/appearance.ts";
 import {
   __resetPreferencesForTesting,
@@ -56,6 +58,31 @@ describe("SettingsMenu", () => {
       fireEvent.click(within(dialog).getByRole("switch", { name: /Developer tools/ }));
     });
     expect(getPreference(developerToolsPreference)).toBe(true);
+  });
+
+  it("sets the GPU memory, keeps it through a reload, and returns it to automatic", async () => {
+    const gib = 1024 * 1024 * 1024;
+    render(<SettingsMenu />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    });
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    const trigger = () => within(dialog).getByRole("button", { name: /GPU memory/ });
+    expect(trigger().textContent).toMatch(/^Automatic \(\d/);
+
+    await userEvent.click(trigger());
+    await userEvent.click(await screen.findByRole("option", { name: "8 GB" }));
+    expect(getPreference(gpuBudgetPreference)).toBe(8 * gib);
+    expect(pageDeviceBudgets().gpuTotalBytes).toBe(8 * gib);
+
+    // A reload reopens the store from this browser's storage.
+    __resetPreferencesForTesting();
+    expect(getPreference(gpuBudgetPreference)).toBe(8 * gib);
+    expect(trigger().textContent).toContain("8 GB");
+
+    await userEvent.click(trigger());
+    await userEvent.click(await screen.findByRole("option", { name: /^Automatic/ }));
+    expect(getPreference(gpuBudgetPreference)).toBeNull();
   });
 
   it("hides a canvas card and brings it back whole", async () => {

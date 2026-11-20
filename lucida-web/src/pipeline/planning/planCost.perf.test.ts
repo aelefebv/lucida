@@ -12,7 +12,7 @@ import { describeTiming, expectWithinBudget, timeStep } from "../../test/perfBud
 import { parseResolvedLayers } from "../../resolvedLayers.ts";
 import { loadWasm } from "../../viewProperties.ts";
 import { collection, singleImage, type DatasetFixture } from "../simulation/fixtures.ts";
-import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import { initialLevelSelectionMemory, selectLevels, type LevelSelectionMemory } from "./levelSelection.ts";
 import { plan } from "./plan.ts";
@@ -20,7 +20,7 @@ import { buildViewSnapshot } from "./snapshot.ts";
 import { initialPlanningState, type PlanningSnapshot, type ViewSnapshotBase } from "./types.ts";
 
 /** The page's budgets on a capable desktop. */
-const BUDGET = { cpu: CEILING_BUDGETS.cpuMainBytes, gpu: CEILING_BUDGETS.gpuTotalBytes };
+const BUDGET = { cpu: DESKTOP_BUDGETS.cpuMainBytes, gpu: DESKTOP_BUDGETS.gpuTotalBytes };
 
 beforeAll(loadWasm);
 

@@ -38,7 +38,7 @@ import {
 } from "../minimapHandlers.ts";
 import { markOverviewsFailed } from "../overviewAtlas.ts";
 import { removeDatasetResources } from "./lifecycle.ts";
-import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
+import { postGpuMemoryIfChanged, setGpuTotal } from "./gpuBudget.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
 import { handleProbe } from "./probe.ts";
 import { handlePresentViews } from "./viewFrame.ts";
@@ -225,6 +225,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // Nothing on the GPU changes, and nothing of the dataset is missing,
       // but its label pools no longer take from what admission may use.
       wantNothingOf(ctx, msg.datasetId);
+      postGpuMemoryIfChanged(ctx);
+      return;
+
+    case "gpuTotal":
+      setGpuTotal(ctx, msg.bytes);
       postGpuMemoryIfChanged(ctx);
       return;
 

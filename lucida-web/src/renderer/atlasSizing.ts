@@ -90,6 +90,15 @@ export function poolCapBytes(limits: DeviceLimits, gpuTotalBytes: number): numbe
   return Math.min(gpuTotalBytes, limits.maxBufferSize);
 }
 
+/**
+ * The cap a pool's grid is laid out for when it is made: the most any total
+ * lets one pool grow to on this device. The total bounds how far it grows, so
+ * a pool made under a lower total grows on when the total is raised.
+ */
+export function poolGridCapBytes(limits: DeviceLimits): number {
+  return limits.maxBufferSize;
+}
+
 /** Slots of `chunk` texels that fit along a texture axis of `limit`, at least one. */
 function slotsAlong(limit: number, chunk: number): number {
   return Math.max(1, Math.floor(limit / Math.max(1, chunk)));

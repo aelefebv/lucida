@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { RenderClient } from "./renderClient.ts";
+import { gpuBudgetPreference, pageDeviceBudgets } from "../pageBudgets.ts";
+import { resetPreference, setPreference } from "../theme/preferences.ts";
 
 /**
  * Stand-in for the browser Worker so RenderClient's lifecycle logic is
@@ -139,11 +141,15 @@ describe("RenderClient destroy", () => {
     expect(client.framesAwaitingDone()).toBe(0);
   });
 
-  it("sends the page's reading of device memory with init", () => {
-    vi.stubGlobal("navigator", { deviceMemory: 4 });
-    makeReadyClient();
-    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
-    expect(worker.posted[0]).toMatchObject({ type: "init", deviceMemoryGiB: 4 });
+  it("sends the page's GPU total with init, and each new one as the setting changes", () => {
+    const { client, worker } = makeReadyClient();
+    expect(worker.posted[0]).toMatchObject({ type: "init", gpuTotalBytes: pageDeviceBudgets().gpuTotalBytes });
+    setPreference(gpuBudgetPreference, 6 * 1024 * 1024 * 1024);
+    expect(worker.posted.at(-1)).toEqual({ type: "gpuTotal", bytes: 6 * 1024 * 1024 * 1024 });
+    const sent = worker.posted.length;
+    client.destroy();
+    resetPreference(gpuBudgetPreference);
+    expect(worker.posted.slice(sent).some((msg) => (msg as { type: string }).type === "gpuTotal")).toBe(false);
   });
 
   it("destroy before init settles ready() with a rejection", async () => {

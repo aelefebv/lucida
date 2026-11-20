@@ -26,7 +26,7 @@ import { AVAILABILITY_UPDATE_SOURCE } from "../../invalidation.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
 import { createSettleState, settleSignal } from "../settle.ts";
-import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import type { ChannelFit } from "../autoContrast.ts";
 import {
   GeneratedAvailabilityCatalog,
@@ -146,7 +146,7 @@ export function describeScenario(spec: ScenarioSpec): Scenario {
     mode: spec.mode ?? "slice",
     viewport: spec.viewport ?? DEFAULT_VIEWPORT,
     source: spec.source ?? {},
-    gpuTotalBytes: spec.gpuTotalBytes ?? CEILING_BUDGETS.gpuTotalBytes,
+    gpuTotalBytes: spec.gpuTotalBytes ?? DESKTOP_BUDGETS.gpuTotalBytes,
     gpuFrameMs: spec.gpuFrameMs ?? 0,
     maxBufferSize: spec.maxBufferSize ?? null,
     cache: { ...spec.cache },
