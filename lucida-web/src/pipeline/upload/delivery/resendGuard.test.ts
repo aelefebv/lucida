@@ -51,6 +51,16 @@ describe("ResendGuard", () => {
     expect(guard.isHeld(chunk(2, "coarse"))).toBe(false);
   });
 
+  it("counts a chunk the worker put off until a gesture ended, sent again, as progress", () => {
+    const guard = new ResendGuard();
+    const deferred = Array.from({ length: 2 * RESEND_GUARD_TICKS }, (_, x) => chunk(x));
+    for (const d of deferred) tick(guard, d);
+    for (const d of deferred) guard.noteDeferred("img-0", 0, "slice", "detail", d.chunkKey);
+    // Sent again one a tick, for longer than the bound.
+    for (const d of deferred) expect(tick(guard, d)).toEqual([]);
+    expect(deferred.some((d) => guard.isHeld(d))).toBe(false);
+  });
+
   it("names a chunk the worker only ever listed as missing as not resident", () => {
     const guard = new ResendGuard();
     const a = chunk(1);

@@ -63,7 +63,10 @@ export class WorkerFeedback {
       if (change === "lost") cpuCache.markChunksLost(parsed.imageId, c, target, tier, group, why);
       else cpuCache.markChunksRefused(parsed.imageId, c, target, tier, group, why);
       if (this.guard) {
-        for (const key of group) this.guard.noteReturned(parsed.imageId, c, target, key, why);
+        for (const key of group) {
+          this.guard.noteReturned(parsed.imageId, c, target, key, why);
+          if (why === "deferred") this.guard.noteDeferred(parsed.imageId, c, target, tier, key);
+        }
       }
     }
     debugLog("orch", "upload.worker_chunk_feedback", {

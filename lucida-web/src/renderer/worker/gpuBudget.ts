@@ -18,6 +18,11 @@
  *      refuses the rest (`atlas-policy`), so the view covers less and the
  *      readout shows the total at its budget.
  *
+ * No pool grows while a gesture runs, since a growth copies the pool and
+ * the frames queued behind the copy wait for it. A full pool then takes the
+ * slot of a chunk the planner doesn't want, and puts off any other chunk
+ * until the gesture ends (`deferredChunks.ts`).
+ *
  * A device that runs out of memory under the total halves it, down to the
  * floor, and the pools give back what it no longer covers.
  *

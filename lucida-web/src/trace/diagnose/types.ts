@@ -628,6 +628,26 @@ export interface GpuMemorySummary {
   samples: number;
 }
 
+/**
+ * The chunk pools that grew during a run. A growth copies the pool into a
+ * larger texture, and every frame queued behind the copy waits for it.
+ */
+export interface PoolGrowthReading {
+  /** The growths the run kept; {@link dropped} counts the rest. */
+  count: number;
+  /**
+   * Growths that overlapped the run's input: from its first input to the
+   * frame that answered its last, when a frame owed to input waited on them.
+   */
+  duringInput: number;
+  /** The longest, from its submit until the GPU had done it. Zero when none grew. */
+  longestMs: number;
+  /** What the growths added to the pools between them. */
+  addedBytes: number;
+  /** Growths past the recorder's limit, counted and not kept. */
+  dropped: number;
+}
+
 export interface NextStep {
   why: string;
   command: string;
@@ -1092,6 +1112,8 @@ export interface DiagnosticDocument {
   renderTiming: RenderTiming;
   /** GPU memory against its budget, or null when no reading carried it. */
   gpuMemory: GpuMemorySummary | null;
+  /** The chunk pools that grew, or null for a document written before growths were recorded. */
+  poolGrowths: PoolGrowthReading | null;
   /** How the view kept up with input, or null when the run, or the window, took none. */
   lag: LagReading | null;
   /** What the client sent during the run, by message type. */

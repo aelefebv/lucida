@@ -12,6 +12,7 @@ import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry, poolGridCapBytes } from "../atlasSizing.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
+import { reportPoolGrowth } from "../worker/poolGrowth.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
 import {
@@ -868,18 +869,24 @@ function createWatchedVolumeAtlas(
   );
 }
 
-/** {@link growVolumeAtlas}, where a grow the device can't allocate loses the pool. */
+/**
+ * {@link growVolumeAtlas}, where a grow the device can't allocate loses the
+ * pool, and a growth is reported to the trace.
+ */
 export function growVolumeAtlasWatched(
   ctx: WorkerCtx,
   poolKey: string,
   atlas: AtlasState,
   toRows: number,
 ): boolean {
-  return allocateWatched(
+  const fromBytes = volumeRowBytes(atlas) * volumeRows(atlas);
+  const grew = allocateWatched(
     ctx,
     () => growVolumeAtlas(ctx.device, atlas, toRows),
     () => replaceLostVolumeAtlas(ctx, poolKey, atlas),
   );
+  if (grew) reportPoolGrowth(ctx, poolKey, "volume", fromBytes, volumeRowBytes(atlas) * volumeRows(atlas));
+  return grew;
 }
 
 /**

@@ -13,6 +13,7 @@
 
 import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { HeldReason } from "../../../trace/types.ts";
+import type { ResidencyTier } from "../../residencyTier.ts";
 import { deliveryTarget } from "../../../renderer/poolKeys.ts";
 
 /**
@@ -29,7 +30,11 @@ export interface HeldChunk {
 }
 
 function deliveryKey(d: ReadyChunkDelivery): string {
-  return `${deliveryTarget(d.mode, d.cut)}|${d.residencyTier}|${d.imageId}|${d.c}|${d.chunkKey}`;
+  return sentKey(deliveryTarget(d.mode, d.cut), d.residencyTier, d.imageId, d.c, d.chunkKey);
+}
+
+function sentKey(target: string, tier: ResidencyTier, imageId: string, c: number, chunkKey: string): string {
+  return `${target}|${tier}|${imageId}|${c}|${chunkKey}`;
 }
 
 function reasonKey(imageId: string, c: number, target: string, chunkKey: string): string {
@@ -73,6 +78,14 @@ export class ResendGuard {
   /** The worker handed a chunk back, evicted or refused, and said why. */
   noteReturned(imageId: string, c: number, target: string, chunkKey: string, reason: HeldReason): void {
     this.lastReason.set(reasonKey(imageId, c, target, chunkKey), reason);
+  }
+
+  /**
+   * The worker put the chunk off until a gesture ended, and asks for it
+   * again: its next send is a first, not a turn of a loop.
+   */
+  noteDeferred(imageId: string, c: number, target: string, tier: ResidencyTier, chunkKey: string): void {
+    this.sentSinceRebuild.delete(sentKey(target, tier, imageId, c, chunkKey));
   }
 
   /**

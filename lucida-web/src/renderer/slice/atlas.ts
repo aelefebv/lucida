@@ -20,6 +20,7 @@ import {
 } from "../failedCells.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
+import { reportPoolGrowth } from "../worker/poolGrowth.ts";
 import { LABEL_TIER, postChunkResidency, postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
 import {
@@ -503,18 +504,24 @@ export function growSliceAtlas(
   return true;
 }
 
-/** {@link growSliceAtlas}, where a grow the device can't allocate loses the pool. */
+/**
+ * {@link growSliceAtlas}, where a grow the device can't allocate loses the
+ * pool, and a growth is reported to the trace.
+ */
 export function growSliceAtlasWatched(
   ctx: WorkerCtx,
   poolKey: string,
   atlas: SliceAtlasState,
   toSlotsY?: number,
 ): boolean {
-  return allocateWatched(
+  const fromBytes = sliceRowBytes(atlas) * atlas.slotsY;
+  const grew = allocateWatched(
     ctx,
     () => growSliceAtlas(ctx.device, atlas, toSlotsY),
     () => replaceLostSliceAtlas(ctx, poolKey, atlas),
   );
+  if (grew) reportPoolGrowth(ctx, poolKey, "slice", fromBytes, sliceRowBytes(atlas) * atlas.slotsY);
+  return grew;
 }
 
 /**

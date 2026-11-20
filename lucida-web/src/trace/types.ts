@@ -10,7 +10,7 @@
 import type { ChunkFailureKind } from "../pipeline/fetch/contentSource.ts";
 import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import type { ChunkFeedbackReason, GpuErrorKind, LevelRange } from "../renderer/workerProtocol.ts";
+import type { ChunkFeedbackReason, GpuErrorKind, LevelRange, PoolMode } from "../renderer/workerProtocol.ts";
 
 /**
  * Bumped whenever the document shape changes incompatibly. One integer for
@@ -1093,6 +1093,7 @@ const CHUNK_FEEDBACK_REASONS = [
   "upload-failed",
   "out-of-memory",
   "replaced",
+  "deferred",
 ] as const satisfies readonly ChunkFeedbackReason[];
 
 /** The GPU's own error kinds. `out-of-memory` is shared with the chunk feedback above. */
@@ -1472,6 +1473,22 @@ export interface TraceCoverage {
   limits: readonly CoverageLimit[];
 }
 
+/**
+ * A chunk pool the render worker grew: it allocated a larger texture and
+ * copied the pool into it, and every frame queued behind the copy waited.
+ */
+export interface TracePoolGrowth {
+  /** Microseconds from run start to the copy's submit. */
+  atUs: number;
+  /** From the submit until the GPU had done it, including any work queued ahead of it. */
+  durationUs: number;
+  poolKey: string;
+  mode: PoolMode;
+  /** The pool's texture before and after, in bytes. */
+  fromBytes: number;
+  toBytes: number;
+}
+
 /** One view's settle in a run with several views. */
 export interface RunViewSettle {
   view: number;
@@ -1558,6 +1575,10 @@ export interface TraceRun {
   errors?: PageError[];
   /** Distinct errors past the per-interval limit, counted rather than kept. */
   errorsDropped?: number;
+  /** The chunk pools that grew, in the order they did. Absent on a document written before growths were recorded. */
+  poolGrowths?: TracePoolGrowth[];
+  /** Growths past the per-interval limit, counted rather than kept. */
+  poolGrowthsDropped?: number;
   /** The frame the run settled on, when someone read it: the trace driver reads every run it waits for. */
   frame?: FrameReading;
   /** The page's scroll once the run closed, read when its frame is. */

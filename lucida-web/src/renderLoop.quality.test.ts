@@ -70,6 +70,7 @@ function makeLoop() {
     lastFrameSeq: () => seq,
     setCanvasColors: () => {},
     abandonFrame: vi.fn(),
+    gesture: () => {},
     onFrameDone: null as ((frameSeq: number, doneAtMs: number) => void) | null,
     onGpuPassTime: null as ((gpuPassUs: number) => void) | null,
     onGpuStatus: () => () => {},

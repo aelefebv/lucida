@@ -198,9 +198,11 @@ export function handleSliceChunkData(
         if (keys) keys.push(chunk.key);
         else replaced.set(taken.plane, [chunk.key]);
       }
-      // A pool grows only once every slot it has holds a chunk, and freely
-      // only while the GPU total has room (`worker/gpuBudget.ts`).
-      if (existingSlot === undefined && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+      // A pool grows only once every slot it has holds a chunk, freely only
+      // while the GPU total has room (`worker/gpuBudget.ts`), and never while
+      // a gesture runs.
+      const mayGrow = !ctx.state.gesture;
+      if (mayGrow && existingSlot === undefined && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
         growSlicePoolWithin(ctx, poolKey, atlas, false, room);
       }
       let slotIndex: number;
@@ -211,6 +213,11 @@ export function handleSliceChunkData(
       } else {
         const params = sliceEvictionParams(ctx.state, atlas, tier);
         const victim = atlas.order.next(params);
+        if (!mayGrow && (!victim || victim.class === "wanted")) {
+          // It would need more room, so it waits for the gesture to end.
+          ctx.state.deferredChunks.add(poolKey, memberId, "slice", tier, chunk.key, cut);
+          continue;
+        }
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
           growSlicePoolWithin(ctx, poolKey, atlas, true, room)
@@ -261,6 +268,16 @@ export function handleSliceChunkData(
       batch.refuse(chunk.key, "upload-failed");
       // A slot taken for a chunk that never landed would hold nothing for good.
       if (claimed >= 0) releaseSlot(atlas, claimed);
+    }
+  }
+
+  // While no gesture runs, a pool that filled grows now rather than when the
+  // next chunk finds it full, which may be in a gesture, where it can't.
+  if (!ctx.state.gesture && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+    try {
+      growSlicePoolWithin(ctx, poolKey, atlas, false, room);
+    } catch (err) {
+      failure ??= err;
     }
   }
 

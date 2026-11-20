@@ -273,9 +273,10 @@ describe("worker dispatch upload feedback", () => {
       order: new EvictionOrder(),
       journal: new SlotJournal(),
       views: new Map(),
-      freeSlots: [0],
-      totalSlots: 1,
-      slotsX: 1, slotsY: 1, slotsZ: 1,
+      // Room to spare, so the upload leaves it with a free slot and it does not grow.
+      freeSlots: [1, 0],
+      totalSlots: 2,
+      slotsX: 1, slotsY: 1, slotsZ: 2,
       texture: {} as GPUTexture,
       c: 0,
     };

@@ -814,12 +814,20 @@ export function gpuTimedOpen(): TraceRun {
 /**
  * The healthy open with the render worker's GPU memory on every reading after
  * the first: growing to a peak, then held under a budget an out-of-memory
- * failure halved.
+ * failure halved. A pool grew twice on the way.
  */
 export function gpuMemoryOpen(): TraceRun {
   const base = healthyLocalOpen();
   const MIB = 1024 * 1024;
-  return makeRun({
+  const growth = (atMs: number, durationMs: number, fromMib: number, toMib: number) => ({
+    atUs: atMs * 1_000,
+    durationUs: durationMs * 1_000,
+    poolKey: "ds|detail|c0|32x32x32|volume",
+    mode: "volume" as const,
+    fromBytes: fromMib * MIB,
+    toBytes: toMib * MIB,
+  });
+  const run = makeRun({
     header: { runId: "local-gpu-memory", durationUs: base.header.durationUs },
     rows: base.rows,
     readings: base.readings.map((reading, i) => {
@@ -830,6 +838,7 @@ export function gpuMemoryOpen(): TraceRun {
     datasetOpens: base.datasetOpens,
     serverRows: base.serverRows,
   });
+  return { ...run, poolGrowths: [growth(120, 3.5, 64, 256), growth(410, 12.25, 256, 512)], poolGrowthsDropped: 0 };
 }
 
 /**

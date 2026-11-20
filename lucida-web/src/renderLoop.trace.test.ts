@@ -21,8 +21,9 @@ import type { DatasetManifest } from "./manifestTypes.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { installTraceSeam } from "./trace/seam.ts";
 import { interactionCause } from "./trace/types.ts";
+import { GESTURE_HOLD_MS } from "./renderLoopTypes.ts";
 
-function makeLoop() {
+function makeLoop(gesture: (running: boolean) => void = () => {}) {
   const source = {
     fetch: () => new Promise(() => {}),
     handleBinary: () => {},
@@ -44,6 +45,7 @@ function makeLoop() {
       lastFrameSeq: () => 0,
       setCanvasColors: () => {},
       captureFrame: () => Promise.resolve({ frame: null, reason: "no frame in this test" }),
+      gesture,
     } as unknown as RenderClient,
     canvas,
   });
@@ -130,6 +132,27 @@ describe("render loop trace wiring", () => {
     loop.markInput("orbit");
     expect(loop.cameraMovedSince(pressed)).toBe(true);
     expect(loop.cameraMovedSince(performance.now() + 1)).toBe(false);
+  });
+
+  it("tells the render worker a gesture runs, once, and that it ended once its hold passed", () => {
+    vi.useFakeTimers();
+    try {
+      const told: boolean[] = [];
+      const { loop } = makeLoop((running) => told.push(running));
+      loop.markInput("orbit");
+      vi.advanceTimersByTime(300);
+      loop.markInput("orbit");
+      loop.markInput("contrast");
+      expect(told).toEqual([true]);
+      vi.advanceTimersByTime(GESTURE_HOLD_MS - 1);
+      expect(told).toEqual([true]);
+      vi.advanceTimersByTime(1);
+      expect(told).toEqual([true, false]);
+      loop.markInput("pan");
+      expect(told).toEqual([true, false, true]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("opens no run on an input over an empty page, so the open that follows keeps its cause", () => {

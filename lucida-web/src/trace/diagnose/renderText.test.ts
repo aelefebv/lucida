@@ -102,8 +102,17 @@ describe("the GPU memory line", () => {
     const line = renderDiagnostic(DOCUMENTS.gpuMemory).text.split("\n").find((l) => l.startsWith("gpu mem"));
     expect(line).toBe(
       "gpu mem   peak 629,145,600 B of 1,610,612,736 B budget · last 629,145,600 B · " +
-        "budget halved to 805,306,368 B · chunk slots 440 of 512 held",
+        "budget halved to 805,306,368 B · chunk slots 440 of 512 held · " +
+        "pools grew 2 time(s) by 469,762,048 B, 0 during input, longest 12.3 ms",
     );
+  });
+
+  it("says when no pool grew, and nothing of growths for a document that predates them", () => {
+    const run = gpuMemoryOpen();
+    const line = (document: DiagnosticDocument) =>
+      renderDiagnostic(document).text.split("\n").find((l) => l.startsWith("gpu mem"));
+    expect(line(diagnoseRun({ ...run, poolGrowths: [] }))).toMatch(/ held · no pool grew$/);
+    expect(line(diagnoseRun({ ...run, poolGrowths: undefined }))).toMatch(/ held$/);
   });
 
   it("says when no reading carried one", () => {

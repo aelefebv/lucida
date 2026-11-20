@@ -177,9 +177,11 @@ export function handleVolumeChunkData(
         continue;
       }
 
-      // A pool grows only once every slot it has holds a chunk, and freely
-      // only while the GPU total has room (`worker/gpuBudget.ts`).
-      if (atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+      // A pool grows only once every slot it has holds a chunk, freely only
+      // while the GPU total has room (`worker/gpuBudget.ts`), and never while
+      // a gesture runs.
+      const mayGrow = !ctx.state.gesture;
+      if (mayGrow && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
         growVolumePoolWithin(ctx, poolKey, atlas, false, room);
       }
       let slotIndex: number;
@@ -188,6 +190,11 @@ export function handleVolumeChunkData(
       } else {
         const params = volumeEvictionParams(ctx.state, atlas, tier);
         const victim = atlas.order.next(params);
+        if (!mayGrow && (!victim || victim.class === "wanted")) {
+          // It would need more room, so it waits for the gesture to end.
+          ctx.state.deferredChunks.add(poolKey, memberId, "volume", tier, chunk.key);
+          continue;
+        }
         if (
           victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
           growVolumePoolWithin(ctx, poolKey, atlas, true, room)
@@ -242,6 +249,16 @@ export function handleVolumeChunkData(
       if (!landed) batch.refuse(chunk.key, "upload-failed");
       // A slot taken for a chunk that never landed would hold nothing for good.
       if (claimed >= 0) releaseSlot(atlas, claimed);
+    }
+  }
+
+  // While no gesture runs, a pool that filled grows now rather than when the
+  // next chunk finds it full, which may be in a gesture, where it can't.
+  if (!ctx.state.gesture && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+    try {
+      growVolumePoolWithin(ctx, poolKey, atlas, false, room);
+    } catch (err) {
+      failure ??= err;
     }
   }
 

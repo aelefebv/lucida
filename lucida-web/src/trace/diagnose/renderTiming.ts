@@ -16,6 +16,7 @@ import type {
   GpuMemorySummary,
   GpuPassAbsenceReason,
   GpuPassTiming,
+  PoolGrowthReading,
   RenderTiming,
   TimingSummary,
 } from "./types.ts";
@@ -83,6 +84,33 @@ export function deriveGpuMemory(readings: readonly TraceReading[]): GpuMemorySum
     summary.samples++;
   }
   return summary;
+}
+
+/** The run's pool growths, or null when its document predates them. */
+export function derivePoolGrowths(run: TraceRun): PoolGrowthReading | null {
+  const growths = run.poolGrowths;
+  if (!growths) return null;
+  let inputStartUs = Number.POSITIVE_INFINITY;
+  let inputEndUs = Number.NEGATIVE_INFINITY;
+  for (const input of run.lag?.inputs ?? []) {
+    inputStartUs = Math.min(inputStartUs, input.atUs);
+    inputEndUs = Math.max(inputEndUs, input.presentedUs ?? input.atUs);
+  }
+  let duringInput = 0;
+  let longestUs = 0;
+  let addedBytes = 0;
+  for (const growth of growths) {
+    if (growth.atUs <= inputEndUs && growth.atUs + growth.durationUs >= inputStartUs) duringInput++;
+    longestUs = Math.max(longestUs, growth.durationUs);
+    addedBytes += growth.toBytes - growth.fromBytes;
+  }
+  return {
+    count: growths.length,
+    duringInput,
+    longestMs: usToMs(longestUs),
+    addedBytes,
+    dropped: run.poolGrowthsDropped ?? 0,
+  };
 }
 
 /**
