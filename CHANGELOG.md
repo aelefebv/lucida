@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.2](https://github.com/aelefebv/lucida/compare/v0.45.1...v0.45.2) (2026-11-20)
+
+
+### Performance
+
+* **web:** no readout probes during a drag, and cheap ones over a 3D collection ([#1711](https://github.com/aelefebv/lucida/issues/1711)) ([4c6bfcd](https://github.com/aelefebv/lucida/commit/4c6bfcdc8cbd32382c6b578e8a12facd8b734b9b))
+
 ## [0.45.1](https://github.com/aelefebv/lucida/compare/v0.45.0...v0.45.1) (2026-11-20)
 
 
