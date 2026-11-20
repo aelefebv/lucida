@@ -44,6 +44,10 @@
       "description": "collection of 576 small multi-channel tiles, one per group",
       "generate": "--tiles 576 --size 256,256 --channels 2 --levels 3 --chunk 128"
     },
+    "large-collection-3d": {
+      "description": "collection of 576 small 3D tiles in two channels, one per group, so a volume view draws 1,152 layers",
+      "generate": "--tiles 576 --size 8,128,128 --channels 2 --levels 2 --chunk 8,128,128"
+    },
     "single-level": {
       "description": "2D image with no pyramid, so the server generates its coarse tier",
       "generate": "--size 4096,4096 --levels 1 --chunk 512"
