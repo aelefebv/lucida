@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { WasmScene } from "lucida-core";
 import { buildLayerInfos } from "./useDatasetSettings.ts";
 import type { DatasetState } from "../types.ts";
@@ -10,6 +10,13 @@ import { withLevels } from "./useDatasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import type { SlicePlane } from "../renderer/slicePlane.ts";
 import type { LevelRange } from "../renderer/workerProtocol.ts";
+
+// These tests reason about a 512 MiB label budget: what a 1536 MiB GPU total gives.
+vi.mock("../pageBudgets.ts", async () => {
+  const { fitBudgets } = await import("../deviceBudget.ts");
+  const budgets = fitBudgets({ memoryGiB: 16, touchOnly: false, fallbackAdapter: false }, 1536 * 1024 * 1024);
+  return { pageDeviceBudgets: () => budgets };
+});
 
 // A single-level image with the given dtype + [Y, X] shape (chunked so a small
 // label's footprint fits the default caps).

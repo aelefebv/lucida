@@ -44,7 +44,7 @@ import {
 } from "./slice/index.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
-import { measureGpuMemory } from "./worker/gpuBudget.ts";
+import { measureGpuCapacity, measureGpuMemory, setGpuTotal } from "./worker/gpuBudget.ts";
 import { growViewSlots } from "./viewIndirection.ts";
 import type {
   Chunk,
@@ -357,6 +357,7 @@ describe("volume pool growth", () => {
   it("grows to its cap's grid and no further", () => {
     // 64 MiB of 32³ chunks: 1024 slots, in layers of 4×4.
     const { ctx, copies } = makeGrowthCtx(64 * 1024 * 1024);
+    (ctx.device as unknown as { limits: Partial<GPUSupportedLimits> }).limits = { maxBufferSize: 64 * 1024 * 1024 };
     const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
     expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([4, 4, 64]);
     // Doubling its rows: through its first layer's four, then whole layers.
@@ -366,6 +367,20 @@ describe("volume pool growth", () => {
     expect(atlas.totalSlots).toBe(1024);
     expect(copies).toHaveLength(8);
     expect(growVolumeAtlas(ctx.device, atlas, volumeRows(atlas) * 2)).toBe(false);
+  });
+
+  it("lays its grid out for the device's largest pool, so a raised total lets it grow on", () => {
+    // Under a 64 MiB total, on a device whose largest buffer is 256 MiB.
+    const { ctx } = makeGrowthCtx(64 * 1024 * 1024);
+    (ctx.device as unknown as { limits: Partial<GPUSupportedLimits> }).limits = { maxBufferSize: 256 * 1024 * 1024 };
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    expect(atlas.slotsX * atlas.slotsY * atlas.maxSlotsZ).toBe(4096);
+    const maxSlots = () => measureGpuCapacity(ctx).pools[0].maxSlots;
+    expect(maxSlots()).toBe(1024);
+    setGpuTotal(ctx, 256 * 1024 * 1024);
+    expect(maxSlots()).toBe(4096);
+    expect(growVolumeAtlas(ctx.device, atlas, atlas.slotsY * atlas.maxSlotsZ)).toBe(true);
+    expect(atlas.totalSlots).toBe(4096);
   });
 
   /** Hold the chunk at each grid cell of `imgA`'s 5×4×4 section in slot order, mapped, through a full first layer. */

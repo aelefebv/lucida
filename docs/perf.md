@@ -108,6 +108,8 @@ one exits 2, as a setup error does.
 `--knob NAME=VALUE` passes a Dev controls knob to every run; `--knob max-fetches=1` is a
 slowdown the comparison flags. A device override goes the same way: `--knob cores=4` drives
 the page as a 4-core machine, and `--knob device-memory=4` as one with 4 GiB.
+`--knob gpu-budget-mb=1536` sets the GPU memory budget as Settings does, and the CPU detail
+store follows it. Each run's trace header records the budgets it ran under, as `budgets`.
 
 ## Selection
 

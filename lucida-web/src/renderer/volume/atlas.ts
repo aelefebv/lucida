@@ -9,7 +9,7 @@
 import { Axis } from "../../axes.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
-import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
+import { computeAtlasGeometry, poolGridCapBytes } from "../atlasSizing.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
@@ -861,7 +861,7 @@ function createWatchedVolumeAtlas(
   return allocateWatched(
     ctx,
     () => createVolumeAtlas(
-      ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
+      ctx.device, datasetId, poolGridCapBytes(getDeviceLimits(ctx.device)),
       chunkX, chunkY, chunkZ, c, format,
     ),
     (lost) => replaceLostVolumeAtlas(ctx, poolKey, lost),

@@ -11,7 +11,7 @@
 import type { WorkerCtx } from "../workerContext.ts";
 import type { WorkerToMainMessage } from "../workerProtocol.ts";
 import { initGPU, requestGpuDevice } from "../gpuContext.ts";
-import { fitBudgets } from "../../deviceBudget.ts";
+import { DESKTOP_BUDGETS } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
@@ -70,11 +70,11 @@ function createRenderers(
 export async function bootstrapWorker(
   canvas: OffscreenCanvas,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
-  deviceMemoryGiB: number | null = null,
+  gpuTotalBytes: number = DESKTOP_BUDGETS.gpuTotalBytes,
   schedule: (task: () => Promise<void>) => void = (task) => void task(),
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
-  const state = createInitialState(fitBudgets(deviceMemoryGiB).gpuTotalBytes);
+  const state = createInitialState(gpuTotalBytes);
   let renderers = createRenderers(device, format, post);
   // The page holds the minimap overlay's content draws until this report
   // (Minimap.tsx).
