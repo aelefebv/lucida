@@ -9,8 +9,9 @@
  * The render worker reads the samples from what it draws (`worker/probe.ts`).
  * One read of every point is in flight at a time, and a new one goes out only
  * when a point moved or a frame was drawn since the last, so the readout
- * follows arriving data without asking for frames of its own. The crosshairs
- * are worked out on the same animation frame, from the cameras as they stand.
+ * follows arriving data without asking for frames of its own. A drag reads
+ * nothing until its button lifts. The crosshairs are worked out on the same
+ * animation frame, from the cameras as they stand.
  */
 
 import { isViewPane } from "../viewer/viewPane.ts";
@@ -86,6 +87,8 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
     inFlight: false,
     probedKey: "",
     probedFrame: -1,
+    /** A mouse or pen moved with a button down: a drag, until the button lifts. */
+    dragging: false,
     linger: undefined as ReturnType<typeof setTimeout> | undefined,
   });
 
@@ -113,18 +116,35 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
       // Over a marker drawn on a view, as off the canvas, nothing is read.
       const pane = isViewPane(e.target) ? (e.target as HTMLElement) : null;
       point(pointerOver(pane, canvas, e, false, e.timeStamp));
-      // A drag is the pan or orbit it moves, not a hover.
-      if (pane && e.buttons === 0) trace?.()?.markHover(e.timeStamp);
+      // A drag is the pan or orbit it moves, not a hover. It reads nothing
+      // until it ends: each of its frames would be read in the render worker
+      // ahead of the next. The card goes, as the view moves under it.
+      const dragging = e.buttons !== 0;
+      if (dragging && !state.dragging) {
+        state.probedKey = "";
+        setShown(null);
+      }
+      state.dragging = dragging;
+      if (pane && !dragging) trace?.()?.markHover(e.timeStamp);
     };
     const onLeave = (e: PointerEvent) => {
       if (e.pointerType !== "touch") point(null);
     };
-    // A finger that lands again starts over; one that lifts leaves the card a moment.
+    // A finger that lands again starts over, so a touch gesture reads nothing,
+    // as a drag doesn't; one that lifts leaves the card a moment.
     const onDown = (e: PointerEvent) => {
       if (e.pointerType === "touch" && hover.getPointer()?.touch) point(null);
     };
     const onUp = (e: PointerEvent) => {
-      if (e.pointerType !== "touch" || !hover.getPointer()?.touch) return;
+      if (e.pointerType !== "touch") {
+        // The drag is over, so the point it ended on is read.
+        if (state.dragging) {
+          state.dragging = false;
+          frameClock.wake();
+        }
+        return;
+      }
+      if (!hover.getPointer()?.touch) return;
       clearTimeout(state.linger);
       state.linger = setTimeout(() => point(null), REVEAL_LINGER_MS);
     };
@@ -154,7 +174,7 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
     return frameClock.subscribe(() => {
       const marks = hover.refresh(scene);
       const pointer = hover.getPointer();
-      if (!pointer || state.inFlight) return;
+      if (!pointer || state.inFlight || state.dragging) return;
       if (canvas.clientWidth === 0 || canvas.clientHeight === 0) return;
       const points = readPoints(pointer, marks, rectOf);
       const key = JSON.stringify(points);
@@ -166,8 +186,8 @@ export function PixelReadout({ canvas, eventRoot, client, scene, datasets, layer
       const dispatchedMs = performance.now();
       void Promise.all(points.map((at) => client.probe(at.x, at.y, at.world && [...at.world]))).then((read) => {
         state.inFlight = false;
-        // The pointer may have left while the read was out.
-        if (hover.getPointer()) {
+        // The pointer may have left, or begun a drag, while the read was out.
+        if (hover.getPointer() && !state.dragging) {
           setShown({ cards: points.map((at, i) => ({ point: at, samples: read[i] })), throughMs: pointer.atMs, dispatchedMs });
         }
         // A point that moved while the read was out is read next.
