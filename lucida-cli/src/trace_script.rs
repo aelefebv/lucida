@@ -2823,8 +2823,9 @@ pub fn format_script_human(script: &ScriptRecord) -> String {
 }
 
 /// A step's lag reading in a few words, read off the page's fields: input to
-/// frame for the first input, at p95 and max, and the frames dropped when any
-/// were.
+/// frame for the first input, at p95 and max, the frames dropped when any
+/// were, and how long the GPU had sat idle before the first input, which
+/// says which clock state the step started on.
 fn describe_lag(lag: &Value) -> Option<String> {
     let timing = lag.get("inputToFrame")?;
     let p95 = timing.get("p95Ms")?.as_f64()?;
@@ -2841,6 +2842,9 @@ fn describe_lag(lag: &Value) -> Option<String> {
         .filter(|dropped| *dropped > 0)
     {
         text.push_str(&format!(", {dropped} frame(s) dropped"));
+    }
+    if let Some(idle) = lag.get("gpuIdleMs").and_then(Value::as_f64) {
+        text.push_str(&format!(", GPU idle {idle} ms before the first input"));
     }
     Some(text)
 }
@@ -3624,6 +3628,7 @@ mod tests {
             "inputs": 25,
             "inputToFrame": { "samples": 25, "p50Ms": 21.3, "p95Ms": 34.1, "maxMs": 40.0 },
             "firstInputMs": 38.5,
+            "gpuIdleMs": 412.5,
             "unanswered": 0,
             "longTasks": { "count": 0, "longestMs": 0, "totalMs": 0 },
             "frames": { "presented": 25, "dropped": 2, "displayIntervalMs": 16.7 },
@@ -3641,7 +3646,8 @@ mod tests {
         let text = format_script_human(&ScriptRecord { steps: vec![pan] });
         assert!(
             text.contains(
-                "view changed · input to frame first 38.5 ms, p95 34.1 ms, max 40 ms, 2 frame(s) dropped"
+                "view changed · input to frame first 38.5 ms, p95 34.1 ms, max 40 ms, 2 frame(s) dropped, \
+                 GPU idle 412.5 ms before the first input"
             ),
             "{text}"
         );

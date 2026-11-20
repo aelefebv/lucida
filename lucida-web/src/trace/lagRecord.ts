@@ -56,6 +56,13 @@ export class LagRecord {
   /** Fixed when the interval closes, from the recorder's page-wide estimate. */
   private displayIntervalMs: number | null = null;
 
+  /** How long the GPU had been idle at the interval's first input, or null when no frame had finished. */
+  private readonly gpuIdleMs: number | null;
+
+  constructor(gpuIdleMs: number | null = null) {
+    this.gpuIdleMs = gpuIdleMs;
+  }
+
   get byteLength(): number {
     return LagRecord.BYTE_LENGTH;
   }
@@ -163,6 +170,7 @@ export class LagRecord {
       longTasks,
       longTasksUnrecorded: Math.max(0, this.tasks - LONG_TASK_CAPACITY),
       displayIntervalUs: this.displayIntervalMs === null ? null : Math.round(this.displayIntervalMs * 1000),
+      gpuIdleUs: this.gpuIdleMs === null ? null : Math.round(this.gpuIdleMs * 1000),
     };
   }
 }

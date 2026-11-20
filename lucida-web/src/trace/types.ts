@@ -1591,6 +1591,14 @@ export interface TraceLag {
    * of them to tell.
    */
   displayIntervalUs: number | null;
+  /**
+   * How long the GPU had been idle when the interval's first input landed:
+   * from when the render worker finished its last viewport frame to the
+   * input's event. A GPU left idle drops its clocks, so a gesture after a
+   * long idle starts on slower ones. Null when no frame had finished yet,
+   * and absent from a trace recorded before it was kept.
+   */
+  gpuIdleUs?: number | null;
 }
 
 export interface TraceInput {

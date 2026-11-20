@@ -86,6 +86,7 @@ export function deriveLag(run: TraceRun, window: RunWindow): LagReading | null {
     inputs: inputs.length,
     inputToFrame: summariseTiming(latencies),
     firstInputMs,
+    gpuIdleMs: window.whole && lag.gpuIdleUs != null ? usToMs(lag.gpuIdleUs) : null,
     unanswered,
     longTasks: { count, longestMs: usToMs(longestUs), totalMs: usToMs(totalUs) },
     frames: { presented, dropped, displayIntervalMs },

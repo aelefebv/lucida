@@ -78,6 +78,7 @@ the N runs, followed by half their range when they differ.
 | evicted | the `evictions` entry of `coverage.notHealthSignals` |
 | short | `load.coverageLossChunks`: wanted chunks not resident at the close |
 | top limiter | `attribution.cause` and `.confidence` |
+| GPU idle | `lag.gpuIdleMs`: how long the GPU had been idle when the run's first input landed, from the render worker finishing its last frame |
 | first input to frame, input to frame p95, longest task, dropped | `lag.firstInputMs`, `lag.inputToFrame.p95Ms`, `lag.longTasks.longestMs`, `lag.frames.dropped` |
 | errors | the `header.errors` the allow list does not name, repeats counted |
 | verdict | `verdict.kind`; `bound` is a run that spent most of its chain in one phase and failed nothing |
@@ -148,6 +149,18 @@ to `lucida trace --script` unchanged, except that an add or remove step's
 
 Keep a scenario to a few steps. The recorder drops its oldest runs to stay under its memory
 cap, so a long script on a large volume can lose an early step's run before the export.
+
+A desktop GPU drops its clocks when it sits idle. A workstation GPU steps down over about 1.3
+to 4 s, and on its lowest clocks a volume frame takes about 15 times as long, until they come
+back about 300 ms into a gesture. A gesture after a pause of a few seconds starts on whichever
+side of a step the pause left it, so its lag reads the clocks, not the code. So a gesture that
+follows another step starts as soon as that step's run settles, about 0.8 s after the last
+frame, on top clocks: `large-canvas-orbit`, `volume-zoomed-orbit`, `slice-zoomed-pan`,
+`settle-then-orbit` and `phone-settle-then-orbit` do. They take no `wait` step, which would
+add the page's half-second quiescence hold, since each gesture step already waits for its
+run to settle. `large-canvas-orbit-cold` waits and then holds 12 s instead, past the lowest
+step on a desktop GPU, so its orbit starts on idle clocks. The `GPU idle` column says
+how long each step's GPU had been idle, and so which state it started in.
 
 ## Builds
 
