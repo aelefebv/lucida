@@ -19,32 +19,26 @@ function delivered(req: ChunkRequest): boolean {
 }
 
 /**
- * The worker's entries a request's chunk is listed in: its member's in its
- * tier, and for an ancestor that member's ancestors too.
- */
-function entriesOf(req: ChunkRequest): { key: string; memberId: string; ancestors: boolean }[] {
-  const memberId = workerMemberId(req.imageId, req.c);
-  const entries = [{ key: wantedEntryKey(req.tier, memberId), memberId, ancestors: false }];
-  if (req.ancestor) entries.push({ key: wantedEntryKey(req.tier, memberId, true), memberId, ancestors: true });
-  return entries;
-}
-
-/**
  * The chunks the uploader can deliver from a plan: its detail and coarse
  * lanes, under the member ids the delivery uses. Prefetch and minimap chunks
- * never reach the worker, so it never wants them.
+ * never reach the worker, so it never wants them. An ancestor is listed among
+ * its member's chunks, and again among the member's ancestors.
  */
 export function wantedChunksFromPlan(
   requests: readonly ChunkRequest[],
 ): WantedChunksByMember {
   const byMember: WantedChunksByMember = new Map();
+  const list = (req: ChunkRequest, memberId: string, ancestors: boolean): void => {
+    const key = wantedEntryKey(req.tier, memberId, ancestors);
+    const entry = byMember.get(key);
+    if (entry) entry.chunkKeys.push(req.chunkKey);
+    else byMember.set(key, { memberId, tier: req.tier, chunkKeys: [req.chunkKey], ...(ancestors && { ancestors }) });
+  };
   for (const req of requests) {
     if (!delivered(req)) continue;
-    for (const { key, memberId, ancestors } of entriesOf(req)) {
-      const entry = byMember.get(key);
-      if (entry) entry.chunkKeys.push(req.chunkKey);
-      else byMember.set(key, { memberId, tier: req.tier, chunkKeys: [req.chunkKey], ...(ancestors && { ancestors }) });
-    }
+    const memberId = workerMemberId(req.imageId, req.c);
+    list(req, memberId, false);
+    if (req.ancestor) list(req, memberId, true);
   }
   return byMember;
 }
@@ -86,25 +80,27 @@ export class WantedChunkCounts {
     if (delta.base !== this.requests) return null;
     this.requests = requests;
     const changes = new Map<string, WantedChunkChanges>();
+    const count = (req: ChunkRequest, memberId: string, ancestors: boolean, sign: 1 | -1): void => {
+      const key = wantedEntryKey(req.tier, memberId, ancestors);
+      let member = this.byMember.get(key);
+      if (member === undefined) this.byMember.set(key, (member = { memberId, tier: req.tier, ancestors, keys: new Map() }));
+      const n = (member.keys.get(req.chunkKey) ?? 0) + sign;
+      if (n > 0) member.keys.set(req.chunkKey, n);
+      else member.keys.delete(req.chunkKey);
+      // A chunk changes for the worker when the first request names it or the last stops.
+      if ((sign === 1 && n === 1) || (sign === -1 && n === 0)) {
+        let changed = changes.get(key);
+        if (changed === undefined) {
+          changes.set(key, (changed = { memberId, tier: req.tier, added: [], removed: [], ...(ancestors && { ancestors }) }));
+        }
+        (sign === 1 ? changed.added : changed.removed).push(req.chunkKey);
+      }
+    };
     const change = (req: ChunkRequest, sign: 1 | -1): void => {
       if (!delivered(req)) return;
-      for (const { key, memberId, ancestors } of entriesOf(req)) {
-        let member = this.byMember.get(key);
-        if (member === undefined) {
-          this.byMember.set(key, (member = { memberId, tier: req.tier, ancestors, keys: new Map() }));
-        }
-        const count = (member.keys.get(req.chunkKey) ?? 0) + sign;
-        if (count > 0) member.keys.set(req.chunkKey, count);
-        else member.keys.delete(req.chunkKey);
-        // A chunk changes for the worker when the first request names it or the last stops.
-        if ((sign === 1 && count === 1) || (sign === -1 && count === 0)) {
-          let changed = changes.get(key);
-          if (changed === undefined) {
-            changes.set(key, (changed = { memberId, tier: req.tier, added: [], removed: [], ...(ancestors && { ancestors }) }));
-          }
-          (sign === 1 ? changed.added : changed.removed).push(req.chunkKey);
-        }
-      }
+      const memberId = workerMemberId(req.imageId, req.c);
+      count(req, memberId, false, sign);
+      if (req.ancestor) count(req, memberId, true, sign);
     };
     for (const req of delta.removed) change(req, -1);
     for (const req of delta.added) change(req, 1);
