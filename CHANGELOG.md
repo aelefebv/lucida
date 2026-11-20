@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.3](https://github.com/aelefebv/lucida/compare/v0.45.2...v0.45.3) (2026-11-20)
+
+
+### Performance
+
+* **web:** no GPU pool grows while a gesture runs ([#1714](https://github.com/aelefebv/lucida/issues/1714)) ([7327763](https://github.com/aelefebv/lucida/commit/7327763429ab5f4ed8b31f3365810dfc98d592b9))
+
 ## [0.45.2](https://github.com/aelefebv/lucida/compare/v0.45.1...v0.45.2) (2026-11-20)
 
 
