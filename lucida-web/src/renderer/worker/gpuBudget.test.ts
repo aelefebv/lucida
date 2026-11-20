@@ -51,7 +51,9 @@ function makeCtx(gpuTotalBytes = 1536 * MIB) {
     }),
     pushErrorScope: vi.fn(),
     popErrorScope: () => Promise.resolve(null),
-    queue: { writeBuffer: vi.fn(), writeTexture: vi.fn(), submit: vi.fn() },
+    queue: {
+      writeBuffer: vi.fn(), writeTexture: vi.fn(), submit: vi.fn(), onSubmittedWorkDone: () => Promise.resolve(),
+    },
   } as unknown as GPUDevice;
   const ctx = {
     device,

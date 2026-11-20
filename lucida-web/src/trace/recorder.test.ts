@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import { lookupChunk } from "./diagnose/chunkLookup.ts";
 import { diagnoseRun } from "./diagnose/diagnose.ts";
-import { MAX_ERRORS_PER_INTERVAL, TraceRecorder } from "./recorder.ts";
+import { MAX_ERRORS_PER_INTERVAL, MAX_POOL_GROWTHS_PER_INTERVAL, TraceRecorder } from "./recorder.ts";
 import { RULESET, type AllowedError } from "./diagnose/ruleset.ts";
 import { noopSinkFactory } from "./sink.ts";
 import { createSettleState, evaluateSettle, type SettleState } from "../pipeline/settle.ts";
@@ -1767,5 +1767,37 @@ describe("errors the page raised", () => {
     const document = recorder.exportDocument();
     expect(document.runs[0].chrome).toEqual(reading);
     expect(document.steadyState.every((interval) => interval.chrome === undefined)).toBe(true);
+  });
+});
+
+describe("pool growths", () => {
+  const growth = { poolKey: "ds|detail|c0|32x32x32|volume", mode: "volume" as const, fromBytes: 64, toBytes: 128 };
+
+  it("records a growth in the interval open as it finished, from its submit, with how long the GPU took", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    advance(100);
+    recorder.notePoolGrowth({ ...growth, atMs: 1_040, doneAtMs: 1_085.5 });
+    recorder.closeRun("quiescent");
+    const run = recorder.exportDocument().runs[0];
+    expect(run.poolGrowths).toEqual([{ ...growth, atUs: 40_000, durationUs: 45_500 }]);
+    expect(run.poolGrowthsDropped).toBe(0);
+  });
+
+  it("keeps a steady-state interval that recorded nothing but a growth", () => {
+    const { recorder } = makeRecorder();
+    recorder.notePoolGrowth({ ...growth, atMs: 1_000, doneAtMs: 1_010 });
+    expect(recorder.exportDocument().steadyState[0].poolGrowths).toHaveLength(1);
+  });
+
+  it("counts growths past the per-interval limit rather than keeping them", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let index = 0; index < MAX_POOL_GROWTHS_PER_INTERVAL + 2; index += 1) {
+      recorder.notePoolGrowth({ ...growth, atMs: 1_000, doneAtMs: 1_010 });
+    }
+    const run = recorder.exportDocument().runs[0];
+    expect(run.poolGrowths).toHaveLength(MAX_POOL_GROWTHS_PER_INTERVAL);
+    expect(run.poolGrowthsDropped).toBe(2);
   });
 });

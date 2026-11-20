@@ -99,6 +99,18 @@ export interface FrameLatency {
   ms: number;
 }
 
+/** A chunk pool growth as the page hears of it, its times on the page's clock. */
+export interface PoolGrowth {
+  poolKey: string;
+  mode: PoolMode;
+  fromBytes: number;
+  toBytes: number;
+  /** When the worker submitted the copy. */
+  atMs: number;
+  /** When the GPU had done it and everything submitted before it. */
+  doneAtMs: number;
+}
+
 export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
@@ -309,6 +321,9 @@ export class RenderClient implements UploadClient {
   /** Hears each viewport frame's GPU pass time, in microseconds, as it is read back. */
   onGpuPassTime: ((gpuPassUs: number) => void) | null = null;
 
+  /** Hears each chunk pool growth once the GPU is through it, its times on this thread's clock. */
+  onPoolGrowth: ((growth: PoolGrowth) => void) | null = null;
+
   private noteFrameDone(frameSeq: number, workerDoneAtMs: number | undefined): void {
     const now = performance.now();
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
@@ -365,6 +380,13 @@ export class RenderClient implements UploadClient {
       this.noteFrameDone(msg.frameSeq, msg.doneAtMs);
     } else if (msg.type === "uploadCost") {
       this.onUploadCost?.(msg.mode, msg.bytes, msg.ms);
+    } else if (msg.type === "poolGrowth") {
+      const { type: _type, submittedAtMs, doneAtMs, ...growth } = msg;
+      this.onPoolGrowth?.({
+        ...growth,
+        atMs: submittedAtMs - performance.timeOrigin,
+        doneAtMs: doneAtMs - performance.timeOrigin,
+      });
     } else if (msg.type === "pipelinesCompiled") {
       this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {

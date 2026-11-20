@@ -39,7 +39,7 @@ import {
   usToMs,
   type WindowRollup,
 } from "./phaseRollup.ts";
-import { adapterKindOf, adapterName, deriveGpuMemory, deriveRenderTiming } from "./renderTiming.ts";
+import { adapterKindOf, adapterName, deriveGpuMemory, derivePoolGrowths, deriveRenderTiming } from "./renderTiming.ts";
 import { summariseSent } from "./sent.ts";
 import { summariseSpace } from "./spatialSummary.ts";
 import { deriveTimeline, type TimelineRecording } from "./timeline.ts";
@@ -251,6 +251,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     aggregates,
     renderTiming: deriveRenderTiming(run),
     gpuMemory: deriveGpuMemory(run.readings),
+    poolGrowths: derivePoolGrowths(run),
     lag,
     sent: summariseSent(run.sent, run.header.durationUs),
     load: deriveLoad(run, steady.reading.tiers),

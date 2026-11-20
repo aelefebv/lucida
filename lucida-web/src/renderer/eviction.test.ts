@@ -50,6 +50,7 @@ import type {
   Chunk,
   ChunkResidencyChange,
   ChunkResidencyMessage,
+  PoolGrowthMessage,
   SliceChunkDataMessage,
   VolumeChunkDataMessage,
   WorkerToMainMessage,
@@ -84,7 +85,7 @@ function makeMockDevice(): GPUDevice {
     createTexture,
     pushErrorScope: vi.fn(),
     popErrorScope: vi.fn(() => Promise.resolve(null)),
-    queue: { writeBuffer, writeTexture } as unknown as GPUQueue,
+    queue: { writeBuffer, writeTexture, onSubmittedWorkDone: () => Promise.resolve() } as unknown as GPUQueue,
   } as unknown as GPUDevice;
 }
 
@@ -434,6 +435,24 @@ describe("volume pool growth", () => {
     expect(copies).toHaveLength(1);
     expect(held.every((key) => atlas.slots.has(`imgA|${key}`))).toBe(true);
     expect(reports(posts, "lost")).toEqual([]);
+  });
+
+  it("reports each growth, its texture before and after, once the GPU is through it", async () => {
+    const { ctx, posts } = makeGrowthCtx();
+    const atlas = withView(ctx, getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, "u16"));
+    holdLayer(atlas);
+    const incoming = makeChunk(0, 0, 0, 4, 0, 0);
+    want(ctx, "imgA", [incoming.key]);
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming], { levelDepth: 160 }), epochs(), "ds1", "imgA");
+    await Promise.resolve();
+
+    const layerBytes = 64 * 32 ** 3 * 2;
+    const growths = posts.filter((msg): msg is PoolGrowthMessage => msg.type === "poolGrowth");
+    expect(growths).toEqual([expect.objectContaining({
+      type: "poolGrowth", poolKey: "ds1", mode: "volume", fromBytes: layerBytes, toBytes: 2 * layerBytes,
+    })]);
+    expect(growths[0].doneAtMs).toBeGreaterThanOrEqual(growths[0].submittedAtMs);
   });
 });
 

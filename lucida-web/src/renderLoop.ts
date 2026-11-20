@@ -302,6 +302,7 @@ export class RenderLoop implements TraceEnvironment {
     };
     this.client.onUploadCost = (mode, bytes, ms) => this.uploader.noteUploadCost(mode, bytes, ms);
     this.client.onGpuPassTime = (gpuPassUs) => this.resolution.noteGpuPass(gpuPassUs / 1000);
+    this.client.onPoolGrowth = (growth) => traceRecorder.notePoolGrowth(growth);
     this.client.onFrameDone = (frameSeq, doneAtMs) => {
       this.lastFrameDoneAtMs = doneAtMs;
       if (this.bandedSeq !== null && frameSeq >= this.bandedSeq) this.bandedSeq = null;

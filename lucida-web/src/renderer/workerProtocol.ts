@@ -1210,6 +1210,23 @@ export interface GpuCapacityMessage extends GpuCapacityReport {
 }
 
 /**
+ * A chunk pool grew: the worker allocated a larger texture and copied the
+ * pool into it, and every frame queued behind the copy waited for it. Sent
+ * once the GPU is done with it. Both times are
+ * `performance.timeOrigin + performance.now()` in the worker.
+ */
+export interface PoolGrowthMessage {
+  type: "poolGrowth";
+  poolKey: string;
+  mode: PoolMode;
+  /** The pool's texture before and after, in bytes. */
+  fromBytes: number;
+  toBytes: number;
+  submittedAtMs: number;
+  doneAtMs: number;
+}
+
+/**
  * Minimap overviews whose atlas the device could not allocate, by overview
  * key. The page uploads them again, under the budget the failure halved.
  */
@@ -1338,6 +1355,7 @@ export type WorkerToMainMessage =
   | GpuPassTimeMessage
   | GpuMemoryMessage
   | GpuCapacityMessage
+  | PoolGrowthMessage
   | MinimapOverviewsLostMessage
   | FrameDoneMessage
   | UploadCostMessage

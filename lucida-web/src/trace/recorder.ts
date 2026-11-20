@@ -45,6 +45,7 @@ import type {
 } from "./liveProgress.ts";
 import { SETTLE_HOLD_MS, wantedSetMet, type SettleState } from "../pipeline/settle.ts";
 import type { ErrorReport } from "../pageErrors.ts";
+import type { PoolGrowth } from "../renderer/renderClient.ts";
 import { RULESET } from "./diagnose/ruleset.ts";
 import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
@@ -92,6 +93,7 @@ import {
   type SendTallies,
   type SocketClose,
   type TraceDocument,
+  type TracePoolGrowth,
   type TraceRun,
   type TruncationRecord,
   type WireLabel,
@@ -165,6 +167,12 @@ export const MAX_ERRORS_PER_INTERVAL = 32;
 
 /** A message longer than this is cut, so one runaway string cannot fill a document. */
 export const MAX_ERROR_MESSAGE_CHARS = 1000;
+
+/**
+ * How many pool growths one interval keeps. A pool grows in few, large
+ * steps, so a run sees a handful, and the first ones are when it grew most.
+ */
+export const MAX_POOL_GROWTHS_PER_INTERVAL = 64;
 
 /**
  * What the page can tell the recorder about the conditions a run ran under.
@@ -269,6 +277,8 @@ interface OpenInterval {
   truncation: TruncationRecord | null;
   errors: PageError[];
   errorsDropped: number;
+  poolGrowths: TracePoolGrowth[];
+  poolGrowthsDropped: number;
   /**
    * When the view last came to have its wanted set, on this recorder's
    * clock, or null while it lacks it. Cleared by input, which changes what
@@ -301,6 +311,8 @@ interface ClosedInterval {
   byteLength: number;
   errors: PageError[];
   errorsDropped: number;
+  poolGrowths: TracePoolGrowth[];
+  poolGrowthsDropped: number;
   /** Read after the interval closed, which is when its frame is the settled one. */
   frame: FrameReading | null;
   /** Read with the frame. */
@@ -1659,6 +1671,28 @@ export class TraceRecorder {
   }
 
   /**
+   * Record a chunk pool growth in the interval open as the GPU finished it.
+   * Not subject to the per-run cap, like errors: a growth holds every frame
+   * queued behind it, and a truncated run is no less likely to have one.
+   */
+  notePoolGrowth(growth: PoolGrowth): void {
+    const run = this.open;
+    if (!run) return;
+    if (run.poolGrowths.length >= MAX_POOL_GROWTHS_PER_INTERVAL) {
+      run.poolGrowthsDropped++;
+      return;
+    }
+    run.poolGrowths.push({
+      atUs: this.offsetUs(run, growth.atMs),
+      durationUs: clamp(Math.round((growth.doneAtMs - growth.atMs) * 1000)),
+      poolKey: growth.poolKey,
+      mode: growth.mode,
+      fromBytes: growth.fromBytes,
+      toBytes: growth.toBytes,
+    });
+  }
+
+  /**
    * Record what the frame showed once run `runId` closed. A run the recorder
    * no longer holds, or one still open, takes nothing: only a closed run's
    * frame is the one it settled on.
@@ -1766,6 +1800,8 @@ export class TraceRecorder {
       truncation: null,
       errors: [],
       errorsDropped: 0,
+      poolGrowths: [],
+      poolGrowthsDropped: 0,
       wantedSetMetAtMs: null,
       views: new Map(),
     };
@@ -1823,7 +1859,10 @@ export class TraceRecorder {
     // An unlabelled interval that recorded nothing is not an artifact. A
     // labelled run that recorded nothing is — a run that saw no work is
     // exactly the news somebody is looking for.
-    if (run.cause === null && run.sink.isEmpty && run.serverRows.length === 0 && run.errors.length === 0) return;
+    if (
+      run.cause === null && run.sink.isEmpty && run.serverRows.length === 0 && run.errors.length === 0 &&
+      run.poolGrowths.length === 0
+    ) return;
 
     run.lag?.close(this.displayIntervalMs());
     const byteLength = intervalBytes(run);
@@ -1841,6 +1880,8 @@ export class TraceRecorder {
       byteLength,
       errors: run.errors,
       errorsDropped: run.errorsDropped,
+      poolGrowths: run.poolGrowths,
+      poolGrowthsDropped: run.poolGrowthsDropped,
       frame: null,
       pageScroll: null,
       chrome: null,
@@ -1975,6 +2016,8 @@ export class TraceRecorder {
       serverRowsDiscarded: interval.serverRowsDiscarded,
       errors: interval.errors.map((error) => ({ ...error })),
       errorsDropped: interval.errorsDropped,
+      poolGrowths: interval.poolGrowths.map((growth) => ({ ...growth })),
+      poolGrowthsDropped: interval.poolGrowthsDropped,
       ...(interval.frame ? { frame: interval.frame } : {}),
       ...(interval.pageScroll ? { pageScroll: interval.pageScroll } : {}),
       ...(interval.chrome ? { chrome: interval.chrome } : {}),

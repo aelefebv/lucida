@@ -187,3 +187,31 @@ describe("the lag rule", () => {
     expect(doc.lag!.statement).toContain("reads up to one display interval low");
   });
 });
+
+describe("pool growths during input", () => {
+  const growth = (atMs: number, durationMs: number) => ({
+    atUs: atMs * MS,
+    durationUs: durationMs * MS,
+    poolKey: "ds|detail|c0|32x32x32|volume",
+    mode: "volume" as const,
+    fromBytes: 64,
+    toBytes: 128,
+  });
+
+  it("counts those that overlap the first input to the frame that answered the last", () => {
+    // Input from 20 ms to the last frame at 114 ms.
+    const run = {
+      ...withLag(interactionRunFor("orbit"), steadyDrag(5, 30)),
+      // Before, ending as input starts, inside, ending past it, and after.
+      poolGrowths: [growth(0, 10), growth(5, 15), growth(60, 45), growth(110, 40), growth(120, 45)],
+    };
+    expect(diagnoseRun(run).poolGrowths).toEqual({
+      count: 5, duringInput: 3, longestMs: 45, addedBytes: 320, dropped: 0,
+    });
+  });
+
+  it("counts none during input in a run that took none", () => {
+    const run = { ...makeRun(), poolGrowths: [growth(10, 40)] };
+    expect(diagnoseRun(run).poolGrowths?.duringInput).toBe(0);
+  });
+});

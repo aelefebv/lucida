@@ -778,7 +778,21 @@ function gpuMemoryOf(document: DiagnosticDocument, p: PrintNumber): string {
     (gpu.overBudget ? " (over budget)" : "") +
     ` · last ${p("gpuMemory.lastBytes", gpu.lastBytes.toLocaleString())} B${halved} · ` +
     `chunk slots ${p("gpuMemory.slotsHeld", gpu.slotsHeld.toLocaleString())} of ` +
-    `${p("gpuMemory.slots", gpu.slots.toLocaleString())} held`
+    `${p("gpuMemory.slots", gpu.slots.toLocaleString())} held` +
+    poolGrowthsOf(document, p)
+  );
+}
+
+/** The pool growths, as a clause of the GPU memory line. Older documents print none. */
+function poolGrowthsOf(document: DiagnosticDocument, p: PrintNumber): string {
+  const growths = document.poolGrowths;
+  if (!growths) return "";
+  if (growths.count === 0) return " · no pool grew";
+  return (
+    ` · pools grew ${p("poolGrowths.count", growths.count)} time(s) by ` +
+    `${p("poolGrowths.addedBytes", growths.addedBytes.toLocaleString())} B, ` +
+    `${p("poolGrowths.duringInput", growths.duringInput)} during input, ` +
+    `longest ${p("poolGrowths.longestMs", growths.longestMs)} ms`
   );
 }
 
