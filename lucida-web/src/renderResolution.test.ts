@@ -167,6 +167,36 @@ describe("AdaptiveResolution", () => {
     expect(res.msUntilRestore()).toBeNull();
   });
 
+  it("restores full resolution when a gesture is ended, without waiting for input to go quiet", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    res.noteFrame(1, 400, 1);
+    expect(res.scale).toBe(MIN_ADAPTIVE_SCALE);
+    c.advance(50);
+    expect(res.endGesture()).toBe(true);
+    expect(res.scale).toBe(1);
+    expect(res.marchCoarsening).toBe(1);
+    expect(res.inGesture).toBe(false);
+    expect(res.msUntilRestore()).toBeNull();
+    // Nothing left to restore.
+    expect(res.endGesture()).toBe(false);
+  });
+
+  it("takes input soon after an ended gesture as a new gesture's, a step above where that one ended", () => {
+    const c = clock();
+    const res = new AdaptiveResolution(c.now);
+    res.noteInput(0);
+    res.noteFrame(1, 400, 1);
+    c.advance(50);
+    res.endGesture();
+    // Well inside the quiet a gesture's end otherwise waits for.
+    c.advance(50);
+    res.noteInput(2);
+    expect(res.scale).toBeCloseTo(MIN_ADAPTIVE_SCALE * GESTURE_START_STEP_UP, 6);
+    expect(res.inGesture).toBe(true);
+  });
+
   it("starts a gesture a step above where the one before it ended, and works back to full", () => {
     const c = clock();
     const res = new AdaptiveResolution(c.now);
