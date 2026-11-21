@@ -1,3 +1,5 @@
+import { GpuLoad } from "./gpuLoad.ts";
+
 /**
  * How much of the device's pixel density the viewport renders at.
  *
@@ -35,15 +37,25 @@ export const MAX_MARCH_COARSENING = 2;
 export const RESTORE_AFTER_MS = 250;
 
 /**
- * GPU idle past which a gesture starts at its cheapest settings. A desktop
- * GPU drops its clocks once it has sat idle about this long, and on its
- * lowest ones a frame at the resolution floor still takes 30 ms or more
- * until they come back a few hundred milliseconds into the gesture.
+ * GPU idle past which a gesture starts at its cheapest settings on a device
+ * that cannot time its passes. A desktop GPU drops its clocks once it has sat
+ * idle about this long, and on its lowest ones a frame at the resolution floor
+ * still takes 30 ms or more until they come back a few hundred milliseconds
+ * into the gesture.
  */
 export const GPU_IDLE_MS = 1000;
 
 /**
- * The share of the capped resolution a gesture that starts on an idle GPU
+ * The {@link GpuLoad} share at or above which a gesture starts as a warm GPU
+ * would. A GPU kept a third busy steps down within about a second, so only a
+ * GPU kept busier than that lately is surely still on its top clocks. Below
+ * it the start is cheap, which costs a frame or two of resolution where the
+ * clocks turn out to be up, against several long frames where they are down.
+ */
+export const WARM_GPU_LOAD = 0.5;
+
+/**
+ * The share of the capped resolution a gesture that starts on lowered clocks
  * draws at, below the floor a long frame steps to, until its clocks are back.
  */
 export const IDLE_START_SCALE = 0.25;
@@ -89,20 +101,23 @@ export class AdaptiveResolution {
    * about the gesture's resolution and must not step it down.
    */
   private settledAfterSeq = 0;
-  /** The gesture under way followed at least {@link GPU_IDLE_MS} of GPU idle. */
-  private gpuWasIdle = false;
+  /** The gesture under way started on clocks a light load had likely lowered. */
+  private startedOnLowClocks = false;
   /**
    * The scale and march the gesture under way would have started at on a
-   * GPU that had not idled, while it draws at its cheapest settings instead.
+   * GPU on its top clocks, while it draws at its cheapest settings instead.
    * Null once a frame has kept up, or when the gesture started warm.
    */
   private warmStart: { factor: number; coarsening: number } | null = null;
+  /** The idle start under way has raised its settings at least once. */
+  private climbed = false;
   /**
    * What the newest frame's passes took on the GPU's own clock, since the
    * idle start last changed its settings. Null before one arrived, and on a
    * device that cannot time them.
    */
   private gpuPassMs: number | null = null;
+  private readonly gpuLoad = new GpuLoad();
   private readonly now: () => number;
 
   constructor(now: () => number = () => performance.now()) {
@@ -136,7 +151,9 @@ export class AdaptiveResolution {
       this.settledAfterSeq = Math.max(this.settledAfterSeq, lastDispatchedSeq);
       this.factor = Math.min(this.factor, this.gestureStart);
       this.gestureUnfitted = true;
-      this.gpuWasIdle = gpuIdleMs >= GPU_IDLE_MS;
+      this.startedOnLowClocks = this.gpuLoad.timed
+        ? this.gpuLoad.share(now) < WARM_GPU_LOAD
+        : gpuIdleMs >= GPU_IDLE_MS;
     }
     this.lastInputAt = now;
   }
@@ -153,6 +170,7 @@ export class AdaptiveResolution {
    */
   noteGpuPass(ms: number): void {
     this.gpuPassMs = ms;
+    this.gpuLoad.notePass(ms, this.now());
   }
 
   /** A frame drawn at full quality took `ms`, dispatch to done. */
@@ -178,12 +196,13 @@ export class AdaptiveResolution {
     if (this.fullQualityFrameMs === null) return;
     const predictedMs = (this.fullQualityFrameMs * share * this.factor * this.factor) / this.coarsening;
     if (predictedMs > LONG_FRAME_MS) this.stepDown(predictedMs);
-    // The full-quality frame was timed on clocks an idle GPU has dropped
-    // since, so it predicts the first frames many times too cheap. Start at
-    // the cheapest settings, and climb back to the fitted ones as frames show
-    // the clocks returning.
-    if (this.gpuWasIdle && (this.factor > IDLE_START_SCALE || this.coarsening < MAX_MARCH_COARSENING)) {
+    // The full-quality frame was timed on clocks a lightly loaded GPU has
+    // likely dropped since, so it predicts the first frames many times too
+    // cheap. Start at the cheapest settings, and climb back to the fitted
+    // ones as frames show the clocks returning.
+    if (this.startedOnLowClocks && (this.factor > IDLE_START_SCALE || this.coarsening < MAX_MARCH_COARSENING)) {
       this.warmStart = { factor: this.factor, coarsening: this.coarsening };
+      this.climbed = false;
       this.factor = IDLE_START_SCALE;
       this.coarsening = MAX_MARCH_COARSENING;
       this.gpuPassMs = null;
@@ -196,23 +215,31 @@ export class AdaptiveResolution {
    * `lastDispatchedSeq` is the newest frame already sent, which the step
    * cannot affect. True when the scale or the march changed.
    *
-   * A gesture that starts after the GPU idled meets it on its idle clocks,
-   * where a frame can take ten times what the last full-quality frame
+   * A gesture that starts after a light load can meet the GPU on lowered
+   * clocks, where a frame can take ten times what the last full-quality frame
    * predicts, until the clocks come back a few hundred milliseconds in. A
    * frame still long at the resolution's floor then coarsens the march, as a
    * predicted one does, or every frame until then holds the GPU that long.
+   *
+   * During an idle start a frame that kept up climbs toward the warm
+   * settings as far as its pass leaves room. A long one above the idle
+   * start's settings steps down, no lower than them, and ends the idle start:
+   * the clocks were up enough to climb, so what holds the frame now is the
+   * view, such as one zooming in, or work its pass does not time, such as
+   * uploads. Climbing again would only meet it again, and every change of
+   * scale costs a frame that resizes the render targets.
    */
   noteFrame(frameSeq: number, latencyMs: number, lastDispatchedSeq: number): boolean {
     if (this.now() - this.lastInputAt >= RESTORE_AFTER_MS) return false;
     if (frameSeq <= this.settledAfterSeq) return false;
-    if (this.warmStart !== null) {
-      if (!this.climb(latencyMs)) return false;
-      this.settledAfterSeq = lastDispatchedSeq;
-      return true;
+    if (latencyMs > LONG_FRAME_MS) {
+      const minFactor = this.warmStart !== null ? IDLE_START_SCALE : MIN_ADAPTIVE_SCALE;
+      if (this.factor <= minFactor && this.coarsening >= MAX_MARCH_COARSENING) return false;
+      this.stepDown(latencyMs, minFactor);
+      this.warmStart = null;
+    } else if (this.warmStart === null || !this.climb(latencyMs)) {
+      return false;
     }
-    if (latencyMs <= LONG_FRAME_MS) return false;
-    if (this.factor <= MIN_ADAPTIVE_SCALE && this.coarsening >= MAX_MARCH_COARSENING) return false;
-    this.stepDown(latencyMs);
     this.settledAfterSeq = lastDispatchedSeq;
     return true;
   }
@@ -236,6 +263,7 @@ export class AdaptiveResolution {
       cost = Math.min(warmCost, ((this.factor * this.factor) / this.coarsening) * (IDLE_CLIMB_PASS_MS / this.gpuPassMs));
     }
     this.gpuPassMs = null;
+    this.climbed = true;
     if (cost >= warmCost) {
       this.factor = warm.factor;
       this.coarsening = warm.coarsening;
@@ -251,14 +279,16 @@ export class AdaptiveResolution {
 
   /**
    * Lower the cost of a frame that takes `ms` at the current scale and march
-   * to {@link TARGET_FRAME_MS}: the resolution first, then, past its floor,
-   * the march, each no lower than its own floor.
+   * to {@link TARGET_FRAME_MS}: the resolution first, then, past its floor
+   * `minFactor`, the march, each no lower than its own floor. A scale already
+   * below the floor stays where it is.
    */
-  private stepDown(ms: number): void {
+  private stepDown(ms: number, minFactor = MIN_ADAPTIVE_SCALE): void {
     // A frame's cost goes with its pixels, the square of the scale, so one
     // step reaches the target instead of creeping down a fixed share a step
     // while every frame on the way holds the GPU for too long.
-    const factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * Math.sqrt(TARGET_FRAME_MS / ms));
+    const floor = Math.min(minFactor, this.factor);
+    const factor = Math.max(floor, this.factor * Math.sqrt(TARGET_FRAME_MS / ms));
     // It goes with the samples along each ray too, so past the resolution's
     // floor the march takes what is left.
     const atFloorMs = (ms * factor * factor) / (this.factor * this.factor);
@@ -278,9 +308,13 @@ export class AdaptiveResolution {
   restoreIfIdle(): boolean {
     const wait = this.msUntilRestore();
     if (wait === null || wait > 0) return false;
-    // A gesture that never left its idle start says nothing about what a
-    // warm GPU keeps up with, so the next starts from where this one would have.
-    const ended = this.warmStart?.factor ?? this.factor;
+    // A gesture that never climbed from its idle start says nothing about
+    // what a warm GPU keeps up with, so the next starts from where this one
+    // would have. One that climbed ended on clocks that kept up with where it
+    // got to, as a warm gesture does.
+    const ended = this.warmStart !== null && !this.climbed
+      ? this.warmStart.factor
+      : Math.max(MIN_ADAPTIVE_SCALE, this.factor);
     this.warmStart = null;
     this.gestureStart = Math.min(1, ended * GESTURE_START_STEP_UP);
     this.factor = 1;

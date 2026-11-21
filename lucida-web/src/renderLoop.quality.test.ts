@@ -175,7 +175,24 @@ describe("volume frames on a GPU too slow for full quality", () => {
     expect(drawn.at(-1)).toMatchObject({ renderScale: 0.5, resolutionScale: 1, marchStepScale: INTERACTION_MARCH_STEP_SCALE });
   });
 
-  it("starts a gesture after less GPU idle as a warm GPU would", () => {
+  it("starts a gesture at its cheapest settings after frames that kept the GPU lightly busy, though it idled less", () => {
+    const { loop, client, finish } = makeLoop();
+    tick();
+    client.onGpuPassTime?.(2_000);
+    finish(2, 30);
+    vi.advanceTimersByTime(GPU_IDLE_MS / 4);
+
+    loop.setRenderScale(0.5);
+    loop.markInput("orbit");
+    tick();
+    expect(drawn.at(-1)).toMatchObject({
+      renderScale: 0.5,
+      resolutionScale: IDLE_START_SCALE,
+      marchStepScale: INTERACTION_MARCH_STEP_SCALE * MAX_MARCH_COARSENING,
+    });
+  });
+
+  it("without pass times, starts a gesture after less GPU idle as a warm GPU would", () => {
     const { loop, finish } = makeLoop();
     tick();
     finish(2, 30);
