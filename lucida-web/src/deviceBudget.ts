@@ -61,17 +61,17 @@ export function deviceClassOf(facts: DeviceFacts): DeviceClass {
 }
 
 /**
- * A desktop's GPU total, unless its memory is small: half of a mid-range
- * desktop GPU's 8 GB. The level selection fills its budget, so the total is
- * how much detail a large volume draws. At this total a workstation GPU's
- * gestures over a large volume keep the lag of a smaller one: their frames
- * sample the coarser levels the selection keeps resident, no pool grows
- * while the view moves, a zoom holds refinement until it ends, and the
- * stages after the plan take a zoom's thousands of changes a few
- * milliseconds a frame rather than all on one. A larger GPU is the person's
- * to claim in Settings.
+ * A desktop's GPU total, unless its memory is small. The level selection
+ * fills its budget, so the total is how much detail a large volume draws.
+ * Up to this total a workstation GPU's gestures over a large volume keep the
+ * lag of a smaller one: their frames sample the coarser levels the selection
+ * keeps resident, no pool grows while the view moves, and a zoom holds
+ * refinement until it ends. Past it, a zoom's per-frame planning grows with
+ * the selection and delays the zoom's frames, so the device-sized 4 GiB, half
+ * of a mid-range desktop GPU's 8 GB, waits on that. A larger GPU is the
+ * person's to claim in Settings.
  */
-const DESKTOP_GPU_TOTAL = 4 * GIB;
+const DESKTOP_GPU_TOTAL = 3 * GIB;
 
 /**
  * A constrained device's GPU total at 8 GiB of memory, the most a phone's
@@ -184,7 +184,7 @@ export function deviceGpuTotal(facts: DeviceFacts): number {
 function fittedGpuTotal(facts: DeviceFacts): number {
   if (deviceClassOf(facts) === "desktop") {
     // The detail store copies the whole total, so it alone counts against
-    // memory, which binds below 16 GiB.
+    // memory, which binds below 12 GiB.
     return Math.min(DESKTOP_GPU_TOTAL, memoryOf(facts) * GIB * MEMORY_SHARE);
   }
   return CONSTRAINED_GPU_TOTAL * smallDeviceFraction(facts);
