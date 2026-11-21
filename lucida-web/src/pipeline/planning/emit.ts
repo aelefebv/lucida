@@ -529,7 +529,12 @@ export function emitDetailLane(
   carry?: LaneCarry,
 ): void {
   const drawn = { lane: "detail", tier: "detail", band: config.detailLaneOffset, t: snapshot.selection.t } as const;
-  const above = { ...drawn, ancestor: true } as const;
+  // The ancestors take a band of their own, the next whole number past the
+  // lane's, after every in-lane term a drawn chunk gets. A request carried
+  // from an earlier plan keeps the priority that plan spread it to, so ranks
+  // alone would let an ancestor kept since a smaller plan sort ahead of
+  // chunks drawn since.
+  const above = { ...drawn, band: drawn.band + 1, ancestor: true } as const;
   const push: Push = (req, key) => out.push(req, key);
   for (const { entity, chosen } of chunks.tiles) {
     if (chosen === undefined) continue;
@@ -544,7 +549,7 @@ export function emitDetailLane(
     if (
       previous !== undefined &&
       previous.size === chosen.detail.length + chosen.ancestors.length &&
-      keepsEvery(previous, chosen, drawn.band, out)
+      keepsEvery(previous, lists, out)
     ) {
       carry.setDetail(entity, previous);
       continue;
@@ -580,27 +585,28 @@ export function emitDetailLane(
 }
 
 /**
- * Whether `previous` holds requests for every cell of `chosen`, keeping them
+ * Whether `previous` holds requests for every cell of `lists`, keeping them
  * in `out` when it does; with as many cells as `previous` holds, the two are
- * the same cells. Only the band's least and greatest key matter to a kept
- * request, so the cells' extremes are kept for them all.
+ * the same cells. Only a band's least and greatest key matter to a kept
+ * request, so each band's extremes are kept for its cells.
  */
 function keepsEvery(
   previous: ReadonlyMap<number, readonly ChunkRequest[]>,
-  chosen: EntityLevelSelection,
-  band: number,
+  lists: readonly (readonly [readonly SelectedCell[], { band: number; ancestor?: true }])[],
   out: LaneRequests,
 ): boolean {
-  let least = Infinity;
-  let greatest = -Infinity;
-  for (const [cells, ancestor] of [[chosen.detail, false], [chosen.ancestors, true]] as const) {
+  const extremes: [number, number, number][] = [];
+  for (const [cells, lane] of lists) {
+    let least = Infinity;
+    let greatest = -Infinity;
     for (const cell of cells) {
-      if (!previous.has(detailCellKey(cell, ancestor))) return false;
+      if (!previous.has(detailCellKey(cell, lane.ancestor === true))) return false;
       if (cell.rank < least) least = cell.rank;
       if (cell.rank > greatest) greatest = cell.rank;
     }
+    if (least <= greatest) extremes.push([lane.band, least, greatest]);
   }
-  if (least <= greatest) {
+  for (const [band, least, greatest] of extremes) {
     out.keep(band, least);
     out.keep(band, greatest);
   }

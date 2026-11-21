@@ -163,6 +163,24 @@ describe("carrying a view's requests between plans", () => {
     expect(second.delta!.added.map((req) => req.chunkKey).sort()).toEqual(atLevel1);
   });
 
+  it("ranks an ancestor carried from an earlier plan after every chunk drawn since", () => {
+    // In the first plan the ancestor ranks second of ten, near the front of
+    // its band. The second draws ten chunks and keeps it.
+    const kept = { level: 1, x: 0, y: 0, z: 0, rank: 1 };
+    const others = [1, 2, 3].flatMap((x) => [0, 1, 2].map((y) => ({ level: 1, x, y, z: 1, rank: 0 })))
+      .slice(0, 8).map((cell, i) => ({ ...cell, rank: i + 2 }));
+    const first = plan(snapshot([view([{ level: 0, x: 0, y: 0, z: 0, rank: 0 }], {}, [kept, ...others])]), initialPlanningState());
+    const drawn = Array.from({ length: 10 }, (_, i) => ({ level: 0, x: i % 8, y: 1 + Math.floor(i / 8), z: 0, rank: i }));
+    const second = plan(snapshot([view(drawn, {}, [{ ...kept, rank: 10 }])]), first.nextState);
+
+    const detail = second.requests.filter((req) => req.lane === "detail");
+    const drawnPriority = Math.max(...detail.filter((req) => !req.ancestor).map((req) => req.priority));
+    const ancestorPriority = Math.min(...detail.filter((req) => req.ancestor).map((req) => req.priority));
+    expect(second.delta).toBeDefined();
+    expect(detail.some((req) => req.ancestor && first.requests.includes(req))).toBe(true);
+    expect(ancestorPriority).toBeGreaterThan(drawnPriority);
+  });
+
   it("carries nothing for a dataset several views plan", () => {
     const two = [view(FIRST), { ...view(FIRST), view: 1 }];
     const first = plan(snapshot(two), initialPlanningState());
