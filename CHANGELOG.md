@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.5](https://github.com/aelefebv/lucida/compare/v0.45.4...v0.45.5) (2026-11-21)
+
+
+### Performance
+
+* **web:** hold a volume's refinement while it zooms in ([#1716](https://github.com/aelefebv/lucida/issues/1716)) ([3c64227](https://github.com/aelefebv/lucida/commit/3c64227a99ac9751be418a7372bbad1aac7014ec))
+
 ## [0.45.4](https://github.com/aelefebv/lucida/compare/v0.45.3...v0.45.4) (2026-11-21)
 
 
