@@ -35,6 +35,14 @@ export const BAND_TARGET_MS = 50;
 /** The most bands a frame is drawn in: each costs a submission and a trip back from the GPU. */
 export const MAX_BANDS = 32;
 
+/**
+ * The share of the time frames for newly resident chunks may take while
+ * more chunks are on their way. A full-quality volume frame on a large canvas
+ * takes 50 to 120 ms, chunks stream in for seconds after a gesture, and the
+ * browser and the rest of the desktop draw with the same GPU.
+ */
+export const STREAMING_FRAME_SHARE = 1 / 3;
+
 /** Bands for a full-quality volume frame, from what the last one took; 1 draws it whole. */
 export function bandsFor(fullQualityMs: number | null): number {
   if (fullQualityMs === null || fullQualityMs <= BANDED_FRAME_MS) return 1;
@@ -65,13 +73,14 @@ export class FramePacer {
 
   /**
    * Whether a frame for newly resident chunks may go now. Nobody is waiting
-   * on one, so it waits for the frame before it to finish. If chunks are
-   * still waiting to be delivered it then waits as long again as that frame
-   * took, so the ticks in between deliver them and one frame draws them all:
-   * while a view loads, the GPU spends at most half its time drawing it.
+   * on one, so it waits for the frame before it to finish. While more chunks
+   * are on their way it then waits until that frame has taken no more than
+   * {@link STREAMING_FRAME_SHARE} of the time since it went, so the ticks in
+   * between deliver what lands and one frame draws it all. The frame that
+   * shows the last of them goes at once.
    */
-  mayDrawResidency(now: number, framesInFlight: number, deliveryBacklogged: boolean): boolean {
+  mayDrawResidency(now: number, framesInFlight: number, streaming: boolean): boolean {
     if (framesInFlight > 0) return false;
-    return !deliveryBacklogged || now - this.lastDoneAt >= this.lastFrameMs;
+    return !streaming || now - this.lastDoneAt >= this.lastFrameMs * (1 / STREAMING_FRAME_SHARE - 1);
   }
 }
