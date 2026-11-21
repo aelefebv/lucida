@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.45.4](https://github.com/aelefebv/lucida/compare/v0.45.3...v0.45.4) (2026-11-21)
+
+
+### Performance
+
+* **web:** a gesture's frame samples no level finer than its pixels resolve ([#1719](https://github.com/aelefebv/lucida/issues/1719)) ([b7539d9](https://github.com/aelefebv/lucida/commit/b7539d90235fe6e7fcd534dd8ab90858f5230071))
+* **web:** a volume view keeps resident the coarser chunks its gesture frames would sample ([#1717](https://github.com/aelefebv/lucida/issues/1717)) ([eebc2df](https://github.com/aelefebv/lucida/commit/eebc2df9ed52b3c3cddb87f4f506aa5d29d8e0db))
+
 ## [0.45.3](https://github.com/aelefebv/lucida/compare/v0.45.2...v0.45.3) (2026-11-20)
 
 
