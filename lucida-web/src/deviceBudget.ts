@@ -128,10 +128,12 @@ const CPU_OVERVIEW_BYTES = 64 * MIB;
 const CPU_OVERVIEW_FLOOR_BYTES = 16 * MIB;
 
 /**
- * Fetched bytes outstanding. A move's first chunks wait behind what is in
- * flight: on a broadband link these 32 MiB already take about two seconds.
- * On one machine twice as much, enough for all 128 concurrent fetches of
- * 64³ chunks, fills a store only about a tenth faster.
+ * The most fetched bytes outstanding, which they hold in memory until they
+ * land. Under it the link's measured rate and round trip size them, since a
+ * move's first chunks wait behind what is in flight: on a broadband link
+ * these 32 MiB would take about two seconds. On one machine twice as much,
+ * enough for all 128 concurrent fetches of 64³ chunks, fills a store only
+ * about a tenth faster.
  */
 const CPU_BYTES_IN_FLIGHT = 32 * MIB;
 /**

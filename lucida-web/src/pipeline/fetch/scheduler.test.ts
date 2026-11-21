@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { Scheduler, type InFlightEntry } from "./scheduler.ts";
 import { BurstLogger } from "./telemetry.ts";
+import { InFlightAllowance } from "./inFlightAllowance.ts";
 
 vi.mock("../../debug/logging.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../debug/logging.ts")>();
@@ -47,7 +48,7 @@ interface StartCall {
 function makeScheduler(opts?: {
   maxConcurrentFetches?: number;
   maxBytesInFlight?: number;
-  initialBytesInFlight?: number;
+  allowance?: InFlightAllowance;
   burstLogger?: BurstLogger;
   admissionWindow?: number;
 }) {
@@ -66,7 +67,7 @@ function makeScheduler(opts?: {
     {
       maxConcurrentFetches: opts?.maxConcurrentFetches ?? 4,
       maxBytesInFlight: opts?.maxBytesInFlight ?? 1_000_000,
-      initialBytesInFlight: opts?.initialBytesInFlight,
+      allowance: opts?.allowance,
       burstLogger: opts?.burstLogger,
       admissionWindow: opts?.admissionWindow,
     },
@@ -263,54 +264,74 @@ describe("Scheduler.correctInFlightBytes", () => {
 });
 
 describe("Scheduler bytes allowed in flight", () => {
-  it("starts at the initial bytes and widens by what each landed fetch carried", () => {
+  it("starts at the allowance's initial bytes and then follows what landed fetches measure", () => {
+    const allowance = new InFlightAllowance(2_000);
     const { scheduler, startCalls } = makeScheduler({
       maxConcurrentFetches: 100,
-      maxBytesInFlight: 10_000,
-      initialBytesInFlight: 2_000,
+      maxBytesInFlight: 100_000,
+      allowance,
     });
-    scheduler.enqueue(Array.from({ length: 20 }, (_, i) => req({ chunkKey: `k${i}` })));
+    scheduler.enqueue(Array.from({ length: 100 }, (_, i) => req({ chunkKey: `k${i}` })));
 
-    scheduler.drain(() => 1_000);
+    scheduler.drain(() => 1_000, 0);
     expect(startCalls).toHaveLength(2);
 
-    // The first lands: its slot is free and the allowance is now 3,000 bytes.
-    scheduler.correctInFlightBytes(startCalls[0].key, 1_000);
-    scheduler.markInFlightDone(startCalls[0].key);
-    scheduler.drain(() => 1_000);
-    expect(scheduler.inFlightSize).toBe(3);
+    // Each landing sends the next: 1,000 bytes every 10 ms, 100 ms apiece.
+    let now = 0;
+    for (let i = 0; i < 40; i++) {
+      now = 100 + i * 10;
+      const call = startCalls[i];
+      scheduler.correctInFlightBytes(call.key, 1_000, 1_000, now);
+      scheduler.markInFlightDone(call.key);
+      scheduler.drain(() => 1_000, now);
+    }
+    // 100 bytes a millisecond over twice the 100 ms round trip.
+    expect(scheduler.inFlightBytes).toBeGreaterThanOrEqual(15_000);
+    expect(scheduler.inFlightBytes).toBeLessThanOrEqual(25_000);
   });
 
-  it("never widens past the bytes cap", () => {
+  it("never passes the bytes cap however fast the link", () => {
+    const allowance = new InFlightAllowance(2_000);
     const { scheduler, startCalls } = makeScheduler({
       maxConcurrentFetches: 100,
       maxBytesInFlight: 3_000,
-      initialBytesInFlight: 2_000,
+      allowance,
     });
-    scheduler.enqueue(Array.from({ length: 20 }, (_, i) => req({ chunkKey: `k${i}` })));
-    scheduler.drain(() => 1_000);
-    for (const call of startCalls.splice(0)) {
-      scheduler.correctInFlightBytes(call.key, 1_000);
+    scheduler.enqueue(Array.from({ length: 50 }, (_, i) => req({ chunkKey: `k${i}` })));
+    scheduler.drain(() => 1_000, 0);
+    for (let i = 0; i < 10; i++) {
+      const call = startCalls[i];
+      scheduler.correctInFlightBytes(call.key, 1_000, 1_000, 1 + i * 0.01);
       scheduler.markInFlightDone(call.key);
+      scheduler.drain(() => 1_000, 1 + i * 0.01);
     }
-
-    scheduler.drain(() => 1_000);
     expect(scheduler.inFlightSize).toBe(3);
   });
 
-  it("starts over at the initial bytes after a reset", () => {
-    const { scheduler, startCalls } = makeScheduler({
-      maxConcurrentFetches: 100,
-      maxBytesInFlight: 10_000,
-      initialBytesInFlight: 2_000,
-    });
+  it("marks the fetches a drain sent with nothing left to send", () => {
+    const allowance = new InFlightAllowance(10_000);
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 100, allowance });
+    scheduler.enqueue([req({ chunkKey: "a" }), req({ chunkKey: "b" })]);
+    scheduler.drain(() => 1_000, 0);
+    const stamps = [...scheduler.inFlightEntries()].map(([, entry]) => entry.stamp);
+    expect(stamps.every((stamp) => stamp?.appLimited)).toBe(true);
+
+    scheduler.enqueue(Array.from({ length: 20 }, (_, i) => req({ chunkKey: `k${i}` })));
+    scheduler.drain(() => 1_000, 1);
+    const capped = [...scheduler.inFlightEntries()].slice(2).map(([, entry]) => entry.stamp);
+    expect(capped.length).toBeGreaterThan(0);
+    expect(capped.some((stamp) => stamp?.appLimited)).toBe(false);
+  });
+
+  it("starts the allowance over after a reset", () => {
+    const allowance = new InFlightAllowance(2_000);
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 100, allowance });
     scheduler.enqueue([req({ chunkKey: "a" })]);
-    scheduler.drain(() => 1_000);
-    scheduler.correctInFlightBytes(startCalls[0].key, 5_000);
+    scheduler.drain(() => 1_000, 0);
     scheduler.reset();
 
     scheduler.enqueue(Array.from({ length: 20 }, (_, i) => req({ chunkKey: `k${i}` })));
-    scheduler.drain(() => 1_000);
+    scheduler.drain(() => 1_000, 1);
     expect(scheduler.inFlightSize).toBe(2);
   });
 });

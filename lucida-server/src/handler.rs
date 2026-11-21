@@ -26,8 +26,8 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::binding::ChunkResolver;
 use crate::chunk_read::{ChunkRead, ChunkReadError, fetch_chunk};
-use crate::chunk_serves::ChunkServes;
-use crate::connection::{ClientSender, CloseSignal, client_queue};
+use crate::chunk_serves::{ChunkServe, ChunkServes};
+use crate::connection::{ClientSender, CloseSignal, Withdrawable, client_queue};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
 use crate::decode_pool::DecodePool;
 use crate::generated::{
@@ -807,7 +807,7 @@ async fn handle_client_inner(
                             match dispatch {
                                 Some(ChunkDispatch::Source { resolver, cache }) => {
                                     let client = unicast_tx.clone();
-                                    chunk_serves.spawn(rid, async move {
+                                    chunk_serves.spawn(rid, move |serve| async move {
                                         serve_chunk_from_store(
                                             id,
                                             &dataset_id,
@@ -819,6 +819,7 @@ async fn handle_client_inner(
                                             &client,
                                             chunk_codecs,
                                             probe,
+                                            serve,
                                         )
                                         .await;
                                     });
@@ -831,7 +832,7 @@ async fn handle_client_inner(
                                     generated_service,
                                 }) => {
                                     let client = unicast_tx.clone();
-                                    chunk_serves.spawn(rid, async move {
+                                    chunk_serves.spawn(rid, move |serve| async move {
                                         generated_service
                                             .enqueue_chunk_request(id, &image_id, level, &key)
                                             .await;
@@ -845,6 +846,7 @@ async fn handle_client_inner(
                                             &client,
                                             chunk_codecs,
                                             probe,
+                                            serve,
                                         )
                                         .await;
                                     });
@@ -1532,6 +1534,7 @@ async fn serve_chunk_from_store(
     client: &ClientSender,
     codecs: CodecSet,
     mut probe: RequestProbe,
+    serve: ChunkServe,
 ) {
     let fail = |error: ChunkReadError, probe: RequestProbe| async move {
         SourceChunkFailure {
@@ -1608,7 +1611,7 @@ async fn serve_chunk_from_store(
                 }
             };
             probe.mark(ServerPhase::SliceEncode);
-            hand_off(&client_queue, buf, probe);
+            hand_off(&client_queue, buf, probe, serve);
             None
         })
         .await;
@@ -1617,11 +1620,18 @@ async fn serve_chunk_from_store(
     }
 }
 
-/// Queue a chunk frame for its client and file the row as delivered.
-fn hand_off(client: &ClientSender, frame: Vec<u8>, mut probe: RequestProbe) {
-    let _ = client.send(Message::Binary(frame.into()));
+/// Queue a chunk frame for its client and file the row as delivered, unless
+/// the request was cancelled meanwhile: then, as for a serve cancelled
+/// earlier, nothing is sent and no row filed. A cancel that comes while the
+/// frame waits in the queue withdraws it there.
+fn hand_off(client: &ClientSender, frame: Vec<u8>, mut probe: RequestProbe, serve: ChunkServe) {
+    if serve.withdrawn() {
+        return;
+    }
+    let _ = client.send_withdrawable(Message::Binary(frame.into()), Box::new(serve));
     // Handoff is terminal: the socket write happens in another task behind
-    // an unbounded queue and is not observable from here.
+    // an unbounded queue and is not observable from here, so a frame
+    // withdrawn from the queue still reads as delivered.
     probe.mark(ServerPhase::Handoff);
     probe.finish(TimingRowOutcome::Delivered);
 }
@@ -1638,6 +1648,7 @@ async fn serve_generated_chunk_request(
     client: &ClientSender,
     codecs: CodecSet,
     mut probe: RequestProbe,
+    serve: ChunkServe,
 ) {
     // A generated chunk never touches the source store, so its permit,
     // read and decompress slots stay unset rather than reading as zero.
@@ -1660,7 +1671,7 @@ async fn serve_generated_chunk_request(
                     let buf =
                         produced_frame(client_id, &dataset, &image, key, None, codecs, &bytes);
                     probe.mark(ServerPhase::SliceEncode);
-                    hand_off(&client_queue, buf, probe);
+                    hand_off(&client_queue, buf, probe, serve);
                 })
                 .await;
         }
@@ -2456,6 +2467,7 @@ mod tests {
             &tx,
             CodecSet::default(),
             test_probe(1, &timings),
+            ChunkServe::untracked(),
         )
         .await;
 
@@ -2499,6 +2511,7 @@ mod tests {
             &tx,
             CodecSet::default(),
             test_probe(1, &timings),
+            ChunkServe::untracked(),
         )
         .await;
 
@@ -2664,6 +2677,7 @@ mod tests {
             &tx,
             CodecSet::default(),
             test_probe(1, &timings),
+            ChunkServe::untracked(),
         )
         .await;
 
@@ -2709,6 +2723,7 @@ mod tests {
             &tx,
             CodecSet::default(),
             test_probe(1, &timings),
+            ChunkServe::untracked(),
         )
         .await;
 
@@ -2782,6 +2797,7 @@ mod tests {
             &tx,
             CodecSet::default(),
             test_probe(1, &timings),
+            ChunkServe::untracked(),
         )
         .await;
 
@@ -2831,6 +2847,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             test_probe(1, &timings),
+            ChunkServe::untracked(),
         )
         .await;
 
@@ -2870,6 +2887,7 @@ mod tests {
             &tx,
             CodecSet::default(),
             test_probe(1, &timings),
+            ChunkServe::untracked(),
         )
         .await;
 
@@ -3030,6 +3048,7 @@ mod tests {
                     &busy_tx,
                     CodecSet::default(),
                     test_probe(1, &Arc::new(TimingBuffer::new())),
+                    ChunkServe::untracked(),
                 )
                 .await;
             });
@@ -3057,6 +3076,7 @@ mod tests {
                     &newcomer_tx,
                     CodecSet::default(),
                     test_probe(2, &Arc::new(TimingBuffer::new())),
+                    ChunkServe::untracked(),
                 )
                 .await;
             }

@@ -8,8 +8,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 /// Who a source read is attributed to for fair sharing.
 ///
@@ -49,6 +51,12 @@ impl RequestLabel {
 /// with large reads leaves it mostly idle with small ones. Past `min_reads`,
 /// a read is admitted only while the bytes in flight stay within
 /// `max_bytes`, so small reads go wider than large ones, up to `max_reads`.
+///
+/// `max_bytes` is what a slow store's link holds, and a fast store holds far
+/// more: an object store in the server's own region answers each read in
+/// 100 to 200 ms however many are in flight. So the bytes in flight may also
+/// grow to what completed reads measure the store to hold, its
+/// bandwidth-delay product (`StoreRate`), still within `max_reads`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SourceReadBounds {
     /// Reads admitted whatever their size. Only reads in flight together
@@ -89,6 +97,7 @@ struct State {
     in_flight: usize,
     /// What the reads in flight are charged for.
     in_flight_bytes: u64,
+    store: StoreRate,
     readers: HashMap<ReaderId, ReaderState>,
     /// Monotonic grant counter, the least-recently-served tiebreak.
     granted: u64,
@@ -108,7 +117,9 @@ struct Waiter {
 
 /// Held for the duration of one backend read; releases on drop.
 ///
-/// Dropping is the only way to release, so a cancelled read — routine, since
+/// A read that brought bytes back releases through
+/// [`SourcePermit::delivered`] instead, which is how the limiter measures the
+/// store. Dropping releases otherwise, so a cancelled read — routine, since
 /// re-planning aborts reads in flight — returns its permit without ceremony.
 pub struct SourcePermit {
     /// `None` once the permit has been disarmed or released. Disarming exists
@@ -118,6 +129,7 @@ pub struct SourcePermit {
     limiter: Option<Arc<SourceReadLimiter>>,
     reader: ReaderId,
     bytes: u64,
+    sent: Sent,
 }
 
 impl SourcePermit {
@@ -135,6 +147,15 @@ impl SourcePermit {
             self.bytes = self.bytes.saturating_add(more);
         }
     }
+
+    /// Release the permit for a read that brought back `bytes`. A read that
+    /// failed or found nothing measures nothing of the store, so it is
+    /// dropped instead.
+    pub fn delivered(mut self, bytes: u64) {
+        if let Some(limiter) = self.limiter.take() {
+            limiter.release_measured(self.reader, self.bytes, Some((self.sent, bytes)));
+        }
+    }
 }
 
 impl Drop for SourcePermit {
@@ -142,6 +163,100 @@ impl Drop for SourcePermit {
         if let Some(limiter) = self.limiter.take() {
             limiter.release(self.reader, self.bytes);
         }
+    }
+}
+
+/// When a read was admitted, and what the store had delivered by then.
+#[derive(Clone, Copy)]
+struct Sent {
+    at: Instant,
+    delivered: u64,
+    /// Admitted with nobody waiting: the limiter held nothing back, so the
+    /// rate it measures is what was asked for, not what the store can do.
+    unqueued: bool,
+}
+
+/// The shortest read is a store's first byte at its fastest, and the rest
+/// take up to twice as long: an object store's take 100 to 200 ms. Twice the
+/// shortest keeps the store busy through the slowest of them.
+const READ_TIME_GAIN: f64 = 2.0;
+
+/// How long a delivery rate counts toward the fastest: long enough to span
+/// reads whose times vary by a round trip, short enough that a store which
+/// slowed stops being overfilled within a few seconds.
+const RATE_WINDOW: Duration = Duration::from_secs(4);
+
+/// What completed reads measure of the store, as a congestion controller
+/// measures acknowledgments: each gives a read time and a delivery rate, the
+/// bytes that came back while it was in flight over how long it took. The
+/// store holds its fastest recent rate times twice its shortest read.
+#[derive(Default)]
+struct StoreRate {
+    delivered: u64,
+    /// Only goes down, so the queue a wider bound builds cannot widen it.
+    shortest: Option<Duration>,
+    /// Recent rates in bytes a second, oldest first, each faster than every
+    /// one after it: the fastest is first.
+    rates: VecDeque<(Instant, f64)>,
+}
+
+impl StoreRate {
+    fn sent(&self, unqueued: bool) -> Sent {
+        Sent {
+            at: Instant::now(),
+            delivered: self.delivered,
+            unqueued,
+        }
+    }
+
+    fn delivered(&mut self, sent: Sent, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        self.delivered += bytes;
+        let now = Instant::now();
+        let took = now.saturating_duration_since(sent.at);
+        if took.is_zero() {
+            return;
+        }
+        self.shortest = Some(self.shortest.map_or(took, |shortest| shortest.min(took)));
+        // A read admitted before anything came back measures its read time but
+        // not the rate: its interval starts before the store had sent anything.
+        if sent.delivered == 0 {
+            return;
+        }
+        let rate = (self.delivered - sent.delivered) as f64 / took.as_secs_f64();
+        if sent.unqueued && rate <= self.fastest() {
+            return;
+        }
+        while self
+            .rates
+            .back()
+            .is_some_and(|&(_, fastest)| fastest <= rate)
+        {
+            self.rates.pop_back();
+        }
+        self.rates.push_back((now, rate));
+        while self.rates.len() > 1
+            && self
+                .rates
+                .front()
+                .is_some_and(|&(at, _)| now.saturating_duration_since(at) > RATE_WINDOW)
+        {
+            self.rates.pop_front();
+        }
+    }
+
+    fn fastest(&self) -> f64 {
+        self.rates.front().map_or(0.0, |&(_, rate)| rate)
+    }
+
+    /// The bytes the store holds in flight, or zero until it has been measured.
+    fn bytes(&self) -> u64 {
+        let Some(shortest) = self.shortest else {
+            return 0;
+        };
+        (self.fastest() * READ_TIME_GAIN * shortest.as_secs_f64()) as u64
     }
 }
 
@@ -157,6 +272,7 @@ impl SourceReadLimiter {
             state: Mutex::new(State {
                 in_flight: 0,
                 in_flight_bytes: 0,
+                store: StoreRate::default(),
                 readers: HashMap::new(),
                 granted: 0,
             }),
@@ -227,12 +343,27 @@ impl SourceReadLimiter {
             limiter: Some(self.clone()),
             reader,
             bytes,
+            sent: state.store.sent(true),
         })
     }
 
     /// Return a permit and pass the room it frees to the readers in line.
     fn release(self: &Arc<Self>, reader: ReaderId, bytes: u64) {
+        self.release_measured(reader, bytes, None);
+    }
+
+    /// [`release`](Self::release), after a read that brought back what
+    /// `delivered` says.
+    fn release_measured(
+        self: &Arc<Self>,
+        reader: ReaderId,
+        bytes: u64,
+        delivered: Option<(Sent, u64)>,
+    ) {
         let mut state = self.state.lock().expect("limiter state");
+        if let Some((sent, delivered)) = delivered {
+            state.store.delivered(sent, delivered);
+        }
         // A permit exists only because `admit` charged it to this reader, and
         // `prune` never drops a reader holding one — so the entry is here.
         // Asserting that keeps a future invariant break loud instead of
@@ -272,6 +403,7 @@ impl SourceReadLimiter {
                 limiter: Some(self.clone()),
                 reader: next,
                 bytes: waiter.bytes,
+                sent: state.store.sent(false),
             };
             if let Err(returned) = waiter.sender.send(permit) {
                 // Undo the transfer under the lock we already hold, then
@@ -301,11 +433,13 @@ impl State {
         })
     }
 
-    /// Whether one more read of `bytes` is within `bounds`.
+    /// Whether one more read of `bytes` is within `bounds`, or within what
+    /// the store was measured to hold.
     fn fits(&self, bounds: &SourceReadBounds, bytes: u64) -> bool {
+        let max_bytes = bounds.max_bytes.max(self.store.bytes());
         self.in_flight < bounds.max_reads
             && (self.in_flight < bounds.min_reads
-                || self.in_flight_bytes.saturating_add(bytes) <= bounds.max_bytes)
+                || self.in_flight_bytes.saturating_add(bytes) <= max_bytes)
     }
 
     fn has_waiters(&self) -> bool {
@@ -664,5 +798,91 @@ mod tests {
         assert!(admitted_now(&limiter, 100 * KIB).is_none());
         drop(grown);
         assert!(admitted_now(&limiter, 100 * KIB).is_some());
+    }
+
+    /// Drive the limiter against a store whose read of `bytes` lands at the
+    /// time `lands` gives, from when it was admitted and when the read before
+    /// it landed, admitting whatever fits every millisecond for `run`. Answers
+    /// the most reads it held at once in the last tenth of the run.
+    async fn drive(
+        limiter: &Arc<SourceReadLimiter>,
+        bytes: u64,
+        run: Duration,
+        lands: impl Fn(Instant, Instant) -> Instant,
+    ) -> usize {
+        let start = Instant::now();
+        let mut held: VecDeque<(Instant, SourcePermit)> = VecDeque::new();
+        let mut last_landing = start;
+        let mut widest = 0;
+        while start.elapsed() < run {
+            let now = Instant::now();
+            while held.front().is_some_and(|(at, _)| *at <= now) {
+                let (_, permit) = held.pop_front().expect("a read is due");
+                permit.delivered(bytes);
+            }
+            while let Some(permit) = admitted_now(limiter, bytes) {
+                let at = lands(now, last_landing);
+                last_landing = at;
+                held.push_back((at, permit));
+            }
+            if start.elapsed() > run.mul_f64(0.9) {
+                widest = widest.max(held.len());
+            }
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
+        widest
+    }
+
+    /// A store that answers every read in 100 ms however many are in flight
+    /// is never full: the bytes in flight grow past the configured bound
+    /// until the count stops them.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_measured_fast_takes_reads_past_the_byte_bound() {
+        let limiter = SourceReadLimiter::with_bounds(SourceReadBounds {
+            min_reads: 2,
+            max_reads: 64,
+            max_bytes: 400 * KIB,
+        });
+        let widest = drive(&limiter, 200 * KIB, Duration::from_secs(3), |now, _| {
+            now + Duration::from_millis(100)
+        })
+        .await;
+        assert_eq!(widest, 64);
+    }
+
+    /// A store behind a 2 MB/s link holds about twice what crosses it in its
+    /// shortest read, so the bound stays near the configured one.
+    #[tokio::test(start_paused = true)]
+    async fn a_store_measured_slow_keeps_near_the_byte_bound() {
+        let limiter = SourceReadLimiter::with_bounds(SourceReadBounds {
+            min_reads: 2,
+            max_reads: 64,
+            max_bytes: 400 * KIB,
+        });
+        let transfer = Duration::from_secs_f64(200.0 * KIB as f64 / 2e6);
+        let widest = drive(&limiter, 200 * KIB, Duration::from_secs(3), |now, last| {
+            (now + Duration::from_millis(100)).max(last) + transfer
+        })
+        .await;
+        assert!((2..=8).contains(&widest), "held {widest} reads at once");
+    }
+
+    /// A read that fails or finds nothing measures nothing, so the bound
+    /// stays where it was configured.
+    #[tokio::test(start_paused = true)]
+    async fn reads_that_bring_nothing_back_measure_nothing() {
+        let limiter = SourceReadLimiter::with_bounds(SourceReadBounds {
+            min_reads: 2,
+            max_reads: 64,
+            max_bytes: 400 * KIB,
+        });
+        for _ in 0..50 {
+            let reads: Vec<_> = std::iter::from_fn(|| admitted_now(&limiter, 200 * KIB)).collect();
+            assert_eq!(reads.len(), 2);
+            tokio::time::advance(Duration::from_millis(100)).await;
+            for permit in reads {
+                permit.delivered(0);
+            }
+        }
     }
 }
