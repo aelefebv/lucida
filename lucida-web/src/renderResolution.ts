@@ -221,12 +221,13 @@ export class AdaptiveResolution {
    * frame still long at the resolution's floor then coarsens the march, as a
    * predicted one does, or every frame until then holds the GPU that long.
    *
-   * During an idle start a long frame steps down too, no lower than where
-   * the idle start began: a view that grows heavier as it moves, such as one
-   * zooming in, outgrows what an earlier frame's pass left room for, and a
-   * frame can run long on work its pass does not time, such as uploads. A
-   * frame that kept up climbs toward the warm settings as far as its pass
-   * leaves room.
+   * During an idle start a frame that kept up climbs toward the warm
+   * settings as far as its pass leaves room. A long one above the idle
+   * start's settings steps down, no lower than them, and ends the idle start:
+   * the clocks were up enough to climb, so what holds the frame now is the
+   * view, such as one zooming in, or work its pass does not time, such as
+   * uploads. Climbing again would only meet it again, and every change of
+   * scale costs a frame that resizes the render targets.
    */
   noteFrame(frameSeq: number, latencyMs: number, lastDispatchedSeq: number): boolean {
     if (this.now() - this.lastInputAt >= RESTORE_AFTER_MS) return false;
@@ -235,6 +236,7 @@ export class AdaptiveResolution {
       const minFactor = this.warmStart !== null ? IDLE_START_SCALE : MIN_ADAPTIVE_SCALE;
       if (this.factor <= minFactor && this.coarsening >= MAX_MARCH_COARSENING) return false;
       this.stepDown(latencyMs, minFactor);
+      this.warmStart = null;
     } else if (this.warmStart === null || !this.climb(latencyMs)) {
       return false;
     }

@@ -358,7 +358,7 @@ describe("AdaptiveResolution", () => {
       expect(res.scale).toBe(1);
     });
 
-    it("steps down from a climb once a frame runs long, no lower than where the idle start began", () => {
+    it("steps a climb down once a frame runs long, and climbs no more", () => {
       const c = clock();
       const res = new AdaptiveResolution(c.now);
       // A warm GPU would start at full: 80 ms / 8 is 10 ms.
@@ -371,17 +371,32 @@ describe("AdaptiveResolution", () => {
       expect(res.scale).toBeCloseTo(0.5, 6);
       expect(res.marchCoarsening).toBe(1);
       // The view grows heavier as it moves: a frame twice the target steps
-      // down as one would in a warm gesture, with no pass to climb on.
+      // down as one would in a warm gesture.
       res.noteGpuPass(TARGET_FRAME_MS);
       expect(res.noteFrame(7, 2 * TARGET_FRAME_MS, 7)).toBe(true);
       expect(res.scale).toBeCloseTo(0.5 * Math.SQRT1_2, 6);
-      // Far heavier still: the scale stops at the idle start's, and the march takes the rest.
+      // The idle start is over: a pass with room to spare climbs no more.
+      res.noteGpuPass(0.1);
+      expect(res.noteFrame(8, 14, 8)).toBe(false);
+      // A frame far heavier still keeps the scale, already below the floor
+      // a warm gesture steps to, and coarsens the march.
+      expect(res.noteFrame(9, 8 * TARGET_FRAME_MS, 9)).toBe(true);
+      expect(res.scale).toBeCloseTo(0.5 * Math.SQRT1_2, 6);
+      expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+    });
+
+    it("steps down no lower than its idle start's settings", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(80);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      res.noteGpuPass(IDLE_CLIMB_PASS_MS / 8);
+      expect(res.noteFrame(6, 14, 6)).toBe(true);
       res.noteGpuPass(TARGET_FRAME_MS);
-      expect(res.noteFrame(8, 8 * TARGET_FRAME_MS, 8)).toBe(true);
+      expect(res.noteFrame(7, 8 * TARGET_FRAME_MS, 7)).toBe(true);
       expect(res.scale).toBe(IDLE_START_SCALE);
       expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
-      // There it holds, as on idle clocks.
-      expect(res.noteFrame(9, 8 * TARGET_FRAME_MS, 9)).toBe(false);
     });
 
     it("steps a climb down on a long frame whose pass was short, as uploads can make one", () => {
