@@ -80,11 +80,12 @@ describe("a static volume", () => {
 });
 
 describe("a volume whose detail outgrows a pool sized at the WebGPU minimums", () => {
-  // 768 level-0 chunks of 512 KiB, 384 MiB. The minimums' 256 MiB buffer
-  // holds 512 of them, and this device's lets the pool hold them all inside
-  // the GPU total. The first plan is made before the worker reports either.
-  // At ratio 1 the far half spans fewer pixels, and the selection draws it a
-  // level coarser.
+  // 768 level-0 chunks of 512 KiB, 384 MiB, and up to the 240 of levels 1
+  // and 2 over them that a quarter-resolution frame samples. The minimums'
+  // 256 MiB buffer holds 512 of them, and this device's lets the pool hold
+  // them all inside the GPU total. The first plan is made before the worker
+  // reports either. At ratio 1 the far half spans fewer pixels, and the
+  // selection draws it a level coarser.
   const scenario = describeScenario({
     name: "deep volume",
     mode: "volume",
@@ -104,7 +105,7 @@ describe("a volume whose detail outgrows a pool sized at the WebGPU minimums", (
       const [open] = run.phases;
       expect(open.detail.resident).toBe(open.detail.desired);
       expect(open.detail.desired).toBeGreaterThan(512);
-      expect(open.detail.desired).toBeLessThanOrEqual(768);
+      expect(open.detail.desired).toBeLessThanOrEqual(768 + 240);
       expect(open.coverage).toBe(1);
     });
   }

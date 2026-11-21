@@ -79,6 +79,7 @@ function simulate(seed: number, is3D: boolean, steps: number, checkRate = 1): vo
       cameraFor: (member) => cameras.get(i, member) ?? [0.5, 0.5, 0.5],
       finestLevelFor: (member) => view.targets.get(member),
       isWanted: (member, chunkKey) => view.wanted.get(`detail|${member}`)?.has(chunkKey) ?? false,
+      isAncestor: (member, chunkKey) => view.wanted.get(`detail|${member}|ancestors`)?.has(chunkKey) ?? false,
       sources: [view.wanted, view.targets, cameras.revisionOf(i)],
     })),
   });

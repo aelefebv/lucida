@@ -1282,8 +1282,12 @@ export class CpuCache {
         entry.wantedAtMs = undefined;
       }
     }
+    // An ancestor's answer holds no settle up: a settled frame draws none.
+    const holdsSettle = delivery.residencyTier !== "detail" ||
+      this.demand.viewWantsDetail(chunkSchedulerKey(delivery, "detail"));
     this.deliveryState.markChunkSent(
       delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier, deliveryTarget(delivery.mode, delivery.cut),
+      holdsSettle,
     );
     if (detail) this.residents.touch(detail);
     if (coarse) this.residents.touch(coarse);
@@ -1569,14 +1573,11 @@ export class CpuCache {
     let inFlight = 0;
     let speculativeInFlight = 0;
     for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
-      if (entry.request.lane === "prefetch") speculativeInFlight++;
+      if (holdsNoSettle(entry.request)) speculativeInFlight++;
       else inFlight++;
     }
 
-    const speculativePending = this.chunkScheduler.countPending(
-      req => req.lane === "prefetch",
-      QUIESCENCE_PENDING_SCAN_CAP,
-    );
+    const speculativePending = this.chunkScheduler.countPending(holdsNoSettle, QUIESCENCE_PENDING_SCAN_CAP);
 
     // The shortfall admission declared is wanted too, and never resident.
     const shortfall = this.shortfallThisPlan;
@@ -1639,7 +1640,7 @@ export class CpuCache {
     };
     for (const requests of this.wantedRequests) {
       for (const req of requests) {
-        if (req.lane === "prefetch") continue;
+        if (holdsNoSettle(req)) continue;
         const key = chunkSchedulerKey(req, req.tier);
         if (seen.has(key)) continue;
         seen.add(key);
@@ -2635,6 +2636,15 @@ function coveringFetch(fetches: readonly InFlightFetch[] | undefined, req: Chunk
  * resolves the tier first and then calls it — so the two paths cannot
  * drift into producing different keys for the same request.
  */
+/**
+ * Whether the view settles without the request's chunk: prefetch, and an
+ * ancestor, which a settled frame draws only where a chunk it draws is
+ * missing.
+ */
+function holdsNoSettle(req: ChunkRequest): boolean {
+  return req.lane === "prefetch" || req.ancestor === true;
+}
+
 function chunkSchedulerKey(req: Pick<ChunkRequest, "entityId" | "chunkKey">, tier: ResidencyTier): string {
   return `${req.entityId}/${tier}/${req.chunkKey}`;
 }

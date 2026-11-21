@@ -162,6 +162,13 @@ export interface SelectedCell {
 export interface EntityLevelSelection {
   /** Cells the detail tier holds, in fetch order. */
   detail: SelectedCell[];
+  /**
+   * The coarser cells the detail tier keeps above {@link detail}'s, ranked
+   * after them, so a frame drawn at a fraction of the resolution has a level
+   * its pixels resolve to sample. Nothing draws them where the selected
+   * cells are resident, and the view settles without them.
+   */
+  ancestors: SelectedCell[];
   /** Cells beyond the selection worth fetching ahead, in order. */
   lookahead: SelectedCell[];
   /** The levels of {@link detail}, finest first. */
@@ -395,6 +402,13 @@ export interface ChunkRequest {
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;
+  /**
+   * A detail chunk the view keeps above the chunks it draws
+   * ({@link EntityLevelSelection.ancestors}): delivered and kept resident
+   * like them, but neither a level the view says it draws nor a chunk it
+   * settles on.
+   */
+  ancestor?: true;
   /**
    * The plane the slice view draws from this chunk, along the chunk's own
    * {@link planeAxis}. Resident means held whole or with this plane among

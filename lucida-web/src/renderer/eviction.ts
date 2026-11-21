@@ -60,6 +60,11 @@ export interface EvictionView {
   /** Whether the planner wants a resident chunk for this view. */
   isWanted: (memberId: string, chunkKey: string) => boolean;
   /**
+   * Whether the planner wants it for this view only as an ancestor, which no
+   * settled frame draws. Never true where {@link isWanted} is false.
+   */
+  isAncestor: (memberId: string, chunkKey: string) => boolean;
+  /**
    * What `cameraFor`, `finestLevelFor` and `isWanted` answer from. Each is
    * replaced rather than changed in place, or is a revision that moves with
    * it, so while every one is the same the answers are too, and a pool's
@@ -86,16 +91,18 @@ export interface FindEvictionParams {
 }
 
 /**
- * The three kinds of slot, in the order they are evicted:
+ * The four kinds of slot, in the order they are evicted:
  *
  *   - `unsampled`: no view's shader reads it. In every view it is finer than
  *     its member's target level, unmapped (another T, C or plane), or has no
  *     section.
  *   - `unwanted`: a view maps it, and its shader may sample it as a
  *     fallback, but the planner wants it for no view that maps it.
- *   - `wanted`: the planner wants it for a view that maps it.
+ *   - `ancestor`: the planner wants it only as an ancestor for the views
+ *     that map it, for frames drawn at a fraction of the resolution.
+ *   - `wanted`: the planner wants it for a view that maps it, to draw.
  */
-export type EvictionClass = "unsampled" | "unwanted" | "wanted";
+export type EvictionClass = "unsampled" | "unwanted" | "ancestor" | "wanted";
 
 export interface EvictionCandidate {
   key: string;
@@ -123,18 +130,20 @@ export function readSlotKey(compositeKey: string, sliceAxis?: SpatialAxis): Slot
   };
 }
 
-const EVICTION_RANK: Record<EvictionClass, number> = { unsampled: 2, unwanted: 1, wanted: 0 };
+const EVICTION_RANK: Record<EvictionClass, number> = { unsampled: 3, unwanted: 2, ancestor: 1, wanted: 0 };
 
 /**
  * Whether eviction takes `a` before `b`. Every slot the planner does not want
- * goes before any it does, and each class has a fixed order, so the choice
- * never depends on the order chunks arrived in:
+ * goes before any it does, an ancestor before any chunk it draws, and each
+ * class has a fixed order, so the choice never depends on the order chunks
+ * arrived in:
  *   1. `unsampled`: the greatest composite key.
  *   2. `unwanted`: the farthest from its member's camera reference, keeping
  *      near fallback longest; the greatest key among equally far.
- *   3. `wanted`: the farthest, then the greatest key. The caller evicts it
- *      only for a wanted chunk strictly nearer, so two chunks at one distance
- *      never trade a slot.
+ *   3. `ancestor`: the farthest, then the greatest key.
+ *   4. `wanted`: the farthest, then the greatest key. The caller evicts it
+ *      only for a chunk it draws strictly nearer, so two chunks at one
+ *      distance never trade a slot.
  */
 export function evictsBefore(a: EvictionCandidate, b: EvictionCandidate): boolean {
   const rank = EVICTION_RANK[a.class] - EVICTION_RANK[b.class];
@@ -166,12 +175,12 @@ export function findEvictionSlot(params: FindEvictionParams): EvictionCandidate 
   return best;
 }
 
-const CLASS_RANK: Record<EvictionClass, number> = { wanted: 0, unwanted: 1, unsampled: 2 };
+const CLASS_RANK: Record<EvictionClass, number> = { wanted: 0, ancestor: 1, unwanted: 2, unsampled: 3 };
 
 /**
  * Every slot, in the order a pool that must shrink keeps them: the reverse of
  * {@link findEvictionSlot}'s order, so wanted slots nearest first, then
- * unwanted ones nearest first, then unsampled ones.
+ * ancestors, then unwanted ones nearest first, then unsampled ones.
  */
 export function rankSlotsToKeep(params: FindEvictionParams): EvictionCandidate[] {
   const ranked: EvictionCandidate[] = [];
@@ -200,7 +209,8 @@ export function classifySlot(
 ): EvictionCandidate {
   const chunk = slot.chunk!;
   let sampled = false;
-  let wanted = false;
+  let drawn = false;
+  let kept = false;
   let dist = Infinity;
   for (const view of params.views) {
     if (view.slotGridIdx[slotIdx] < 0) continue;
@@ -209,11 +219,15 @@ export function classifySlot(
     const lodMeta = view.entityMetas.get(slot.memberId)?.find(m => m.level === chunk.level);
     if (!lodMeta) continue;
     sampled = true;
-    wanted ||= view.isWanted(slot.memberId, slot.chunkKey);
+    if (view.isWanted(slot.memberId, slot.chunkKey)) {
+      if (view.isAncestor(slot.memberId, slot.chunkKey)) kept = true;
+      else drawn = true;
+    }
     if (withDistance) dist = Math.min(dist, viewChunkDistSq(params, view, lodMeta, slot.memberId, chunk));
   }
   if (!sampled) return { key: compositeKey, class: "unsampled", dist: Infinity };
-  return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist: withDistance ? dist : 0 };
+  const kind: EvictionClass = drawn ? "wanted" : kept ? "ancestor" : "unwanted";
+  return { key: compositeKey, class: kind, dist: withDistance ? dist : 0 };
 }
 
 function viewChunkDistSq(
@@ -246,10 +260,16 @@ export function incomingDistSq(
 }
 
 /**
- * Whether a wanted incoming chunk may take `victim`'s slot. Its distance is
- * read only against a wanted victim: a full pool asks at each chunk, and the
- * page's admission leaves it a slot no view wants far more often than not.
+ * Whether a wanted incoming chunk may take `victim`'s slot. One the view
+ * draws takes any slot but a chunk it draws, and that only when strictly
+ * nearer. An ancestor never takes the slot of a chunk the view draws, and
+ * another ancestor's only when strictly nearer, so the room the ancestors
+ * take is room the drawn chunks leave. Its distance is read only against a
+ * victim the planner wants: a full pool asks at each chunk, and the page's
+ * admission leaves it a slot no view wants far more often than not.
  */
-export function mayEvict(victim: EvictionCandidate, incomingDist: () => number): boolean {
-  return victim.class !== "wanted" || incomingDist() < victim.dist;
+export function mayEvict(victim: EvictionCandidate, incomingDist: () => number, incomingAncestor = false): boolean {
+  if (victim.class === "wanted") return !incomingAncestor && incomingDist() < victim.dist;
+  if (victim.class === "ancestor" && incomingAncestor) return incomingDist() < victim.dist;
+  return true;
 }

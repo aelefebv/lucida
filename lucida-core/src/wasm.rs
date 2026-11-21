@@ -50,7 +50,10 @@ pub fn enumerate_chunks(
 /// `enumerate_chunks` does. `entities` and `previous` are in the flat layout
 /// `crate::level_selection` describes, as is the result. `lookahead` is 0
 /// for none, 1 for the finer cells the selection would refine next, and 2
-/// for the coarser cells above its finest.
+/// for the coarser cells above its finest. A positive `ancestor_scale` keeps
+/// each selected cell's ancestors that a frame at that share of the
+/// resolution would sample, the selected cells and their ancestors within
+/// `ancestor_share` of the budget together; zero keeps none.
 #[allow(clippy::too_many_arguments)]
 #[wasm_bindgen]
 pub fn select_levels(
@@ -62,8 +65,10 @@ pub fn select_levels(
     budget_gpu: f64,
     share: f64,
     lookahead: u32,
+    ancestor_scale: f64,
+    ancestor_share: f64,
 ) -> Result<Vec<f64>, JsError> {
-    use crate::level_selection::{Cost, Lookahead, select_batch};
+    use crate::level_selection::{Ancestors, Cost, Lookahead, select_batch};
     let views = crate::chunk::ChunkView::many_from_json(regions_json, depth_bias)
         .map_err(|e| JsError::new(&format!("invalid visible regions: {e}")))?;
     let lookahead = match lookahead {
@@ -81,6 +86,10 @@ pub fn select_levels(
         },
         share,
         lookahead,
+        (ancestor_scale > 0.0).then_some(Ancestors {
+            scale: ancestor_scale,
+            share: ancestor_share,
+        }),
     ))
 }
 

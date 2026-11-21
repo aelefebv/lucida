@@ -99,9 +99,30 @@ export const DEPTH_BIAS_VIEW = 0;
 /**
  * The share of the memory budget the level selection selects to. The rest
  * holds the coarser chunks a refinement replaces until the finer ones
+ * arrive, the chunks a moving view lets go of until their replacements
  * arrive, and the prefetch lane.
  */
 export const SELECTION_SHARE = 0.8;
+
+/**
+ * The lowest share of the resolution a warm gesture's frame draws at: the
+ * interaction render scale of a half times the adaptive floor of a half. A
+ * volume view keeps resident the coarser chunks over each chunk its level
+ * selection chose that a frame at this scale would sample, its ancestors,
+ * so such a frame has a level its pixels resolve. Where a sample of the
+ * selection's own level spans a pixel, that reaches two levels up; where it
+ * spans two, one; where it spans more, none.
+ */
+export const ANCESTOR_SCALE = 0.25;
+
+/**
+ * The share of the memory budget a volume view's selection and its
+ * ancestors may take together. The ancestors take only from what
+ * {@link SELECTION_SHARE} leaves: a refinement keeps the chunk it refines as
+ * an ancestor, which that rest held for it before, and where no gesture
+ * frame would sample an ancestor the view keeps none and draws as it did.
+ */
+export const ANCESTOR_SHARE = 0.95;
 
 /**
  * Per-tick planning tunables threaded through {@link plan}. Lane offsets
@@ -125,6 +146,10 @@ export interface PlanningConfig {
   depthBiasView: number;
   /** {@link SELECTION_SHARE}. */
   selectionShare: number;
+  /** {@link ANCESTOR_SCALE}. */
+  ancestorScale: number;
+  /** {@link ANCESTOR_SHARE}. */
+  ancestorShare: number;
 
   /**
    * Detail render radius as a multiplier of the visible-region
@@ -167,6 +192,8 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   distanceWeight: DISTANCE_WEIGHT,
   depthBiasView: DEPTH_BIAS_VIEW,
   selectionShare: SELECTION_SHARE,
+  ancestorScale: ANCESTOR_SCALE,
+  ancestorShare: ANCESTOR_SHARE,
   detailRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   coarseRenderRadiusView: RENDER_RADIUS_DISABLED_VIEW,
   minimapLaneOffset: MINIMAP_LANE_OFFSET,

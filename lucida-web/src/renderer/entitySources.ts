@@ -4,10 +4,11 @@
  * The detail tier holds sections for the finest level the level selection
  * chose and the next coarser levels, so the selection's coarser chunks draw
  * where it chose them, and resident coarser chunks fill the screen where a
- * finer one is missing. Planning requests the selection's chunks only, so
- * the extra sections cost indirection entries, never fetches. A level finer
- * than the finest chosen is never a source: zoomed out it would show the
- * decimated picture the selection replaced.
+ * finer one is missing. Planning requests the selection's chunks and the
+ * ancestors it keeps above them, so the other sections cost indirection
+ * entries, never fetches. A level finer than the finest chosen is never a
+ * source: zoomed out it would show the decimated picture the selection
+ * replaced.
  */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";

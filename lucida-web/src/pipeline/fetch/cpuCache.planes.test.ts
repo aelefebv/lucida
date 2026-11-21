@@ -156,6 +156,25 @@ describe("a chunk held as some of its planes", () => {
   });
 });
 
+describe("an ancestor a volume view keeps", () => {
+  it("is fetched, held and delivered, but the view settles without it", async () => {
+    const { source, cache, submit } = setup();
+    const above = request({ mode: "volume", ancestor: true });
+    submit(above);
+    let settle = cache.settleInputs(createSettleState());
+    expect(settle).toMatchObject({ inFlight: 0, speculativeInFlight: 1, desiredDetailChunks: 0 });
+
+    source.land(CHUNK);
+    await landed();
+    expect(cache.holds(above)).toBe(true);
+    const deliveries = [...cache.getDeliverable()];
+    expect(deliveries.map((d) => d.mode)).toEqual(["volume"]);
+    for (const delivery of deliveries) cache.markSent(delivery);
+    settle = cache.settleInputs(createSettleState());
+    expect(settle).toMatchObject({ uploadsUnanswered: 0, desiredDetailChunks: 0, residentDetailChunks: 0 });
+  });
+});
+
 describe("a chunk a slice view and a volume view both want", () => {
   it("goes to the pools of each, to the volume's only once it is whole, and again only to the pools that lose it", async () => {
     const { source, cache, submit } = setup();

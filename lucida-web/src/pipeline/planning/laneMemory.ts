@@ -29,6 +29,16 @@ export function cellKey(level: number, x: number, y: number, z: number): number 
   return ((level * 65536 + z) * 65536 + y) * 65536 + x;
 }
 
+/**
+ * The key a detail cell's requests are carried by: {@link cellKey}, below
+ * zero for an ancestor, so a cell that turns from ancestor to drawn or back
+ * is asked for anew.
+ */
+export function detailCellKey(cell: { level: number; x: number; y: number; z: number }, ancestor: boolean): number {
+  const key = cellKey(cell.level, cell.x, cell.y, cell.z);
+  return ancestor ? -1 - key : key;
+}
+
 /** What every request of `view`'s lanes depends on beyond its own chunk. */
 export function laneScope(view: DatasetView, epochs: SceneEpochs, config: object): LaneScope {
   const { selection } = view;

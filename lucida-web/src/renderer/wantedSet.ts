@@ -91,7 +91,8 @@ export interface WantedSetUpdate {
  * serves each entity's visible pixels, from nothing kept.
  *
  * Only the planner's wanted keys are reported missing. The coarser levels
- * kept under the finest are sampled when resident but never wanted. A
+ * kept under the finest are sampled when resident, and wanted only where
+ * the selection keeps them as ancestors, which are no positions. A
  * position's serving level is the first in sampling order whose covering
  * chunks are all resident; a position no level covers is blank and counts
  * toward neither end of the entity's range.
@@ -156,8 +157,11 @@ interface MemberPlan {
   /** The member's keys into the wanted chunk index, and the sets it read there. */
   detailKey: string;
   coarseKey: string;
+  ancestorsKey: string;
   detail: ReadonlySet<string> | undefined;
   coarse: ReadonlySet<string> | undefined;
+  /** The detail chunks that are ancestors, which are wanted but are no positions. */
+  ancestors: ReadonlySet<string> | undefined;
   reads: SectionReads;
   /** By {@link lookupId}, in the order they were planned. */
   lookups: Map<string, ChunkLookup>;
@@ -360,12 +364,15 @@ export class WantedSetTracker {
     }
     const detail = wanted.get(prior.detailKey);
     const coarse = wanted.get(prior.coarseKey);
-    if (prior.detail === detail && prior.coarse === coarse) return { plan: prior, added: [], dropped: [] };
+    const ancestors = wanted.get(prior.ancestorsKey);
+    if (prior.detail === detail && prior.coarse === coarse && prior.ancestors === ancestors) {
+      return { plan: prior, added: [], dropped: [] };
+    }
     const added: ChunkLookup[] = [];
     const dropped: ChunkLookup[] = [];
     const lookups = new Map(prior.lookups);
-    const plan: MemberPlan = { ...prior, detail, coarse, lookups };
-    const planner = new MemberPlanner(scope, entry, channel, atlases, poolFor, prior.reads);
+    const plan: MemberPlan = { ...prior, detail, coarse, ancestors, lookups };
+    const planner = new MemberPlanner(scope, entry, channel, atlases, poolFor, prior.reads, ancestors);
     for (const tier of RESIDENCY_TIERS) {
       const before = tier === "detail" ? prior.detail : prior.coarse;
       const after = tier === "detail" ? detail : coarse;
@@ -383,6 +390,25 @@ export class WantedSetTracker {
         const lookup = planner.lookup(tier, chunkKey);
         if (lookup === null) continue;
         lookups.set(lookupId(tier, chunkKey), lookup);
+        added.push(lookup);
+      }
+    }
+    // A chunk wanted before and after that turned ancestor, or back, is
+    // looked up again, to leave the positions or join them.
+    if (prior.ancestors !== ancestors) {
+      const turned = (from: ReadonlySet<string> | undefined, to: ReadonlySet<string> | undefined) =>
+        [...(from ?? [])].filter((chunkKey) => !to?.has(chunkKey));
+      for (const chunkKey of [...turned(prior.ancestors, ancestors), ...turned(ancestors, prior.ancestors)]) {
+        if (!prior.detail?.has(chunkKey) || !detail?.has(chunkKey)) continue;
+        const id = lookupId("detail", chunkKey);
+        const old = lookups.get(id);
+        if (old !== undefined) {
+          lookups.delete(id);
+          dropped.push(old);
+        }
+        const lookup = planner.lookup("detail", chunkKey);
+        if (lookup === null) continue;
+        lookups.set(id, lookup);
         added.push(lookup);
       }
     }
@@ -574,8 +600,10 @@ function planMember(
   const memberId = memberIdForColdEntry(entry, channel);
   const detailKey = wantedEntryKey("detail", memberId);
   const coarseKey = wantedEntryKey("coarse", memberId);
+  const ancestorsKey = wantedEntryKey("detail", memberId, true);
   const keys = { detail: wanted.get(detailKey), coarse: wanted.get(coarseKey) };
-  const planner = new MemberPlanner(scope, entry, channel, atlases, poolFor, new SectionReads(memberId));
+  const ancestors = wanted.get(ancestorsKey);
+  const planner = new MemberPlanner(scope, entry, channel, atlases, poolFor, new SectionReads(memberId), ancestors);
   const lookups = new Map<string, ChunkLookup>();
   for (const tier of RESIDENCY_TIERS) {
     for (const chunkKey of (tier === "detail" ? keys.detail : keys.coarse) ?? []) {
@@ -583,7 +611,16 @@ function planMember(
       if (lookup !== null) lookups.set(lookupId(tier, chunkKey), lookup);
     }
   }
-  return { detailKey, coarseKey, detail: keys.detail, coarse: keys.coarse, reads: planner.reads, lookups };
+  return {
+    detailKey,
+    coarseKey,
+    ancestorsKey,
+    detail: keys.detail,
+    coarse: keys.coarse,
+    ancestors,
+    reads: planner.reads,
+    lookups,
+  };
 }
 
 /** The lookup of each of one member's wanted chunks, sharing what the member's chunks read alike. */
@@ -595,6 +632,7 @@ class MemberPlanner {
   private readonly memberId: string;
   private readonly atlases: ReadonlyMap<string, AtlasSnapshot>;
   private readonly poolFor: SourcePoolResolver;
+  private readonly ancestors: ReadonlySet<string> | undefined;
   private readonly grids = new Map<number, LevelGrid | undefined>();
   private sampled: SampledLevel[] | null = null;
 
@@ -605,6 +643,7 @@ class MemberPlanner {
     atlases: ReadonlyMap<string, AtlasSnapshot>,
     poolFor: SourcePoolResolver,
     reads: SectionReads,
+    ancestors: ReadonlySet<string> | undefined,
   ) {
     this.scope = scope;
     this.entry = entry;
@@ -613,6 +652,7 @@ class MemberPlanner {
     this.atlases = atlases;
     this.poolFor = poolFor;
     this.reads = reads;
+    this.ancestors = ancestors;
   }
 
   /** The lookup of one wanted chunk, or null when the view lays out no section for it. */
@@ -650,8 +690,9 @@ class MemberPlanner {
       // A wanted chunk is served by its own level once resident, or a
       // coarser one until then, or by the level one finer the selection
       // just coarsened it from, still resident. Levels finer than that
-      // are left out: a chunk's cover two levels down runs to dozens.
-      serving: tier === "detail"
+      // are left out: a chunk's cover two levels down runs to dozens. An
+      // ancestor is no position: the chunks under it draw where it lies.
+      serving: tier === "detail" && !this.ancestors?.has(chunkKey)
         ? coverages(
           this.sampledLevels().filter((level) => level.grid.level >= chunk.level - 1),
           grid, [chunk.x, chunk.y, chunk.z], context,

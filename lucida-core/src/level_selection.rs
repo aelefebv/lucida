@@ -11,6 +11,12 @@
 //! not fit. It fits the budget by construction, and its work is bounded by
 //! the chunks it selects rather than by the chunks in view.
 //!
+//! A frame drawn at a fraction of the screen's resolution, as a gesture's
+//! is, can resolve a coarser level than the selection chose. So the
+//! selection can keep each selected cell's ancestors resident beside it: the
+//! coarser cells over it that such a frame would sample, charged to the same
+//! budget.
+//!
 //! It reads the camera, the level geometry, the budget and the previous
 //! selection, and nothing else, so every client gets the same selection for
 //! the same inputs.
@@ -210,6 +216,24 @@ pub struct PreviousSelection {
     pub kept: CellSet,
     /// Cells it replaced with finer ones.
     pub refined: CellSet,
+    /// Cells it kept as ancestors.
+    pub ancestors: CellSet,
+}
+
+/// The ancestors a selection keeps for frames drawn at a fraction of the
+/// screen's resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ancestors {
+    /// The lowest share of the screen's resolution a frame draws at. Each
+    /// selected cell keeps the coarser cells over it that such a frame would
+    /// sample: those whose samples span at most one of its pixels where the
+    /// cell is nearest the eye.
+    pub scale: f64,
+    /// The share of the budget the selected cells and their ancestors may
+    /// take together. The selected cells alone stay within the selection's
+    /// own share, so the ancestors take room only from what that share
+    /// leaves, and none where no frame would sample them.
+    pub share: f64,
 }
 
 /// Which way the view last zoomed, and so which cells beyond the selection
@@ -226,10 +250,13 @@ pub enum Lookahead {
 /// A view's selection.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LevelSelection {
-    /// The selected cells, in fetch order: coarser levels first, so a slow
-    /// link fills the whole view before it sharpens, then larger measure,
-    /// then nearer the focus, which orders a slice view's cells center out.
+    /// The selected cells, in fetch order ([`fetch_order`]).
     pub cells: Vec<SelectedCell>,
+    /// The ancestors the selected cells keep resident, in fetch order: the
+    /// coarser cells over each selected cell that a frame at the ancestors'
+    /// scale would sample, and none beyond the levels the renderer binds.
+    /// Never a selected cell.
+    pub ancestors: Vec<SelectedCell>,
     /// Cells beyond the selection worth fetching ahead, in order, which fit
     /// the room the selection leaves.
     pub lookahead: Vec<SelectedCell>,
@@ -238,6 +265,8 @@ pub struct LevelSelection {
     pub refined: Vec<Cell>,
     /// What the selected cells cost the detail budget.
     pub used: Cost,
+    /// What the ancestors cost it, beside them.
+    pub ancestors_used: Cost,
     /// The measure of the refinement the budget refused, when it refused
     /// one: how many device pixels a sample spans where the selection draws
     /// coarser than the screen calls for. `None` when every cell reached the
@@ -250,6 +279,36 @@ pub struct LevelSelection {
 /// The quarter octave the target level holds a boundary by.
 fn band() -> f64 {
     2f64.powf(HYSTERESIS_OCTAVES)
+}
+
+/// The order a view fetches its cells in: coarser levels first, so a slow
+/// link fills the whole view before it sharpens, then larger measure, then
+/// nearer the focus, which orders a slice view's cells center out.
+pub fn fetch_order(a: &SelectedCell, b: &SelectedCell) -> Ordering {
+    b.cell
+        .level
+        .cmp(&a.cell.level)
+        .then_with(|| b.measure.total_cmp(&a.measure))
+        .then_with(|| a.distance.total_cmp(&b.distance))
+        .then_with(|| a.cell.cmp(&b.cell))
+}
+
+/// Take one from `level`'s count, dropping the level at none.
+fn count_down(levels: &mut BTreeMap<u32, usize>, level: u32) {
+    if let Some(count) = levels.get_mut(&level) {
+        *count -= 1;
+        if *count == 0 {
+            levels.remove(&level);
+        }
+    }
+}
+
+/// A cell some selected cells keep as an ancestor: how many, and how far its
+/// center lies from the view's focus.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    holders: u32,
+    distance: f64,
 }
 
 /// A selected cell waiting to be refined, ordered by priority, then by cell
@@ -293,28 +352,51 @@ struct Ahead {
 struct Refiner<'s, 'a> {
     entities: &'s [SelectionEntity<'a>],
     previous: &'s PreviousSelection,
+    /// Which ancestors each selected cell keeps, if any.
+    ancestors: Option<Ancestors>,
     /// Selected cells, each with its measure and distance.
     selected: CellMap<SelectedCell>,
     refined: CellSet,
     /// Per entity, how many charged cells each detail level holds, which
     /// keeps the levels within the renderer's sources.
     detail_levels: Vec<BTreeMap<u32, usize>>,
+    /// Ancestors of the selected cells, selected themselves or not.
+    held: CellMap<Held>,
+    /// Per entity, how many ancestors that are not selected each charged
+    /// level holds, within the reach or beyond it.
+    held_levels: Vec<BTreeMap<u32, usize>>,
+    /// Per entity, the coarsest level the renderer binds beside the finest
+    /// selected one. It only falls as the refinement goes finer, and an
+    /// ancestor past it costs nothing, since nothing could sample it.
+    reach: Vec<u32>,
     heap: BinaryHeap<Candidate>,
+    /// What the selected cells and the ancestors cost together.
     used: Cost,
+    /// What the ancestors cost, of `used`.
+    held_used: Cost,
     counts: CullCounts,
     found: Vec<ScoredChunk>,
 }
 
 impl<'s, 'a> Refiner<'s, 'a> {
-    fn new(entities: &'s [SelectionEntity<'a>], previous: &'s PreviousSelection) -> Self {
+    fn new(
+        entities: &'s [SelectionEntity<'a>],
+        previous: &'s PreviousSelection,
+        ancestors: Option<Ancestors>,
+    ) -> Self {
         Self {
             entities,
             previous,
+            ancestors,
             selected: CellMap::default(),
             refined: CellSet::default(),
             detail_levels: vec![BTreeMap::new(); entities.len()],
+            held: CellMap::default(),
+            held_levels: vec![BTreeMap::new(); entities.len()],
+            reach: vec![u32::MAX; entities.len()],
             heap: BinaryHeap::new(),
             used: Cost::default(),
+            held_used: Cost::default(),
             counts: CullCounts::default(),
             found: Vec::new(),
         }
@@ -367,10 +449,33 @@ impl<'s, 'a> Refiner<'s, 'a> {
 
     fn select(&mut self, cell: Cell, distance: f64) {
         let measure = self.measure(cell);
+        let ancestors = self.ancestors_of(cell, measure);
+        self.select_with(cell, distance, measure, ancestors);
+    }
+
+    /// Select `cell`, whose measure is `measure` and whose ancestors are
+    /// `ancestors`.
+    fn select_with(
+        &mut self,
+        cell: Cell,
+        distance: f64,
+        measure: f64,
+        ancestors: Vec<(Cell, f64)>,
+    ) {
         let entities = self.entities;
         let entity = &entities[cell.entity as usize];
         if entity.charged(cell.level) {
-            self.used = self.used.add(entity.cost(cell.level));
+            // An ancestor selected in its own right is charged once.
+            let was_held = self.held.contains_key(&cell);
+            if was_held {
+                count_down(&mut self.held_levels[cell.entity as usize], cell.level);
+            }
+            let cost = entity.cost(cell.level);
+            if was_held && self.within_reach(cell) {
+                self.held_used = self.held_used.sub(cost);
+            } else {
+                self.used = self.used.add(cost);
+            }
             *self.detail_levels[cell.entity as usize]
                 .entry(cell.level)
                 .or_default() += 1;
@@ -383,25 +488,197 @@ impl<'s, 'a> Refiner<'s, 'a> {
                 distance,
             },
         );
+        for (ancestor, distance) in ancestors {
+            self.hold(ancestor, distance);
+        }
         self.offer(cell, measure);
     }
 
     fn unselect(&mut self, cell: Cell) {
-        if self.selected.remove(&cell).is_none() {
+        let Some(selected) = self.selected.remove(&cell) else {
             return;
-        }
+        };
         let entities = self.entities;
         let entity = &entities[cell.entity as usize];
         if entity.charged(cell.level) {
-            self.used = self.used.sub(entity.cost(cell.level));
-            let levels = &mut self.detail_levels[cell.entity as usize];
-            if let Some(count) = levels.get_mut(&cell.level) {
-                *count -= 1;
-                if *count == 0 {
-                    levels.remove(&cell.level);
-                }
+            count_down(&mut self.detail_levels[cell.entity as usize], cell.level);
+            // A cell still an ancestor of others stays, as theirs.
+            let held = self.held.contains_key(&cell);
+            if held {
+                *self.held_levels[cell.entity as usize]
+                    .entry(cell.level)
+                    .or_default() += 1;
+            }
+            let cost = entity.cost(cell.level);
+            if held && self.within_reach(cell) {
+                self.held_used = self.held_used.add(cost);
+            } else {
+                self.used = self.used.sub(cost);
             }
         }
+        // The same cells it held when selected: the choice reads only the
+        // cell, its measure and the previous selection.
+        for (ancestor, _) in self.ancestors_of(cell, selected.measure) {
+            self.release(ancestor);
+        }
+    }
+
+    /// Whether `cell` lies within its entity's reach.
+    fn within_reach(&self, cell: Cell) -> bool {
+        cell.level <= self.reach[cell.entity as usize]
+    }
+
+    /// The coarser cells over `cell` that the view samples and that a frame
+    /// at the ancestors' scale would sample there, each with its distance
+    /// from the focus. `measure` is the device pixels one of `cell`'s samples
+    /// spans where it is nearest the eye, so a sample of a coarser level
+    /// spans that times the levels' ratio, and the frame's pixels are fewer
+    /// by its scale. A level whose samples span more than one of the frame's
+    /// pixels there is one the frame never falls through to, and ends them.
+    /// So does a level the coarse tier holds, resident under every cell
+    /// already.
+    ///
+    /// A cell the last selection kept as an ancestor is kept until its span
+    /// passes one pixel by the target level's hysteresis band, so a cell near
+    /// the bound does not come and go as the view moves.
+    fn ancestors_of(&mut self, cell: Cell, measure: f64) -> Vec<(Cell, f64)> {
+        let mut out = Vec::new();
+        let Some(ancestors) = self.ancestors else {
+            return out;
+        };
+        let entities = self.entities;
+        let entity = &entities[cell.entity as usize];
+        let ratio = |level: u32| entity.ratios.get(level as usize).copied().unwrap_or(1.0);
+        let own = ratio(cell.level);
+        let mut level = cell.level;
+        while let Some(coarser) = entity.coarser(level) {
+            let span = measure * ancestors.scale * ratio(coarser) / own;
+            if span.is_nan() || span > band() {
+                break;
+            }
+            let (lo, hi) = entity.queries[cell.level as usize].cell_box([cell.x, cell.y, cell.z]);
+            self.found.clear();
+            // Its own counts: the planner's culling counters say what the
+            // selection considered drawing, not what it keeps beside it.
+            chunk::enumerate_chunks_within(
+                entity.view,
+                &entity.queries[coarser as usize],
+                lo,
+                hi,
+                &mut CullCounts::default(),
+                &mut self.found,
+            );
+            for found in &self.found {
+                let ancestor = Cell {
+                    entity: cell.entity,
+                    level: coarser,
+                    z: found.z,
+                    y: found.y,
+                    x: found.x,
+                };
+                if span <= 1.0 || self.previous.ancestors.contains(&ancestor) {
+                    out.push((ancestor, found.distance));
+                }
+            }
+            level = coarser;
+        }
+        out
+    }
+
+    /// Whether `ancestor` would cost the budget once held: not held or
+    /// selected yet, at a charged level within its entity's reach.
+    fn costs_to_hold(&self, ancestor: Cell) -> bool {
+        let entity = &self.entities[ancestor.entity as usize];
+        !self.held.contains_key(&ancestor)
+            && !self.selected.contains_key(&ancestor)
+            && entity.charged(ancestor.level)
+            && self.within_reach(ancestor)
+    }
+
+    fn hold(&mut self, ancestor: Cell, distance: f64) {
+        let held = self.held.entry(ancestor).or_insert(Held {
+            holders: 0,
+            distance,
+        });
+        held.holders += 1;
+        if held.holders > 1 || self.selected.contains_key(&ancestor) {
+            return;
+        }
+        let entities = self.entities;
+        let entity = &entities[ancestor.entity as usize];
+        if entity.charged(ancestor.level) {
+            *self.held_levels[ancestor.entity as usize]
+                .entry(ancestor.level)
+                .or_default() += 1;
+            if self.within_reach(ancestor) {
+                let cost = entity.cost(ancestor.level);
+                self.used = self.used.add(cost);
+                self.held_used = self.held_used.add(cost);
+            }
+        }
+    }
+
+    fn release(&mut self, ancestor: Cell) {
+        let Some(held) = self.held.get_mut(&ancestor) else {
+            return;
+        };
+        held.holders -= 1;
+        if held.holders > 0 {
+            return;
+        }
+        self.held.remove(&ancestor);
+        if self.selected.contains_key(&ancestor) {
+            return;
+        }
+        let entities = self.entities;
+        let entity = &entities[ancestor.entity as usize];
+        if entity.charged(ancestor.level) {
+            count_down(
+                &mut self.held_levels[ancestor.entity as usize],
+                ancestor.level,
+            );
+            if self.within_reach(ancestor) {
+                let cost = entity.cost(ancestor.level);
+                self.used = self.used.sub(cost);
+                self.held_used = self.held_used.sub(cost);
+            }
+        }
+    }
+
+    /// What the ancestors of one entity between `reach` and its reach now
+    /// cost, which bringing its reach down to `reach` gives up.
+    fn held_beyond(&self, entity_index: usize, reach: u32) -> Cost {
+        let entity = &self.entities[entity_index];
+        let now = self.reach[entity_index];
+        if reach >= now {
+            return Cost::default();
+        }
+        self.held_levels[entity_index]
+            .range(reach + 1..=now)
+            .fold(Cost::default(), |sum, (&level, &count)| {
+                sum.add(entity.cost(level).scaled(count as f64))
+            })
+    }
+
+    /// The ancestors the selected cells hold that are not selected, which
+    /// the renderer can bind, in fetch order.
+    fn held_cells(&self) -> Vec<SelectedCell> {
+        let mut cells: Vec<SelectedCell> = self
+            .held
+            .iter()
+            .filter(|(cell, _)| {
+                !self.selected.contains_key(cell)
+                    && self.entities[cell.entity as usize].charged(cell.level)
+                    && self.within_reach(**cell)
+            })
+            .map(|(&cell, held)| SelectedCell {
+                cell,
+                measure: self.measure(cell),
+                distance: held.distance,
+            })
+            .collect();
+        cells.sort_by(fetch_order);
+        cells
     }
 
     /// Every cell of the entity's start level the view samples.
@@ -457,13 +734,20 @@ impl<'s, 'a> Refiner<'s, 'a> {
     }
 
     /// Refine in priority order until nothing calls for it or the next
-    /// refinement would not fit `budget`. Returns the priority of the
-    /// refinement the budget refused, if it refused one, and leaves it queued.
+    /// refinement would not fit: the selected cells within `budget`, and
+    /// with their ancestors within `with_ancestors`. Returns the priority of
+    /// the refinement the budget refused, if it refused one, and leaves it
+    /// queued.
     ///
     /// With `ahead`, the cells refinements add are fetched beside the
     /// selection rather than in place of what they refine, so they are
     /// charged to its room without the refunds and collected in it.
-    fn refine(&mut self, budget: Cost, mut ahead: Option<&mut Ahead>) -> Option<f64> {
+    fn refine(
+        &mut self,
+        budget: Cost,
+        with_ancestors: Cost,
+        mut ahead: Option<&mut Ahead>,
+    ) -> Option<f64> {
         while let Some(&top) = self.heap.peek() {
             let cell = top.cell;
             if !self.selected.contains_key(&cell) || self.refined.contains(&cell) {
@@ -503,27 +787,61 @@ impl<'s, 'a> Refiner<'s, 'a> {
                     !self.selected.contains_key(child) && !self.refined.contains(child)
                 })
                 .collect();
+            let lineage: Vec<(f64, Vec<(Cell, f64)>)> = children
+                .iter()
+                .map(|&(child, _)| {
+                    let measure = self.measure(child);
+                    (measure, self.ancestors_of(child, measure))
+                })
+                .collect();
+            // What the children's ancestors add: in a grid that nests, the
+            // cell refined is the first, and its own first is often held
+            // already. What the refinement lets go of is left out, so the
+            // check errs toward the budget.
+            let mut adding = CellSet::default();
+            let mut added = Cost::default();
+            for &(ancestor, _) in lineage.iter().flat_map(|(_, ancestors)| ancestors) {
+                if ancestor.level <= reach
+                    && self.costs_to_hold(ancestor)
+                    && adding.insert(ancestor)
+                {
+                    added = added.add(entity.cost(ancestor.level));
+                }
+            }
+            let held_beyond = self.held_beyond(cell.entity as usize, reach);
             let mut after = self
                 .used
                 .add(entity.cost(finer).scaled(children.len() as f64))
-                .sub(given_up);
+                .add(added)
+                .sub(given_up)
+                .sub(held_beyond);
+            let mut held_after = self.held_used.add(added).sub(held_beyond);
+            // The cell refined stays, as an ancestor, while a child or
+            // another selected cell keeps it.
+            let stays = self.held.contains_key(&cell)
+                || lineage
+                    .iter()
+                    .any(|(_, ancestors)| ancestors.iter().any(|&(a, _)| a == cell));
             if entity.charged(cell.level) {
-                after = after.sub(entity.cost(cell.level));
+                if stays {
+                    held_after = held_after.add(entity.cost(cell.level));
+                } else {
+                    after = after.sub(entity.cost(cell.level));
+                }
             }
             let fits = match ahead.as_deref() {
                 Some(ahead) => ahead
                     .spent
                     .add(entity.cost(finer).scaled(children.len() as f64))
                     .within(ahead.room),
-                None => after.within(budget),
+                None => after.within(with_ancestors) && after.sub(held_after).within(budget),
             };
             if !fits {
                 return Some(top.priority);
             }
 
             self.heap.pop();
-            self.unselect(cell);
-            self.refined.insert(cell);
+            self.lower_reach(cell.entity as usize, reach);
             if beyond {
                 let dropped: Vec<Cell> = self
                     .selected
@@ -537,28 +855,36 @@ impl<'s, 'a> Refiner<'s, 'a> {
                     self.unselect(cell);
                 }
             }
-            for (child, distance) in children {
-                self.select(child, distance);
+            // The children go in before the cell comes out, so the cell
+            // passes from selected to held without leaving the budget.
+            for ((child, distance), (measure, ancestors)) in children.into_iter().zip(lineage) {
+                self.select_with(child, distance, measure, ancestors);
                 if let Some(ahead) = ahead.as_deref_mut() {
                     ahead.spent = ahead.spent.add(entity.cost(finer));
                     ahead.cells.push(child);
                 }
             }
+            self.unselect(cell);
+            self.refined.insert(cell);
         }
         None
+    }
+
+    /// Bring an entity's reach down to `reach`, and stop charging the
+    /// ancestors past it.
+    fn lower_reach(&mut self, entity_index: usize, reach: u32) {
+        let beyond = self.held_beyond(entity_index, reach);
+        if reach < self.reach[entity_index] {
+            self.used = self.used.sub(beyond);
+            self.held_used = self.held_used.sub(beyond);
+            self.reach[entity_index] = reach;
+        }
     }
 
     /// The selected cells in fetch order.
     fn cells(&self) -> Vec<SelectedCell> {
         let mut cells: Vec<SelectedCell> = self.selected.values().copied().collect();
-        cells.sort_by(|a, b| {
-            b.cell
-                .level
-                .cmp(&a.cell.level)
-                .then_with(|| b.measure.total_cmp(&a.measure))
-                .then_with(|| a.distance.total_cmp(&b.distance))
-                .then_with(|| a.cell.cmp(&b.cell))
-        });
+        cells.sort_by(fetch_order);
         cells
     }
 
@@ -585,7 +911,7 @@ impl<'s, 'a> Refiner<'s, 'a> {
                 continue;
             };
             for (parent, distance) in self.children(cell, coarser) {
-                if !self.selected.contains_key(&parent) {
+                if !self.selected.contains_key(&parent) && !self.held.contains_key(&parent) {
                     parents.insert(parent, distance);
                 }
             }
@@ -629,22 +955,32 @@ impl<'s, 'a> Refiner<'s, 'a> {
 /// level's hysteresis band, both in which cell refines first and in the
 /// one-pixel stop, so a small camera move keeps the set it had. `lookahead`
 /// asks for the cells worth fetching ahead in the room the share leaves.
+///
+/// With `ancestors`, each selected cell keeps the ancestors a frame at their
+/// scale would sample, and the selected cells with their ancestors stay
+/// within the ancestors' share of `budget`. A refinement keeps the cell it
+/// refines while one of its children keeps it as an ancestor.
 pub fn select_levels(
     entities: &[SelectionEntity],
     budget: Cost,
     share: f64,
     previous: &PreviousSelection,
     lookahead: Lookahead,
+    ancestors: Option<Ancestors>,
 ) -> LevelSelection {
-    let mut refiner = Refiner::new(entities, previous);
+    let mut refiner = Refiner::new(entities, previous, ancestors);
     for index in 0..entities.len() {
         refiner.seed(index);
     }
-    let limit = refiner.refine(budget.scaled(share.clamp(0.0, 1.0)), None);
+    let share = share.clamp(0.0, 1.0);
+    let with_ancestors = ancestors.map_or(share, |a| a.share.clamp(share, 1.0));
+    let limit = refiner.refine(budget.scaled(share), budget.scaled(with_ancestors), None);
     let cells = refiner.cells();
+    let held = refiner.held_cells();
     let mut refined: Vec<Cell> = refiner.refined.iter().copied().collect();
     refined.sort_unstable();
     let used = refiner.used;
+    let ancestors_used = refiner.held_used;
     let lookahead = match lookahead {
         Lookahead::None => Vec::new(),
         Lookahead::Finer => {
@@ -653,7 +989,7 @@ pub fn select_levels(
                 spent: Cost::default(),
                 room: budget.sub(used),
             };
-            refiner.refine(budget, Some(&mut ahead));
+            refiner.refine(budget, budget, Some(&mut ahead));
             ahead
                 .cells
                 .into_iter()
@@ -664,9 +1000,11 @@ pub fn select_levels(
     };
     LevelSelection {
         cells,
+        ancestors: held,
         lookahead,
         refined,
-        used,
+        used: used.sub(ancestors_used),
+        ancestors_used,
         limit,
         counts: refiner.counts,
     }
@@ -684,18 +1022,23 @@ pub const ENTITY_HEADER: usize = 7;
 pub const LEVEL_STRIDE: usize = 12;
 
 /// Numbers per cell in [`select_batch`]'s previous selection: entity, level,
-/// X, Y, Z, and 1 for a cell it refined or 0 for one it kept.
+/// X, Y, Z, and 0 for a cell it kept, 1 for one it refined, or 2 for one it
+/// kept as an ancestor. A cell refined and kept as an ancestor may come twice.
 pub const PREVIOUS_STRIDE: usize = 6;
 
 /// Numbers per cell in [`select_batch`]'s output: entity, level, X, Y, Z,
-/// measure and distance. A refined cell has neither, and writes zeros.
-pub const CELL_STRIDE: usize = 7;
+/// measure, distance, and 1 for an ancestor the selection keeps or 0
+/// otherwise. A refined cell has no measure or distance, and writes zeros.
+pub const CELL_STRIDE: usize = 8;
 
-/// Numbers at the head of [`select_batch`]'s output: how many selected,
-/// lookahead and refined cells follow, in that order; the CPU and GPU bytes
-/// used; the refused refinement's measure or -1; and the four
-/// [`CullCounts`] in field order.
-pub const SELECTION_HEADER: usize = 10;
+/// Numbers at the head of [`select_batch`]'s output: how many fetched cells,
+/// the selected ones in fetch order and then their ancestors in fetch order,
+/// then lookahead and refined cells follow, in that order; the CPU and GPU
+/// bytes the
+/// selected cells use; the refused refinement's measure or -1; the four
+/// [`CullCounts`] in field order; and the CPU and GPU bytes the ancestors
+/// use.
+pub const SELECTION_HEADER: usize = 12;
 
 /// [`select_levels`] over the flat numeric layout the strides above describe,
 /// so a client crosses into the core once per view. `views` are the regions
@@ -708,6 +1051,7 @@ pub fn select_batch(
     budget: Cost,
     share: f64,
     lookahead: Lookahead,
+    ancestors: Option<Ancestors>,
 ) -> Vec<f64> {
     let index = |v: f64| -> Option<u32> {
         (v.is_finite() && v >= 0.0 && v <= u32::MAX as f64).then_some(v as u32)
@@ -780,21 +1124,30 @@ pub fn select_batch(
             y,
             x,
         };
-        if numbers[5] > 0.0 {
+        if numbers[5] > 1.5 {
+            last.ancestors.insert(cell);
+        } else if numbers[5] > 0.0 {
             last.refined.insert(cell);
         } else {
             last.kept.insert(cell);
         }
     }
 
-    let selection = select_levels(&parsed, budget, share, &last, lookahead);
+    let selection = select_levels(&parsed, budget, share, &last, lookahead, ancestors);
+    // The ancestors go after every selected cell: a settled frame draws none
+    // of them, so they wait for what it draws.
+    let fetched: Vec<(&SelectedCell, bool)> = selection
+        .cells
+        .iter()
+        .map(|cell| (cell, false))
+        .chain(selection.ancestors.iter().map(|cell| (cell, true)))
+        .collect();
     let mut out = Vec::with_capacity(
         SELECTION_HEADER
-            + (selection.cells.len() + selection.lookahead.len() + selection.refined.len())
-                * CELL_STRIDE,
+            + (fetched.len() + selection.lookahead.len() + selection.refined.len()) * CELL_STRIDE,
     );
     out.extend_from_slice(&[
-        selection.cells.len() as f64,
+        fetched.len() as f64,
         selection.lookahead.len() as f64,
         selection.refined.len() as f64,
         selection.used.cpu,
@@ -804,8 +1157,10 @@ pub fn select_batch(
         selection.counts.after_xy_bounds as f64,
         selection.counts.after_z_range as f64,
         selection.counts.after_frustum as f64,
+        selection.ancestors_used.cpu,
+        selection.ancestors_used.gpu,
     ]);
-    let mut push = |cell: Cell, measure: f64, distance: f64| {
+    let mut push = |cell: Cell, measure: f64, distance: f64, ancestor: bool| {
         out.extend_from_slice(&[
             f64::from(cell.entity),
             f64::from(cell.level),
@@ -814,13 +1169,17 @@ pub fn select_batch(
             f64::from(cell.z),
             measure,
             distance,
+            if ancestor { 1.0 } else { 0.0 },
         ]);
     };
-    for cell in selection.cells.iter().chain(&selection.lookahead) {
-        push(cell.cell, cell.measure, cell.distance);
+    for (cell, ancestor) in fetched {
+        push(cell.cell, cell.measure, cell.distance, ancestor);
+    }
+    for cell in &selection.lookahead {
+        push(cell.cell, cell.measure, cell.distance, false);
     }
     for &cell in &selection.refined {
-        push(cell, 0.0, 0.0);
+        push(cell, 0.0, 0.0, false);
     }
     out
 }
@@ -912,6 +1271,7 @@ mod tests {
             1.0,
             &PreviousSelection::default(),
             Lookahead::None,
+            None,
         )
     }
 
@@ -919,6 +1279,7 @@ mod tests {
         PreviousSelection {
             kept: selection.cells.iter().map(|c| c.cell).collect(),
             refined: selection.refined.iter().copied().collect(),
+            ancestors: selection.ancestors.iter().map(|c| c.cell).collect(),
         }
     }
 
@@ -1045,6 +1406,7 @@ mod tests {
                     share,
                     &PreviousSelection::default(),
                     Lookahead::Finer,
+                    None,
                 );
                 let charged = selection.cells.iter().filter(|c| c.cell.level != 4).count() as f64;
                 assert_eq!(selection.used.cpu, charged);
@@ -1117,6 +1479,7 @@ mod tests {
                 0.8,
                 &PreviousSelection::default(),
                 Lookahead::Finer,
+                None,
             )
         };
         let first = run();
@@ -1162,6 +1525,7 @@ mod tests {
                 1.0,
                 &previous(&first),
                 Lookahead::None,
+                None,
             );
             assert_eq!(set(&next), set(&first), "after turning by {step}");
         }
@@ -1184,6 +1548,7 @@ mod tests {
             1.0,
             &previous(&before),
             Lookahead::None,
+            None,
         );
         assert_eq!(levels_of(&held), [1].into());
         let past = select_levels(
@@ -1192,6 +1557,7 @@ mod tests {
             1.0,
             &previous(&before),
             Lookahead::None,
+            None,
         );
         assert_eq!(levels_of(&past), [0].into());
     }
@@ -1311,6 +1677,7 @@ mod tests {
             1.0,
             &PreviousSelection::default(),
             Lookahead::Coarser,
+            None,
         );
         assert_eq!(levels_of(&selection), [0].into());
         assert!(!selection.lookahead.is_empty());
@@ -1327,6 +1694,7 @@ mod tests {
             0.5,
             &PreviousSelection::default(),
             Lookahead::Finer,
+            None,
         );
         assert!(!selection.lookahead.is_empty());
         let finest = selection.cells.iter().map(|c| c.cell.level).min().unwrap();
@@ -1358,6 +1726,7 @@ mod tests {
             budget,
             0.8,
             Lookahead::None,
+            Some(KEEP),
         );
         let direct = select_levels(
             &[entity(&view, &levels)],
@@ -1365,37 +1734,339 @@ mod tests {
             0.8,
             &PreviousSelection::default(),
             Lookahead::None,
+            Some(KEEP),
         );
-        assert_eq!(out[0] as usize, direct.cells.len());
+        assert!(!direct.ancestors.is_empty());
+        let fetched = direct.cells.len() + direct.ancestors.len();
+        assert_eq!(out[0] as usize, fetched);
         assert_eq!(out[2] as usize, direct.refined.len());
         assert_eq!(out[3], direct.used.cpu);
-        let cell = direct.cells[0];
+        assert_eq!(out[10], direct.ancestors_used.cpu);
+        assert_eq!(out[11], direct.ancestors_used.gpu);
+
+        // The selected cells in fetch order, then their ancestors, each
+        // marked for which it is.
+        let cell_of = |numbers: &[f64; CELL_STRIDE]| Cell {
+            entity: numbers[0] as u32,
+            level: numbers[1] as u32,
+            x: numbers[2] as u32,
+            y: numbers[3] as u32,
+            z: numbers[4] as u32,
+        };
+        let rows = out[SELECTION_HEADER..SELECTION_HEADER + fetched * CELL_STRIDE]
+            .as_chunks::<CELL_STRIDE>()
+            .0;
+        let marked = |flag: f64| -> BTreeSet<Cell> {
+            rows.iter().filter(|n| n[7] == flag).map(cell_of).collect()
+        };
+        assert_eq!(marked(0.0), set(&direct));
         assert_eq!(
-            out[SELECTION_HEADER..SELECTION_HEADER + CELL_STRIDE],
-            [
-                0.0,
-                f64::from(cell.cell.level),
-                f64::from(cell.cell.x),
-                f64::from(cell.cell.y),
-                f64::from(cell.cell.z),
-                cell.measure,
-                cell.distance,
-            ]
+            marked(1.0),
+            direct.ancestors.iter().map(|c| c.cell).collect()
+        );
+        assert!(rows.windows(2).all(|w| w[0][7] <= w[1][7]));
+        assert!(
+            rows.windows(2)
+                .all(|w| w[0][7] != w[1][7] || w[0][1] >= w[1][1])
         );
 
         // Fed back as the previous selection, it selects the same again.
         let mut previous = Vec::new();
-        let cells = &out[SELECTION_HEADER..];
-        for (index, numbers) in cells.as_chunks::<CELL_STRIDE>().0.iter().enumerate() {
+        for numbers in rows {
             previous.extend_from_slice(&numbers[..5]);
-            previous.push(if index < direct.cells.len() { 0.0 } else { 1.0 });
+            previous.push(if numbers[7] > 0.0 { 2.0 } else { 0.0 });
         }
-        let again = select_batch(&[view], &entities, &previous, budget, 0.8, Lookahead::None);
-        let selected = SELECTION_HEADER + direct.cells.len() * CELL_STRIDE;
-        assert_eq!(again[..5], out[..5]);
-        assert_eq!(
-            again[SELECTION_HEADER..selected],
-            out[SELECTION_HEADER..selected]
+        let refined = &out[SELECTION_HEADER + (fetched + out[1] as usize) * CELL_STRIDE..];
+        for numbers in refined.as_chunks::<CELL_STRIDE>().0 {
+            previous.extend_from_slice(&numbers[..5]);
+            previous.push(1.0);
+        }
+        let again = select_batch(
+            &[view],
+            &entities,
+            &previous,
+            budget,
+            0.8,
+            Lookahead::None,
+            Some(KEEP),
         );
+        let end = SELECTION_HEADER + fetched * CELL_STRIDE;
+        assert_eq!(again[..5], out[..5]);
+        assert_eq!(again[SELECTION_HEADER..end], out[SELECTION_HEADER..end]);
+    }
+
+    /// Ancestors for frames at a quarter of the resolution, with all of the
+    /// budget for the selected cells and their ancestors together.
+    const KEEP: Ancestors = Ancestors {
+        scale: 0.25,
+        share: 1.0,
+    };
+
+    fn select_keeping(entities: &[SelectionEntity], budget: Cost, share: f64) -> LevelSelection {
+        select_levels(
+            entities,
+            budget,
+            share,
+            &PreviousSelection::default(),
+            Lookahead::None,
+            Some(KEEP),
+        )
+    }
+
+    /// The cells of `level` over `cell`, by their boxes.
+    fn covering(levels: &[LevelGeometry], cell: Cell, level: u32) -> Vec<Cell> {
+        let (lo, hi) = cell_box(levels, cell);
+        let grid = levels[level as usize].grid_shape;
+        let mut out = Vec::new();
+        for z in 0..grid[2] as u32 {
+            for y in 0..grid[3] as u32 {
+                for x in 0..grid[4] as u32 {
+                    let over = Cell {
+                        entity: cell.entity,
+                        level,
+                        z,
+                        y,
+                        x,
+                    };
+                    let (olo, ohi) = cell_box(levels, over);
+                    if (0..3).all(|a| olo[a] < hi[a] && lo[a] < ohi[a]) {
+                        out.push(over);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every cell over a selected cell at a level below `coarse` whose
+    /// samples a quarter-resolution frame would put under one of its pixels
+    /// there: the ancestors the rule keeps, with no previous selection.
+    fn sampled_ancestors(
+        levels: &[LevelGeometry],
+        selection: &LevelSelection,
+        coarse: u32,
+        axes: &[usize],
+    ) -> BTreeSet<Cell> {
+        let ratios = level_shape_ratios(levels, axes);
+        let mut out = BTreeSet::new();
+        for selected in &selection.cells {
+            let cell = selected.cell;
+            for level in cell.level + 1..coarse {
+                let span =
+                    selected.measure * 0.25 * ratios[level as usize] / ratios[cell.level as usize];
+                if span > 1.0 {
+                    break;
+                }
+                out.extend(covering(levels, cell, level));
+            }
+        }
+        out
+    }
+
+    fn count(cells: &[SelectedCell], coarse: u32) -> f64 {
+        cells.iter().filter(|c| c.cell.level != coarse).count() as f64
+    }
+
+    #[test]
+    fn each_selected_cell_keeps_the_ancestors_a_quarter_resolution_frame_would_sample() {
+        let view = volume_view(Arcball::new([800, 600]), 512);
+        let levels = cube_pyramid(512, 32, 5);
+        for budget in [300.0, 1500.0, 4000.0] {
+            let selection = select_keeping(&[entity(&view, &levels)], cells_budget(budget), 0.8);
+            let held: BTreeSet<Cell> = selection.ancestors.iter().map(|c| c.cell).collect();
+            // Level 4 is the coarse tier's, under every cell already.
+            assert_eq!(
+                held,
+                sampled_ancestors(&levels, &selection, 4, &VOLUME_AXES),
+                "at {budget}"
+            );
+            assert!(held.is_disjoint(&set(&selection)));
+            let refined: BTreeSet<Cell> = selection.refined.iter().copied().collect();
+            assert!(held.is_subset(&refined));
+        }
+    }
+
+    #[test]
+    fn a_view_zoomed_past_a_pixel_keeps_only_the_levels_its_frames_sample() {
+        // Level 0 at 1.8 pixels a sample: a quarter-resolution frame puts a
+        // level 1 sample under 0.9 of its pixels, and a level 2 sample under
+        // 1.8. At 5 pixels it samples no coarser level at all.
+        let levels = image(2048);
+        let near = select_keeping(&[entity(&slice_view(1.8), &levels)], cells_budget(1e9), 1.0);
+        assert_eq!(levels_of(&near), [0].into());
+        assert!(!near.ancestors.is_empty());
+        assert!(near.ancestors.iter().all(|c| c.cell.level == 1));
+
+        let view = slice_view(5.0);
+        let nearer = select_keeping(&[entity(&view, &levels)], cells_budget(1e9), 1.0);
+        assert!(nearer.ancestors.is_empty());
+        assert_eq!(nearer, select(&[entity(&view, &levels)], cells_budget(1e9)));
+    }
+
+    #[test]
+    fn the_selected_cells_stay_within_their_share_and_with_their_ancestors_within_theirs() {
+        let view = volume_view(Arcball::new([800, 600]), 512);
+        let levels = cube_pyramid(512, 32, 5);
+        let ancestors = Ancestors {
+            scale: 0.25,
+            share: 0.9,
+        };
+        for cells in [0.0, 1.0, 10.0, 100.0, 333.0, 1000.0, 4000.0] {
+            let selection = select_levels(
+                &[entity(&view, &levels)],
+                cells_budget(cells),
+                0.8,
+                &PreviousSelection::default(),
+                Lookahead::None,
+                Some(ancestors),
+            );
+            assert_eq!(selection.used.cpu, count(&selection.cells, 4), "{cells}");
+            assert_eq!(
+                selection.ancestors_used.cpu,
+                count(&selection.ancestors, 4),
+                "{cells}"
+            );
+            assert!(selection.used.cpu <= cells * 0.8, "{cells}");
+            assert!(
+                selection.used.cpu + selection.ancestors_used.cpu <= cells * 0.9,
+                "{cells}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ancestors_take_room_from_what_the_share_leaves() {
+        let view = volume_view(Arcball::new([800, 600]), 512);
+        let levels = cube_pyramid(512, 32, 5);
+        let run = |ancestors: Option<Ancestors>| {
+            select_levels(
+                &[entity(&view, &levels)],
+                cells_budget(1500.0),
+                0.8,
+                &PreviousSelection::default(),
+                Lookahead::None,
+                ancestors,
+            )
+        };
+        let without = run(None);
+        assert!(without.limit.is_some());
+        // Room past the share for them: the selection is what it was.
+        let beside = run(Some(KEEP));
+        assert!(!beside.ancestors.is_empty());
+        assert_eq!(set(&beside), set(&without));
+        assert_eq!(beside.used, without.used);
+        // None past it: they come out of what the selection draws.
+        let inside = run(Some(Ancestors {
+            scale: 0.25,
+            share: 0.8,
+        }));
+        assert!(count(&inside.cells, 4) < count(&without.cells, 4));
+        assert!(inside.used.cpu + inside.ancestors_used.cpu <= 1200.0);
+    }
+
+    #[test]
+    fn ancestors_stay_within_the_levels_the_renderer_binds() {
+        // The selection's levels run from 0 to 3, and a level 2 or 3 cell's
+        // ancestors at levels 4 and 5 could not be bound.
+        let levels = cube_pyramid(4096, 64, 7);
+        let view = volume_view(head_on(0.51, [100, 75]), 4096);
+        let selection = select_keeping(&[entity(&view, &levels)], cells_budget(1e9), 1.0);
+        let finest = selection.cells.iter().map(|c| c.cell.level).min().unwrap();
+        assert_eq!(finest, 0);
+        assert!(levels_of(&selection).contains(&3));
+        assert!(!selection.ancestors.is_empty());
+        assert!(
+            selection
+                .ancestors
+                .iter()
+                .all(|c| c.cell.level < finest + MAX_LEVEL_SOURCES)
+        );
+        assert_eq!(selection.ancestors_used.cpu, count(&selection.ancestors, 6));
+    }
+
+    #[test]
+    fn a_refinement_keeps_the_cell_it_refines_while_a_child_samples_it() {
+        // Level 2 at 0.8 pixels a sample: a quarter-resolution frame samples
+        // level 3 over each, and level 4 is the coarse tier's.
+        let levels = image(2048);
+        let view = slice_at(0.2, [128.0, 128.0]);
+        let without = select(&[entity(&view, &levels)], cells_budget(1e9));
+        let with = select_keeping(&[entity(&view, &levels)], cells_budget(1e9), 1.0);
+        assert_eq!(set(&with), set(&without));
+        assert_eq!(with.used, without.used);
+        assert!(with.ancestors.iter().all(|c| c.cell.level == 3));
+        assert!(!with.ancestors.is_empty());
+        assert_eq!(with.ancestors_used.cpu, with.ancestors.len() as f64);
+    }
+
+    #[test]
+    fn grids_that_do_not_nest_keep_every_cell_over_a_selected_one_a_frame_samples() {
+        let levels = vec![
+            geo(0, [1, 192, 192], [1, 48, 48]),
+            geo(1, [1, 96, 96], [1, 32, 32]),
+            geo(2, [1, 48, 48], [1, 16, 16]),
+            geo(3, [1, 24, 24], [1, 24, 24]),
+        ];
+        let view = slice_at(1.5, [96.0, 96.0]);
+        for cells in [3.0, 9.0, 20.0, 40.0, 1e9] {
+            let selection = select_keeping(&[entity(&view, &levels)], cells_budget(cells), 1.0);
+            assert_eq!(selection.used.cpu, count(&selection.cells, 3), "{cells}");
+            assert_eq!(
+                selection.ancestors_used.cpu,
+                count(&selection.ancestors, 3),
+                "{cells}"
+            );
+            assert!(selection.used.cpu + selection.ancestors_used.cpu <= cells);
+            let kept: BTreeSet<Cell> = selection
+                .cells
+                .iter()
+                .chain(&selection.ancestors)
+                .map(|c| c.cell)
+                .collect();
+            for over in sampled_ancestors(&levels, &selection, 3, &IN_PLANE_AXES) {
+                assert!(kept.contains(&over), "{over:?} with {cells}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_ancestor_kept_last_time_stays_until_its_span_passes_the_band() {
+        // Level 0 at 1.9 pixels a sample keeps level 1 above it, a level 1
+        // sample spanning 0.95 of a quarter-resolution frame's pixels. At
+        // 2.1 that is 1.05: a fresh selection drops it and one that kept it
+        // keeps it. At 2.5 it is 1.25, past the band, and both drop it.
+        let levels = image(2048);
+        let at = |pixels: f64, previous: &PreviousSelection| {
+            select_levels(
+                &[entity(&slice_view(pixels), &levels)],
+                cells_budget(1e9),
+                1.0,
+                previous,
+                Lookahead::None,
+                Some(KEEP),
+            )
+        };
+        let before = at(1.9, &PreviousSelection::default());
+        assert!(!before.ancestors.is_empty());
+        let fresh = PreviousSelection::default();
+        assert!(at(2.1, &fresh).ancestors.is_empty());
+        assert!(!at(2.1, &previous(&before)).ancestors.is_empty());
+        assert!(at(2.5, &previous(&before)).ancestors.is_empty());
+    }
+
+    #[test]
+    fn the_coarser_lookahead_leaves_out_the_ancestors() {
+        let levels = image(2048);
+        let view = slice_view(0.6);
+        let selection = select_levels(
+            &[entity(&view, &levels)],
+            cells_budget(1e9),
+            1.0,
+            &PreviousSelection::default(),
+            Lookahead::Coarser,
+            Some(KEEP),
+        );
+        assert!(!selection.ancestors.is_empty());
+        assert!(selection.lookahead.is_empty());
     }
 }

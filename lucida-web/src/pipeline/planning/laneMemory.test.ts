@@ -44,9 +44,10 @@ function cells(list: [number, number, number, number][]): SelectedCell[] {
   return list.map(([lvl, x, y, z], rank) => ({ level: lvl, x, y, z, rank }));
 }
 
-function selection(detail: SelectedCell[]): DatasetLevelSelection {
+function selection(detail: SelectedCell[], ancestors: SelectedCell[] = []): DatasetLevelSelection {
   const entity: EntityLevelSelection = {
     detail,
+    ancestors,
     lookahead: [],
     detailLevels: [...new Set(detail.map((cell) => cell.level))].sort((a, b) => a - b),
     coarseCells: 1,
@@ -54,7 +55,7 @@ function selection(detail: SelectedCell[]): DatasetLevelSelection {
   return { entities: new Map([["vol", entity]]), budgetLimited: false };
 }
 
-function view(detail: SelectedCell[], overrides: Partial<ViewSnapshot> = {}): ViewSnapshot {
+function view(detail: SelectedCell[], overrides: Partial<ViewSnapshot> = {}, ancestors: SelectedCell[] = []): ViewSnapshot {
   return createSyntheticView({
     entities: [ENTITY],
     visibleRegion: {
@@ -72,7 +73,7 @@ function view(detail: SelectedCell[], overrides: Partial<ViewSnapshot> = {}): Vi
       renderMode: "volume",
       interactionState: "idle",
     },
-    levelSelection: selection(detail),
+    levelSelection: selection(detail, ancestors),
     ...overrides,
   });
 }
@@ -141,6 +142,43 @@ describe("carrying a view's requests between plans", () => {
     expect(second.delta).toBeUndefined();
     const before = new Set(first.requests);
     expect(second.requests.some((req) => before.has(req))).toBe(false);
+  });
+
+  it("marks only the ancestors, and asks anew for a cell that turns from ancestor to drawn", () => {
+    // Level 1's first cell kept above two of its level 0 cells, then drawn
+    // once the selection coarsens back to it.
+    const above = { level: 1, x: 0, y: 0, z: 0, rank: 0 };
+    const fine = [{ level: 0, x: 0, y: 0, z: 0, rank: 1 }, { level: 0, x: 1, y: 0, z: 0, rank: 2 }];
+    const first = plan(snapshot([view(fine, {}, [above])]), initialPlanningState());
+    const second = plan(snapshot([view([above])]), first.nextState);
+    const fresh = plan(snapshot([view([above])]), initialPlanningState());
+
+    const marked = (requests: readonly ChunkRequest[]) =>
+      requests.filter((req) => req.ancestor).map((req) => req.chunkKey).sort();
+    const atLevel1 = ["1/0/0/0/0/0", "1/0/1/0/0/0"];
+    expect(marked(first.requests)).toEqual(atLevel1);
+    expect(marked(second.requests)).toEqual([]);
+    expect(identities(second.requests)).toEqual(identities(fresh.requests));
+    expect(marked(second.delta!.removed)).toEqual(atLevel1);
+    expect(second.delta!.added.map((req) => req.chunkKey).sort()).toEqual(atLevel1);
+  });
+
+  it("ranks an ancestor carried from an earlier plan after every chunk drawn since", () => {
+    // In the first plan the ancestor ranks second of ten, near the front of
+    // its band. The second draws ten chunks and keeps it.
+    const kept = { level: 1, x: 0, y: 0, z: 0, rank: 1 };
+    const others = [1, 2, 3].flatMap((x) => [0, 1, 2].map((y) => ({ level: 1, x, y, z: 1, rank: 0 })))
+      .slice(0, 8).map((cell, i) => ({ ...cell, rank: i + 2 }));
+    const first = plan(snapshot([view([{ level: 0, x: 0, y: 0, z: 0, rank: 0 }], {}, [kept, ...others])]), initialPlanningState());
+    const drawn = Array.from({ length: 10 }, (_, i) => ({ level: 0, x: i % 8, y: 1 + Math.floor(i / 8), z: 0, rank: i }));
+    const second = plan(snapshot([view(drawn, {}, [{ ...kept, rank: 10 }])]), first.nextState);
+
+    const detail = second.requests.filter((req) => req.lane === "detail");
+    const drawnPriority = Math.max(...detail.filter((req) => !req.ancestor).map((req) => req.priority));
+    const ancestorPriority = Math.min(...detail.filter((req) => req.ancestor).map((req) => req.priority));
+    expect(second.delta).toBeDefined();
+    expect(detail.some((req) => req.ancestor && first.requests.includes(req))).toBe(true);
+    expect(ancestorPriority).toBeGreaterThan(drawnPriority);
   });
 
   it("carries nothing for a dataset several views plan", () => {

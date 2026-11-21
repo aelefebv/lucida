@@ -20,7 +20,7 @@ import {
 } from "./config.ts";
 import { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
 import type { LaneCarry } from "./laneMemory.ts";
-import { cellKey } from "./laneMemory.ts";
+import { detailCellKey } from "./laneMemory.ts";
 import type {
   ActiveSetEntry,
   ChunkRequest,
@@ -355,6 +355,8 @@ interface LaneTarget {
   whole: boolean;
   /** The plane of the level the slice view cuts, which its pools hold ({@link poolCutAt}). */
   cut: PoolCut | undefined;
+  /** Its requests are for ancestors the view keeps ({@link ChunkRequest.ancestor}). */
+  ancestor?: true;
 }
 
 /**
@@ -399,6 +401,7 @@ function emitChunk(
       if (slice.axis !== "z") req.planeAxis = slice.axis;
     }
     if (cut) req.cut = cut;
+    if (target.ancestor) req.ancestor = true;
     push(req, key);
   }
 }
@@ -514,7 +517,9 @@ export function emitMinimapLane(
  * Detail lane: the chunks the level selection chose for each visible tile,
  * in the selection's fetch order: coarser levels first, so a slow link fills
  * the whole view before it sharpens, then larger on screen, then nearer the
- * focus. With `carry`, a cell the previous plan asked for keeps its requests.
+ * focus. Then the ancestors it keeps above them, which a settled frame does
+ * not draw. With `carry`, a cell the previous plan asked for alike keeps its
+ * requests.
  */
 export function emitDetailLane(
   chunks: PlanChunks,
@@ -523,69 +528,85 @@ export function emitDetailLane(
   config: PlanningConfig,
   carry?: LaneCarry,
 ): void {
-  const lane = { lane: "detail", tier: "detail", band: config.detailLaneOffset, t: snapshot.selection.t } as const;
+  const drawn = { lane: "detail", tier: "detail", band: config.detailLaneOffset, t: snapshot.selection.t } as const;
+  // The ancestors take a band of their own, the next whole number past the
+  // lane's, after every in-lane term a drawn chunk gets. A request carried
+  // from an earlier plan keeps the priority that plan spread it to, so ranks
+  // alone would let an ancestor kept since a smaller plan sort ahead of
+  // chunks drawn since.
+  const above = { ...drawn, band: drawn.band + 1, ancestor: true } as const;
   const push: Push = (req, key) => out.push(req, key);
   for (const { entity, chosen } of chunks.tiles) {
     if (chosen === undefined) continue;
+    const lists = [[chosen.detail, drawn], [chosen.ancestors, above]] as const;
     if (carry === undefined) {
-      emitCells(entity, chosen.detail, snapshot, config, lane, push);
+      for (const [cells, lane] of lists) emitCells(entity, cells, snapshot, config, lane, push);
       continue;
     }
     const previous = carry.detailOf(entity);
     // An entity whose cells all held keeps its requests whole, as the last
     // plan recorded them; most entities of a wide collection do.
-    if (previous !== undefined && previous.size === chosen.detail.length && keepsEvery(previous, chosen.detail, lane.band, out)) {
+    if (
+      previous !== undefined &&
+      previous.size === chosen.detail.length + chosen.ancestors.length &&
+      keepsEvery(previous, lists, out)
+    ) {
       carry.setDetail(entity, previous);
       continue;
     }
     const cells = new Map<number, readonly ChunkRequest[]>();
-    const targets = new Map<number, LaneTarget>();
     let emitted: ChunkRequest[] = [];
     const collect: Push = (req, rank) => {
       emitted.push(req);
       out.push(req, rank);
     };
-    for (const cell of chosen.detail) {
-      const key = cellKey(cell.level, cell.x, cell.y, cell.z);
-      const kept = previous?.get(key);
-      if (kept !== undefined) {
-        out.keep(lane.band, cell.rank);
-        cells.set(key, kept);
-        continue;
+    for (const [list, lane] of lists) {
+      const targets = new Map<number, LaneTarget>();
+      for (const cell of list) {
+        const key = detailCellKey(cell, lane === above);
+        const kept = previous?.get(key);
+        if (kept !== undefined) {
+          out.keep(lane.band, cell.rank);
+          cells.set(key, kept);
+          continue;
+        }
+        let target = targets.get(cell.level);
+        if (target === undefined) {
+          target = laneTarget(entity, cell.level, snapshot, config, lane, false);
+          targets.set(cell.level, target);
+        }
+        emitted = [];
+        emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, collect);
+        cells.set(key, emitted);
       }
-      let target = targets.get(cell.level);
-      if (target === undefined) {
-        target = laneTarget(entity, cell.level, snapshot, config, lane, false);
-        targets.set(cell.level, target);
-      }
-      emitted = [];
-      emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, collect);
-      cells.set(key, emitted);
     }
     carry.setDetail(entity, cells);
   }
 }
 
 /**
- * Whether `previous` holds requests for every one of `cells`, keeping them
+ * Whether `previous` holds requests for every cell of `lists`, keeping them
  * in `out` when it does; with as many cells as `previous` holds, the two are
- * the same cells. Only the band's least and greatest key matter to a kept
- * request, so the cells' extremes are kept for them all.
+ * the same cells. Only a band's least and greatest key matter to a kept
+ * request, so each band's extremes are kept for its cells.
  */
 function keepsEvery(
   previous: ReadonlyMap<number, readonly ChunkRequest[]>,
-  cells: readonly SelectedCell[],
-  band: number,
+  lists: readonly (readonly [readonly SelectedCell[], { band: number; ancestor?: true }])[],
   out: LaneRequests,
 ): boolean {
-  let least = Infinity;
-  let greatest = -Infinity;
-  for (const cell of cells) {
-    if (!previous.has(cellKey(cell.level, cell.x, cell.y, cell.z))) return false;
-    if (cell.rank < least) least = cell.rank;
-    if (cell.rank > greatest) greatest = cell.rank;
+  const extremes: [number, number, number][] = [];
+  for (const [cells, lane] of lists) {
+    let least = Infinity;
+    let greatest = -Infinity;
+    for (const cell of cells) {
+      if (!previous.has(detailCellKey(cell, lane.ancestor === true))) return false;
+      if (cell.rank < least) least = cell.rank;
+      if (cell.rank > greatest) greatest = cell.rank;
+    }
+    if (least <= greatest) extremes.push([lane.band, least, greatest]);
   }
-  if (cells.length > 0) {
+  for (const [band, least, greatest] of extremes) {
     out.keep(band, least);
     out.keep(band, greatest);
   }

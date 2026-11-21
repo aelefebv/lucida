@@ -235,6 +235,25 @@ describe("a level selection the budget stopped", () => {
     const text = renderDiagnostic(diagnoseRun(selectedRun(true))).text;
     expect(text).toContain("levels    ds: 48 at 1, 762 at 2 where the screen calls for level 0 · the budget stopped it");
   });
+
+  it("prints the ancestors a dataset keeps above the levels it draws", () => {
+    const run = selectedRun(true);
+    const [dataset] = run.header.selectionAtSettle.datasets;
+    const kept = {
+      ...run,
+      header: {
+        ...run.header,
+        selectionAtSettle: {
+          ...run.header.selectionAtSettle,
+          datasets: [{ ...dataset, ancestors: [{ level: 2, chunks: 96 }, { level: 3, chunks: 12 }] }],
+        },
+      },
+    };
+    const text = renderDiagnostic(diagnoseRun(kept)).text;
+    expect(text).toContain(
+      "levels    ds: 48 at 1, 762 at 2 · keeps 96 at 2, 12 at 3 above them where the screen calls for level 0",
+    );
+  });
 });
 
 describe("replans woken by an availability update alone", () => {

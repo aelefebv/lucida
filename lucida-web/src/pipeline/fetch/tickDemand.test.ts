@@ -59,6 +59,18 @@ describe("TickDemand", () => {
     expect(demand.wants("absent")).toBe(false);
   });
 
+  it("delivers an ancestor where the view wants it, but neither settles on it nor shows its failure", () => {
+    const demand = new TickDemand();
+    const above = request({ lane: "detail", mode: "volume", ancestor: true });
+    demand.note("above", above);
+
+    expect(demand.detailKeys).toBe(1);
+    expect(demand.viewDetailKeys).toBe(0);
+    expect(demand.viewWantsDetail("above")).toBe(false);
+    expect(demand.viewShows("above")).toBe(false);
+    expect(viewTargets(demand, "above")).toEqual([["volume", above]]);
+  });
+
   it("names each place the view wants a chunk delivered once, and none for prefetch", () => {
     const demand = new TickDemand();
     const slice = request({ lane: "detail", mode: "slice", cut: { axis: "z", plane: 3 } });

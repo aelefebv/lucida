@@ -145,12 +145,13 @@ function fetchContestedChunksWhole(requests: readonly ChunkRequest[]): void {
 
 /**
  * What makes two requests ask for one thing: the chunk, its tier, the pools
- * it fills, and the planes drawn from it.
+ * it fills, the planes drawn from it, and whether the view draws it or keeps
+ * it as an ancestor, which a view that draws it must not take it for.
  */
 export function requestIdentity(req: ChunkRequest): string {
   return [
     req.imageId, req.tier, req.mode, req.chunkKey, req.planeAxis ?? "", req.plane ?? "", req.planes?.join(",") ?? "",
-    req.cut ? `${req.cut.axis}${req.cut.plane}` : "",
+    req.cut ? `${req.cut.axis}${req.cut.plane}` : "", req.ancestor ? "ancestor" : "",
   ].join("|");
 }
 

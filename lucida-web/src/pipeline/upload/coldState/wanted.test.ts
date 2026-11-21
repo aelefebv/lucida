@@ -39,6 +39,18 @@ describe("wantedChunksFromPlan", () => {
     ]);
   });
 
+  it("lists an ancestor among the member's chunks, and again among its ancestors", () => {
+    const wanted = wantedChunksFromPlan([
+      req({ chunkKey: "0/0/0/0/0/0" }),
+      req({ chunkKey: "1/0/0/0/0/0", level: 1, ancestor: true }),
+    ]);
+
+    expect([...wanted.values()]).toEqual([
+      { memberId: "img:ch0", tier: "detail", chunkKeys: ["0/0/0/0/0/0", "1/0/0/0/0/0"] },
+      { memberId: "img:ch0", tier: "detail", chunkKeys: ["1/0/0/0/0/0"], ancestors: true },
+    ]);
+  });
+
   it("names the channel when one is shown alone too", () => {
     const wanted = wantedChunksFromPlan([req({})]);
     expect([...wanted.values()].map((e) => e.memberId)).toEqual(["img:ch0"]);
@@ -85,6 +97,20 @@ describe("WantedChunkCounts", () => {
     ]);
     expect(new WantedChunkCounts(before).changesTo(new WantedChunkCounts(after))).toEqual([
       { memberId: "b:ch0", tier: "detail", added: [], removed: ["k1"] },
+    ]);
+  });
+
+  it("tells a chunk that turns from ancestor to drawn as a change of the ancestors alone", () => {
+    const above = req({ chunkKey: "k1", ancestor: true });
+    const drawn = req({ chunkKey: "k1" });
+    const before = [above];
+    const counts = new WantedChunkCounts(before);
+
+    expect(counts.apply([drawn], { base: before, added: [drawn], removed: [above] })).toEqual([
+      { memberId: "img:ch0", tier: "detail", added: [], removed: ["k1"], ancestors: true },
+    ]);
+    expect(new WantedChunkCounts([above]).changesTo(new WantedChunkCounts([drawn]))).toEqual([
+      { memberId: "img:ch0", tier: "detail", added: [], removed: ["k1"], ancestors: true },
     ]);
   });
 

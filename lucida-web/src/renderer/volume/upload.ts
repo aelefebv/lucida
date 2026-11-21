@@ -18,7 +18,7 @@ import { asUint32, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import { makeCompositeKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
 import { incomingDistSq, mayEvict } from "../eviction.ts";
-import { anyViewWants } from "../worker/draws.ts";
+import { anyViewWants, onlyAncestorIn } from "../worker/draws.ts";
 import { GpuRoom } from "../worker/gpuBudget.ts";
 import { anySection, anyViewHolds, dropSlot, holdSlot, mapSlot, sectionOf, unmapSlot } from "../viewIndirection.ts";
 import { volumeEvictionParams } from "./eviction.ts";
@@ -190,19 +190,23 @@ export function handleVolumeChunkData(
       } else {
         const params = volumeEvictionParams(ctx.state, atlas, tier);
         const victim = atlas.order.next(params);
-        if (!mayGrow && (!victim || victim.class === "wanted")) {
+        const ancestor = victim !== null && victim.class !== "unsampled" && victim.class !== "unwanted" &&
+          onlyAncestorIn(atlas, memberId, tier, chunk.key);
+        if (!mayGrow && (!victim || victim.class === "wanted" || (ancestor && victim.class === "ancestor"))) {
           // It would need more room, so it waits for the gesture to end.
           ctx.state.deferredChunks.add(poolKey, memberId, "volume", tier, chunk.key);
           continue;
         }
+        // Room taken from other pools goes to a chunk the view draws, never
+        // to an ancestor.
         if (
-          victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
+          victim?.class === "wanted" && !ancestor && atlas.slots.size >= atlas.totalSlots &&
           growVolumePoolWithin(ctx, poolKey, atlas, true, room)
         ) {
           slotIndex = atlas.freeSlots.pop()!;
         } else {
           const incomingDist = () => incomingDistSq(params, memberId, { level, x: chunk.x, y: chunk.y, z: chunk.z });
-          if (!victim || !mayEvict(victim, incomingDist)) {
+          if (!victim || !mayEvict(victim, incomingDist, ancestor)) {
             batch.refuse(chunk.key, "atlas-policy");
             continue;
           }

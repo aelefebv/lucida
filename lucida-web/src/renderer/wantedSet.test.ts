@@ -544,6 +544,27 @@ describe("computeWantedSet", () => {
       expect(levelsFor(coldState, wanted(["img:ch0", "detail", leftHalf]), atlases)[0].displayed).toEqual({ min: 0, max: 0 });
     });
 
+    it("counts no ancestor as a position, and still asks for it", () => {
+      // The left half at level 0, with the level 1 chunks over it and level
+      // 2 kept above it, one of them not yet resident. Counted, level 2's
+      // chunk would be served by itself, since level 1 covers only half of it.
+      const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0] })] });
+      const leftHalf = levelKeys(0).filter((key) => key.endsWith("/0") || key.endsWith("/1"));
+      const above = [...levelKeys(1).filter((key) => key.endsWith("/0")), ...levelKeys(2)];
+      const lacking = "1/0/0/0/1/0";
+      const atlases = new Map([["pool", makeVolumePool("img:ch0", sections, slotsOf([
+        ...leftHalf, ...above.filter((key) => key !== lacking),
+      ].map((key) => vk("img:ch0", key))))]]);
+      const wantedChunks = indexWantedChunks([
+        { memberId: "img:ch0", tier: "detail", chunkKeys: [...leftHalf, ...above] },
+        { memberId: "img:ch0", tier: "detail", chunkKeys: above, ancestors: true },
+      ]);
+
+      const result = computeWantedSet(coldState, wantedChunks, atlases, new Map(), poolsFromAtlases(atlases));
+      expect(result.levels[0].displayed).toEqual({ min: 0, max: 0 });
+      expect(chunks(result.missing).map((m) => m.chunkKey)).toEqual([lacking]);
+    });
+
     it("reads each wanted chunk from its own level when the selection chose several", () => {
       // The near half at level 0, the far half at level 1, both resident.
       const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0, 1] })] });
@@ -751,6 +772,14 @@ describe("a WantedSetTracker kept from one update to the next", () => {
         next.set(wantedEntryKey("detail", memberId), new Set(chunkKeys));
         wantedIndex = next;
       },
+      /** Mark which of a member's wanted detail chunks are ancestors. */
+      wantAncestors: (memberId: string, chunkKeys: string[]) => {
+        const next = new Map(wantedIndex);
+        const key = wantedEntryKey("detail", memberId, true);
+        if (chunkKeys.length > 0) next.set(key, new Set(chunkKeys));
+        else next.delete(key);
+        wantedIndex = next;
+      },
       retarget: (index: number, detailLevels: number[]) => {
         const activeSet = cold.activeSet.slice();
         activeSet[index] = { ...activeSet[index], detailLevels };
@@ -793,6 +822,34 @@ describe("a WantedSetTracker kept from one update to the next", () => {
     // Let go again: named as lacking, though it lacked before it was held.
     w.leave("detail", "a:ch0", level0Keys(0)[1]);
     expect(w.update(tracker).missing.map(id)).toEqual([`a:ch0 detail ${level0Keys(0)[1]}`]);
+  });
+
+  it("takes a chunk out of the positions when it turns ancestor, puts it back when it turns drawn, and asks for it either way", () => {
+    const w = world();
+    const tracker = new WantedSetTracker();
+    w.update(tracker);
+    // Two of level 0's four chunks, and the level 1 chunk over all four,
+    // resident. Drawn, the level 1 chunk is served by itself, since level
+    // 0 covers only half of it.
+    const near = level0Keys(0).slice(0, 2);
+    for (const key of [...near, level1Key(0)]) w.arrive("detail", "a:ch0", key);
+    w.want("a:ch0", [...near, level1Key(0)]);
+    w.wantAncestors("a:ch0", [level1Key(0)]);
+    const kept = w.update(tracker);
+    expect(kept.levels?.[0].displayed).toEqual({ min: 0, max: 0 });
+    expect(kept.levels).toEqual(w.fresh().levels);
+
+    w.wantAncestors("a:ch0", []);
+    const drawn = w.update(tracker);
+    expect(drawn.levels?.[0].displayed).toEqual({ min: 0, max: 1 });
+    expect(drawn.levels).toEqual(w.fresh().levels);
+
+    w.wantAncestors("a:ch0", [level1Key(0)]);
+    w.leave("detail", "a:ch0", level1Key(0));
+    const lost = w.update(tracker);
+    expect(lost.missing.map(id)).toEqual([`a:ch0 detail ${level1Key(0)}`]);
+    expect(lost.levels?.[0].displayed).toEqual({ min: 0, max: 0 });
+    expect(new Set(tracker.lacking().map(id))).toEqual(new Set(w.fresh().missing.map(id)));
   });
 
   it("keeps the lookups of chunks still wanted when a member's wanted chunks change, and names only the new ones", () => {

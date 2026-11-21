@@ -115,6 +115,13 @@ and a view too deep for its target level draws coarser
 (`lucida-core/src/level_selection.rs`).
 _Avoid_: selection (unqualified; selector state such as the current z)
 
+**Ancestor**:
+A coarser chunk a volume view's level selection keeps resident over a chunk it
+chose, because a gesture's frame, drawn at a quarter of the resolution, would
+sample it there. Charged to the budget beside the selection, and drawn only
+where the chunks under it are missing. No part of the wanted set: the view
+fetches its ancestors after it and settles without them.
+
 **Displayed level**:
 The level the renderer sampled for an entity's pixels: the level the selection
 chose once its chunks are resident, and a coarser resident level or the coarse

@@ -21,19 +21,24 @@ function delivered(req: ChunkRequest): boolean {
 /**
  * The chunks the uploader can deliver from a plan: its detail and coarse
  * lanes, under the member ids the delivery uses. Prefetch and minimap chunks
- * never reach the worker, so it never wants them.
+ * never reach the worker, so it never wants them. An ancestor is listed among
+ * its member's chunks, and again among the member's ancestors.
  */
 export function wantedChunksFromPlan(
   requests: readonly ChunkRequest[],
 ): WantedChunksByMember {
   const byMember: WantedChunksByMember = new Map();
+  const list = (req: ChunkRequest, memberId: string, ancestors: boolean): void => {
+    const key = wantedEntryKey(req.tier, memberId, ancestors);
+    const entry = byMember.get(key);
+    if (entry) entry.chunkKeys.push(req.chunkKey);
+    else byMember.set(key, { memberId, tier: req.tier, chunkKeys: [req.chunkKey], ...(ancestors && { ancestors }) });
+  };
   for (const req of requests) {
     if (!delivered(req)) continue;
     const memberId = workerMemberId(req.imageId, req.c);
-    const key = wantedEntryKey(req.tier, memberId);
-    const entry = byMember.get(key);
-    if (entry) entry.chunkKeys.push(req.chunkKey);
-    else byMember.set(key, { memberId, tier: req.tier, chunkKeys: [req.chunkKey] });
+    list(req, memberId, false);
+    if (req.ancestor) list(req, memberId, true);
   }
   return byMember;
 }
@@ -41,6 +46,7 @@ export function wantedChunksFromPlan(
 interface MemberCounts {
   memberId: string;
   tier: ResidencyTier;
+  ancestors: boolean;
   /** How many of the plan's requests name each chunk. */
   keys: Map<string, number>;
 }
@@ -58,10 +64,10 @@ export class WantedChunkCounts {
 
   constructor(requests: readonly ChunkRequest[], wanted: WantedChunksByMember = wantedChunksFromPlan(requests)) {
     this.requests = requests;
-    for (const [key, { memberId, tier, chunkKeys }] of wanted) {
+    for (const [key, { memberId, tier, chunkKeys, ancestors }] of wanted) {
       const keys = new Map<string, number>();
       for (const chunkKey of chunkKeys) keys.set(chunkKey, (keys.get(chunkKey) ?? 0) + 1);
-      this.byMember.set(key, { memberId, tier, keys });
+      this.byMember.set(key, { memberId, tier, ancestors: ancestors ?? false, keys });
     }
   }
 
@@ -74,21 +80,27 @@ export class WantedChunkCounts {
     if (delta.base !== this.requests) return null;
     this.requests = requests;
     const changes = new Map<string, WantedChunkChanges>();
+    const count = (req: ChunkRequest, memberId: string, ancestors: boolean, sign: 1 | -1): void => {
+      const key = wantedEntryKey(req.tier, memberId, ancestors);
+      let member = this.byMember.get(key);
+      if (member === undefined) this.byMember.set(key, (member = { memberId, tier: req.tier, ancestors, keys: new Map() }));
+      const n = (member.keys.get(req.chunkKey) ?? 0) + sign;
+      if (n > 0) member.keys.set(req.chunkKey, n);
+      else member.keys.delete(req.chunkKey);
+      // A chunk changes for the worker when the first request names it or the last stops.
+      if ((sign === 1 && n === 1) || (sign === -1 && n === 0)) {
+        let changed = changes.get(key);
+        if (changed === undefined) {
+          changes.set(key, (changed = { memberId, tier: req.tier, added: [], removed: [], ...(ancestors && { ancestors }) }));
+        }
+        (sign === 1 ? changed.added : changed.removed).push(req.chunkKey);
+      }
+    };
     const change = (req: ChunkRequest, sign: 1 | -1): void => {
       if (!delivered(req)) return;
       const memberId = workerMemberId(req.imageId, req.c);
-      const key = wantedEntryKey(req.tier, memberId);
-      let member = this.byMember.get(key);
-      if (member === undefined) this.byMember.set(key, (member = { memberId, tier: req.tier, keys: new Map() }));
-      const count = (member.keys.get(req.chunkKey) ?? 0) + sign;
-      if (count > 0) member.keys.set(req.chunkKey, count);
-      else member.keys.delete(req.chunkKey);
-      // A chunk changes for the worker when the first request names it or the last stops.
-      if ((sign === 1 && count === 1) || (sign === -1 && count === 0)) {
-        let changed = changes.get(key);
-        if (changed === undefined) changes.set(key, (changed = { memberId, tier: req.tier, added: [], removed: [] }));
-        (sign === 1 ? changed.added : changed.removed).push(req.chunkKey);
-      }
+      count(req, memberId, false, sign);
+      if (req.ancestor) count(req, memberId, true, sign);
     };
     for (const req of delta.removed) change(req, -1);
     for (const req of delta.added) change(req, 1);
@@ -98,7 +110,7 @@ export class WantedChunkCounts {
       const added = new Set(changed.added);
       const removed = changed.removed.filter((chunkKey) => !added.delete(chunkKey));
       if (added.size === 0 && removed.length === 0) continue;
-      out.push({ memberId: changed.memberId, tier: changed.tier, added: [...added], removed });
+      out.push({ ...changed, added: [...added], removed });
       if (this.byMember.get(key)!.keys.size === 0) this.byMember.delete(key);
     }
     return out;
@@ -107,14 +119,21 @@ export class WantedChunkCounts {
   /** What changes from these chunks to `next`'s, for the worker. */
   changesTo(next: WantedChunkCounts): WantedChunkChanges[] {
     const out: WantedChunkChanges[] = [];
+    const change = (member: MemberCounts, added: string[], removed: string[]): WantedChunkChanges => ({
+      memberId: member.memberId,
+      tier: member.tier,
+      added,
+      removed,
+      ...(member.ancestors && { ancestors: true as const }),
+    });
     for (const [key, member] of next.byMember) {
       const held = this.byMember.get(key)?.keys;
       const added = [...member.keys.keys()].filter((chunkKey) => !held?.has(chunkKey));
       const removed = held === undefined ? [] : [...held.keys()].filter((chunkKey) => !member.keys.has(chunkKey));
-      if (added.length > 0 || removed.length > 0) out.push({ memberId: member.memberId, tier: member.tier, added, removed });
+      if (added.length > 0 || removed.length > 0) out.push(change(member, added, removed));
     }
     for (const [key, member] of this.byMember) {
-      if (!next.byMember.has(key)) out.push({ memberId: member.memberId, tier: member.tier, added: [], removed: [...member.keys.keys()] });
+      if (!next.byMember.has(key)) out.push(change(member, [], [...member.keys.keys()]));
     }
     return out;
   }

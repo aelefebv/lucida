@@ -1052,6 +1052,7 @@ describe("eviction kernel — findEvictionSlot", () => {
       cameraFor: corner,
       finestLevelFor: () => 0,
       isWanted: all,
+      isAncestor: () => false,
       sources: [],
       ...overrides,
     };
@@ -1185,5 +1186,36 @@ describe("eviction kernel — findEvictionSlot", () => {
     expect(mayEvict({ key: "k", class: "unwanted", dist: 0.1 }, () => 10)).toBe(true);
     expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, () => 0.4)).toBe(true);
     expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, () => 0.5)).toBe(false);
+  });
+
+  it("takes an ancestor's slot after every unwanted one and before any chunk a view draws", () => {
+    const keys = [`memA|0/0/0/0/0/0`, `memA|0/0/0/1/3/3`, `memA|0/0/0/0/1/1`];
+    const drawnFar = keys[1];
+    const chunkOf = (composite: string) => composite.slice(composite.indexOf("|") + 1);
+    const options: PickOptions = {
+      isWanted: (_, chunk) => chunk !== chunkOf(keys[2]),
+      isAncestor: (_, chunk) => chunk === chunkOf(keys[0]),
+    };
+    expect(pick(keys, [0, 1, 2], options)).toMatchObject({ key: keys[2], class: "unwanted" });
+    const wanted: PickOptions = { ...options, isWanted: () => true };
+    expect(pick(keys, [0, 1, 2], wanted)).toMatchObject({ key: keys[0], class: "ancestor" });
+    expect(pick([drawnFar], [1], wanted)).toMatchObject({ class: "wanted" });
+  });
+
+  it("counts a chunk one view draws and another keeps as an ancestor as drawn", () => {
+    const key = `memA|0/0/0/0/0/0`;
+    const drawing = view([0]);
+    const keeping = view([0], { isAncestor: () => true });
+    expect(findEvictionSlot({ slots: new Map([[key, 0]]), views: [keeping], is3D: true })).toMatchObject({ class: "ancestor" });
+    expect(findEvictionSlot({ slots: new Map([[key, 0]]), views: [keeping, drawing], is3D: true })).toMatchObject({ class: "wanted" });
+  });
+
+  it("never lets an ancestor take a drawn chunk's slot, and another ancestor's only when strictly nearer", () => {
+    expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, () => 0.1, true)).toBe(false);
+    expect(mayEvict({ key: "k", class: "ancestor", dist: 0.5 }, () => 0.4, true)).toBe(true);
+    expect(mayEvict({ key: "k", class: "ancestor", dist: 0.5 }, () => 0.5, true)).toBe(false);
+    expect(mayEvict({ key: "k", class: "unwanted", dist: 0.1 }, () => 10, true)).toBe(true);
+    // A chunk the view draws takes an ancestor's slot at any distance.
+    expect(mayEvict({ key: "k", class: "ancestor", dist: 0.1 }, () => 10)).toBe(true);
   });
 });

@@ -711,7 +711,9 @@ export interface ColdStateMessage {
   /**
    * The chunks the planner delivers for this view: its detail and coarse
    * lanes. The worker admits, keeps, and reports against these keys, so it
-   * never wants a chunk the planner will not send.
+   * never wants a chunk the planner will not send. An entry marked
+   * `ancestors` lists again those of the member's detail chunks that are
+   * ancestors the level selection keeps.
    */
   wantedChunks: WantedMemberChunks[];
   activeSet: ColdStateActiveEntry[];
@@ -751,6 +753,12 @@ export interface WantedMemberChunks {
   memberId: string;
   tier: ResidencyTier;
   chunkKeys: string[];
+  /**
+   * The entry lists the member's ancestors in the tier, chunks its entry
+   * without the mark lists too: wanted resident, but not drawn where the
+   * chunks under them are, so they are not positions the view draws.
+   */
+  ancestors?: true;
 }
 
 /**
@@ -764,6 +772,8 @@ export interface WantedChunkChanges {
   tier: ResidencyTier;
   added: string[];
   removed: string[];
+  /** See {@link WantedMemberChunks.ancestors}. */
+  ancestors?: true;
 }
 
 /**
