@@ -109,6 +109,21 @@ describe("the volume renderer's member draws", () => {
     expect([...coarseSlots]).toEqual([4, 4, 1]);
   });
 
+  it("writes a gesture frame's perspective scale beside the eye, and none for any other frame", async () => {
+    const { device, renderer, draw } = await setup();
+    renderer.setMatrices(new Float32Array(16), new Float32Array([7, 8, 9]));
+    const scaleIn = () => {
+      const [, , data] = device.queue.writeBuffer.mock.calls.filter((call) => call[4] === 512).at(-1)!;
+      return new Float32Array(data as ArrayBuffer, 0, 512 / 4)[VOLUME_UNIFORM_OFFSETS.cameraPos / 4 + 3];
+    };
+
+    renderer.prepareMembers("view", [draw(0, 0)]);
+    expect(scaleIn()).toBe(0);
+    renderer.setGesturePixelsPerWorld(450);
+    renderer.prepareMembers("view", [draw(0, 0)]);
+    expect(scaleIn()).toBe(450);
+  });
+
   it("draws each prepared draw through its scissor, block and entity reference, in one pass", async () => {
     const { renderer, collection } = await setup();
     renderer.prepareMembers("view", collection(3));

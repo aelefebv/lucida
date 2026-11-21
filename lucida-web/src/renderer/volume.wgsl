@@ -10,6 +10,9 @@ const FAILED: u32 = 0xFFFFFFFEu;
 
 struct Uniforms {
   invViewProj: mat4x4f,                // offset 0   (64 bytes)
+  // cameraPos.xyz=eye; cameraPos.w=render pixels per world unit one unit
+  // from it in a gesture's frame, which samples no level finer than its
+  // pixels resolve, and 0 in every other frame, which samples every level.
   cameraPos: vec4f,                    // offset 64  (16 bytes)
   // stepInfo.x=opacityScale (translucent compositing constant),
   // stepInfo.y=renderMode (0=translucent,1=MIP),
@@ -260,6 +263,8 @@ fn failedHatch(px: vec2f, pixelRatio: f32) -> vec4f {
 const CELL_EXIT_NUDGE: f32 = 1e-5;
 // The exit distance of a cell nothing bounds.
 const NO_CELL_EXIT: f32 = 1e30;
+// A ray parameter no march reaches.
+const NEVER: f32 = 1e30;
 
 // The march step for a level: two thirds of one sample spacing along
 // its densest axis, in local [0,1] units.
@@ -285,9 +290,10 @@ fn cellExitDistance(source: ChunkTierSource, pos: vec3f, rd: vec3f) -> f32 {
 
 // One ray sample: the value and how far the march may advance from it.
 // After a hit that is the answering level's step. After a miss it is at
-// least the finest bound level's step, so a resident chunk of it is never
-// stepped over, and it reaches the far side of the cells every source
-// missed in, since each sample before that would miss in the same cells.
+// least the step of the finest level the sample reads, so a resident chunk
+// of it is never stepped over, and it reaches the far side of the cells
+// every source missed in, since each sample before that would miss in the
+// same cells.
 // A view that is still loading is mostly misses, and stepping through
 // them one sample at a time made its frames the slowest it draws.
 struct VolumeSample {
@@ -299,10 +305,13 @@ struct VolumeSample {
 // then the coarser resident levels), then the coarse tier, then empty.
 // Every sample comes from exactly one level; there is no blending. A
 // failed chunk answers like a resident one, with FAILED as its value.
+// The sources before `first` are finer than a gesture's frame resolves
+// there, so they are passed over as if they missed (see
+// `levelGivesWayAt`); every other frame passes 0.
 //
 // An entity that binds no tier at all has no level dims to step by, so it
 // misses at the unit step.
-fn sampleWithFallback(pos: vec3f, rd: vec3f) -> VolumeSample {
+fn sampleWithFallback(pos: vec3f, rd: vec3f, first: u32) -> VolumeSample {
   var out: VolumeSample;
   out.value = MISS;
   out.step = 1.0;
@@ -311,7 +320,7 @@ fn sampleWithFallback(pos: vec3f, rd: vec3f) -> VolumeSample {
   if (count == 0u && activeEntity.coarseSource.valid == 0u) {
     return out;
   }
-  for (var i = 0u; i < count; i++) {
+  for (var i = first; i < count; i++) {
     let v = sampleLevelVolume(activeEntity.levelSources[i], pos);
     if (v != MISS) {
       out.value = v;
@@ -325,9 +334,11 @@ fn sampleWithFallback(pos: vec3f, rd: vec3f) -> VolumeSample {
     out.step = stepForDims(activeEntity.coarseSource.levelDims);
     return out;
   }
-  // A source that reads nothing misses everywhere, so it bounds nothing.
+  // A source that reads nothing misses everywhere, so it bounds nothing,
+  // and neither does one passed over, which the ray never samples again
+  // as it moves away from the eye.
   var skip = NO_CELL_EXIT;
-  for (var i = 0u; i < count; i++) {
+  for (var i = first; i < count; i++) {
     let source = activeEntity.levelSources[i];
     if (sourceReadable(source, u.levelAtlasSlotDims[source.poolIndex].xyz)) {
       skip = min(skip, cellExitDistance(source, pos, rd));
@@ -337,13 +348,38 @@ fn sampleWithFallback(pos: vec3f, rd: vec3f) -> VolumeSample {
     skip = min(skip, cellExitDistance(activeEntity.coarseSource, pos, rd));
   }
   if (count != 0u) {
-    out.step = stepForDims(activeEntity.levelSources[0].levelDims);
+    out.step = stepForDims(activeEntity.levelSources[first].levelDims);
   } else {
     out.step = stepForDims(activeEntity.coarseSource.levelDims);
   }
   // Past the boundary, so the next sample lands in the next cell.
   out.step = max(out.step, skip + CELL_EXIT_NUDGE);
   return out;
+}
+
+// The ray parameter at which a gesture frame's march passes level source `i`
+// over for the next coarser one: where a sample of that one spans at most
+// one of the frame's pixels, so reading `i` would only cost time. This is
+// the level selection's measure at the frame's scale, taken at the sample
+// rather than where its chunk is nearest the eye, with a sample's size its
+// level's world spacing along its densest axis, which is never more than the
+// size the selection measures the level by. The selection keeps resident the
+// coarser chunks a frame at a quarter of the resolution would read; where
+// the one asked for is missing, the march falls through to coarser ones as
+// on any miss. `extents` is the world length of the volume's edge along each
+// local axis, `eyeAt0` the ray's distance from the eye where `t` is 0, and
+// `worldPerT` the world length of a unit of `t`. The ray moves away from the
+// eye, so a source passed over stays passed over. A frame that writes no
+// scale, a settled one, passes none over.
+fn levelGivesWayAt(i: u32, extents: vec3f, eyeAt0: f32, worldPerT: f32) -> f32 {
+  let pixelsPerWorld = u.cameraPos.w;
+  let count = min(activeEntity.levelSourceCount, MAX_LEVEL_SOURCES);
+  if (pixelsPerWorld <= 0.0 || i + 1u >= count) {
+    return NEVER;
+  }
+  let spacing = extents / vec3f(max(activeEntity.levelSources[i + 1u].levelDims, vec3u(1u)));
+  let size = min(min(spacing.x, spacing.y), spacing.z);
+  return (pixelsPerWorld * size - eyeAt0) / worldPerT;
 }
 
 // `EntityDescriptor.sampleFormat`: the texel is the sample's float32 bits,
@@ -445,7 +481,7 @@ fn fsCut(input: VSOut) -> @location(0) vec4f {
   }
   // The direction only bounds a ray's skip past empty cells, which one
   // sample never takes.
-  let s = sampleWithFallback(local, vec3f(0.0, 0.0, 1.0));
+  let s = sampleWithFallback(local, vec3f(0.0, 0.0, 1.0), 0u);
   if (s.value == FAILED) {
     return failedHatch(input.pos.xy, u.stepInfo.z) * entity.opacity;
   }
@@ -596,7 +632,7 @@ fn march(input: VSOut) -> FsOut {
     for (var i = 0; i < 512; i++) {
       if (lt >= tEnd) { break; }
       let pos = ro + rd * lt;
-      let s = sampleWithFallback(pos, rd);
+      let s = sampleWithFallback(pos, rd, 0u);
       // FAILED is no label id: the ray stops at the failed cell and draws the
       // hatch there, so missing labels never read as background.
       if (s.value == FAILED) {
@@ -643,14 +679,26 @@ fn march(input: VSOut) -> FsOut {
   // The ray crossed a failed chunk, so what it accumulated is missing a part.
   var crossedFailed = false;
 
+  // The first level source the samples read, and where along the ray the
+  // next gives way to a coarser one; a gesture's frame only moves them.
+  let extents = vec3f(length(entity.modelMatrix[0].xyz), length(entity.modelMatrix[1].xyz), length(entity.modelMatrix[2].xyz));
+  let eyeAt0 = dot(worldRo - u.cameraPos.xyz, worldRd);
+  let worldPerT = 1.0 / length(localRd4.xyz);
+  var first = 0u;
+  var givesWay = levelGivesWayAt(first, extents, eyeAt0, worldPerT);
+
   for (var i = 0; i < maxSteps; i++) {
     if (t >= tEnd) { break; }
     if (renderMode == 0 && alpha >= 0.98) { break; } // early termination (translucent)
     if (renderMode == 1 && maxVal >= 0.98) { break; } // early termination (MIP)
 
     let pos = ro + rd * t;
+    while (t >= givesWay) {
+      first++;
+      givesWay = levelGivesWayAt(first, extents, eyeAt0, worldPerT);
+    }
 
-    let s = sampleWithFallback(pos, rd);
+    let s = sampleWithFallback(pos, rd, first);
     let advance = max(s.step, minStep);
     if (s.value == FAILED) {
       crossedFailed = true;
