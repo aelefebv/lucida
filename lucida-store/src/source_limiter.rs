@@ -56,7 +56,7 @@ impl RequestLabel {
 /// more: an object store in the server's own region answers each read in
 /// 100 to 200 ms however many are in flight. So the bytes in flight may also
 /// grow to what completed reads measure the store to hold, its
-/// bandwidth-delay product ([`StoreRate`]), still within `max_reads`.
+/// bandwidth-delay product (`StoreRate`), still within `max_reads`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SourceReadBounds {
     /// Reads admitted whatever their size. Only reads in flight together
