@@ -515,10 +515,11 @@ export function emitMinimapLane(
 
 /**
  * Detail lane: the chunks the level selection chose for each visible tile,
- * and the ancestors it keeps above them, in the selection's fetch order:
- * coarser levels first, so a slow link fills the whole view before it
- * sharpens, then larger on screen, then nearer the focus. With `carry`, a
- * cell the previous plan asked for alike keeps its requests.
+ * in the selection's fetch order: coarser levels first, so a slow link fills
+ * the whole view before it sharpens, then larger on screen, then nearer the
+ * focus. Then the ancestors it keeps above them, which a settled frame does
+ * not draw. With `carry`, a cell the previous plan asked for alike keeps its
+ * requests.
  */
 export function emitDetailLane(
   chunks: PlanChunks,

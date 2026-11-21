@@ -2,7 +2,10 @@ import type { ChunkRequest } from "../planning/index.ts";
 import { deliveryTarget } from "../../renderer/poolKeys.ts";
 
 const DETAIL = 1;
-/** A detail chunk a lane other than prefetch asks for: what settling waits on. */
+/**
+ * A detail chunk a lane other than prefetch asks for, and not as an
+ * ancestor: what settling waits on. A settled frame draws no ancestor.
+ */
 const VIEW_DETAIL = 2;
 const COARSE = 4;
 /** A coarse chunk the view's own coarse lane asks for, not only the minimap or overview. */
@@ -15,7 +18,7 @@ interface KeyDemand {
 }
 
 function flagsOf(req: ChunkRequest): number {
-  if (req.tier === "detail") return req.lane === "prefetch" ? DETAIL : DETAIL | VIEW_DETAIL;
+  if (req.tier === "detail") return req.lane === "prefetch" || req.ancestor ? DETAIL : DETAIL | VIEW_DETAIL;
   return req.lane === "coarse" ? COARSE | COARSE_LANE : COARSE;
 }
 

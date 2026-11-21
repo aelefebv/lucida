@@ -17,7 +17,8 @@
 
 import type { ResidencyTier } from "../residencyTier.ts";
 
-type ChunkDelivery = "sent" | "held";
+/** `aside` is sent and unanswered too, but holds no settle up. */
+type ChunkDelivery = "sent" | "aside" | "held";
 
 function channelKeyFor(imageId: string, c: number): string {
   return `${imageId}|${c}`;
@@ -32,19 +33,24 @@ export class DeliveryState {
   /** Chunks `sent` and not yet answered, kept as a count so settling reads it for nothing. */
   private unanswered = 0;
 
-  /** How many posted chunks the worker has not yet answered. */
+  /** How many posted chunks the worker has not yet answered, of those settling waits on. */
   get chunksUnanswered(): number {
     return this.unanswered;
   }
 
-  /** Posted to the worker; awaits its answer. */
-  markChunkSent(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, target: string): void {
+  /**
+   * Posted to the worker; awaits its answer. Without `holdsSettle`, as for
+   * an ancestor, which a settled frame does not draw, the wait for the answer
+   * holds no settle up.
+   */
+  markChunkSent(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, target: string, holdsSettle = true): void {
     const byKey = this.channel(imageId, c, true)!;
     const key = slotKeyFor(chunkKey, tier, target);
     const prior = byKey.get(key);
     if (prior === "held") return;
-    if (prior === undefined) this.unanswered++;
-    byKey.set(key, "sent");
+    if (prior === "sent") this.unanswered--;
+    if (holdsSettle) this.unanswered++;
+    byKey.set(key, holdsSettle ? "sent" : "aside");
   }
 
   /** The worker wrote the chunk, or already held it. */
@@ -72,7 +78,7 @@ export class DeliveryState {
   /**
    * The worker's wanted set lists the chunk as not held. Returns whether this
    * mirror held it, a disagreement, after which the chunk may be sent again.
-   * A `sent` chunk is left alone: the report predates its answer.
+   * A chunk sent and unanswered is left alone: the report predates its answer.
    */
   markChunkMissing(imageId: string, c: number, chunkKey: string, tier: ResidencyTier, target: string): boolean {
     const key = slotKeyFor(chunkKey, tier, target);

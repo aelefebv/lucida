@@ -119,7 +119,8 @@ _Avoid_: selection (unqualified; selector state such as the current z)
 A coarser chunk a volume view's level selection keeps resident over a chunk it
 chose, because a gesture's frame, drawn at a quarter of the resolution, would
 sample it there. Charged to the budget beside the selection, and drawn only
-where the chunks under it are missing.
+where the chunks under it are missing. No part of the wanted set: the view
+fetches its ancestors after it and settles without them.
 
 **Displayed level**:
 The level the renderer sampled for an entity's pixels: the level the selection
@@ -141,8 +142,8 @@ Which concurrent stream of planner work a request belongs to: `detail`,
 _Avoid_: track (a display track is a timeline row), channel (an image axis)
 
 **Wanted set**:
-The chunks the current view calls for: its level selection, the ancestors it
-keeps, and the coarse tier under them. Demand, not possession.
+The chunks the current view calls for: its level selection and the coarse tier
+under it. Demand, not possession.
 
 **Settled**:
 A view once quiescent has held: covering its whole wanted set, or covering

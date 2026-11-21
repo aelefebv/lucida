@@ -209,7 +209,7 @@ describe("selectLevels", () => {
     return { ...slice, selection: { ...slice.selection, renderMode: "volume" } };
   }
 
-  it("keeps a volume view's ancestors that a quarter-resolution frame samples, in one fetch order with its chunks, and a slice view's none", () => {
+  it("keeps a volume view's ancestors that a quarter-resolution frame samples, ranked after its chunks, and a slice view's none", () => {
     // Half a pixel per sample calls for level 1, and a quarter-resolution
     // frame samples levels 2 and 3 above it. Level 4 is the coarse tier's.
     const slice = sliceView(0, [image("a", pyramid())], 0.5);
@@ -221,7 +221,8 @@ describe("selectLevels", () => {
     expect(new Set(a.ancestors.map((cell) => cell.level))).toEqual(new Set([2, 3]));
     const fetched = [...a.detail, ...a.ancestors].sort((p, q) => p.rank - q.rank);
     expect(fetched.map((cell) => cell.rank)).toEqual(fetched.map((_, i) => i));
-    const levels = fetched.map((cell) => cell.level);
+    expect(Math.min(...a.ancestors.map((cell) => cell.rank))).toBe(a.detail.length);
+    const levels = a.ancestors.sort((p, q) => p.rank - q.rank).map((cell) => cell.level);
     expect(levels).toEqual([...levels].sort((p, q) => q - p));
     // The share bounds the view's own chunks; the ancestors come beside it.
     expect(result.summaries.get(0)!.used.cpu).toBe(a.detail.length * 64 * 64 * 64 * 2);

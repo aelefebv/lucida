@@ -1032,8 +1032,9 @@ pub const PREVIOUS_STRIDE: usize = 6;
 pub const CELL_STRIDE: usize = 8;
 
 /// Numbers at the head of [`select_batch`]'s output: how many fetched cells,
-/// the selected ones and their ancestors in one fetch order, then lookahead
-/// and refined cells follow, in that order; the CPU and GPU bytes the
+/// the selected ones in fetch order and then their ancestors in fetch order,
+/// then lookahead and refined cells follow, in that order; the CPU and GPU
+/// bytes the
 /// selected cells use; the refused refinement's measure or -1; the four
 /// [`CullCounts`] in field order; and the CPU and GPU bytes the ancestors
 /// use.
@@ -1133,13 +1134,14 @@ pub fn select_batch(
     }
 
     let selection = select_levels(&parsed, budget, share, &last, lookahead, ancestors);
-    let mut fetched: Vec<(&SelectedCell, bool)> = selection
+    // The ancestors go after every selected cell: a settled frame draws none
+    // of them, so they wait for what it draws.
+    let fetched: Vec<(&SelectedCell, bool)> = selection
         .cells
         .iter()
         .map(|cell| (cell, false))
         .chain(selection.ancestors.iter().map(|cell| (cell, true)))
         .collect();
-    fetched.sort_by(|a, b| fetch_order(a.0, b.0));
     let mut out = Vec::with_capacity(
         SELECTION_HEADER
             + (fetched.len() + selection.lookahead.len() + selection.refined.len()) * CELL_STRIDE,
@@ -1742,7 +1744,7 @@ mod tests {
         assert_eq!(out[10], direct.ancestors_used.cpu);
         assert_eq!(out[11], direct.ancestors_used.gpu);
 
-        // The selected cells and their ancestors in one fetch order, each
+        // The selected cells in fetch order, then their ancestors, each
         // marked for which it is.
         let cell_of = |numbers: &[f64; CELL_STRIDE]| Cell {
             entity: numbers[0] as u32,
@@ -1762,7 +1764,11 @@ mod tests {
             marked(1.0),
             direct.ancestors.iter().map(|c| c.cell).collect()
         );
-        assert!(rows.windows(2).all(|w| w[0][1] >= w[1][1]));
+        assert!(rows.windows(2).all(|w| w[0][7] <= w[1][7]));
+        assert!(
+            rows.windows(2)
+                .all(|w| w[0][7] != w[1][7] || w[0][1] >= w[1][1])
+        );
 
         // Fed back as the previous selection, it selects the same again.
         let mut previous = Vec::new();

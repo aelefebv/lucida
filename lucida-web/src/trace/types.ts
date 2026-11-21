@@ -340,11 +340,12 @@ export interface SelectionAtSettle {
  * What the pipeline has left to do, from the CPU cache's point of view.
  * One shape with two readings: live, it is the cache's half of the
  * quiescence predicate; captured at run close, it is what was still
- * outstanding at settle. Prefetch is excluded from the predicate, so a run
- * can close with speculative work in flight, and the reader has to see it.
+ * outstanding at settle. Prefetch and the ancestors a volume view keeps are
+ * excluded from the predicate, so a run can close with that work in flight,
+ * and the reader has to see it.
  */
 export interface Outstanding {
-  /** Non-speculative work only; the speculative remainder is counted below. */
+  /** Work the view settles on only; prefetch and ancestors are counted below. */
   pending: number;
   inFlight: number;
   speculativePending: number;

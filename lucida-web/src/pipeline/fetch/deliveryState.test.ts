@@ -17,6 +17,23 @@ describe("DeliveryState", () => {
     expect(state.chunksUnanswered).toBe(0);
   });
 
+  it("does not count an unanswered chunk that holds no settle up, until one sent again does", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img", 0, "1/0/0/0/0/0", "detail", "volume", false);
+    expect(state.chunksUnanswered).toBe(0);
+    expect(state.wasChunkSent("img", 0, "1/0/0/0/0/0", "detail", "volume")).toBe(true);
+    state.markChunkSent("img", 0, "1/0/0/0/0/0", "detail", "volume");
+    expect(state.chunksUnanswered).toBe(1);
+    state.markChunkHeld("img", 0, "1/0/0/0/0/0", "detail", "volume");
+    expect(state.chunksUnanswered).toBe(0);
+
+    state.markChunkSent("img", 0, "1/0/0/0/0/1", "detail", "volume", false);
+    state.markChunkRefused("img", 0, "1/0/0/0/0/1", "detail", "volume");
+    state.markChunkSent("img", 0, "1/0/0/0/0/2", "detail", "volume", false);
+    state.clearChunksForImage("img");
+    expect(state.chunksUnanswered).toBe(0);
+  });
+
   it("tracks chunk sent state by image, channel, and chunk key", () => {
     const state = new DeliveryState();
     state.markChunkSent("img-0", 1, "0/0/1/0/0/0", "detail", "slice");
