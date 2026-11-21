@@ -75,8 +75,16 @@ export class InFlightAllowance {
   /** Decaying sums of what landed fetches were charged and what the wire carried. */
   private charged = 0;
   private carried = 0;
+  /** What every landed fetch was charged, which widens the allowance until a rate is known. */
+  private landedBytes = 0;
 
-  /** `initialBytes` is the allowance before a rate is known. */
+  /**
+   * `initialBytes` is the allowance before anything lands. Until a rate is
+   * known each fetch that lands widens it by what it was charged, so the
+   * first round trips double it, as a slow start does: the rate takes a
+   * fetch sent after the first landing to measure, and the coarse levels a
+   * first frame draws from should not wait a round trip for it.
+   */
   constructor(initialBytes: number) {
     this.initialBytes = initialBytes;
   }
@@ -91,6 +99,7 @@ export class InFlightAllowance {
    */
   landed(stamp: SendStamp, bytes: number, wireBytes: number, nowMs: number): void {
     this.delivered += wireBytes;
+    this.landedBytes += bytes;
     this.charged = this.charged * RATIO_DECAY + bytes;
     this.carried = this.carried * RATIO_DECAY + wireBytes;
     const elapsedMs = nowMs - stamp.sentAtMs;
@@ -111,13 +120,16 @@ export class InFlightAllowance {
    */
   bytes(): number {
     const wireBytesPerMs = this.fastestWireBytesPerMs();
-    if (wireBytesPerMs === 0 || this.shortestRoundTripMs === Infinity) return this.initialBytes;
+    if (wireBytesPerMs === 0 || this.shortestRoundTripMs === Infinity) {
+      return this.initialBytes + this.landedBytes;
+    }
     const ms = Math.max(DRAIN_FLOOR_MS, ROUND_TRIP_GAIN * this.shortestRoundTripMs);
     return wireBytesPerMs * ms * (this.charged / this.carried);
   }
 
   reset(): void {
     this.delivered = 0;
+    this.landedBytes = 0;
     this.shortestRoundTripMs = Infinity;
     this.rates = [];
     this.charged = 0;

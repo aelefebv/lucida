@@ -46,13 +46,16 @@ function fill(
 }
 
 describe("InFlightAllowance", () => {
-  it("allows the initial bytes until a rate is known", () => {
+  it("starts at the initial bytes and widens by what lands until a rate is known", () => {
     const allowance = new InFlightAllowance(4 * MB);
     expect(allowance.bytes()).toBe(4 * MB);
 
-    // Sent before anything landed, it measures the round trip and not the rate.
-    allowance.landed(allowance.stamp(0), MB, MB, 200);
-    expect(allowance.bytes()).toBe(4 * MB);
+    // Sent before anything landed, they measure the round trip and not the rate.
+    const first = allowance.stamp(0);
+    const second = allowance.stamp(0);
+    allowance.landed(first, MB, MB, 200);
+    allowance.landed(second, MB, MB, 280);
+    expect(allowance.bytes()).toBe(6 * MB);
   });
 
   it("allows twice the shortest round trip at the fastest rate", () => {
