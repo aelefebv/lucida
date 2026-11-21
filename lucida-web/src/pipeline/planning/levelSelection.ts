@@ -33,7 +33,7 @@ import type {
  */
 const PREVIOUS_STRIDE = 6;
 const CELL_STRIDE = 8;
-const SELECTION_HEADER = 10;
+const SELECTION_HEADER = 12;
 
 /**
  * How far the focal zoom must move between two plans of a moving view to be
@@ -109,9 +109,10 @@ export interface LevelSelectionResult {
 
 /**
  * Select the levels every view draws at, within `budget`. Each view selects
- * to `config.selectionShare` of its share, ancestors included, which leaves
- * the rest for the chunks it lets go of while their replacements load, and
- * for prefetch.
+ * to `config.selectionShare` of its share, which leaves the rest for the
+ * chunks a refinement replaces while the finer ones load, and for prefetch.
+ * A volume view's ancestors take from that rest, up to
+ * `config.ancestorShare`.
  */
 export function selectLevels(
   views: readonly SelectionView[],
@@ -167,8 +168,8 @@ interface EncodedView {
   owners: Owner[];
   datasetIds: string[];
   lookahead: number;
-  /** How many coarser levels each selected cell keeps resident above it. */
-  ancestors: number;
+  /** The scale of the frames the view keeps ancestors for, or 0 for none. */
+  ancestorScale: number;
   zoom: number | null;
   region: string | null;
   zoomDirection: ZoomDirection | null;
@@ -234,7 +235,7 @@ function encodeView(view: SelectionView, memory: ViewMemory | undefined, config:
     owners,
     datasetIds: view.datasets.map((dataset) => dataset.datasetId),
     lookahead,
-    ancestors: volume ? config.ancestorLevels : 0,
+    ancestorScale: volume ? config.ancestorScale : 0,
     zoom,
     region,
     zoomDirection,
@@ -306,7 +307,8 @@ function runView(input: EncodedView, budget: SelectionBytes, config: PlanningCon
       budget.gpu,
       config.selectionShare,
       input.lookahead,
-      input.ancestors,
+      input.ancestorScale,
+      config.ancestorShare,
     );
   const [fetchedCount, lookaheadCount, refinedCount] = [out[0], out[1], out[2]];
   const limited = out[5] >= 0;
@@ -324,9 +326,9 @@ function runView(input: EncodedView, budget: SelectionBytes, config: PlanningCon
     const owner = out[at];
     const level = out[at + 1];
     const chosen = byOwner[owner];
-    // An ancestor is a cell the selection refined, which the refined cells
-    // remember.
+    // Remembered so the next selection keeps an ancestor near its bound.
     if (out[at + 7] > 0) {
+      remembered[owner].push(0, level, out[at + 2], out[at + 3], out[at + 4], 2);
       chosen.ancestors.push({ level, x: out[at + 2], y: out[at + 3], z: out[at + 4], rank });
       continue;
     }

@@ -116,10 +116,10 @@ and a view too deep for its target level draws coarser
 _Avoid_: selection (unqualified; selector state such as the current z)
 
 **Ancestor**:
-A coarser chunk the level selection keeps resident over a chunk it chose, in a
-volume view up to two levels above it, so a gesture's frame, drawn at a
-fraction of the resolution, has a level its pixels resolve. Charged to the
-selection's budget, and drawn only where the chunks under it are missing.
+A coarser chunk a volume view's level selection keeps resident over a chunk it
+chose, because a gesture's frame, drawn at a quarter of the resolution, would
+sample it there. Charged to the budget beside the selection, and drawn only
+where the chunks under it are missing.
 
 **Displayed level**:
 The level the renderer sampled for an entity's pixels: the level the selection

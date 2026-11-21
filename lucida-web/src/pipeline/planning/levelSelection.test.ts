@@ -2,7 +2,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import type { DatasetManifest, LevelGeometry } from "../../manifestTypes.ts";
 import { loadWasm } from "../../viewProperties.ts";
-import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
+import { INTERACTION_RENDER_SCALE } from "../../components/volumeRenderScale.ts";
+import { MIN_ADAPTIVE_SCALE } from "../../renderResolution.ts";
+import { ANCESTOR_SCALE, DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
 import {
   fairShares,
   initialLevelSelectionMemory,
@@ -201,15 +203,19 @@ describe("selectLevels", () => {
     expect(result.summaries.get(0)!.used.cpu + result.summaries.get(1)!.used.cpu).toBeLessThanOrEqual(share);
   });
 
-  it("keeps a volume view's ancestors two levels up, in one fetch order with its chunks and within its share, and a slice view's none", () => {
-    // Half a pixel per sample calls for level 1, with levels 2 and 3 above
-    // it. Level 4 is the coarse tier's.
-    const entity = image("a", pyramid());
-    const slice = sliceView(0, [entity], 0.5);
+  /** The slice view across the middle plane at `pixelsPerSample`, drawn as a volume. */
+  function volumeView(pixelsPerSample: number): ViewSnapshotBase {
+    const slice = sliceView(0, [image("a", pyramid())], pixelsPerSample);
+    return { ...slice, selection: { ...slice.selection, renderMode: "volume" } };
+  }
+
+  it("keeps a volume view's ancestors that a quarter-resolution frame samples, in one fetch order with its chunks, and a slice view's none", () => {
+    // Half a pixel per sample calls for level 1, and a quarter-resolution
+    // frame samples levels 2 and 3 above it. Level 4 is the coarse tier's.
+    const slice = sliceView(0, [image("a", pyramid())], 0.5);
     expect(select([viewOf(slice)]).byView.get(0)!.get("ds")!.entities.get("a")!.ancestors).toEqual([]);
 
-    const volume = { ...slice, selection: { ...slice.selection, renderMode: "volume" as const } };
-    const result = select([viewOf(volume)]);
+    const result = select([viewOf(volumeView(0.5))]);
     const a = result.byView.get(0)!.get("ds")!.entities.get("a")!;
     expect(a.detailLevels).toEqual([1]);
     expect(new Set(a.ancestors.map((cell) => cell.level))).toEqual(new Set([2, 3]));
@@ -217,7 +223,33 @@ describe("selectLevels", () => {
     expect(fetched.map((cell) => cell.rank)).toEqual(fetched.map((_, i) => i));
     const levels = fetched.map((cell) => cell.level);
     expect(levels).toEqual([...levels].sort((p, q) => q - p));
-    expect(result.summaries.get(0)!.used.cpu).toBe(fetched.length * 64 * 64 * 64 * 2);
+    // The share bounds the view's own chunks; the ancestors come beside it.
+    expect(result.summaries.get(0)!.used.cpu).toBe(a.detail.length * 64 * 64 * 64 * 2);
+  });
+
+  it("keeps fewer ancestors as the view zooms past a pixel a sample, and none past two", () => {
+    const ancestorsAt = (pixelsPerSample: number) =>
+      select([viewOf(volumeView(pixelsPerSample))]).byView.get(0)!.get("ds")!.entities.get("a")!;
+    const near = ancestorsAt(1.8);
+    expect(near.detailLevels).toEqual([0]);
+    expect(near.ancestors.length).toBeGreaterThan(0);
+    expect(near.ancestors.every((cell) => cell.level === 1)).toBe(true);
+    expect(ancestorsAt(3).ancestors).toEqual([]);
+  });
+
+  it("keeps an ancestor the last selection kept until its span passes the band", () => {
+    // Level 0 at 1.9 pixels a sample keeps level 1; at 2.1 a fresh selection
+    // would not, but one that kept it does.
+    const first = selectLevels([viewOf(volumeView(1.9))], ROOMY, initialLevelSelectionMemory(), DEFAULT_PLANNING_CONFIG);
+    const ancestorsOf = (result: ReturnType<typeof select>) => result.byView.get(0)!.get("ds")!.entities.get("a")!.ancestors;
+    expect(ancestorsOf(first).length).toBeGreaterThan(0);
+    expect(ancestorsOf(select([viewOf(volumeView(2.1))]))).toEqual([]);
+    const held = selectLevels([viewOf(volumeView(2.1))], ROOMY, first.memory, DEFAULT_PLANNING_CONFIG);
+    expect(ancestorsOf(held).length).toBeGreaterThan(0);
+  });
+
+  it("keeps ancestors for the frames a warm gesture draws at its lowest", () => {
+    expect(ANCESTOR_SCALE).toBe(INTERACTION_RENDER_SCALE * MIN_ADAPTIVE_SCALE);
   });
 
   it("lists nothing for a view with nothing to draw", () => {
