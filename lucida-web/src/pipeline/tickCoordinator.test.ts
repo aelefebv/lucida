@@ -18,6 +18,8 @@ import { initialPlanningState } from "./planning/index.ts";
 import { resolvedLayersJson } from "../resolvedLayerFixtures.ts";
 import type { CutReach, ResolvedLayer } from "../resolvedLayers.ts";
 import { loadWasm } from "../viewProperties.ts";
+import { STILL_MS } from "./viewMotion.ts";
+import type { DatasetLevelSelection } from "./planning/types.ts";
 
 beforeAll(loadWasm);
 
@@ -452,6 +454,112 @@ describe("epoch caching", () => {
       orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
       expect(planSpy).toHaveBeenCalledTimes(1);
       expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["volume", "zooms in", [1], [0]],
+    ["volume", "turns", [0], [0]],
+    ["slice", "zooms in", [0], [0]],
+  ] as const)("draws a %s view that %s at levels %j, and at %j once it has held still", (mode, move, moving, stopped) => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(1, 2) }]]);
+      const epochs = { content: 1, layout: 1, view: 1, selection: 1 };
+      // Level 0 is the target past half a pixel per sample. A turn moves the
+      // measure and not the focal zoom, as an orbit's near side does.
+      const visibleRegion: MockSceneConfig["visibleRegion"] & { focal_zoom: number } = {
+        xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: 0.3, focal_zoom: 0.3, sort_center: null, frustum_planes: null,
+      };
+      const scene = createMockScene({ epochs, visibleRegion });
+      const orch = makeOrch();
+      const ctx = () =>
+        ({ ...(makeCtx(scene, datasets) as object), views: [{ id: 0, mode, rect: [0, 0, 800, 600] }] }) as unknown as TickContext;
+      const levels = () => {
+        const snapshot = planSpy.mock.lastCall![0] as { views: { levelSelection: DatasetLevelSelection }[] };
+        return snapshot.views[0].levelSelection.entities.get("tile-0")?.detailLevels;
+      };
+      orch.planAndFetch(ctx(), emptyMinimap);
+      expect(levels()).toEqual([1]);
+
+      // A zoom a frame at a time: the first frame replans at once, and the
+      // window holds the next replan 200 ms.
+      vi.advanceTimersByTime(500);
+      let lastMove = 0;
+      for (let frame = 0; frame < 20; frame++) {
+        epochs.view++;
+        visibleRegion.effective_zoom = 0.3 + 0.035 * frame;
+        if (move === "zooms in") visibleRegion.focal_zoom = visibleRegion.effective_zoom;
+        lastMove = performance.now();
+        orch.planAndFetch(ctx(), emptyMinimap);
+        vi.advanceTimersByTime(16);
+      }
+      expect(planSpy).toHaveBeenCalledTimes(3);
+      expect(levels()).toEqual(moving);
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // The camera holds still. A held refinement falls due once it has
+      // held still long enough; the view change the window deferred is due
+      // when the window ends.
+      const wait = orch.msUntilPendingRebuild(performance.now())!;
+      if (moving[0] === 1) expect(wait).toBe(lastMove + STILL_MS - performance.now());
+      vi.advanceTimersByTime(wait);
+      orch.planAndFetch(ctx(), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(4);
+      expect(levels()).toEqual(stopped);
+      expect(orch.hasPendingRebuild()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds a volume zooming in through a frame held up past the pause, and refines once it stops", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContentWithTiles(1, 2) }]]);
+      const epochs = { content: 1, layout: 1, view: 1, selection: 1 };
+      const visibleRegion: MockSceneConfig["visibleRegion"] & { focal_zoom: number } = {
+        xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: 0.3, focal_zoom: 0.3, sort_center: null, frustum_planes: null,
+      };
+      const scene = createMockScene({ epochs, visibleRegion });
+      const orch = makeOrch();
+      const ctx = () =>
+        ({ ...(makeCtx(scene, datasets) as object), views: [{ id: 0, mode: "volume", rect: [0, 0, 800, 600] }] }) as unknown as TickContext;
+      const levels = () => {
+        const snapshot = planSpy.mock.lastCall![0] as { views: { levelSelection: DatasetLevelSelection }[] };
+        return snapshot.views[0].levelSelection.entities.get("tile-0")?.detailLevels;
+      };
+      const frame = (zoom: number, ms = 16) => {
+        epochs.view++;
+        visibleRegion.effective_zoom = zoom;
+        visibleRegion.focal_zoom = zoom;
+        orch.planAndFetch(ctx(), emptyMinimap);
+        vi.advanceTimersByTime(ms);
+      };
+      orch.planAndFetch(ctx(), emptyMinimap);
+      vi.advanceTimersByTime(500);
+      for (let i = 0; i < 15; i++) frame(0.3 + 0.03 * i);
+      expect(levels()).toEqual([1]);
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // A long task holds the next tick past the pause; the input that came
+      // during it lands as one change, and the gesture goes on.
+      vi.advanceTimersByTime(STILL_MS + 50);
+      frame(0.8);
+      frame(0.82);
+      expect(levels()).toEqual([1]);
+
+      // The render loop ticks whenever an owed plan falls due: the view
+      // change the window deferred, held, then the refinement.
+      const stopped = performance.now();
+      for (let due = orch.msUntilPendingRebuild(stopped); due !== null; due = orch.msUntilPendingRebuild(performance.now())) {
+        vi.advanceTimersByTime(due);
+        orch.planAndFetch(ctx(), emptyMinimap);
+      }
+      expect(levels()).toEqual([0]);
+      expect(performance.now() - stopped).toBeLessThanOrEqual(STILL_MS);
     } finally {
       vi.useRealTimers();
     }

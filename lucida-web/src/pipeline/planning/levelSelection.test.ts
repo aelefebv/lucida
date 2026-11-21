@@ -176,6 +176,32 @@ describe("selectLevels", () => {
     expect(ahead(run(panned, still.memory))).toEqual([]);
   });
 
+  it.each([
+    ["volume", "zooms in", [2]],
+    ["volume", "turns", [1]],
+    ["slice", "zooms in", [1]],
+  ] as const)("draws a %s view that %s while the views move at levels %j, and refines it once they stop", (mode, move, levelsWhileMoving) => {
+    // A turn moves the measure and not the focal zoom, as an orbit's near
+    // side does; a zoom moves both.
+    const entity = image("a", pyramid());
+    const at = (pixelsPerSample: number): SelectionView => {
+      const view = sliceView(0, [entity], pixelsPerSample);
+      view.selection = { ...view.selection, renderMode: mode };
+      view.visibleRegion = { ...view.visibleRegion, focalZoom: move === "turns" ? 0.2 : pixelsPerSample };
+      return viewOf(view);
+    };
+    const before = select([at(0.2)]);
+    const moved = selectLevels([at(0.5)], ROOMY, before.memory, DEFAULT_PLANNING_CONFIG, true);
+    const whileMoving = moved.byView.get(0)!.get("ds")!.entities.get("a")!;
+    expect(whileMoving.detailLevels).toEqual(levelsWhileMoving);
+    expect(moved.held).toBe(levelsWhileMoving[0] === 2);
+    // What a held zoom draws once it stops, it fetches ahead.
+    if (moved.held) expect(whileMoving.lookahead.map((cell) => cell.level)).toEqual(expect.arrayContaining([1]));
+    const stopped = selectLevels([at(0.5)], ROOMY, moved.memory, DEFAULT_PLANNING_CONFIG);
+    expect(stopped.byView.get(0)!.get("ds")!.entities.get("a")!.detailLevels).toEqual([1]);
+    expect(stopped.held).toBe(false);
+  });
+
   it("looks no level ahead with the prefetch lane off", () => {
     const entity = image("a", pyramid());
     const off = { ...DEFAULT_PLANNING_CONFIG, prefetchDepth: 0 };

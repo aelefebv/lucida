@@ -112,7 +112,9 @@ visible chunk starts at the coarse tier's level, and the chunk whose samples
 look largest on screen refines first, until each chunk's samples span a device
 pixel or the budget is spent, so a near chunk can draw finer than a far one
 and a view too deep for its target level draws coarser
-(`lucida-core/src/level_selection.rs`).
+(`lucida-core/src/level_selection.rs`). While a volume view zooms in, the
+selection holds: it keeps what it chose or coarsens it, refines only what
+comes into view, and refines the rest once the camera stops.
 _Avoid_: selection (unqualified; selector state such as the current z)
 
 **Ancestor**:

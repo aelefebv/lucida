@@ -57,6 +57,7 @@ import {
   type ViewSelectionSummary,
 } from "./planning/levelSelection.ts";
 import { pageDeviceBudgets } from "../pageBudgets.ts";
+import { ViewMotion } from "./viewMotion.ts";
 import type {
   ActiveSetEntry,
   DatasetLevelSelection,
@@ -816,6 +817,14 @@ export class TickCoordinator {
 
   /** What the last level selection chose, which the next leans toward. */
   private levelMemory: LevelSelectionMemory = initialLevelSelectionMemory();
+  /** Whether the views are moving, which holds a volume's refinement while it zooms in. */
+  private readonly motion = new ViewMotion();
+  /**
+   * The last selection held back a refinement the screen calls for while a
+   * view zoomed in. The views are not settled until a selection makes it,
+   * which the first plan after they stop does.
+   */
+  private refinementOwed = false;
   /** The budget the last selection ran within, what each view spent of it, and what the trace reads of it. */
   private lastSelection: {
     budget: SelectionBytes;
@@ -836,6 +845,7 @@ export class TickCoordinator {
   private selectLevels(
     ctx: TickContext,
     datasets: SelectedDatasets,
+    now: number,
   ): LevelSelectionResult & { budget: SelectionBytes; datasets: SelectedDatasets } {
     const byView = new Map<number, SelectionDataset[]>();
     for (const { dsId, views } of datasets) {
@@ -852,7 +862,11 @@ export class TickCoordinator {
       return { view, datasets: of, area: rect ? Math.max(0, rect[2]) * Math.max(0, rect[3]) : 0 };
     });
     const budget = selectionBudget(ctx, ctx.client.gpuCapacity());
-    return { ...selectLevels(views, budget, this.levelMemory, configStore.get()), budget, datasets };
+    // A refinement still owed holds until the camera has held still: the
+    // first change after a long task starts a run of its own, and is the
+    // same gesture going on.
+    const moving = this.motion.moving(now) || (this.refinementOwed && !this.motion.stopped(now));
+    return { ...selectLevels(views, budget, this.levelMemory, configStore.get(), moving), budget, datasets };
   }
 
   /**
@@ -861,6 +875,7 @@ export class TickCoordinator {
    */
   private commitSelection(selection: LevelSelectionResult & { budget: SelectionBytes; datasets: SelectedDatasets }): void {
     this.levelMemory = selection.memory;
+    this.refinementOwed = selection.held;
     this.lastSelection = {
       budget: selection.budget,
       summaries: selection.summaries,
@@ -965,6 +980,7 @@ export class TickCoordinator {
       selection: rawEpochs.selection,
       request: this.requestEpoch,
     };
+    this.motion.note(currentEpochs.view, tickStart);
     // Diff against last epochs — drives both the cache-hit decision and
     // per-epoch cause attribution published to coldState telemetry.
     const hasPrior = this.lastEpochs !== null && this.cachedResult !== null;
@@ -979,6 +995,7 @@ export class TickCoordinator {
       if (this.manifestReplacedSinceRebuild(ctx)) causes.push("manifest");
       if (this.minimapHasUnplannedChunks(minimapPendingFetch)) causes.push("minimap");
       if (this.capacityReplanOwed) causes.push("capacity");
+      if (this.refinementOwed && this.motion.stopped(tickStart)) causes.push("refine");
       isHit = causes.length === 0;
     }
 
@@ -991,10 +1008,11 @@ export class TickCoordinator {
     //   - selection: the leading change rebuilds promptly, and further
     //     changes within the window coalesce.
     // Structural changes must render immediately, and so does a capacity
-    // report, which comes once rather than as a stream.
+    // report or the refinement owed once the views stop, each of which comes
+    // once rather than as a stream.
     let coalescedSkip = false;
     if (!isHit && hasPrior) {
-      if (!isStructural(causes) && !causes.includes("capacity")) {
+      if (!isStructural(causes) && !causes.includes("capacity") && !causes.includes("refine")) {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
           : VIEW_REPLAN_INTERVAL_MS;
@@ -1048,14 +1066,14 @@ export class TickCoordinator {
     // set's inputs are unchanged, so only the requests need emitting again.
     const requestsOnly =
       !structural && causes.every((c) => c === "selection" || c === "minimap");
-    // Only the camera moved, the worker's room changed, or the minimap asked
-    // for chunks, so the active set is a pure function of the view and the
-    // budget, and the descriptors' inputs held. This is the sole gate for the
-    // view-move cold-state delta. Anything else, bar a display edit patched
-    // below, fails it and takes the full rebuild, so the delta's retained
-    // descriptors are safe.
+    // Only the camera moved, the worker's room changed, the views stopped
+    // with a refinement owed, or the minimap asked for chunks, so the active
+    // set is a pure function of the view and the budget, and the descriptors'
+    // inputs held. This is the sole gate for the view-move cold-state delta.
+    // Anything else, bar a display edit patched below, fails it and takes the
+    // full rebuild, so the delta's retained descriptors are safe.
     let viewOnly = !structural && causes.length > 0 &&
-      causes.every((cause) => cause === "view" || cause === "capacity" || cause === "minimap");
+      causes.every((cause) => cause === "view" || cause === "capacity" || cause === "refine" || cause === "minimap");
 
     // Display-only fast path: a per-channel intensity edit with nothing else
     // changed. The active set and residency are then identical, so push a
@@ -1158,7 +1176,7 @@ export class TickCoordinator {
 
     // The level selection runs once over every dataset each view draws, so
     // they share the budget, before any dataset plans from it.
-    const levelSelection = this.selectLevels(ctx, preparedDatasets);
+    const levelSelection = this.selectLevels(ctx, preparedDatasets, tickStart);
     this.commitSelection(levelSelection);
 
     for (const { dsId, dsSettings, planningState: planningStateForDataset, views: preparedViews } of preparedDatasets) {
@@ -1732,7 +1750,7 @@ export class TickCoordinator {
     });
     // The cut picks the chunks along it, so the selection runs again. The
     // cached active set holds only while it keeps every entity's levels.
-    const levelSelection = this.selectLevels(ctx, scrubbedViews);
+    const levelSelection = this.selectLevels(ctx, scrubbedViews, args.tickStart);
     const chosenOf = (dsId: string) => levelSelection.byView.get(drawn.id)?.get(dsId) ?? NOTHING_CHOSEN;
     const keepsLevels = perDataset.every((pd) => (pd.planningState.views.get(drawn.id)?.activeSet ?? []).every((entry) => {
       if (entry.kind !== "tile") return true;
@@ -2038,11 +2056,11 @@ export class TickCoordinator {
   }
 
   /**
-   * True while a coalesced change's trailing rebuild is owed. The view is
-   * not settled until it lands.
+   * True while a coalesced change's trailing rebuild is owed, or the
+   * refinement a moving view held. The view is not settled until it lands.
    */
   hasPendingRebuild(): boolean {
-    return this.pendingDeferredRebuild;
+    return this.pendingDeferredRebuild || this.refinementOwed;
   }
 
   /**
@@ -2050,7 +2068,9 @@ export class TickCoordinator {
    * render loop ticks again then rather than every frame until then.
    */
   msUntilPendingRebuild(now: number): number | null {
-    if (!this.pendingDeferredRebuild) return null;
-    return Math.max(0, this.lastRebuildAt + this.deferredRebuildIntervalMs - now);
+    let due = Number.POSITIVE_INFINITY;
+    if (this.pendingDeferredRebuild) due = this.lastRebuildAt + this.deferredRebuildIntervalMs;
+    if (this.refinementOwed) due = Math.min(due, this.motion.stopsAt());
+    return due === Number.POSITIVE_INFINITY ? null : Math.max(0, due - now);
   }
 }
