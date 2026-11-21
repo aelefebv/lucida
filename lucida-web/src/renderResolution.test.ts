@@ -384,6 +384,21 @@ describe("AdaptiveResolution", () => {
       expect(res.noteFrame(9, 8 * TARGET_FRAME_MS, 9)).toBe(false);
     });
 
+    it("steps a climb down on a long frame whose pass was short, as uploads can make one", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(80);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      res.noteGpuPass(IDLE_CLIMB_PASS_MS / 8);
+      expect(res.noteFrame(6, 14, 6)).toBe(true);
+      expect(res.scale).toBeCloseTo(0.5, 6);
+      // The pass leaves room, but the frame took twice the target.
+      res.noteGpuPass(IDLE_CLIMB_PASS_MS / 4);
+      expect(res.noteFrame(7, 2 * TARGET_FRAME_MS, 7)).toBe(true);
+      expect(res.scale).toBeCloseTo(0.5 * Math.SQRT1_2, 6);
+    });
+
     it("starts the next gesture from where one ended once its idle start had climbed", () => {
       const c = clock();
       const res = new AdaptiveResolution(c.now);
