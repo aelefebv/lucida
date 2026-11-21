@@ -11,6 +11,7 @@
  */
 
 import type { BurstLogger } from "./telemetry.ts";
+import type { InFlightAllowance, SendStamp } from "./inFlightAllowance.ts";
 
 export interface SchedulableRequest {
   datasetId: string;
@@ -38,11 +39,10 @@ export interface SchedulerConfig<Req extends SchedulableRequest = SchedulableReq
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   /**
-   * The bytes in flight allowed before anything has landed. Each fetch that
-   * lands widens the window by what it carried, up to `maxBytesInFlight`.
-   * Absent, the window starts wide open.
+   * Sizes the bytes in flight below `maxBytesInFlight` from what the fetches
+   * that land measure of the link. Absent, only the cap holds them back.
    */
-  initialBytesInFlight?: number;
+  allowance?: InFlightAllowance;
   burstLogger?: BurstLogger;
   /**
    * How many front-of-queue entries carry an enqueue timestamp. Defaults
@@ -66,6 +66,8 @@ export interface InFlightEntry<Req extends SchedulableRequest> {
   controller: AbortController;
   /** Starts as an estimate; corrected to actual via {@link Scheduler.correctInFlightBytes}. */
   estimatedBytes: number;
+  /** Absent without an allowance, and once the fetch has landed. */
+  stamp?: SendStamp;
 }
 
 export interface SchedulerDumpEntry<Req extends SchedulableRequest> {
@@ -101,8 +103,6 @@ export class Scheduler<Req extends SchedulableRequest> {
   private pending: Req[] = [];
   private inFlight = new Map<string, InFlightEntry<Req>>();
   private inFlightBytesCounter = 0;
-  /** The bytes in flight allowed so far; see {@link SchedulerConfig.initialBytesInFlight}. */
-  private bytesAllowed: number;
   /**
    * Admission timestamps for the window only — the moment a request
    * entered the front {@link admissionWindow} entries of `pending`, i.e.
@@ -128,7 +128,6 @@ export class Scheduler<Req extends SchedulableRequest> {
     this.keyFn = keyFn;
     this.startFn = startFn;
     this.admissionWindow = this.windowFor(config.maxConcurrentFetches);
-    this.bytesAllowed = config.initialBytesInFlight ?? Infinity;
   }
 
   private windowFor(maxConcurrentFetches: number): number {
@@ -274,6 +273,7 @@ export class Scheduler<Req extends SchedulableRequest> {
   drain(estimateBytes: (req: Req) => number, now: number = performance.now()): void {
     const speculative = this.config.speculative;
     let speculativeBytes = speculative ? this.speculativeBytesInFlight(speculative.is) : 0;
+    const started: InFlightEntry<Req>[] = [];
     let at = 0;
     while (at < this.pending.length && this.canStartMore()) {
       const req = this.pending[at];
@@ -290,8 +290,15 @@ export class Scheduler<Req extends SchedulableRequest> {
       this.enqueuedAt.delete(key);
       const estimate = estimateBytes(req);
       if (isSpeculative) speculativeBytes += estimate;
-      this.startInFlight(req, key, estimate, admittedAtMs, now);
+      started.push(this.startInFlight(req, key, estimate, admittedAtMs, now));
       this.promoteIntoWindow(now);
+    }
+    // Nothing a cap held back: these fetches are all the page had to send, so
+    // the rates they measure say what it asked for, not what the link can do.
+    if (this.canStartMore()) {
+      for (const entry of started) {
+        if (entry.stamp) entry.stamp.appLimited = true;
+      }
     }
 
     if (this.pending.length > 0 && !this.canStartMore() && this.config.burstLogger) {
@@ -344,9 +351,10 @@ export class Scheduler<Req extends SchedulableRequest> {
   }
 
   private canStartMore(): boolean {
+    const allowed = this.config.allowance?.bytes() ?? Infinity;
     return (
       this.inFlight.size < this.config.maxConcurrentFetches &&
-      this.inFlightBytesCounter < Math.min(this.bytesAllowed, this.config.maxBytesInFlight)
+      this.inFlightBytesCounter < Math.min(allowed, this.config.maxBytesInFlight)
     );
   }
 
@@ -356,29 +364,39 @@ export class Scheduler<Req extends SchedulableRequest> {
     estimate: number,
     admittedAtMs: number | undefined,
     startedAtMs: number,
-  ): void {
+  ): InFlightEntry<Req> {
     const controller = new AbortController();
     const entry: InFlightEntry<Req> = {
       request: req,
       controller,
       estimatedBytes: estimate,
     };
+    if (this.config.allowance) entry.stamp = this.config.allowance.stamp(startedAtMs);
     this.inFlightBytesCounter += estimate;
     this.inFlight.set(key, entry);
     this.startFn(req, controller, estimate, key, admittedAtMs, startedAtMs);
+    return entry;
   }
 
   /**
-   * The fetch for `key` landed with `actualBytes`, which widens the bytes
-   * allowed in flight by as much. No-op if the key was cancelled between
-   * fetch start and response.
+   * The fetch for `key` landed, to be charged `actualBytes` from now on, after
+   * the wire carried `wireBytes` of it, which the allowance measures the link
+   * by. No-op if the key was cancelled between fetch start and response.
    */
-  correctInFlightBytes(key: string, actualBytes: number): void {
+  correctInFlightBytes(
+    key: string,
+    actualBytes: number,
+    wireBytes: number = actualBytes,
+    now: number = performance.now(),
+  ): void {
     const entry = this.inFlight.get(key);
     if (!entry) return;
     this.inFlightBytesCounter += actualBytes - entry.estimatedBytes;
     entry.estimatedBytes = actualBytes;
-    this.bytesAllowed += actualBytes;
+    if (entry.stamp) {
+      this.config.allowance?.landed(entry.stamp, actualBytes, wireBytes, now);
+      entry.stamp = undefined;
+    }
   }
 
   /** Idempotent — safe to call after cancellation. */
@@ -492,7 +510,7 @@ export class Scheduler<Req extends SchedulableRequest> {
     }
     this.inFlight.clear();
     this.inFlightBytesCounter = 0;
-    this.bytesAllowed = this.config.initialBytesInFlight ?? Infinity;
+    this.config.allowance?.reset();
     this.pending = [];
     this.enqueuedAt.clear();
   }

@@ -74,6 +74,25 @@ pub fn limit_inbound(ws: WebSocketUpgrade) -> WebSocketUpgrade {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotQueued;
 
+/// What can take a queued message back: once it says so, the queue drops the
+/// message unsent and frees its bytes. It is dropped with the message, sent
+/// or not.
+pub trait Withdrawable: Send {
+    fn withdrawn(&self) -> bool;
+}
+
+/// A message waiting in the queue, and what can take it back.
+struct Queued {
+    message: Message,
+    withdrawal: Option<Box<dyn Withdrawable>>,
+}
+
+impl Queued {
+    fn withdrawn(&self) -> bool {
+        self.withdrawal.as_ref().is_some_and(|w| w.withdrawn())
+    }
+}
+
 struct Shared {
     queued_bytes: AtomicUsize,
     budget: usize,
@@ -111,13 +130,13 @@ impl CloseRequest {
 /// feeds the same queue and can close the same connection.
 #[derive(Clone)]
 pub struct ClientSender {
-    tx: mpsc::UnboundedSender<Message>,
+    tx: mpsc::UnboundedSender<Queued>,
     shared: Arc<Shared>,
 }
 
 /// The receiving half, owned by the connection's outbound task.
 pub struct ClientReceiver {
-    rx: mpsc::UnboundedReceiver<Message>,
+    rx: mpsc::UnboundedReceiver<Queued>,
     shared: Arc<Shared>,
 }
 
@@ -173,17 +192,37 @@ impl ClientSender {
     /// reaches the budget the connection is closed and nothing more is
     /// queued.
     pub fn send(&self, message: Message) -> Result<(), NotQueued> {
+        self.enqueue(Queued {
+            message,
+            withdrawal: None,
+        })
+    }
+
+    /// Queue a message as [`send`](Self::send) does, to be dropped unsent if
+    /// `withdrawal` says so before the socket takes it.
+    pub fn send_withdrawable(
+        &self,
+        message: Message,
+        withdrawal: Box<dyn Withdrawable>,
+    ) -> Result<(), NotQueued> {
+        self.enqueue(Queued {
+            message,
+            withdrawal: Some(withdrawal),
+        })
+    }
+
+    fn enqueue(&self, queued: Queued) -> Result<(), NotQueued> {
         if self.close_requested() {
             return Err(NotQueued);
         }
-        let len = payload_len(&message);
+        let len = payload_len(&queued.message);
         let backlog = self.shared.queued_bytes.fetch_add(len, Ordering::AcqRel);
         if backlog >= self.shared.budget {
             self.shared.queued_bytes.fetch_sub(len, Ordering::AcqRel);
             self.close(CLOSE_TOO_FAR_BEHIND, "client fell too far behind");
             return Err(NotQueued);
         }
-        self.tx.send(message).map_err(|_| {
+        self.tx.send(queued).map_err(|_| {
             self.shared.queued_bytes.fetch_sub(len, Ordering::AcqRel);
             NotQueued
         })
@@ -222,22 +261,32 @@ impl ClientSender {
 }
 
 impl ClientReceiver {
+    /// The next message not withdrawn. Cancel-safe: nothing is taken off the
+    /// queue across an await without being returned or dropped as withdrawn.
     pub async fn recv(&mut self) -> Option<Message> {
-        let message = self.rx.recv().await?;
-        self.release(&message);
-        Some(message)
+        loop {
+            let queued = self.rx.recv().await?;
+            if let Some(message) = self.take(queued) {
+                return Some(message);
+            }
+        }
     }
 
     pub fn try_recv(&mut self) -> Result<Message, mpsc::error::TryRecvError> {
-        let message = self.rx.try_recv()?;
-        self.release(&message);
-        Ok(message)
+        loop {
+            let queued = self.rx.try_recv()?;
+            if let Some(message) = self.take(queued) {
+                return Ok(message);
+            }
+        }
     }
 
-    fn release(&self, message: &Message) {
+    /// Free the message's bytes, and hand it on unless it was withdrawn.
+    fn take(&self, queued: Queued) -> Option<Message> {
         self.shared
             .queued_bytes
-            .fetch_sub(payload_len(message), Ordering::AcqRel);
+            .fetch_sub(payload_len(&queued.message), Ordering::AcqRel);
+        (!queued.withdrawn()).then_some(queued.message)
     }
 }
 
@@ -315,6 +364,36 @@ mod tests {
             tx.close_signal().requested().await.code,
             CLOSE_ACCESS_REVOKED
         );
+    }
+
+    struct Flag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Withdrawable for Flag {
+        fn withdrawn(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    #[test]
+    fn a_withdrawn_message_is_dropped_unsent_and_frees_its_bytes() {
+        let (tx, mut rx) = client_queue_with_budget(100);
+        let withdrawn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        tx.send_withdrawable(text(10), Box::new(Flag(Arc::clone(&withdrawn))))
+            .unwrap();
+        tx.send_withdrawable(text(20), Box::new(Flag(Arc::new(false.into()))))
+            .unwrap();
+        tx.send(text(30)).unwrap();
+        withdrawn.store(true, Ordering::Release);
+
+        let lens: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|message| payload_len(&message))
+            .collect();
+        assert_eq!(
+            lens,
+            [20, 30],
+            "the withdrawn one is skipped, the rest keep their order"
+        );
+        assert_eq!(tx.queued_bytes(), 0);
     }
 
     #[test]

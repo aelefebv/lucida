@@ -25,6 +25,7 @@ import {
 } from "./eviction.ts";
 import { ChunkStore } from "./chunkStore.ts";
 import { Scheduler } from "./scheduler.ts";
+import { InFlightAllowance } from "./inFlightAllowance.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
@@ -84,13 +85,13 @@ export const DEFAULT_MAX_BYTES_IN_FLIGHT = DESKTOP_BUDGETS.cpuBytesInFlight;
  */
 export const DEFAULT_MAX_CONCURRENT_FETCHES = 128;
 /**
- * The bytes allowed in flight before anything has landed. Each fetch that
- * lands widens the allowance by what it carried, up to the bytes cap. Until
+ * The bytes allowed in flight before anything has landed, after which the
+ * link's measured rate and round trip size them (`InFlightAllowance`). Until
  * replies come back the page cannot tell a server on this machine from one
  * reading a store across a continent. A first wave of large chunks, sent all
  * at once, queues behind the few cores a small server serves them from and
- * delays every request in it, while a far link fills within a few round trips
- * of growth. 4 MiB is about one 200 ms round trip at 18 MiB/s.
+ * delays every request in it. 4 MiB is about one 200 ms round trip at
+ * 18 MiB/s.
  */
 export const INITIAL_BYTES_IN_FLIGHT = 4 * 1024 * 1024;
 /**
@@ -513,7 +514,7 @@ export class CpuCache {
       {
         maxConcurrentFetches: this.config.maxConcurrentFetches,
         maxBytesInFlight: this.config.maxBytesInFlight,
-        initialBytesInFlight: INITIAL_BYTES_IN_FLIGHT,
+        allowance: new InFlightAllowance(INITIAL_BYTES_IN_FLIGHT),
         burstLogger: burstBackpressure,
         speculative: { is: (req) => req.lane === "prefetch", maxBytesInFlight: PREFETCH_BYTES_IN_FLIGHT },
       },
@@ -1997,7 +1998,7 @@ export class CpuCache {
     // Correct the in-flight byte estimate only while this settle still owns
     // the slot; a superseded successor keeps its own accounting.
     if (this.chunkScheduler.isCurrent(key, controller)) {
-      this.chunkScheduler.correctInFlightBytes(key, fetchedBytes);
+      this.chunkScheduler.correctInFlightBytes(key, fetchedBytes, wireBytes);
     }
 
     let decoded: ArrayBuffer;
