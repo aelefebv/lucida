@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BAND_TARGET_MS, BANDED_FRAME_MS, FramePacer, MAX_BANDS, MAX_INTERACTIVE_FRAMES_IN_FLIGHT, bandsFor } from "./framePacing.ts";
+import { BAND_TARGET_MS, BANDED_FRAME_MS, FramePacer, MAX_BANDS, MAX_INTERACTIVE_FRAMES_IN_FLIGHT, STREAMING_FRAME_SHARE, bandsFor } from "./framePacing.ts";
 import { LONG_FRAME_MS } from "./renderResolution.ts";
 
 describe("FramePacer", () => {
@@ -26,18 +26,21 @@ describe("FramePacer", () => {
     expect(pacer.mayDrawResidency(1000, 0, false)).toBe(true);
   });
 
-  it("draws new chunks at once when nothing is left to deliver", () => {
+  it("draws new chunks at once when no more are on their way", () => {
     const pacer = new FramePacer();
     pacer.noteFrameDone(3000, 1000);
     expect(pacer.mayDrawResidency(1001, 0, false)).toBe(true);
   });
 
-  it("lets the ticks after a slow frame deliver for as long as that frame took", () => {
+  it("while chunks stream, holds a frame until the one before has taken no more than its share of the time", () => {
     const pacer = new FramePacer();
-    pacer.noteFrameDone(3000, 1000);
+    pacer.noteFrameDone(100, 1000);
+    const wait = 100 * (1 / STREAMING_FRAME_SHARE - 1);
     expect(pacer.mayDrawResidency(1016, 0, true)).toBe(false);
-    expect(pacer.mayDrawResidency(3999, 0, true)).toBe(false);
-    expect(pacer.mayDrawResidency(4000, 0, true)).toBe(true);
+    expect(pacer.mayDrawResidency(1000 + wait - 1, 0, true)).toBe(false);
+    expect(pacer.mayDrawResidency(1000 + wait, 0, true)).toBe(true);
+    // The frame that went and the wait after it: the frame took its share.
+    expect(100 / (100 + wait)).toBeCloseTo(STREAMING_FRAME_SHARE);
   });
 
   it("never holds a frame on a GPU that finishes within a tick", () => {

@@ -11,6 +11,7 @@ import {
   MIN_ADAPTIVE_SCALE,
   RESTORE_AFTER_MS,
   TARGET_FRAME_MS,
+  WARM_GPU_LOAD,
 } from "./renderResolution.ts";
 
 describe("cappedPixelRatioScale", () => {
@@ -29,6 +30,14 @@ describe("cappedPixelRatioScale", () => {
 function clock() {
   let t = 1000;
   return { now: () => t, advance: (ms: number) => { t += ms; } };
+}
+
+/** Frames whose passes take `passMs` every `everyMs`, for `forMs`. */
+function frames(res: AdaptiveResolution, c: ReturnType<typeof clock>, passMs: number, everyMs: number, forMs: number) {
+  for (let t = 0; t < forMs; t += everyMs) {
+    c.advance(everyMs);
+    res.noteGpuPass(passMs);
+  }
 }
 
 describe("AdaptiveResolution", () => {
@@ -270,7 +279,7 @@ describe("AdaptiveResolution", () => {
       expect(res.scale).toBeCloseTo(Math.SQRT1_2, 6);
     });
 
-    it("starts at its cheapest settings after the GPU idled, and without pass times takes the fitted ones back once a frame keeps up", () => {
+    it("without pass times, starts at its cheapest settings after the GPU idled, and takes the fitted ones back once a frame keeps up", () => {
       const c = clock();
       const res = new AdaptiveResolution(c.now);
       // 200 ms / 8 is 25 ms: a warm GPU would start a little below full.
@@ -291,7 +300,7 @@ describe("AdaptiveResolution", () => {
       expect(res.scale).toBeCloseTo(Math.sqrt(TARGET_FRAME_MS / 25) * Math.sqrt(TARGET_FRAME_MS / 22), 6);
     });
 
-    it("starts as a warm GPU would after less idle than that", () => {
+    it("without pass times, starts as a warm GPU would after less idle than that", () => {
       const c = clock();
       const res = new AdaptiveResolution(c.now);
       res.noteFullQualityFrame(200);
@@ -299,6 +308,54 @@ describe("AdaptiveResolution", () => {
       res.fitGestureStart(SHARE);
       expect(res.scale).toBeCloseTo(Math.sqrt(TARGET_FRAME_MS / 25), 6);
       expect(res.marchCoarsening).toBe(1);
+    });
+
+    it("with pass times, starts at its cheapest settings after frames that kept the GPU lightly busy, however recent", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(80);
+      // A third of the time on the GPU, as frames for streaming chunks are
+      // held to: enough for the clocks to step down within a second.
+      frames(res, c, 11, 33, 2000);
+      c.advance(GPU_IDLE_MS / 2);
+      res.noteInput(5, GPU_IDLE_MS / 2);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(IDLE_START_SCALE);
+      expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+    });
+
+    it("with pass times, starts as a warm GPU would after frames that kept it busy", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(80);
+      frames(res, c, 14, 16, 1000);
+      c.advance(50);
+      res.noteInput(5, 50);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(1);
+      expect(res.marchCoarsening).toBe(1);
+    });
+
+    it("with pass times, starts at its cheapest settings once a busy GPU has sat idle long enough", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(80);
+      frames(res, c, 16, 16, 1000);
+      c.advance(GPU_IDLE_MS);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(IDLE_START_SCALE);
+    });
+
+    it("with pass times, reads the load and not the idle time it is given", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(80);
+      // Just at the warm share, the GPU busy to the last moment.
+      frames(res, c, 16 * WARM_GPU_LOAD * 1.2, 16, 2000);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(1);
     });
 
     it("starts the next gesture from the fitted settings when one ends before a frame kept up", () => {
