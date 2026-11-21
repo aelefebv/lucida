@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.9](https://github.com/aelefebv/lucida/compare/v0.45.8...v0.45.9) (2026-11-21)
+
+
+### Performance
+
+* **web:** restore a gesture's render scale and adaptive factor together ([#1730](https://github.com/aelefebv/lucida/issues/1730)) ([095d69d](https://github.com/aelefebv/lucida/commit/095d69d7c60e8bd3f729816b077800fe9d288f9f))
+
 ## [0.45.8](https://github.com/aelefebv/lucida/compare/v0.45.7...v0.45.8) (2026-11-21)
 
 
