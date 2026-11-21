@@ -2682,6 +2682,76 @@ describe("incremental delta fold", () => {
     }
   });
 
+  it("hands a moving view's change to the stages on the tick after its replan", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2) }],
+      ]);
+      const orch = makeOrch();
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [
+          fullPayload([foldRow({ target_level: 0 })]),
+          deltaPayload([], [], []),
+          deltaPayload([], [], [foldRow({ target_level: 1 })]),
+        ],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      let zoom = 1;
+      const scene = {
+        ...fold.scene,
+        visible_region: () => JSON.stringify({
+          xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: zoom, sort_center: null, frustum_planes: null,
+        }),
+      };
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = () =>
+        ({ ...(makeCtx(scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
+      const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
+
+      orch.planAndFetch(ctx(), emptyMinimap);
+      // The camera moves a frame at a time: the first change replans at
+      // once, the window holds the next replan 200 ms, and that one comes
+      // while the views move.
+      vi.advanceTimersByTime(500);
+      let view = 2;
+      for (; planSpy.mock.calls.length < 3; view++) {
+        if (view > 2) zoom = 0.4;
+        fold.setView(view);
+        orch.planAndFetch(ctx(), emptyMinimap);
+        if (planSpy.mock.calls.length < 3) vi.advanceTimersByTime(16);
+      }
+      const planned = planSpy.mock.results.at(-1)!.value as RequestPlan;
+      expect(planned.delta!.removed.length).toBeGreaterThan(0);
+      const replanned = submits().at(-1)!;
+      expect(replanned.delta).toEqual({ base: replanned.requests, added: [], removed: [] });
+      expect(orch.owesPlanChanges()).toBe(true);
+
+      // The next tick, within the window, takes the change.
+      vi.advanceTimersByTime(16);
+      fold.setView(view);
+      orch.planAndFetch(ctx(), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(3);
+      const taken = submits().at(-1)!;
+      expect(taken.requests).toBe(planned.requests);
+      expect(taken.delta!.removed).toHaveLength(planned.delta!.removed.length);
+      expect(orch.owesPlanChanges()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each(["slice", "volume"] as const)(
     "admits a %s view against the GPU room the render worker reports, not the CPU budgets alone",
     (mode) => {

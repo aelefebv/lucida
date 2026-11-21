@@ -978,8 +978,13 @@ export class TickCoordinator {
    * carried them from its last plan or is new to the stages, which then
    * take it from nothing. Otherwise the stages take every plan whole.
    * Returns how many changes they take now.
+   *
+   * While the views move, the replan's own tick hands them none: its
+   * selection and lanes have spent that frame's share, and a gesture frame
+   * follows every tick, so the change lands one frame later, beside the
+   * next frame rather than on top of this one.
    */
-  private pace(planned: PlannedDataset[], labelRequests: readonly (readonly ChunkRequest[])[]): number {
+  private pace(planned: PlannedDataset[], labelRequests: readonly (readonly ChunkRequest[])[], moving: boolean): number {
     // A dataset the stages hold nothing of takes its plan as additions to nothing.
     const changes = planned.map(({ dsId, result }) =>
       this.heldActiveSets.has(dsId) ? result.delta : { base: [], added: result.requests, removed: [] });
@@ -991,7 +996,7 @@ export class TickCoordinator {
       return 0;
     }
     this.pacing.retain(new Set(planned.map((dataset) => dataset.dsId)));
-    const budget = this.changeBudget(planned.length);
+    const budget = moving ? 0 : this.changeBudget(planned.length);
     let taken = 0;
     for (const [i, dataset] of planned.entries()) {
       const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, changes[i]!, budget);
@@ -1400,7 +1405,7 @@ export class TickCoordinator {
       config: planningConfig,
       cutStep: view.cutStep,
     })));
-    const pacedChanges = this.pace(plannedDatasets, labelRequests);
+    const pacedChanges = this.pace(plannedDatasets, labelRequests, this.motion.moving(tickStart));
     const applyStart = performance.now();
     const admissions = this.admit(
       ctx,
