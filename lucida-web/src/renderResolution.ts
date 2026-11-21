@@ -109,6 +109,8 @@ export class AdaptiveResolution {
    * Null once a frame has kept up, or when the gesture started warm.
    */
   private warmStart: { factor: number; coarsening: number } | null = null;
+  /** The idle start under way has raised its settings at least once. */
+  private climbed = false;
   /**
    * What the newest frame's passes took on the GPU's own clock, since the
    * idle start last changed its settings. Null before one arrived, and on a
@@ -200,6 +202,7 @@ export class AdaptiveResolution {
     // ones as frames show the clocks returning.
     if (this.startedOnLowClocks && (this.factor > IDLE_START_SCALE || this.coarsening < MAX_MARCH_COARSENING)) {
       this.warmStart = { factor: this.factor, coarsening: this.coarsening };
+      this.climbed = false;
       this.factor = IDLE_START_SCALE;
       this.coarsening = MAX_MARCH_COARSENING;
       this.gpuPassMs = null;
@@ -217,18 +220,23 @@ export class AdaptiveResolution {
    * predicts, until the clocks come back a few hundred milliseconds in. A
    * frame still long at the resolution's floor then coarsens the march, as a
    * predicted one does, or every frame until then holds the GPU that long.
+   *
+   * During an idle start a frame climbs toward the warm settings as far as
+   * its pass leaves room, and a long one steps down no lower than where the
+   * idle start began: a view that grows heavier as it moves, such as one
+   * zooming in, outgrows what an earlier frame's pass left room for.
    */
   noteFrame(frameSeq: number, latencyMs: number, lastDispatchedSeq: number): boolean {
     if (this.now() - this.lastInputAt >= RESTORE_AFTER_MS) return false;
     if (frameSeq <= this.settledAfterSeq) return false;
-    if (this.warmStart !== null) {
-      if (!this.climb(latencyMs)) return false;
+    if (this.warmStart !== null && this.climb(latencyMs)) {
       this.settledAfterSeq = lastDispatchedSeq;
       return true;
     }
     if (latencyMs <= LONG_FRAME_MS) return false;
-    if (this.factor <= MIN_ADAPTIVE_SCALE && this.coarsening >= MAX_MARCH_COARSENING) return false;
-    this.stepDown(latencyMs);
+    const minFactor = this.warmStart !== null ? IDLE_START_SCALE : MIN_ADAPTIVE_SCALE;
+    if (this.factor <= minFactor && this.coarsening >= MAX_MARCH_COARSENING) return false;
+    this.stepDown(latencyMs, minFactor);
     this.settledAfterSeq = lastDispatchedSeq;
     return true;
   }
@@ -252,6 +260,7 @@ export class AdaptiveResolution {
       cost = Math.min(warmCost, ((this.factor * this.factor) / this.coarsening) * (IDLE_CLIMB_PASS_MS / this.gpuPassMs));
     }
     this.gpuPassMs = null;
+    this.climbed = true;
     if (cost >= warmCost) {
       this.factor = warm.factor;
       this.coarsening = warm.coarsening;
@@ -267,14 +276,16 @@ export class AdaptiveResolution {
 
   /**
    * Lower the cost of a frame that takes `ms` at the current scale and march
-   * to {@link TARGET_FRAME_MS}: the resolution first, then, past its floor,
-   * the march, each no lower than its own floor.
+   * to {@link TARGET_FRAME_MS}: the resolution first, then, past its floor
+   * `minFactor`, the march, each no lower than its own floor. A scale already
+   * below the floor stays where it is.
    */
-  private stepDown(ms: number): void {
+  private stepDown(ms: number, minFactor = MIN_ADAPTIVE_SCALE): void {
     // A frame's cost goes with its pixels, the square of the scale, so one
     // step reaches the target instead of creeping down a fixed share a step
     // while every frame on the way holds the GPU for too long.
-    const factor = Math.max(MIN_ADAPTIVE_SCALE, this.factor * Math.sqrt(TARGET_FRAME_MS / ms));
+    const floor = Math.min(minFactor, this.factor);
+    const factor = Math.max(floor, this.factor * Math.sqrt(TARGET_FRAME_MS / ms));
     // It goes with the samples along each ray too, so past the resolution's
     // floor the march takes what is left.
     const atFloorMs = (ms * factor * factor) / (this.factor * this.factor);
@@ -294,9 +305,13 @@ export class AdaptiveResolution {
   restoreIfIdle(): boolean {
     const wait = this.msUntilRestore();
     if (wait === null || wait > 0) return false;
-    // A gesture that never left its idle start says nothing about what a
-    // warm GPU keeps up with, so the next starts from where this one would have.
-    const ended = this.warmStart?.factor ?? this.factor;
+    // A gesture that never climbed from its idle start says nothing about
+    // what a warm GPU keeps up with, so the next starts from where this one
+    // would have. One that climbed ended on clocks that kept up with where it
+    // got to, as a warm gesture does.
+    const ended = this.warmStart !== null && !this.climbed
+      ? this.warmStart.factor
+      : Math.max(MIN_ADAPTIVE_SCALE, this.factor);
     this.warmStart = null;
     this.gestureStart = Math.min(1, ended * GESTURE_START_STEP_UP);
     this.factor = 1;

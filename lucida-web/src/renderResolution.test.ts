@@ -358,6 +358,54 @@ describe("AdaptiveResolution", () => {
       expect(res.scale).toBe(1);
     });
 
+    it("steps down from a climb once a frame runs long, no lower than where the idle start began", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      // A warm GPU would start at full: 80 ms / 8 is 10 ms.
+      res.noteFullQualityFrame(80);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      // Room for eight times the cost: the march's coarsening back, and half the scale.
+      res.noteGpuPass(IDLE_CLIMB_PASS_MS / 8);
+      expect(res.noteFrame(6, 14, 6)).toBe(true);
+      expect(res.scale).toBeCloseTo(0.5, 6);
+      expect(res.marchCoarsening).toBe(1);
+      // The view grows heavier as it moves: a frame twice the target steps
+      // down as one would in a warm gesture, with no pass to climb on.
+      res.noteGpuPass(TARGET_FRAME_MS);
+      expect(res.noteFrame(7, 2 * TARGET_FRAME_MS, 7)).toBe(true);
+      expect(res.scale).toBeCloseTo(0.5 * Math.SQRT1_2, 6);
+      // Far heavier still: the scale stops at the idle start's, and the march takes the rest.
+      res.noteGpuPass(TARGET_FRAME_MS);
+      expect(res.noteFrame(8, 8 * TARGET_FRAME_MS, 8)).toBe(true);
+      expect(res.scale).toBe(IDLE_START_SCALE);
+      expect(res.marchCoarsening).toBe(MAX_MARCH_COARSENING);
+      // There it holds, as on idle clocks.
+      expect(res.noteFrame(9, 8 * TARGET_FRAME_MS, 9)).toBe(false);
+    });
+
+    it("starts the next gesture from where one ended once its idle start had climbed", () => {
+      const c = clock();
+      const res = new AdaptiveResolution(c.now);
+      res.noteFullQualityFrame(80);
+      res.noteInput(5, GPU_IDLE_MS);
+      res.fitGestureStart(SHARE);
+      res.noteGpuPass(IDLE_CLIMB_PASS_MS / 8);
+      expect(res.noteFrame(6, 14, 6)).toBe(true);
+      expect(res.scale).toBeCloseTo(0.5, 6);
+      c.advance(RESTORE_AFTER_MS);
+      expect(res.restoreIfIdle()).toBe(true);
+      // The next gesture starts cheap too, after so light a load, and climbs
+      // no further than a step above where this one ended.
+      res.noteInput(7);
+      res.fitGestureStart(SHARE);
+      expect(res.scale).toBe(IDLE_START_SCALE);
+      res.noteGpuPass(0.01);
+      expect(res.noteFrame(8, 14, 8)).toBe(true);
+      expect(res.scale).toBeCloseTo(0.5 * GESTURE_START_STEP_UP, 6);
+      expect(res.marchCoarsening).toBe(1);
+    });
+
     it("starts the next gesture from the fitted settings when one ends before a frame kept up", () => {
       const c = clock();
       const res = new AdaptiveResolution(c.now);
