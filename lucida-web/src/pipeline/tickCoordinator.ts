@@ -1046,7 +1046,10 @@ export class TickCoordinator {
       return;
     }
     const start = performance.now();
-    const gesture = ctx.gesture === true || this.motion.moving(start);
+    // A gesture ends, for pacing, once the camera holds still, not when the
+    // render loop's hold on gesture quality lets go half a second later:
+    // what it still owes then goes whole, as a plan between gestures does.
+    const gesture = this.motion.moving(start);
     const budget = this.changeBudget(pass.length, gesture ? this.applyMs.gesture : this.applyMs.idle);
     // Between gestures only a dataset's first plan is still paced.
     const taken = pass.map((dataset) => this.pacing.take(

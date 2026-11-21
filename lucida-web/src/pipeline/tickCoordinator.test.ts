@@ -2633,11 +2633,13 @@ describe("incremental delta fold", () => {
         ({ ...(makeCtx(scene, datasets) as object), client, cpuCache, gesture }) as unknown as TickContext;
       const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
 
-      /** Ticks that plan nothing new, until the stages hold what the plans want. */
+      /** Ticks that plan nothing new, until the stages hold what the plans want; in a gesture, the camera moves on each. */
+      let frame = 100;
       const drain = (gesture = false): void => {
         for (let tick = 0; orch.owesPlanChanges(); tick++) {
           expect(tick).toBeLessThan(20);
           vi.advanceTimersByTime(16);
+          if (gesture) fold.setView(frame++);
           orch.planAndFetch(ctx(gesture), emptyMinimap);
         }
       };
@@ -2683,7 +2685,8 @@ describe("incremental delta fold", () => {
       expect(submits().length - from).toBeGreaterThan(3);
       for (let i = 1; i < all.length; i++) expect(all[i].delta!.base).toBe(all[i - 1].requests);
       expect(all.at(-1)!.requests).toBe(planned.requests);
-      expect(orch.hasPendingRebuild()).toBe(false);
+      // Nothing is owed; the camera's last moves wait on the coalescing window.
+      expect(orch.owesPlanChanges()).toBe(false);
       // The worker heard every change once.
       const detail = client.coldStateDelta.mock.calls.slice(before.deltas)
         .flatMap(([msg]) => (msg as ColdStateDeltaMessage).wantedChunks)
@@ -2778,17 +2781,22 @@ describe("incremental delta fold", () => {
       const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
 
       // The plan's own tick takes the fewest changes a tick takes, and so
-      // does a tick while a gesture runs.
+      // does a tick while the camera moves. A frame waiting on the move goes
+      // out first, so the stages take nothing on its first call.
       orch.planAndFetch(ctx(false), emptyMinimap);
       const opened = planSpy.mock.results[0].value as RequestPlan;
       expect(submits()[0].requests.length).toBeLessThanOrEqual(1024);
-      vi.advanceTimersByTime(16);
+      vi.advanceTimersByTime(8);
+      fold.setView(2);
+      orch.planAndFetch(ctx(true), emptyMinimap, true);
+      vi.advanceTimersByTime(8);
+      fold.setView(3);
       orch.planAndFetch(ctx(true), emptyMinimap);
       expect(submits()[1].requests.length).toBeLessThanOrEqual(2048);
       expect(orch.owesPlanChanges()).toBe(true);
 
-      // With no gesture, the next tick takes the rest.
-      vi.advanceTimersByTime(16);
+      // Once the camera holds still, the next tick takes the rest.
+      vi.advanceTimersByTime(STILL_MS);
       orch.planAndFetch(ctx(false), emptyMinimap);
       expect(submits()[2].requests).toBe(opened.requests);
       expect(orch.owesPlanChanges()).toBe(false);
