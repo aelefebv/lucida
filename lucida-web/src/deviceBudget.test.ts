@@ -22,13 +22,13 @@ const phone = (memoryGiB: number): DeviceFacts => ({ memoryGiB, touchOnly: true,
 const software = (memoryGiB: number | null): DeviceFacts => ({ memoryGiB, touchOnly: false, fallbackAdapter: true });
 
 describe("fitBudgets", () => {
-  it("gives a desktop with a hardware adapter a 1536 MiB GPU total and a detail store as large", () => {
-    for (const memory of [8, 16, 32, null]) {
+  it("gives a desktop with a hardware adapter a 3 GiB GPU total and a detail store as large", () => {
+    for (const memory of [16, 32]) {
       expect(fitBudgets(desktop(memory))).toEqual({
-        gpuTotalBytes: 1536 * MIB,
-        labelVolumeBytes: 512 * MIB,
-        labelTotalVolumeBytes: 512 * MIB,
-        cpuMainBytes: 1536 * MIB,
+        gpuTotalBytes: 3 * GIB,
+        labelVolumeBytes: 1 * GIB,
+        labelTotalVolumeBytes: 1 * GIB,
+        cpuMainBytes: 3 * GIB,
         cpuOverviewBytes: 64 * MIB,
         cpuBytesInFlight: 32 * MIB,
       });
@@ -36,7 +36,11 @@ describe("fitBudgets", () => {
     expect(fitBudgets(desktop(32))).toEqual(DESKTOP_BUDGETS);
   });
 
-  it("keeps a small desktop's detail store to a quarter of its memory", () => {
+  it("keeps a smaller desktop's detail store, and so its GPU total, to a quarter of its memory", () => {
+    // Safari and Firefox report nothing, which a desktop reads as 8 GiB.
+    for (const memory of [8, null]) {
+      expect(fitBudgets(desktop(memory))).toMatchObject({ gpuTotalBytes: 2 * GIB, cpuMainBytes: 2 * GIB });
+    }
     expect(fitBudgets(desktop(4))).toMatchObject({ gpuTotalBytes: 1 * GIB, cpuMainBytes: 1 * GIB });
   });
 
