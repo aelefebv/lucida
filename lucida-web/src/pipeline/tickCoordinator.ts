@@ -334,8 +334,12 @@ const SELECTION_COALESCE_INTERVAL_MS = 150;
  */
 const PACED_APPLY_MS = 4;
 
-/** The fewest changes a tick takes, so a slow measure still drains what is owed. */
-const MIN_PACED_CHANGES = 256;
+/**
+ * The fewest changes a tick takes: about what an orbit or a pan replan
+ * changes, which pacing would only spread over ticks that each cost more
+ * than the change, and enough that a slow measure still drains what is owed.
+ */
+const MIN_PACED_CHANGES = 1024;
 
 /** What one change costs those stages before a pass has measured it, in ms: about what a workstation takes. */
 const INITIAL_CHANGE_COST_MS = 0.002;
@@ -976,10 +980,11 @@ export class TickCoordinator {
    * Returns how many changes they take now.
    */
   private pace(planned: PlannedDataset[], labelRequests: readonly (readonly ChunkRequest[])[]): number {
+    // A dataset the stages hold nothing of takes its plan as additions to nothing.
+    const changes = planned.map(({ dsId, result }) =>
+      this.heldActiveSets.has(dsId) ? result.delta : { base: [], added: result.requests, removed: [] });
     const paceable = planned.length > 0 && planned.every((dataset, i) =>
-      dataset.views.length === 1 &&
-      labelRequests[i].length === 0 &&
-      (dataset.result.delta !== undefined || !this.heldActiveSets.has(dataset.dsId)));
+      dataset.views.length === 1 && labelRequests[i].length === 0 && changes[i] !== undefined);
     if (!paceable) {
       this.pacing.clear();
       this.pacedPass = null;
@@ -987,16 +992,14 @@ export class TickCoordinator {
     }
     this.pacing.retain(new Set(planned.map((dataset) => dataset.dsId)));
     const budget = this.changeBudget(planned.length);
-    let changes = 0;
-    for (const dataset of planned) {
-      // A dataset's first plan is everything it adds to nothing the stages hold.
-      const carried = dataset.result.delta ?? { base: [], added: dataset.result.requests, removed: [] };
-      const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, carried, budget);
+    let taken = 0;
+    for (const [i, dataset] of planned.entries()) {
+      const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, changes[i]!, budget);
       dataset.result = { ...dataset.result, requests, delta };
-      changes += delta.added.length + delta.removed.length;
+      taken += delta.added.length + delta.removed.length;
     }
     this.pacedPass = planned;
-    return changes;
+    return taken;
   }
 
   /**

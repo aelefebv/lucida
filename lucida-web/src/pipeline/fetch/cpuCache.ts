@@ -742,12 +742,15 @@ export class CpuCache {
     // queued again below if it is still wanted and missing.
     const queued = this.chunkScheduler.pendingSnapshot().filter((req) => !affected.has(requestChunkKey(req)));
     const walk = this.beginWalk(inFlight, queued);
+    // Aborted together: each abort scans what is in flight.
+    const unwanted = new Set<string>();
     for (const [key, chunk] of affected) {
       this.unseeChunk(key, chunk, inFlight);
       const requests = [...this.demand.requestsOf(key)].sort(compareChunkRequests);
       for (const req of requests) this.walkRequest(req, key, walk);
-      this.cancelUnwantedFetches(key, requests, inFlight);
+      this.noteUnwantedFetches(key, requests, inFlight, unwanted);
     }
+    this.cancelOmittedChunkWork(unwanted);
     this.chunkStore.invalidateOrder();
     this.overviewStore.invalidateOrder();
     this.enqueueWalk(walk, (ordered) => mergeQueues(queued, ordered));
@@ -789,18 +792,21 @@ export class CpuCache {
   }
 
   /**
-   * Abort each fetch of the chunk at `key` that none of `requests` waits on,
-   * as a full submit aborts the fetches its plan left out: a chunk still
-   * wanted keeps its whole fetch, and any fetch of planes that holds a plane
-   * one of them draws.
+   * Add to `unwanted` each fetch of the chunk at `key` that none of
+   * `requests` waits on, for the walk to abort as a full submit aborts the
+   * fetches its plan left out: a chunk still wanted keeps its whole fetch,
+   * and any fetch of planes that holds a plane one of them draws.
    */
-  private cancelUnwantedFetches(key: string, requests: readonly ChunkRequest[], inFlight: Map<string, InFlightFetch[]>): void {
-    const unwanted = new Set<string>();
+  private noteUnwantedFetches(
+    key: string,
+    requests: readonly ChunkRequest[],
+    inFlight: Map<string, InFlightFetch[]>,
+    unwanted: Set<string>,
+  ): void {
     for (const fetch of inFlight.get(key) ?? []) {
       const wanted = requests.length > 0 && (fetch.key === key || requests.some((req) => holdsPlane(fetch.request, req)));
       if (!wanted) unwanted.add(fetch.key);
     }
-    this.cancelOmittedChunkWork(unwanted);
   }
 
   /** A walk over a submit's requests, with `queued` already in the queue it adds to. */
