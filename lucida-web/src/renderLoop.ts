@@ -202,14 +202,6 @@ export class RenderLoop implements TraceEnvironment {
   /** The last tick left decoded chunks undelivered for want of upload budget. */
   private deliveryBacklogged = false;
 
-  /**
-   * More of the chunks the view wants are on their way: decoded and not yet
-   * delivered, or fetched and not yet landed, as of the last tick.
-   */
-  private chunksStreaming(): boolean {
-    return this.deliveryBacklogged || this.settleState.pending > 0 || this.settleState.inFlight > 0;
-  }
-
   constructor(opts: RenderLoopOptions) {
     this.session = opts.session;
     this.datasets = new Map();
@@ -1073,7 +1065,7 @@ export class RenderLoop implements TraceEnvironment {
     } else if (this.residencyDirty) {
       if (
         now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS &&
-        this.framePacer.mayDrawResidency(now, framesInFlight, this.chunksStreaming())
+        this.framePacer.mayDrawResidency(now, framesInFlight, this.deliveryBacklogged)
       ) {
         // Enough time elapsed since the last data render: render now.
         this.residencyDirty = false;
