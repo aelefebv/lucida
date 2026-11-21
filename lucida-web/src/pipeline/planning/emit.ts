@@ -131,6 +131,15 @@ function chunkAlong(axis: SpatialAxis, x: number, y: number, z: number): number 
 }
 
 /**
+ * What a request's priority is first written as, before its band. The
+ * band is a whole number, and {@link LaneRequests.finish} adds a fraction to
+ * it in place: a field the engine first saw hold a small integer changes
+ * every request's shape when it does, which costs about a microsecond a
+ * request, where a field first written as a fraction takes either.
+ */
+const UNPLACED = Number.NaN;
+
+/**
  * The share of its band a lane's in-lane terms spread over. Under one, so a
  * lane never reaches the next whole-number band.
  */
@@ -412,9 +421,10 @@ function emitChunk(
       lane: target.lane,
       tier: target.tier,
       mode: snapshot.selection.renderMode,
-      priority: target.band,
+      priority: UNPLACED,
       chunkKey: chunkKey(level, target.t, c, z, y, x),
     };
+    req.priority = target.band;
     if (holdsPlane && !whole) {
       req.plane = slice.plane;
       req.planes = slice.planes;
@@ -509,26 +519,25 @@ export function emitMinimapLane(
     const pending = minimapPending.get(entity.imageId);
     if (!pending) continue;
     for (const coord of pending) {
-      out.push(
-        {
-          datasetId,
-          entityId: entity.entityId,
-          imageId: entity.imageId,
-          level: coord.level,
-          t: coord.t,
-          c: coord.c,
-          z: coord.z,
-          y: coord.y,
-          x: coord.x,
-          lane: "minimap",
-          tier: "coarse",
-          // Minimap chunks go to no pools; the view's mode only fills the field.
-          mode,
-          priority: band,
-          chunkKey: coord.key,
-        },
-        0,
-      );
+      const req: ChunkRequest = {
+        datasetId,
+        entityId: entity.entityId,
+        imageId: entity.imageId,
+        level: coord.level,
+        t: coord.t,
+        c: coord.c,
+        z: coord.z,
+        y: coord.y,
+        x: coord.x,
+        lane: "minimap",
+        tier: "coarse",
+        // Minimap chunks go to no pools; the view's mode only fills the field.
+        mode,
+        priority: UNPLACED,
+        chunkKey: coord.key,
+      };
+      req.priority = band;
+      out.push(req, 0);
     }
   }
 }

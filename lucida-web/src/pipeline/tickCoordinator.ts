@@ -342,7 +342,7 @@ const PACED_APPLY_MS = 4;
 const MIN_PACED_CHANGES = 1024;
 
 /** What one change costs those stages before a pass has measured it, in ms: about what a workstation takes. */
-const INITIAL_CHANGE_COST_MS = 0.002;
+const INITIAL_CHANGE_COST_MS = 0.003;
 
 /**
  * Per-dataset carry-forward captured at each full rebuild. Lets the next
