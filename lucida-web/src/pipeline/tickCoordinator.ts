@@ -328,11 +328,20 @@ const SELECTION_COALESCE_INTERVAL_MS = 150;
 
 /**
  * The main thread's time a tick gives the stages after the plan (admission,
- * the CPU cache and the worker's wanted set) to take a plan's changes; the
- * rest wait for the ticks after ({@link RequestPacing}). A frame at 60 Hz
- * has 16 ms, and a replan's selection and lanes take some of it already.
+ * the CPU cache and the worker's wanted set) to take a plan's changes when
+ * it also planned or a gesture runs; the rest wait for the ticks after
+ * ({@link RequestPacing}). A frame at 60 Hz has 16 ms, and the replan's
+ * selection and lanes, or the gesture's frame, take much of it.
  */
 const PACED_APPLY_MS = 4;
+
+/**
+ * What a tick that plans nothing new gives those stages while no gesture
+ * runs. No frame answers an input then, and the chunks a refinement turns
+ * into ones the view draws, many resident already, upload only once the
+ * stages take them, so a larger share settles the view sooner.
+ */
+const PACED_IDLE_APPLY_MS = 12;
 
 /**
  * The fewest changes a tick takes: about what an orbit or a pan replan
@@ -817,13 +826,21 @@ export class TickCoordinator {
    * shuffled tests. Production never passes it.
    */
   private readonly planFn: typeof plan;
-  /** The main thread's time a tick gives the stages after the plan ({@link PACED_APPLY_MS}); tests shrink it. */
-  private readonly pacedApplyMs: number;
+  /**
+   * The main thread's time a tick gives the stages after the plan, as a
+   * gesture runs and between gestures ({@link PACED_APPLY_MS},
+   * {@link PACED_IDLE_APPLY_MS}); tests shrink them.
+   */
+  private readonly applyMs: { gesture: number; idle: number };
 
-  constructor(uploader: Uploader, planFn: typeof plan = plan, pacedApplyMs = PACED_APPLY_MS) {
+  constructor(
+    uploader: Uploader,
+    planFn: typeof plan = plan,
+    applyMs: { gesture: number; idle: number } = { gesture: PACED_APPLY_MS, idle: PACED_IDLE_APPLY_MS },
+  ) {
     this.uploader = uploader;
     this.planFn = planFn;
-    this.pacedApplyMs = pacedApplyMs;
+    this.applyMs = applyMs;
     // Config tweaks don't bump any WASM epoch, so without this hook the
     // epoch fast-path would keep returning the cached plan and the
     // user's slider would have no visible effect until something else
@@ -1022,7 +1039,8 @@ export class TickCoordinator {
       return;
     }
     const start = performance.now();
-    const budget = this.changeBudget(pass.length);
+    const gesture = ctx.gesture === true || this.motion.moving(start);
+    const budget = this.changeBudget(pass.length, gesture ? this.applyMs.gesture : this.applyMs.idle);
     const taken = pass.map((dataset) => this.pacing.take(dataset.dsId, budget)!);
     const admissions = this.admit(ctx, pass.map((dataset, i) => ({ dsId: dataset.dsId, ...taken[i] })));
     const deltas = admissions.map((admission) => admission.delta);
@@ -1076,9 +1094,9 @@ export class TickCoordinator {
     }, chunkBytesFor(ctx.datasets.get(dsId)!.manifest));
   }
 
-  /** How many changes each of `datasets` hands the stages a tick: what the time budget holds at the measured cost. */
-  private changeBudget(datasets: number): number {
-    return Math.max(MIN_PACED_CHANGES, Math.floor(this.pacedApplyMs / this.changeCostMs / Math.max(1, datasets)));
+  /** How many changes each of `datasets` hands the stages a tick: what `ms` holds at the measured cost. */
+  private changeBudget(datasets: number, ms = this.applyMs.gesture): number {
+    return Math.max(MIN_PACED_CHANGES, Math.floor(ms / this.changeCostMs / Math.max(1, datasets)));
   }
 
   /** Fold one pass's cost per change into the estimate, when it took enough changes to measure. */

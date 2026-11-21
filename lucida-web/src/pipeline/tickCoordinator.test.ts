@@ -2601,7 +2601,7 @@ describe("incremental delta fold", () => {
         ["ds1", { manifest: createMockContentWithTiles(1, 2, 16) }],
       ]);
       // No time to spare: each tick takes the fewest changes a tick takes.
-      const orch = new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan, 0);
+      const orch = new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan, { gesture: 0, idle: 0 });
       const fold = makeFoldScene({
         fullRows: [foldRow({ target_level: 0 })],
         deltaScript: [
@@ -2677,6 +2677,53 @@ describe("incremental delta fold", () => {
         .filter((change) => change.tier === "detail");
       expect(detail.flatMap((change) => change.removed)).toHaveLength(4096);
       expect(detail.flatMap((change) => change.added)).toHaveLength(1024);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands what a plan owes over in larger shares between gestures than while one runs", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2, 16) }],
+      ]);
+      const orch = new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan, { gesture: 0, idle: 1_000 });
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [fullPayload([foldRow({ target_level: 0 })])],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = (gesture: boolean) =>
+        ({ ...(makeCtx(fold.scene, datasets) as object), client, cpuCache, gesture }) as unknown as TickContext;
+      const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
+
+      // The plan's own tick takes the fewest changes a tick takes, and so
+      // does a tick while a gesture runs.
+      orch.planAndFetch(ctx(false), emptyMinimap);
+      const opened = planSpy.mock.results[0].value as RequestPlan;
+      expect(submits()[0].requests.length).toBeLessThanOrEqual(1024);
+      vi.advanceTimersByTime(16);
+      orch.planAndFetch(ctx(true), emptyMinimap);
+      expect(submits()[1].requests.length).toBeLessThanOrEqual(2048);
+      expect(orch.owesPlanChanges()).toBe(true);
+
+      // With no gesture, the next tick takes the rest.
+      vi.advanceTimersByTime(16);
+      orch.planAndFetch(ctx(false), emptyMinimap);
+      expect(submits()[2].requests).toBe(opened.requests);
+      expect(orch.owesPlanChanges()).toBe(false);
     } finally {
       vi.useRealTimers();
     }
