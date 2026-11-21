@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.6](https://github.com/aelefebv/lucida/compare/v0.45.5...v0.45.6) (2026-11-21)
+
+
+### Performance
+
+* size the bytes in flight to the link and the reads to the store, and withdraw cancelled frames ([#1720](https://github.com/aelefebv/lucida/issues/1720)) ([a84c72e](https://github.com/aelefebv/lucida/commit/a84c72e9575ff16f8604bcce0c5b8465f5e07f9a))
+
 ## [0.45.5](https://github.com/aelefebv/lucida/compare/v0.45.4...v0.45.5) (2026-11-21)
 
 
