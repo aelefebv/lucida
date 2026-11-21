@@ -15,7 +15,7 @@ import type {
   CacheStateSnapshot,
 } from "../planning/index.ts";
 import { compareChunkRequests, type RequestDelta } from "../planning/index.ts";
-import { requestChunkKey } from "../planning/requestKeys.ts";
+import { requestChunkKey, tierChunkKey } from "../planning/requestKeys.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { InteractionModeDetector } from "./interactionMode.ts";
 import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
@@ -2638,13 +2638,6 @@ function coveringFetch(fetches: readonly InFlightFetch[] | undefined, req: Chunk
 }
 
 /**
- * The scheduler key for a chunk request at a known residency tier. Sole
- * definition of that string: `CpuCache.submit` derives the tier once per
- * request and calls this directly, while {@link CpuCache.inFlightKey}
- * resolves the tier first and then calls it — so the two paths cannot
- * drift into producing different keys for the same request.
- */
-/**
  * Whether the view settles without the request's chunk: prefetch, and an
  * ancestor, which a settled frame draws only where a chunk it draws is
  * missing.
@@ -2653,8 +2646,13 @@ function holdsNoSettle(req: ChunkRequest): boolean {
   return req.lane === "prefetch" || req.ancestor === true;
 }
 
+/**
+ * The scheduler key for a chunk at a known residency tier: a cached entry's,
+ * or a chunk the worker answered for. A request's own is
+ * {@link requestChunkKey}, the same string kept with the request.
+ */
 function chunkSchedulerKey(req: Pick<ChunkRequest, "entityId" | "chunkKey">, tier: ResidencyTier): string {
-  return `${req.entityId}/${tier}/${req.chunkKey}`;
+  return tierChunkKey(req.entityId, tier, req.chunkKey);
 }
 
 /**

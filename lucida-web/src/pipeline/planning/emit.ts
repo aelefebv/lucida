@@ -131,11 +131,12 @@ function chunkAlong(axis: SpatialAxis, x: number, y: number, z: number): number 
 }
 
 /**
- * What a request's priority is first written as, before its band. The
- * band is a whole number, and {@link LaneRequests.finish} adds a fraction to
- * it in place: a field the engine first saw hold a small integer changes
- * every request's shape when it does, which costs about a microsecond a
- * request, where a field first written as a fraction takes either.
+ * What a request's priority holds before its band. The band is a whole
+ * number, and {@link LaneRequests.finish} adds a fraction to it in place.
+ * Created holding a small integer, every request would change shape when
+ * the fraction lands, about a microsecond each on a plan of thousands.
+ * Created holding NaN, which the engine stores as it stores fractions, the
+ * field takes both without a change of shape.
  */
 const UNPLACED = Number.NaN;
 

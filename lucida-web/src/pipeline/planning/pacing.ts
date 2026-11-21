@@ -9,18 +9,16 @@
  * what the view holds and land on one frame.
  *
  * {@link RequestPacing} holds, per dataset, what the stages hold and what the
- * plans have changed since, and gives the stages at most a budget of those
+ * plans have changed since, and gives the stages about a budget of those
  * changes a tick; the coordinator gives them the rest on the ticks after.
  * A plan made while changes are still owed is weighed against what the
  * stages hold, not against the plan before it.
  *
- * Removals go first, so the stages give up what the plans no longer want
- * before they take more: until every removal is taken, what they hold is
- * within what they held, and after, within what the plans want now, and
- * each fits the budgets the plan it came from fits. A removal of a chunk an
- * owed addition asks for again, as when a chunk fetched ahead becomes one
- * the view draws, goes with that addition instead, so no chunk the plans
- * want is ever left unwanted between two of them.
+ * Removals go first, so the stages make room before they fill it, and what
+ * they hold fits the budgets as the plans on either side do. A removal of a
+ * chunk an owed addition asks for again, as when a chunk fetched ahead
+ * becomes one the view draws, goes with that addition instead, so no chunk
+ * the plans want is ever left unwanted between two of them.
  */
 
 import { mergeInOrder } from "./laneMemory.ts";
