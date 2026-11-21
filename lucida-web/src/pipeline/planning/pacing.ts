@@ -11,6 +11,8 @@
  * {@link RequestPacing} holds, per dataset, what the stages hold and what the
  * plans have changed since, and gives the stages about a budget of those
  * changes a tick; the coordinator gives them the rest on the ticks after.
+ * The coordinator paces while a gesture runs and while a dataset's first
+ * plan is owed.
  * A plan made while changes are still owed is weighed against what the
  * stages hold, not against the plan before it.
  *
@@ -65,9 +67,13 @@ class DatasetPacing {
    */
   private addingChunks: Map<string, number> | null = null;
 
+  /** The stages held nothing of the dataset when pacing began, and have yet to catch up with its plans. */
+  opening: boolean;
+
   constructor(held: readonly ChunkRequest[]) {
     this.target = held;
     this.held = held;
+    this.opening = held.length === 0;
   }
 
   get owed(): number {
@@ -83,6 +89,7 @@ class DatasetPacing {
   adopt(requests: readonly ChunkRequest[]): void {
     this.target = requests;
     this.held = requests;
+    this.opening = false;
   }
 
   /** Owe a plan's changes, which `delta` gives on the last plan's requests. */
@@ -126,6 +133,7 @@ class DatasetPacing {
       for (const req of this.adding) if (this.pending.has(req)) added.push(req);
       this.clearOwed();
       this.held = this.target;
+      this.opening = false;
       return { requests: this.held, delta: { base, added, removed } };
     }
     for (const [chunk, list] of this.unpaired) {
@@ -156,6 +164,7 @@ class DatasetPacing {
     if (this.owed === 0) {
       // A chunk's removals go together, so the last of them can overrun the budget.
       this.held = this.target;
+      this.opening = false;
     } else {
       const gone = new Set(removed);
       const kept = removed.length === 0 ? base : base.filter((req) => !gone.has(req));
@@ -254,6 +263,11 @@ export class RequestPacing {
    */
   take(dsId: string, budget: number): PacedRequests | null {
     return this.datasets.get(dsId)?.take(budget) ?? null;
+  }
+
+  /** Whether `dsId`'s first plan, taken from nothing, is still owed to the stages. */
+  opening(dsId: string): boolean {
+    return this.datasets.get(dsId)?.opening ?? false;
   }
 
   /** Whether any dataset has changes the stages have yet to take. */

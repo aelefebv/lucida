@@ -336,10 +336,9 @@ const SELECTION_COALESCE_INTERVAL_MS = 150;
 const PACED_APPLY_MS = 4;
 
 /**
- * What a tick that plans nothing new gives those stages while no gesture
- * runs. No frame answers an input then, and the chunks a refinement turns
- * into ones the view draws, many resident already, upload only once the
- * stages take them, so a larger share settles the view sooner.
+ * What a tick that plans nothing new gives those stages of a dataset's
+ * first plan while no gesture runs. No frame answers an input then, so a
+ * larger share fills the view sooner.
  */
 const PACED_IDLE_APPLY_MS = 12;
 
@@ -989,17 +988,23 @@ export class TickCoordinator {
   }
 
   /**
-   * Hand the stages after the plan at most a tick's budget of each dataset's
-   * changes, owing the rest to the ticks after, when every dataset is drawn
-   * by one view, submits nothing beside its plan's requests, and either
-   * carried them from its last plan or is new to the stages, which then
-   * take it from nothing. Otherwise the stages take every plan whole.
-   * Returns how many changes they take now.
+   * Hand the stages after the plan at most a tick's budget of a dataset's
+   * changes while the views move or while its first plan is owed, owing the
+   * rest to the ticks after, when every dataset is drawn by one view,
+   * submits nothing beside its plan's requests, and either carried them
+   * from its last plan or is new to the stages, which then take it from
+   * nothing. Otherwise the stages take every plan whole. Returns how many
+   * changes they take now.
    *
    * While the views move, the replan's own tick hands them none: its
    * selection and lanes have spent that frame's share, and a gesture frame
    * follows every tick, so the change lands one frame later, beside the
    * next frame rather than on top of this one.
+   *
+   * Between gestures a carried plan goes whole. The refinement once a zoom
+   * stops turns thousands of chunks the lookahead fetched into ones the view
+   * draws, and handed over a share a tick it left them waiting to upload
+   * until the view settled seconds later.
    */
   private pace(planned: PlannedDataset[], labelRequests: readonly (readonly ChunkRequest[])[], moving: boolean): number {
     // A dataset the stages hold nothing of takes its plan as additions to nothing.
@@ -1013,10 +1018,12 @@ export class TickCoordinator {
       return 0;
     }
     this.pacing.retain(new Set(planned.map((dataset) => dataset.dsId)));
-    const budget = moving ? 0 : this.changeBudget(planned.length);
+    const budget = this.changeBudget(planned.length);
     let taken = 0;
     for (const [i, dataset] of planned.entries()) {
-      const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, changes[i]!, budget);
+      const opening = !this.heldActiveSets.has(dataset.dsId) || this.pacing.opening(dataset.dsId);
+      const share = moving ? 0 : opening ? budget : Number.POSITIVE_INFINITY;
+      const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, changes[i]!, share);
       dataset.result = { ...dataset.result, requests, delta };
       taken += delta.added.length + delta.removed.length;
     }
@@ -1041,7 +1048,11 @@ export class TickCoordinator {
     const start = performance.now();
     const gesture = ctx.gesture === true || this.motion.moving(start);
     const budget = this.changeBudget(pass.length, gesture ? this.applyMs.gesture : this.applyMs.idle);
-    const taken = pass.map((dataset) => this.pacing.take(dataset.dsId, budget)!);
+    // Between gestures only a dataset's first plan is still paced.
+    const taken = pass.map((dataset) => this.pacing.take(
+      dataset.dsId,
+      gesture || this.pacing.opening(dataset.dsId) ? budget : Number.POSITIVE_INFINITY,
+    )!);
     const admissions = this.admit(ctx, pass.map((dataset, i) => ({ dsId: dataset.dsId, ...taken[i] })));
     const deltas = admissions.map((admission) => admission.delta);
     const carried = deltas.every((delta) => delta !== undefined) &&
