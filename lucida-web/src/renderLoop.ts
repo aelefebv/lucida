@@ -1121,6 +1121,8 @@ export class RenderLoop implements TraceEnvironment {
     );
     if (this.deliveryBacklogged) {
       this.setDirty("residency", this.mode === "slice" ? "tick_slice_continuation" : "tick_volume_continuation");
+    } else if (this.tickCoordinator.owesPlanChanges()) {
+      this.setDirty("residency", "plan_pacing");
     }
 
     this.scheduleTrailingRebuild();

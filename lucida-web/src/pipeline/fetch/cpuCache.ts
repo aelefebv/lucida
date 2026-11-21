@@ -15,6 +15,7 @@ import type {
   CacheStateSnapshot,
 } from "../planning/index.ts";
 import { compareChunkRequests, type RequestDelta } from "../planning/index.ts";
+import { requestChunkKey } from "../planning/requestKeys.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { InteractionModeDetector } from "./interactionMode.ts";
 import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
@@ -600,7 +601,7 @@ export class CpuCache {
     const inFlight = this.inFlightByChunk();
     for (let i = 0; i < requests.length; i++) {
       const req = requests[i];
-      const key = chunkSchedulerKey(req, req.tier);
+      const key = requestChunkKey(req);
       keys[i] = key;
       if (unwantedInFlightKeys.size > 0) {
         // A chunk still wanted keeps its whole fetch, which holds every
@@ -698,12 +699,12 @@ export class CpuCache {
 
     const affected = new Map<string, ChunkAt>();
     for (const req of delta.removed) {
-      const key = chunkSchedulerKey(req, req.tier);
+      const key = requestChunkKey(req);
       this.demand.forget(key, req);
       affected.set(key, req);
     }
     for (const req of delta.added) {
-      const key = chunkSchedulerKey(req, req.tier);
+      const key = requestChunkKey(req);
       this.demand.note(key, req);
       affected.set(key, req);
     }
@@ -739,7 +740,7 @@ export class CpuCache {
     const inFlight = this.inFlightByChunk();
     // The queue keeps what no delta touched; each chunk a delta names is
     // queued again below if it is still wanted and missing.
-    const queued = this.chunkScheduler.pendingSnapshot().filter((req) => !affected.has(chunkSchedulerKey(req, req.tier)));
+    const queued = this.chunkScheduler.pendingSnapshot().filter((req) => !affected.has(requestChunkKey(req)));
     const walk = this.beginWalk(inFlight, queued);
     for (const [key, chunk] of affected) {
       this.unseeChunk(key, chunk, inFlight);
@@ -934,7 +935,7 @@ export class CpuCache {
     const inFlight = this.inFlightByChunk();
     for (const requests of this.wantedRequests) {
       for (const req of requests) {
-        const key = chunkSchedulerKey(req, req.tier);
+        const key = requestChunkKey(req);
         const fetchKey = fetchKeyFor(key, req);
         if (seen.has(fetchKey)) continue;
         seen.add(fetchKey);
@@ -1642,7 +1643,7 @@ export class CpuCache {
     for (const requests of this.wantedRequests) {
       for (const req of requests) {
         if (holdsNoSettle(req)) continue;
-        const key = chunkSchedulerKey(req, req.tier);
+        const key = requestChunkKey(req);
         if (seen.has(key)) continue;
         seen.add(key);
         // Resident as the demand counts reckon it: held, and seen by this plan.
@@ -1790,7 +1791,7 @@ export class CpuCache {
 
   /** Whether the server answered that it is still generating the chunk, and has not said it is ready. */
   awaitsServer(req: ChunkRequest): boolean {
-    return this.getFailureRecord(chunkSchedulerKey(req, req.tier))?.kind === "pending";
+    return this.getFailureRecord(requestChunkKey(req))?.kind === "pending";
   }
 
   /** Searches detail then overview; null when neither has the chunk. */
@@ -1892,7 +1893,7 @@ export class CpuCache {
     const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs, dispatchedAtMs);
     // `key` names this fetch, and `chunk` the chunk it fetches, which is
     // what failures, the wanted set and refusals are kept by.
-    const chunk = chunkSchedulerKey(req, req.tier);
+    const chunk = requestChunkKey(req);
 
     let result: FetchResult;
     try {
@@ -2238,7 +2239,7 @@ export class CpuCache {
   private inFlightByChunk(): Map<string, InFlightFetch[]> {
     const byChunk = new Map<string, InFlightFetch[]>();
     for (const [key, entry] of this.chunkScheduler.inFlightEntries()) {
-      const chunk = chunkSchedulerKey(entry.request, entry.request.tier);
+      const chunk = requestChunkKey(entry.request);
       const fetches = byChunk.get(chunk);
       if (fetches) fetches.push({ key, request: entry.request });
       else byChunk.set(chunk, [{ key, request: entry.request }]);
@@ -2529,7 +2530,7 @@ export class CpuCache {
 
   /** The scheduler key of the fetch `req` starts. */
   private inFlightKey(req: ChunkRequest): string {
-    return fetchKeyFor(chunkSchedulerKey(req, req.tier), req);
+    return fetchKeyFor(requestChunkKey(req), req);
   }
 }
 

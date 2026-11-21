@@ -88,7 +88,7 @@ function emitLanes(
     const chunks = enumeratePlanChunks(activeSet, input, entityById, config);
     const from = lanes.count;
     emitDetailLane(chunks, input, lanes, config, carry);
-    emitPrefetchLane(chunks, input, lanes, config, cutStep);
+    emitPrefetchLane(chunks, input, lanes, config, cutStep, carry);
     emitCoarseLane(chunks, input, stats, lanes, config);
     if (view.view === snapshot.leadingView) lanes.lead(from);
     byView?.set(view.view, lanes.since(from).filter((req) => req.lane !== "prefetch"));

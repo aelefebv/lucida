@@ -224,7 +224,7 @@ function createMockContent(): DatasetManifest {
  * Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles,
  * each a pyramid of `levelCount` levels halving from 1024² with 256² chunks.
  */
-function createMockContentWithTiles(n: number, levelCount = 1): DatasetManifest {
+function createMockContentWithTiles(n: number, levelCount = 1, chunkSide = 256): DatasetManifest {
   const entities: Array<Record<string, unknown>> = [
     { id: "group-0", kind: "Group", parent: null, labels: {} },
   ];
@@ -232,7 +232,7 @@ function createMockContentWithTiles(n: number, levelCount = 1): DatasetManifest 
   const levels: Array<Record<string, unknown>> = [];
   for (let level = 0; level < levelCount; level++) {
     const side = 1024 >> level;
-    const chunk = Math.min(256, side);
+    const chunk = Math.min(chunkSide, side);
     levels.push({
       level_index: level,
       shape: [1, 1, 1, side, side],
@@ -2589,6 +2589,82 @@ describe("incremental delta fold", () => {
       const detail = moved.wantedChunks.find((change) => change.tier === "detail")!;
       expect(detail.removed).toHaveLength(16);
       expect(detail.added).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands a zoom's large change to the stages a budget a tick, and holds the view unsettled until they take it", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2, 32) }],
+      ]);
+      // No time to spare: each tick takes the fewest changes a tick takes.
+      const orch = new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan, 0);
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [
+          fullPayload([foldRow({ target_level: 0 })]),
+          deltaPayload([], [], [foldRow({ target_level: 1 })]),
+        ],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      let zoom = 1;
+      const scene = {
+        ...fold.scene,
+        visible_region: () => JSON.stringify({
+          xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: zoom, sort_center: null, frustum_planes: null,
+        }),
+      };
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = () =>
+        ({ ...(makeCtx(scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
+      const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
+
+      orch.planAndFetch(ctx(), emptyMinimap);
+      const first = submits()[0];
+      expect(first.requests.filter((r) => r.lane === "detail")).toHaveLength(1024);
+
+      vi.advanceTimersByTime(500);
+      fold.setView(2);
+      zoom = 0.4;
+      orch.planAndFetch(ctx(), emptyMinimap);
+      const planned = planSpy.mock.results.at(-1)!.value as RequestPlan;
+      expect(planned.delta!.removed.length + planned.delta!.added.length).toBeGreaterThan(1000);
+      const zoomed = submits()[1];
+      expect(zoomed.delta!.base).toBe(first.requests);
+      expect(zoomed.delta!.added.length + zoomed.delta!.removed.length).toBeLessThanOrEqual(256);
+      expect(orch.owesPlanChanges()).toBe(true);
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // Ticks that plan nothing new hand the rest over, each on what the last took.
+      for (let tick = 0; orch.owesPlanChanges(); tick++) {
+        expect(tick).toBeLessThan(20);
+        vi.advanceTimersByTime(16);
+        orch.planAndFetch(ctx(), emptyMinimap);
+      }
+      expect(planSpy).toHaveBeenCalledTimes(2);
+      const all = submits().slice(1);
+      for (let i = 1; i < all.length; i++) expect(all[i].delta!.base).toBe(all[i - 1].requests);
+      expect(all.at(-1)!.requests).toBe(planned.requests);
+      expect(orch.hasPendingRebuild()).toBe(false);
+      // The worker heard every change once.
+      const detail = client.coldStateDelta.mock.calls
+        .flatMap(([msg]) => (msg as ColdStateDeltaMessage).wantedChunks)
+        .filter((change) => change.tier === "detail");
+      expect(detail.flatMap((change) => change.removed)).toHaveLength(1024);
+      expect(detail.flatMap((change) => change.added)).toHaveLength(256);
     } finally {
       vi.useRealTimers();
     }

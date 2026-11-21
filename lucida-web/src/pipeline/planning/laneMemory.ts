@@ -20,7 +20,16 @@
  * them all again.
  */
 
-import type { EntitySnapshot, LaneMemory, LaneScope, EntityDetailRequests, ChunkRequest, RequestDelta, DatasetView } from "./types.ts";
+import type {
+  CellLane,
+  ChunkRequest,
+  DatasetView,
+  EntityDetailRequests,
+  EntitySnapshot,
+  LaneMemory,
+  LaneScope,
+  RequestDelta,
+} from "./types.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { compareChunkRequests } from "./emit.ts";
 
@@ -73,7 +82,7 @@ function sameScope(a: LaneScope, b: LaneScope): boolean {
 export class LaneCarry {
   private readonly previous: LaneMemory | null;
   private readonly scope: LaneScope;
-  private readonly detail = new Map<string, EntityDetailRequests>();
+  private readonly cells: Record<CellLane, Map<string, EntityDetailRequests>> = { detail: new Map(), ahead: new Map() };
   private readonly others: OtherRequests = new Map();
   /** The previous plan's requests of the other lanes this plan kept. */
   private readonly kept = new Set<ChunkRequest>();
@@ -84,15 +93,15 @@ export class LaneCarry {
     this.scope = scope;
   }
 
-  /** The previous plan's detail requests of `entity` by cell, when its levels are the ones they came from. */
-  detailOf(entity: EntitySnapshot): ReadonlyMap<number, readonly ChunkRequest[]> | undefined {
-    const held = this.previous?.detail.get(entity.entityId);
+  /** The previous plan's requests of `lane` for `entity` by cell, when its levels are the ones they came from. */
+  cellsOf(lane: CellLane, entity: EntitySnapshot): ReadonlyMap<number, readonly ChunkRequest[]> | undefined {
+    const held = this.previous?.cells[lane].get(entity.entityId);
     return held !== undefined && held.levels === entity.levels ? held.cells : undefined;
   }
 
-  /** `entity`'s detail requests in this plan, by cell. */
-  setDetail(entity: EntitySnapshot, cells: ReadonlyMap<number, readonly ChunkRequest[]>): void {
-    this.detail.set(entity.entityId, { levels: entity.levels, cells });
+  /** `entity`'s requests of `lane` in this plan, by cell. */
+  setCells(lane: CellLane, entity: EntitySnapshot, cells: ReadonlyMap<number, readonly ChunkRequest[]>): void {
+    this.cells[lane].set(entity.entityId, { levels: entity.levels, cells });
   }
 
   /**
@@ -123,11 +132,13 @@ export class LaneCarry {
       return { requests: added, memory: this.memory(added) };
     }
     const removed: ChunkRequest[] = [];
-    for (const [entityId, held] of previous.detail) {
-      const now = this.detail.get(entityId)?.cells;
-      if (now === held.cells) continue;
-      for (const [cell, requests] of held.cells) {
-        if (now?.get(cell) !== requests) removed.push(...requests);
+    for (const lane of ["detail", "ahead"] as const) {
+      for (const [entityId, held] of previous.cells[lane]) {
+        const now = this.cells[lane].get(entityId)?.cells;
+        if (now === held.cells) continue;
+        for (const [cell, requests] of held.cells) {
+          if (now?.get(cell) !== requests) removed.push(...requests);
+        }
       }
     }
     for (const byChunk of previous.others.values()) {
@@ -145,7 +156,7 @@ export class LaneCarry {
   }
 
   private memory(requests: readonly ChunkRequest[]): LaneMemory {
-    return { scope: this.scope, detail: this.detail, others: this.others, requests };
+    return { scope: this.scope, cells: this.cells, others: this.others, requests };
   }
 }
 
@@ -174,7 +185,7 @@ function sameAsk(a: ChunkRequest, b: ChunkRequest): boolean {
 }
 
 /** Two lists each in planner order, as one. */
-function mergeInOrder(a: readonly ChunkRequest[], b: readonly ChunkRequest[]): ChunkRequest[] {
+export function mergeInOrder(a: readonly ChunkRequest[], b: readonly ChunkRequest[]): ChunkRequest[] {
   const out = new Array<ChunkRequest>(a.length + b.length);
   let i = 0;
   let j = 0;

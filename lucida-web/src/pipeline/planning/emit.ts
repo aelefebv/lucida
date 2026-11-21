@@ -23,6 +23,7 @@ import type { LaneCarry } from "./laneMemory.ts";
 import { detailCellKey } from "./laneMemory.ts";
 import type {
   ActiveSetEntry,
+  CellLane,
   ChunkRequest,
   DatasetView,
   EntityLevelSelection,
@@ -204,6 +205,11 @@ export class LaneRequests {
       this.keep(req.priority, key);
       return;
     }
+    this.add(req, key);
+  }
+
+  /** A request of `req.priority`'s band that no earlier plan made alike: a lane that keeps by cell knows. */
+  add(req: ChunkRequest, key: number): void {
     this.requests.push(req);
     this.keys.push(key);
     this.leading.push(false);
@@ -543,45 +549,60 @@ export function emitDetailLane(
       for (const [cells, lane] of lists) emitCells(entity, cells, snapshot, config, lane, push);
       continue;
     }
-    const previous = carry.detailOf(entity);
-    // An entity whose cells all held keeps its requests whole, as the last
-    // plan recorded them; most entities of a wide collection do.
-    if (
-      previous !== undefined &&
-      previous.size === chosen.detail.length + chosen.ancestors.length &&
-      keepsEvery(previous, lists, out)
-    ) {
-      carry.setDetail(entity, previous);
-      continue;
-    }
-    const cells = new Map<number, readonly ChunkRequest[]>();
-    let emitted: ChunkRequest[] = [];
-    const collect: Push = (req, rank) => {
-      emitted.push(req);
-      out.push(req, rank);
-    };
-    for (const [list, lane] of lists) {
-      const targets = new Map<number, LaneTarget>();
-      for (const cell of list) {
-        const key = detailCellKey(cell, lane === above);
-        const kept = previous?.get(key);
-        if (kept !== undefined) {
-          out.keep(lane.band, cell.rank);
-          cells.set(key, kept);
-          continue;
-        }
-        let target = targets.get(cell.level);
-        if (target === undefined) {
-          target = laneTarget(entity, cell.level, snapshot, config, lane, false);
-          targets.set(cell.level, target);
-        }
-        emitted = [];
-        emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, collect);
-        cells.set(key, emitted);
-      }
-    }
-    carry.setDetail(entity, cells);
+    emitCarriedCells(entity, "detail", lists, snapshot, config, out, carry);
   }
+}
+
+/**
+ * One entity's cells of a lane carried by cell into `out`: a cell the
+ * previous plan asked for alike keeps its requests, and every other is
+ * emitted anew, each ranked by its place in the view's fetch order.
+ */
+function emitCarriedCells(
+  entity: EntitySnapshot,
+  carried: CellLane,
+  lists: readonly (readonly [readonly SelectedCell[], Omit<LaneTarget, "slice" | "whole" | "cut">])[],
+  snapshot: DatasetView,
+  config: PlanningConfig,
+  out: LaneRequests,
+  carry: LaneCarry,
+): void {
+  const previous = carry.cellsOf(carried, entity);
+  // An entity whose cells all held keeps its requests whole, as the last
+  // plan recorded them; most entities of a wide collection do.
+  let count = 0;
+  for (const [list] of lists) count += list.length;
+  if (previous !== undefined && previous.size === count && keepsEvery(previous, lists, out)) {
+    carry.setCells(carried, entity, previous);
+    return;
+  }
+  const cells = new Map<number, readonly ChunkRequest[]>();
+  let emitted: ChunkRequest[] = [];
+  const collect: Push = (req, rank) => {
+    emitted.push(req);
+    out.add(req, rank);
+  };
+  for (const [list, lane] of lists) {
+    const targets = new Map<number, LaneTarget>();
+    for (const cell of list) {
+      const key = detailCellKey(cell, lane.ancestor === true);
+      const kept = previous?.get(key);
+      if (kept !== undefined) {
+        out.keep(lane.band, cell.rank);
+        cells.set(key, kept);
+        continue;
+      }
+      let target = targets.get(cell.level);
+      if (target === undefined) {
+        target = laneTarget(entity, cell.level, snapshot, config, lane, false);
+        targets.set(cell.level, target);
+      }
+      emitted = [];
+      emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, collect);
+      cells.set(key, emitted);
+    }
+  }
+  carry.setCells(carried, entity, cells);
 }
 
 /**
@@ -633,6 +654,7 @@ export function emitPrefetchLane(
   out: LaneRequests,
   config: PlanningConfig,
   cutStep = false,
+  carry?: LaneCarry,
 ): void {
   const push: Push = (req, key) => out.push(req, key);
   const t = snapshot.selection.t;
@@ -649,9 +671,13 @@ export function emitPrefetchLane(
       }, push);
     }
     if (config.prefetchDepth > 0) {
-      emitCells(entity, chosen.lookahead, snapshot, config, {
+      const ahead = {
         lane: "prefetch", tier: "detail", band: config.prefetchLaneOffset + config.prefetchDepth * PREFETCH_STEP, t,
-      }, push);
+      } as const;
+      // A zoom moves the lookahead by thousands of cells a plan, most of
+      // which the plan before already asked for, so it carries by cell too.
+      if (carry === undefined) emitCells(entity, chosen.lookahead, snapshot, config, ahead, push);
+      else emitCarriedCells(entity, "ahead", [[chosen.lookahead, ahead]], snapshot, config, out, carry);
     }
   }
 }
