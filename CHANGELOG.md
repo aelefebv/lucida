@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.7](https://github.com/aelefebv/lucida/compare/v0.45.6...v0.45.7) (2026-11-21)
+
+
+### Performance
+
+* **web:** start a gesture from the GPU's recent load, not its idle time alone ([#1723](https://github.com/aelefebv/lucida/issues/1723)) ([9cb2c22](https://github.com/aelefebv/lucida/commit/9cb2c22ddae3579ac438c3c245ca390d820ac40b))
+
 ## [0.45.6](https://github.com/aelefebv/lucida/compare/v0.45.5...v0.45.6) (2026-11-21)
 
 
