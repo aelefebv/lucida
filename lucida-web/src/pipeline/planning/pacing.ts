@@ -42,6 +42,9 @@ function pairKey(req: ChunkRequest): string {
   return req.chunkKey;
 }
 
+/** The share of a budget left over that goes with the rest rather than on a tick of its own. */
+const SMALL_REMAINDER = 0.25;
+
 /** One dataset's requests between what the stages hold and what its plans want. */
 class DatasetPacing {
   /** What the plans want now: the last plan's requests. */
@@ -111,12 +114,15 @@ class DatasetPacing {
     this.target = requests;
   }
 
-  /** Take at most `budget` owed changes, or every one when they fit it. */
+  /**
+   * Take at most `budget` owed changes, or every one when they fit it or
+   * what would be left is too little to be worth a tick of its own.
+   */
   take(budget: number): PacedRequests {
     const base = this.held;
     const removed: ChunkRequest[] = [];
     const added: ChunkRequest[] = [];
-    if (this.owed <= budget) {
+    if (this.owed <= budget * (1 + SMALL_REMAINDER)) {
       for (const list of this.unpaired.values()) removed.push(...list);
       for (const list of this.paired.values()) removed.push(...list);
       for (const req of this.adding) if (this.pending.has(req)) added.push(req);
@@ -236,7 +242,7 @@ export class RequestPacing {
     }
     // Most plans change less than a tick takes, with nothing owed: the
     // stages take the plan as it is.
-    if (pacing.owed === 0 && delta.added.length + delta.removed.length <= budget) {
+    if (pacing.owed === 0 && delta.added.length + delta.removed.length <= budget * (1 + SMALL_REMAINDER)) {
       pacing.adopt(requests);
       return { requests, delta };
     }
