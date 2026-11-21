@@ -13,6 +13,7 @@ import type { PixelRect } from "./renderer/layerBatches.ts";
 import type { TickCoordinatorResult } from "./pipeline/tickCoordinator.ts";
 import { datasetViewKey } from "./renderer/poolKeys.ts";
 import { scaleRect } from "./slicePath.ts";
+import { cappedPixelRatioScale } from "./renderResolution.ts";
 
 /**
  * Ray-march steps a gesture's frame takes per step of its sampled level.
@@ -133,6 +134,24 @@ export function volumeFrameScale(ctx: TickContext): FrameScale {
   };
 }
 
+/**
+ * Render pixels per world unit one unit from `view`'s eye in a frame drawn
+ * below the resolution the level selection measures at, the capped pixel
+ * ratio, as a gesture's is: the render scale times the adaptive factor under
+ * one. Such a frame's march samples no level finer than its pixels resolve,
+ * where the selection keeps coarser chunks resident for it. 0 for a frame at
+ * that resolution, which samples every level source, as a settled frame
+ * must to draw what the selection chose.
+ */
+export function gesturePixelsPerWorld(
+  scene: Pick<TickContext["scene"], "pixels_per_world">,
+  view: number,
+  frame: FrameScale,
+): number {
+  if (frame.scale >= cappedPixelRatioScale(devicePixelRatio)) return 0;
+  return scene.pixels_per_world(view) * frame.scale;
+}
+
 /** Build `view`'s layer params and render it in its rectangle of the canvas. */
 export function renderVolumeView(
   ctx: TickContext,
@@ -222,7 +241,7 @@ export function renderVolumeView(
   const pixelRatio = devicePixelRatio * ctx.renderScale * ctx.resolutionScale;
   const frameSeq = client.volumeRenderMultiPass(
     layers, invVP, eye, fullCanvasW, fullCanvasH, fullW, fullH, plan.epochs, view.id, rect, viewProj, camForward,
-    clipDistance, clipMode, pixelRatio, ctx.marchStepScale, ctx.bands,
+    clipDistance, clipMode, pixelRatio, ctx.marchStepScale, ctx.bands, gesturePixelsPerWorld(scene, view.id, frame),
   );
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened

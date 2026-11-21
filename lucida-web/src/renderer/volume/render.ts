@@ -255,6 +255,7 @@ export async function handleVolumeRenderMultiPass(
   timing.beginFrame();
   renderer.setPixelRatio(msg.pixelRatio ?? 1);
   renderer.setMarchStepScale(msg.marchStepScale ?? 1);
+  renderer.setGesturePixelsPerWorld(msg.gesturePixelsPerWorld ?? 0);
   renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
 
   // What each drawn layer is, in message order: an intensity layer's index
@@ -320,6 +321,7 @@ export async function handleVolumeRenderMultiPass(
       // Given up between bands: the canvas keeps the frame it shows.
       if (lastMode !== null) renderer.setRenderMode(lastMode);
       renderer.setMarchStepScale(1);
+      renderer.setGesturePixelsPerWorld(0);
       timing.endFrame();
       return;
     }
@@ -371,6 +373,7 @@ export async function handleVolumeRenderMultiPass(
 
   // The minimap and thumbnails draw with this renderer too, at full quality.
   renderer.setMarchStepScale(1);
+  renderer.setGesturePixelsPerWorld(0);
   timing.endFrame();
   // The frame can be read only here, after its last pass and before the
   // texture expires with this handler. A view that covers part of the canvas

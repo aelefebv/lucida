@@ -17,7 +17,7 @@ import type { PixelRect } from "./layerBatches.ts";
  */
 export const VOLUME_UNIFORM_OFFSETS = {
   invViewProj: 0,           // mat4x4f (64B)
-  cameraPos: 64,            // vec4f (16B)
+  cameraPos: 64,            // vec4f (16B) — xyz=eye, w=a gesture frame's render pixels per world unit one unit from it
   stepInfo: 80,             // vec4f (16B) — x=opacityScale, y=renderMode, z=pixelRatio, w=marchStepScale
   levelAtlasSlotDims: 96,   // array<vec4u, 4> (64B) — xyz=slots per axis per level pool binding
   coarseAtlasSlotDims: 160, // vec4u (16B)
@@ -223,6 +223,7 @@ export class VolumeRenderer {
   private renderMode = 0;
   private pixelRatio = 1;
   private marchStepScale = 1;
+  private gesturePixelsPerWorld = 0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private levelBindings: Array<VolumePoolBinding | null> = [];
@@ -516,6 +517,15 @@ export class VolumeRenderer {
     this.marchStepScale = scale;
   }
 
+  /**
+   * Render pixels per world unit one unit from the eye in a gesture's frame,
+   * from the next draw on: the march samples no level finer than they
+   * resolve. 0 samples every level source, as every other frame must.
+   */
+  setGesturePixelsPerWorld(pixelsPerWorld: number) {
+    this.gesturePixelsPerWorld = pixelsPerWorld;
+  }
+
   /** Per-frame view-projection, eye, and clip params. Model matrices live in the descriptor. */
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
@@ -616,7 +626,7 @@ export class VolumeRenderer {
     const O = VOLUME_UNIFORM_OFFSETS;
     f32.fill(0, base, base + VOLUME_UNIFORM_SIZE / 4);
     f32.set(cut ?? this.invViewProj, base + O.invViewProj / 4);
-    f32.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], base + O.cameraPos / 4);
+    f32.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], this.gesturePixelsPerWorld], base + O.cameraPos / 4);
     // stepInfo = (opacityScale, renderMode, pixelRatio, marchStepScale). The
     // march step comes from the sampled level's dims in the descriptor.
     f32.set([0.08, renderMode, this.pixelRatio, this.marchStepScale], base + O.stepInfo / 4);

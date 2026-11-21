@@ -629,6 +629,17 @@ impl Camera {
         }
     }
 
+    /// Device pixels per world unit one unit from the eye: the perspective
+    /// scale a volume view's sample measure divides by distance. `None` for
+    /// a slice view, whose samples sit `zoom` device pixels apart everywhere.
+    pub fn pixels_per_world_at_unit_distance(&self) -> Option<f64> {
+        match self {
+            Camera::Slice(_) => None,
+            Camera::Arcball(v) => Some(v.pixels_per_world_at_unit_distance()),
+            Camera::Fly(v) => Some(v.pixels_per_world_at_unit_distance()),
+        }
+    }
+
     /// Returns the camera position in world space.
     pub fn eye_position(&self) -> [f64; 3] {
         match self {
@@ -4094,6 +4105,30 @@ mod tests {
         let own = a.view_proj();
         let differs = (0..16).any(|i| (view_proj[i] - own[i]).abs() > 1e-4);
         assert!(differs, "viewport override should change the projection");
+    }
+
+    #[test]
+    fn a_volume_camera_reports_the_perspective_scale_its_measure_divides_by_distance() {
+        let mut a = Arcball::new([800, 600]);
+        a.fov = std::f64::consts::FRAC_PI_2;
+        a.distance = 3.0;
+        // tan(45°) is 1, so the scale is half the viewport's height, whatever
+        // the distance.
+        let scale = Camera::Arcball(a.clone())
+            .pixels_per_world_at_unit_distance()
+            .unwrap();
+        assert!((scale - 300.0).abs() < 1e-9);
+        assert!((scale / a.distance - a.effective_zoom()).abs() < 1e-9);
+
+        let mut f = Fly::new([800, 600]);
+        f.fov = std::f64::consts::FRAC_PI_2;
+        let fly = Camera::Fly(f).pixels_per_world_at_unit_distance().unwrap();
+        assert!((fly - 300.0).abs() < 1e-9);
+
+        assert_eq!(
+            Camera::Slice(Slice::new([800, 600])).pixels_per_world_at_unit_distance(),
+            None
+        );
     }
 
     #[test]

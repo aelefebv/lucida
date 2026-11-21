@@ -1264,6 +1264,15 @@ impl WasmScene {
         vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
     }
 
+    /// Device pixels per world unit one unit from `view`'s eye, the scale its
+    /// volume measure divides by distance
+    /// ([`Camera::pixels_per_world_at_unit_distance`]). 0 for a slice view.
+    pub fn pixels_per_world(&self, view: u32) -> f64 {
+        self.camera_in(view)
+            .and_then(Camera::pixels_per_world_at_unit_distance)
+            .unwrap_or(0.0)
+    }
+
     /// Where `view`'s center ray meets a dataset, in its `[0,1]^3` local
     /// space.
     pub fn ray_hit_local(&self, view: u32, dataset_id: &str) -> Vec<f32> {

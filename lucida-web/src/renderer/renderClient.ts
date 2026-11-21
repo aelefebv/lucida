@@ -682,6 +682,7 @@ export class RenderClient implements UploadClient {
     pixelRatio?: number,
     marchStepScale?: number,
     bands?: number,
+    gesturePixelsPerWorld?: number,
   ): number {
     const frameSeq = this.nextFrameSeq();
     this.worker.postMessage({
@@ -690,7 +691,7 @@ export class RenderClient implements UploadClient {
       view,
       layers, invViewProj, eye,
       canvasW, canvasH, rect, fullW, fullH, viewProj,
-      camForward, clipDistance, clipMode, pixelRatio, marchStepScale, bands,
+      camForward, clipDistance, clipMode, pixelRatio, marchStepScale, bands, gesturePixelsPerWorld,
       frameSeq,
     });
     return frameSeq;

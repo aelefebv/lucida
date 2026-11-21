@@ -93,6 +93,7 @@ interface MockRenderer {
   setRenderMode: ReturnType<typeof vi.fn>;
   setPixelRatio: ReturnType<typeof vi.fn>;
   setMarchStepScale: ReturnType<typeof vi.fn>;
+  setGesturePixelsPerWorld: ReturnType<typeof vi.fn>;
   setMatrices: ReturnType<typeof vi.fn>;
   setLabelColorBuffer: ReturnType<typeof vi.fn>;
   setDescriptorBinding: ReturnType<typeof vi.fn>;
@@ -109,6 +110,7 @@ function makeRenderer(): MockRenderer {
     setRenderMode: vi.fn(),
     setPixelRatio: vi.fn(),
     setMarchStepScale: vi.fn(),
+    setGesturePixelsPerWorld: vi.fn(),
     setMatrices: vi.fn(),
     setLabelColorBuffer: vi.fn(),
     setDescriptorBinding: vi.fn(),
@@ -278,6 +280,27 @@ describe("handleVolumeRenderMultiPass", () => {
     renderer.setMarchStepScale.mockClear();
     await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
     expect(renderer.setMarchStepScale.mock.calls).toEqual([[1], [1]]);
+  });
+
+  it("caps the levels a gesture's frame samples, and hands the renderer back sampling every level", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const state = createInitialState();
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: null } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite: vi.fn(), descIndex });
+
+    await handleVolumeRenderMultiPass(ctx, { ...msgFor([{ memberId: "img-a", entityIndex: 0 }]), gesturePixelsPerWorld: 450 });
+    expect(renderer.setGesturePixelsPerWorld.mock.calls).toEqual([[450], [0]]);
+    const [capped, full] = renderer.setGesturePixelsPerWorld.mock.invocationCallOrder;
+    const submits = vi.mocked(device.queue.submit).mock.invocationCallOrder;
+    expect(capped).toBeLessThan(submits[0]);
+    expect(full).toBeGreaterThan(submits[submits.length - 1]);
+
+    renderer.setGesturePixelsPerWorld.mockClear();
+    await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a", entityIndex: 0 }]));
+    expect(renderer.setGesturePixelsPerWorld.mock.calls).toEqual([[0], [0]]);
   });
 
   it("does not advance first-layer state for skipped non-renderable layers", async () => {

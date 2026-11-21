@@ -293,6 +293,13 @@ export interface VolumeRenderMultiPassMessage {
    */
   marchStepScale?: number;
   /**
+   * Render pixels per world unit one unit from the eye, in a frame drawn
+   * below the resolution the level selection measures at, as a gesture's
+   * is: its march samples no level finer than those pixels resolve. 0, or
+   * absent, for every other frame, which samples every level source.
+   */
+  gesturePixelsPerWorld?: number;
+  /**
    * Row bands to march the frame in, each its own submission, so a frame
    * too long to wait for can be given up between bands; see
    * {@link AbandonFrameMessage}. A frame with label layers is drawn whole.

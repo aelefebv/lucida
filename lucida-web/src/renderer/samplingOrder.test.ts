@@ -355,4 +355,16 @@ describe("the shaders visit the chain in the same order", () => {
     expect(chain).toMatch(/out\.step = stepForDims\(activeEntity\.levelSources\[i\]\.levelDims\)/);
     expect(chain).toMatch(/out\.step = stepForDims\(activeEntity\.coarseSource\.levelDims\)/);
   });
+
+  it("volume.wgsl passes level sources over only in a gesture's march, and keeps the chain past them", () => {
+    const chain = body(volumeSrc, "sampleWithFallback");
+    // From the first source the frame reads, a miss stepping by that one's spacing.
+    expect(chain).toMatch(/for \(var i = first; i < count; i\+\+\)/);
+    expect(chain).toMatch(/out\.step = stepForDims\(activeEntity\.levelSources\[first\]\.levelDims\)/);
+    // A frame that writes no scale, a settled one, passes no source over.
+    expect(body(volumeSrc, "levelGivesWayAt")).toMatch(/if \(pixelsPerWorld <= 0\.0 \|\| i \+ 1u >= count\) \{\s*return NEVER;/);
+    // A slice view's cut and a label's first hit read every source.
+    const calls = volumeSrc.match(/sampleWithFallback\(.*\);/g) ?? [];
+    expect(calls.map((call) => call.slice(call.lastIndexOf(",") + 1).trim())).toEqual(["0u);", "0u);", "first);"]);
+  });
 });
