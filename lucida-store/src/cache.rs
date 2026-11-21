@@ -71,8 +71,10 @@ const DEFAULT_MIN_SOURCE_READS: usize = 16;
 ///
 /// This is a bound on lucida's demand, not a property of the store, and the
 /// knee moves with the link: on that same store, 332 KiB reads were still
-/// gaining at 64 (10.3 MiB/s at 16, 21.3 MiB/s at 64). An operator on a
-/// fatter link can raise it with [`SOURCE_READ_BYTES_ENV`];
+/// gaining at 64 (10.3 MiB/s at 16, 21.3 MiB/s at 64). So this is a floor:
+/// past it the limiter lets the bytes in flight grow to what completed reads
+/// measure the store to hold. An operator on a fatter link can raise the
+/// floor with [`SOURCE_READ_BYTES_ENV`];
 /// `docs/research/source-read-concurrency-harness/` re-runs the sweep to find
 /// where their own knee is.
 const DEFAULT_SOURCE_READ_BYTES: u64 = 5 * 1024 * 1024;
@@ -484,8 +486,8 @@ enum Answer {
 /// permits would state the same mapping twice, in complementary directions,
 /// with nothing keeping them agreeing.
 ///
-/// Neither payload is ever read: a permit is held, not consulted, and the
-/// release is its `Drop`.
+/// A metadata permit is held, not consulted, and its release is its `Drop`.
+/// A chunk permit is handed what its read delivered, which measures the store.
 #[allow(dead_code)]
 enum ReadPermit<'a> {
     Chunk(crate::source_limiter::SourcePermit),
@@ -1578,7 +1580,10 @@ impl CachedStore {
                         .collect()
                 })
         };
-        drop(permit);
+        match &fetch {
+            Ok(slices) => permit.delivered(slices.iter().map(|slice| slice.len() as u64).sum()),
+            Err(_) => drop(permit),
+        }
         let elapsed = started.elapsed();
         let timing = permit_and_read(
             permit_wait,
@@ -1741,7 +1746,7 @@ impl CachedStore {
             // apart: chunk reads queue on the fair-share source limiter, which
             // has contention to arbitrate, while metadata reads take a plain
             // permit from their own cap.
-            let _permit = match class {
+            let permit = match class {
                 ReadClass::Chunk => {
                     let permit = ReadPermit::Chunk(
                         self.source_read
@@ -1763,7 +1768,11 @@ impl CachedStore {
                     permit
                 }
             };
-            self.request(key).await
+            let fetch = self.request(key).await;
+            if let (ReadPermit::Chunk(permit), Ok(bytes)) = (permit, &fetch) {
+                permit.delivered(bytes.len() as u64);
+            }
+            fetch
         };
         let elapsed = started.elapsed();
         let timing = permit_and_read(permit_wait, elapsed, fetch.as_ref().map_or(0, Bytes::len));
