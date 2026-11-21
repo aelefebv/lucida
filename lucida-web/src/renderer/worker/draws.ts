@@ -64,6 +64,23 @@ export function anyViewWants(pool: SharedChunkPool, memberId: string, tier: Resi
   return false;
 }
 
+/**
+ * Whether the views drawing from `pool` that want one member's chunk in
+ * `tier` all want it only as an ancestor, so it takes no slot from a chunk
+ * one of them draws.
+ */
+export function onlyAncestorIn(pool: SharedChunkPool, memberId: string, tier: ResidencyTier, chunkKey: string): boolean {
+  const key = wantedEntryKey(tier, memberId);
+  const kept = wantedEntryKey(tier, memberId, true);
+  let ancestor = false;
+  for (const view of pool.views.values()) {
+    if (!view.draw.wanted.get(key)?.has(chunkKey)) continue;
+    if (!view.draw.wanted.get(kept)?.has(chunkKey)) return false;
+    ancestor = true;
+  }
+  return ancestor;
+}
+
 /** A pool's count of wanted chunks, and each view's sections and wanted index it was counted from. */
 interface WantedCount {
   tier: ResidencyTier;
@@ -140,12 +157,18 @@ export function evictionViewsOf(
       if (!byMember.has(memberId)) byMember.set(memberId, wanted.get(wantedEntryKey(tier, memberId)));
       return byMember.get(memberId);
     };
+    const ancestorsByMember = new Map<string, ReadonlySet<string> | undefined>();
+    const ancestorsOf = (memberId: string): ReadonlySet<string> | undefined => {
+      if (!ancestorsByMember.has(memberId)) ancestorsByMember.set(memberId, wanted.get(wantedEntryKey(tier, memberId, true)));
+      return ancestorsByMember.get(memberId);
+    };
     return {
       slotGridIdx: view.slotGridIdx,
       entityMetas: view.entityMetas,
       cameraFor: (memberId) => cameraFor(view.draw.view, memberId),
       finestLevelFor: (memberId) => finestLevels.get(memberId),
       isWanted: (memberId, chunkKey) => wantedOf(memberId)?.has(chunkKey) ?? false,
+      isAncestor: (memberId, chunkKey) => ancestorsOf(memberId)?.has(chunkKey) ?? false,
       sources: [wanted, finestLevels, cameras.revisionOf(view.draw.view)],
     };
   });
