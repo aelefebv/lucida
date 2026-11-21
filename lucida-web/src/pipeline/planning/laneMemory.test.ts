@@ -44,18 +44,23 @@ function cells(list: [number, number, number, number][]): SelectedCell[] {
   return list.map(([lvl, x, y, z], rank) => ({ level: lvl, x, y, z, rank }));
 }
 
-function selection(detail: SelectedCell[], ancestors: SelectedCell[] = []): DatasetLevelSelection {
+function selection(detail: SelectedCell[], ancestors: SelectedCell[] = [], lookahead: SelectedCell[] = []): DatasetLevelSelection {
   const entity: EntityLevelSelection = {
     detail,
     ancestors,
-    lookahead: [],
+    lookahead,
     detailLevels: [...new Set(detail.map((cell) => cell.level))].sort((a, b) => a - b),
     coarseCells: 1,
   };
   return { entities: new Map([["vol", entity]]), budgetLimited: false };
 }
 
-function view(detail: SelectedCell[], overrides: Partial<ViewSnapshot> = {}, ancestors: SelectedCell[] = []): ViewSnapshot {
+function view(
+  detail: SelectedCell[],
+  overrides: Partial<ViewSnapshot> = {},
+  ancestors: SelectedCell[] = [],
+  lookahead: SelectedCell[] = [],
+): ViewSnapshot {
   return createSyntheticView({
     entities: [ENTITY],
     visibleRegion: {
@@ -73,7 +78,7 @@ function view(detail: SelectedCell[], overrides: Partial<ViewSnapshot> = {}, anc
       renderMode: "volume",
       interactionState: "idle",
     },
-    levelSelection: selection(detail, ancestors),
+    levelSelection: selection(detail, ancestors, lookahead),
     ...overrides,
   });
 }
@@ -123,6 +128,22 @@ describe("carrying a view's requests between plans", () => {
     }
     // The list is the previous one less what was removed, plus what was added.
     expect(second.requests.length).toBe(first.requests.length - delta.removed.length + delta.added.length);
+  });
+
+  it("carries the lookahead by cell, asking anew only for the cells it gained", () => {
+    const ahead = cells([[0, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 1, 1, 0]]);
+    // The lookahead moves on: two cells stay, one goes, two come.
+    const moved = [ahead[1], ahead[3], ...cells([[0, 2, 0, 0], [0, 2, 1, 0]])].map((cell, rank) => ({ ...cell, rank }));
+    const first = plan(snapshot([view(FIRST, {}, [], ahead)]), initialPlanningState());
+    const second = plan(snapshot([view(FIRST, {}, [], moved)]), first.nextState);
+    const fresh = plan(snapshot([view(FIRST, {}, [], moved)]), initialPlanningState());
+
+    expect(identities(second.requests)).toEqual(identities(fresh.requests));
+    const prefetch = (requests: readonly ChunkRequest[]) =>
+      requests.filter((req) => req.lane === "prefetch").map((req) => req.chunkKey).sort();
+    expect(prefetch(second.delta!.removed)).toEqual(["0/0/0/0/0/0", "0/0/0/0/1/0", "0/0/1/0/0/0", "0/0/1/0/1/0"]);
+    expect(prefetch(second.delta!.added)).toEqual(["0/0/0/0/0/2", "0/0/0/0/1/2", "0/0/1/0/0/2", "0/0/1/0/1/2"]);
+    expect(second.delta!.added.filter((req) => req.lane !== "prefetch")).toEqual([]);
   });
 
   it("stays in planner order", () => {

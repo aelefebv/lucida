@@ -256,31 +256,45 @@ export class LaneRequests {
    * span, under half, and the rest the second half, each spread by its keys.
    */
   finish(): ChunkRequest[] {
-    const range = new Map<string, [number, number]>();
+    // Each band's least and greatest key, for its leading requests and for the rest.
+    const ranges = [new Map<number, [number, number]>(), new Map<number, [number, number]>()];
     const split = new Map<number, number>();
-    const group = (i: number): string => `${this.requests[i].priority}|${this.leading[i] ? 1 : 0}`;
+    const rangeOf = (i: number): Map<number, [number, number]> => ranges[this.leading[i] ? 1 : 0];
     // Kept requests never lead: a view that leads plans beside another, and
     // such a plan keeps nothing.
     for (const [band, keys] of this.keptRange) {
-      range.set(`${band}|0`, [keys[0], keys[1]]);
+      ranges[0].set(band, [keys[0], keys[1]]);
       split.set(band, 2);
     }
     for (let i = 0; i < this.requests.length; i++) {
       const band = this.requests[i].priority;
       split.set(band, (split.get(band) ?? 0) | (this.leading[i] ? 1 : 2));
       const key = this.keys[i];
-      const seen = range.get(group(i));
-      if (seen === undefined) range.set(group(i), [key, key]);
+      const range = rangeOf(i);
+      const seen = range.get(band);
+      if (seen === undefined) range.set(band, [key, key]);
       else if (key < seen[0]) seen[0] = key;
       else if (key > seen[1]) seen[1] = key;
     }
+    // A lane pushes its requests together, so a band's range is looked up
+    // once per run of them rather than once per request.
+    let band = NaN;
+    let leading = false;
+    let range: [number, number] = [0, 0];
+    let halves = false;
     for (let i = 0; i < this.requests.length; i++) {
       const req = this.requests[i];
-      const [least, greatest] = range.get(group(i))!;
-      const halves = split.get(req.priority) === 3;
-      const start = halves && !this.leading[i] ? IN_LANE_SPAN / 2 : 0;
-      const width = halves ? (this.leading[i] ? 0.99 : 1) * (IN_LANE_SPAN / 2) : IN_LANE_SPAN;
-      req.priority += start;
+      if (req.priority !== band || this.leading[i] !== leading) {
+        band = req.priority;
+        leading = this.leading[i];
+        range = rangeOf(i).get(band)!;
+        halves = split.get(band) === 3;
+      }
+      const least = range[0];
+      const greatest = range[1];
+      const start = halves && !leading ? IN_LANE_SPAN / 2 : 0;
+      const width = halves ? (leading ? 0.99 : 1) * (IN_LANE_SPAN / 2) : IN_LANE_SPAN;
+      req.priority = band + start;
       if (greatest > least) req.priority += (width * (this.keys[i] - least)) / (greatest - least);
     }
     return this.requests.sort(compareChunkRequests);

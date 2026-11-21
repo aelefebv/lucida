@@ -57,8 +57,12 @@ class DatasetPacing {
   /** Owed additions in planner order; an entry no longer in {@link pending} was withdrawn. */
   private adding: ChunkRequest[] = [];
   private readonly pending = new Set<ChunkRequest>();
-  /** How many owed additions there are of each {@link pairKey}. */
-  private readonly addingChunks = new Map<string, number>();
+  /**
+   * How many owed additions there are of each {@link pairKey}, kept only
+   * while removals are owed: a dataset's first plan, all additions, pairs
+   * nothing.
+   */
+  private addingChunks: Map<string, number> | null = null;
 
   constructor(held: readonly ChunkRequest[]) {
     this.target = held;
@@ -90,10 +94,12 @@ class DatasetPacing {
       }
     }
     if (delta.added.length > 0) {
+      const index = this.addingChunks;
       for (const req of delta.added) {
-        const chunk = pairKey(req);
         this.pending.add(req);
-        this.addingChunks.set(chunk, (this.addingChunks.get(chunk) ?? 0) + 1);
+        if (index === null) continue;
+        const chunk = pairKey(req);
+        index.set(chunk, (index.get(chunk) ?? 0) + 1);
         const unpaired = this.unpaired.get(chunk);
         if (unpaired !== undefined) {
           this.unpaired.delete(chunk);
@@ -130,6 +136,7 @@ class DatasetPacing {
         if (!this.pending.delete(req)) continue;
         added.push(req);
         // The removals it pairs with go once every addition sharing its key has.
+        if (this.addingChunks === null) continue;
         const chunk = pairKey(req);
         if (!this.countDown(chunk)) continue;
         const pairs = this.paired.get(chunk);
@@ -141,6 +148,7 @@ class DatasetPacing {
     }
     this.adding = this.adding.slice(next);
     this.removing -= removed.length;
+    if (this.removing === 0) this.addingChunks = null;
     if (this.owed === 0) {
       // A chunk's removals go together, so the last of them can overrun the budget.
       this.held = this.target;
@@ -155,16 +163,28 @@ class DatasetPacing {
   /** Owe the removal of `req`, which the stages hold. */
   private owe(req: ChunkRequest): void {
     const chunk = pairKey(req);
-    const into = this.addingChunks.has(chunk) ? this.paired : this.unpaired;
+    const into = this.indexAdditions().has(chunk) ? this.paired : this.unpaired;
     const list = into.get(chunk);
     if (list === undefined) into.set(chunk, [req]);
     else list.push(req);
     this.removing++;
   }
 
+  /** {@link addingChunks}, counted from the owed additions when it is not kept yet. */
+  private indexAdditions(): Map<string, number> {
+    if (this.addingChunks !== null) return this.addingChunks;
+    const index = new Map<string, number>();
+    for (const req of this.adding) {
+      if (!this.pending.has(req)) continue;
+      const chunk = pairKey(req);
+      index.set(chunk, (index.get(chunk) ?? 0) + 1);
+    }
+    return (this.addingChunks = index);
+  }
+
   /** An owed addition of `chunk` was withdrawn before the stages took it. */
   private withdrawAddition(chunk: string): void {
-    if (!this.countDown(chunk)) return;
+    if (this.addingChunks === null || !this.countDown(chunk)) return;
     const pairs = this.paired.get(chunk);
     if (pairs !== undefined) {
       this.paired.delete(chunk);
@@ -172,14 +192,15 @@ class DatasetPacing {
     }
   }
 
-  /** One owed addition of `chunk` fewer; whether none is left. */
+  /** One owed addition of `chunk` fewer in {@link addingChunks}; whether none is left. */
   private countDown(chunk: string): boolean {
-    const n = (this.addingChunks.get(chunk) ?? 0) - 1;
+    const index = this.addingChunks!;
+    const n = (index.get(chunk) ?? 0) - 1;
     if (n > 0) {
-      this.addingChunks.set(chunk, n);
+      index.set(chunk, n);
       return false;
     }
-    this.addingChunks.delete(chunk);
+    index.delete(chunk);
     return true;
   }
 
@@ -189,7 +210,7 @@ class DatasetPacing {
     this.removing = 0;
     this.adding = [];
     this.pending.clear();
-    this.addingChunks.clear();
+    this.addingChunks = null;
   }
 }
 

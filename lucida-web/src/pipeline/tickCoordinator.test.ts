@@ -2632,9 +2632,25 @@ describe("incremental delta fold", () => {
         ({ ...(makeCtx(scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
       const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
 
+      /** Ticks that plan nothing new, until the stages hold what the plans want. */
+      const drain = (): void => {
+        for (let tick = 0; orch.owesPlanChanges(); tick++) {
+          expect(tick).toBeLessThan(20);
+          vi.advanceTimersByTime(16);
+          orch.planAndFetch(ctx(), emptyMinimap);
+        }
+      };
+
+      // A dataset new to the stages starts from nothing, a budget of its requests a tick.
       orch.planAndFetch(ctx(), emptyMinimap);
-      const first = submits()[0];
-      expect(first.requests.filter((r) => r.lane === "detail")).toHaveLength(1024);
+      const opened = planSpy.mock.results[0].value as RequestPlan;
+      expect(opened.requests.filter((r) => r.lane === "detail")).toHaveLength(1024);
+      expect(submits()[0].requests.length).toBeLessThanOrEqual(256);
+      expect(submits()[0].delta).toBeUndefined();
+      drain();
+      const first = submits().at(-1)!;
+      expect(first.requests).toBe(opened.requests);
+      const before = { submits: submits().length, deltas: client.coldStateDelta.mock.calls.length };
 
       vi.advanceTimersByTime(500);
       fold.setView(2);
@@ -2642,25 +2658,21 @@ describe("incremental delta fold", () => {
       orch.planAndFetch(ctx(), emptyMinimap);
       const planned = planSpy.mock.results.at(-1)!.value as RequestPlan;
       expect(planned.delta!.removed.length + planned.delta!.added.length).toBeGreaterThan(1000);
-      const zoomed = submits()[1];
+      const zoomed = submits()[before.submits];
       expect(zoomed.delta!.base).toBe(first.requests);
       expect(zoomed.delta!.added.length + zoomed.delta!.removed.length).toBeLessThanOrEqual(256);
       expect(orch.owesPlanChanges()).toBe(true);
       expect(orch.hasPendingRebuild()).toBe(true);
 
       // Ticks that plan nothing new hand the rest over, each on what the last took.
-      for (let tick = 0; orch.owesPlanChanges(); tick++) {
-        expect(tick).toBeLessThan(20);
-        vi.advanceTimersByTime(16);
-        orch.planAndFetch(ctx(), emptyMinimap);
-      }
+      drain();
       expect(planSpy).toHaveBeenCalledTimes(2);
-      const all = submits().slice(1);
+      const all = submits().slice(before.submits);
       for (let i = 1; i < all.length; i++) expect(all[i].delta!.base).toBe(all[i - 1].requests);
       expect(all.at(-1)!.requests).toBe(planned.requests);
       expect(orch.hasPendingRebuild()).toBe(false);
       // The worker heard every change once.
-      const detail = client.coldStateDelta.mock.calls
+      const detail = client.coldStateDelta.mock.calls.slice(before.deltas)
         .flatMap(([msg]) => (msg as ColdStateDeltaMessage).wantedChunks)
         .filter((change) => change.tier === "detail");
       expect(detail.flatMap((change) => change.removed)).toHaveLength(1024);

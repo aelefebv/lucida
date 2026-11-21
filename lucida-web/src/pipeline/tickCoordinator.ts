@@ -969,13 +969,17 @@ export class TickCoordinator {
 
   /**
    * Hand the stages after the plan at most a tick's budget of each dataset's
-   * changes, owing the rest to the ticks after, when every dataset's plan
-   * carried its requests and submits nothing beside them; otherwise the
-   * stages take every plan whole. Returns how many changes they take now.
+   * changes, owing the rest to the ticks after, when every dataset is drawn
+   * by one view, submits nothing beside its plan's requests, and either
+   * carried them from its last plan or is new to the stages, which then
+   * take it from nothing. Otherwise the stages take every plan whole.
+   * Returns how many changes they take now.
    */
   private pace(planned: PlannedDataset[], labelRequests: readonly (readonly ChunkRequest[])[]): number {
-    const paceable = planned.length > 0 &&
-      planned.every((dataset, i) => dataset.result.delta !== undefined && labelRequests[i].length === 0);
+    const paceable = planned.length > 0 && planned.every((dataset, i) =>
+      dataset.views.length === 1 &&
+      labelRequests[i].length === 0 &&
+      (dataset.result.delta !== undefined || !this.heldActiveSets.has(dataset.dsId)));
     if (!paceable) {
       this.pacing.clear();
       this.pacedPass = null;
@@ -985,7 +989,9 @@ export class TickCoordinator {
     const budget = this.changeBudget(planned.length);
     let changes = 0;
     for (const dataset of planned) {
-      const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, dataset.result.delta!, budget);
+      // A dataset's first plan is everything it adds to nothing the stages hold.
+      const carried = dataset.result.delta ?? { base: [], added: dataset.result.requests, removed: [] };
+      const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, carried, budget);
       dataset.result = { ...dataset.result, requests, delta };
       changes += delta.added.length + delta.removed.length;
     }
@@ -1391,8 +1397,8 @@ export class TickCoordinator {
       config: planningConfig,
       cutStep: view.cutStep,
     })));
-    const applyStart = performance.now();
     const pacedChanges = this.pace(plannedDatasets, labelRequests);
+    const applyStart = performance.now();
     const admissions = this.admit(
       ctx,
       plannedDatasets.map((planned) => ({
