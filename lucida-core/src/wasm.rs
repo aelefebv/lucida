@@ -48,7 +48,9 @@ pub fn enumerate_chunks(
 /// is a JSON array of the visible regions the entities name by index, as
 /// `visible_region` writes them, and `depth_bias` moves each one's focus as
 /// `enumerate_chunks` does. `entities` and `previous` are in the flat layout
-/// `crate::level_selection` describes, as is the result. `lookahead` is 0
+/// `crate::level_selection` describes, as is the result. With
+/// `hold_refinement` the selection refines none of the cells the previous one
+/// kept. `lookahead` is 0
 /// for none, 1 for the finer cells the selection would refine next, and 2
 /// for the coarser cells above its finest. A positive `ancestor_scale` keeps
 /// each selected cell's ancestors that a frame at that share of the
@@ -61,6 +63,7 @@ pub fn select_levels(
     depth_bias: f64,
     entities: &[f64],
     previous: &[f64],
+    hold_refinement: bool,
     budget_cpu: f64,
     budget_gpu: f64,
     share: f64,
@@ -80,6 +83,7 @@ pub fn select_levels(
         &views,
         entities,
         previous,
+        hold_refinement,
         Cost {
             cpu: budget_cpu,
             gpu: budget_gpu,

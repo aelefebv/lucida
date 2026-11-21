@@ -33,7 +33,7 @@ import type {
  */
 const PREVIOUS_STRIDE = 6;
 const CELL_STRIDE = 8;
-const SELECTION_HEADER = 12;
+const SELECTION_HEADER = 13;
 
 /**
  * How far the focal zoom must move between two plans of a moving view to be
@@ -105,6 +105,11 @@ export interface LevelSelectionResult {
   byView: Map<number, Map<string, DatasetLevelSelection>>;
   summaries: Map<number, ViewSelectionSummary>;
   memory: LevelSelectionMemory;
+  /**
+   * Whether a view held back a refinement the screen calls for while it
+   * zoomed in, so the selection has refining to do once the views stop.
+   */
+  held: boolean;
 }
 
 /**
@@ -113,14 +118,25 @@ export interface LevelSelectionResult {
  * chunks a refinement replaces while the finer ones load, and for prefetch.
  * A volume view's ancestors take from that rest, up to
  * `config.ancestorShare`.
+ *
+ * A volume view that zooms in while the views are `moving` holds its
+ * refinement: it keeps what it last chose or coarsens it, refines only what
+ * comes into view, and looks ahead to the refinements it holds back, which
+ * the CPU cache fetches and the GPU does not take until the view stops. A
+ * zoom in calls for finer levels across the view, so each replan of a deep
+ * volume would otherwise fetch and upload cells the zoom passes. An orbit or
+ * a pan refines as it moves: its replans change little but what comes into
+ * view. A slice view's selection is one band of planes, which the screen
+ * bounds.
  */
 export function selectLevels(
   views: readonly SelectionView[],
   budget: SelectionBytes,
   memory: LevelSelectionMemory,
   config: PlanningConfig,
+  moving = false,
 ): LevelSelectionResult {
-  const encoded = views.map((view) => encodeView(view, memory.views.get(view.view), config));
+  const encoded = views.map((view) => encodeView(view, memory.views.get(view.view), config, moving));
   let runs = encoded.map((input) => runView(input, budget, config));
 
   // Several views share the budget. Each first selected at the whole of
@@ -150,7 +166,7 @@ export function selectLevels(
     const { zoom, region, zoomDirection } = encoded[i];
     remembered.set(view.view, { cells: run.cells, zoom, region, zoomDirection });
   });
-  return { byView, summaries, memory: { views: remembered } };
+  return { byView, summaries, memory: { views: remembered }, held: runs.some((run) => run.held) };
 }
 
 /** Which dataset and entity each entity index of a view's call stands for. */
@@ -168,6 +184,8 @@ interface EncodedView {
   owners: Owner[];
   datasetIds: string[];
   lookahead: number;
+  /** Whether the selection refines none of the cells the previous one kept. */
+  holdRefinement: boolean;
   /** The scale of the frames the view keeps ancestors for, or 0 for none. */
   ancestorScale: number;
   zoom: number | null;
@@ -175,7 +193,12 @@ interface EncodedView {
   zoomDirection: ZoomDirection | null;
 }
 
-function encodeView(view: SelectionView, memory: ViewMemory | undefined, config: PlanningConfig): EncodedView {
+function encodeView(
+  view: SelectionView,
+  memory: ViewMemory | undefined,
+  config: PlanningConfig,
+  moving: boolean,
+): EncodedView {
   const regions: Record<string, unknown>[] = [];
   const entities: number[] = [];
   const previous: number[] = [];
@@ -215,7 +238,8 @@ function encodeView(view: SelectionView, memory: ViewMemory | undefined, config:
   // The selection looks ahead the way the view last zoomed, through the
   // replans of a view that holds still while its chunks arrive. A move that
   // is not a zoom, an orbit or a pan, ends it: its lookahead would follow the
-  // view's near side around and fetch cells nothing draws.
+  // view's near side around and fetch cells nothing draws. A held zoom in
+  // looks ahead first to the refinements it holds back.
   const first = view.datasets[0]?.view.visibleRegion;
   const zoom = first === undefined ? null : first.focalZoom ?? first.effectiveZoom;
   const region = regions.length === 0 ? null : JSON.stringify(regions[0]);
@@ -235,6 +259,7 @@ function encodeView(view: SelectionView, memory: ViewMemory | undefined, config:
     owners,
     datasetIds: view.datasets.map((dataset) => dataset.datasetId),
     lookahead,
+    holdRefinement: moving && volume && zoomDirection === "in",
     ancestorScale: volume ? config.ancestorScale : 0,
     zoom,
     region,
@@ -292,6 +317,7 @@ interface ViewRun {
   used: SelectionBytes;
   budget: SelectionBytes;
   limit: number | null;
+  held: boolean;
 }
 
 /** One call into the core for one view, read back per dataset and entity. */
@@ -303,6 +329,7 @@ function runView(input: EncodedView, budget: SelectionBytes, config: PlanningCon
       config.depthBiasView,
       input.entities,
       input.previous,
+      input.holdRefinement,
       budget.cpu,
       budget.gpu,
       config.selectionShare,
@@ -368,6 +395,7 @@ function runView(input: EncodedView, budget: SelectionBytes, config: PlanningCon
     used: { cpu: out[3], gpu: out[4] },
     budget,
     limit: limited ? out[5] : null,
+    held: out[12] > 0,
   };
 }
 

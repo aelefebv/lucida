@@ -218,6 +218,13 @@ pub struct PreviousSelection {
     pub refined: CellSet,
     /// Cells it kept as ancestors.
     pub ancestors: CellSet,
+    /// Refine no cell it kept, while the view zooms in. A zoom in calls for
+    /// finer levels across the whole view, so each replan of a deep volume
+    /// would refine most of what the last one chose and fetch and upload
+    /// cells the zoom passes before they land. Held, the selection keeps
+    /// what the last one chose or coarsens it. Cells it had none of still
+    /// refine: nothing of theirs is resident to keep.
+    pub hold_refinement: bool,
 }
 
 /// The ancestors a selection keeps for frames drawn at a fraction of the
@@ -241,7 +248,9 @@ pub struct Ancestors {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lookahead {
     None,
-    /// The refinements the selection would make next, given more room.
+    /// The refinements the selection would make next, given more room: in a
+    /// held selection, first the ones its hold kept back, which it makes once
+    /// the view stops.
     Finer,
     /// The coarser cells above the finest selected ones.
     Coarser,
@@ -272,6 +281,10 @@ pub struct LevelSelection {
     /// coarser than the screen calls for. `None` when every cell reached the
     /// level the screen calls for.
     pub limit: Option<f64>,
+    /// Whether the previous selection's hold kept back a refinement the
+    /// screen calls for, so the selection has refining to do once the view
+    /// stops.
+    pub refinement_held: bool,
     /// What the enumerations behind it culled.
     pub counts: CullCounts,
 }
@@ -374,6 +387,11 @@ struct Refiner<'s, 'a> {
     used: Cost,
     /// What the ancestors cost, of `used`.
     held_used: Cost,
+    /// Whether the previous selection's hold on refinement applies: to the
+    /// selection, and not to the lookahead past it.
+    holding_refinement: bool,
+    /// The refinements that hold kept back.
+    kept_back: Vec<Candidate>,
     counts: CullCounts,
     found: Vec<ScoredChunk>,
 }
@@ -397,6 +415,8 @@ impl<'s, 'a> Refiner<'s, 'a> {
             heap: BinaryHeap::new(),
             used: Cost::default(),
             held_used: Cost::default(),
+            holding_refinement: previous.hold_refinement,
+            kept_back: Vec::new(),
             counts: CullCounts::default(),
             found: Vec::new(),
         }
@@ -430,7 +450,8 @@ impl<'s, 'a> Refiner<'s, 'a> {
     }
 
     /// Queue `cell` for refinement if it has a finer level to go to and the
-    /// screen, or its pin, calls for one.
+    /// screen, or its pin, calls for one, unless the hold on refinement keeps
+    /// it back.
     fn offer(&mut self, cell: Cell, measure: f64) {
         let entities = self.entities;
         let entity = &entities[cell.entity as usize];
@@ -442,8 +463,14 @@ impl<'s, 'a> Refiner<'s, 'a> {
             Some(pin) => cell.level > pin,
             None => priority > 1.0,
         };
-        if wanted {
-            self.heap.push(Candidate { priority, cell });
+        if !wanted {
+            return;
+        }
+        let candidate = Candidate { priority, cell };
+        if self.holding_refinement && self.previous.kept.contains(&cell) {
+            self.kept_back.push(candidate);
+        } else {
+            self.heap.push(candidate);
         }
     }
 
@@ -953,8 +980,9 @@ impl<'s, 'a> Refiner<'s, 'a> {
 ///
 /// `previous` tilts close calls toward the last selection by the target
 /// level's hysteresis band, both in which cell refines first and in the
-/// one-pixel stop, so a small camera move keeps the set it had. `lookahead`
-/// asks for the cells worth fetching ahead in the room the share leaves.
+/// one-pixel stop, so a small camera move keeps the set it had. Its hold on
+/// refinement refines none of the cells it kept. `lookahead` asks for the
+/// cells worth fetching ahead in the room the share leaves.
 ///
 /// With `ancestors`, each selected cell keeps the ancestors a frame at their
 /// scale would sample, and the selected cells with their ancestors stay
@@ -981,9 +1009,13 @@ pub fn select_levels(
     refined.sort_unstable();
     let used = refiner.used;
     let ancestors_used = refiner.held_used;
+    let refinement_held = !refiner.kept_back.is_empty();
     let lookahead = match lookahead {
         Lookahead::None => Vec::new(),
         Lookahead::Finer => {
+            refiner.holding_refinement = false;
+            let kept_back = std::mem::take(&mut refiner.kept_back);
+            refiner.heap.extend(kept_back);
             let mut ahead = Ahead {
                 cells: Vec::new(),
                 spent: Cost::default(),
@@ -1006,6 +1038,7 @@ pub fn select_levels(
         used: used.sub(ancestors_used),
         ancestors_used,
         limit,
+        refinement_held,
         counts: refiner.counts,
     }
 }
@@ -1036,18 +1069,21 @@ pub const CELL_STRIDE: usize = 8;
 /// then lookahead and refined cells follow, in that order; the CPU and GPU
 /// bytes the
 /// selected cells use; the refused refinement's measure or -1; the four
-/// [`CullCounts`] in field order; and the CPU and GPU bytes the ancestors
-/// use.
-pub const SELECTION_HEADER: usize = 12;
+/// [`CullCounts`] in field order; the CPU and GPU bytes the ancestors use;
+/// and 1 when the hold on refinement kept one back.
+pub const SELECTION_HEADER: usize = 13;
 
 /// [`select_levels`] over the flat numeric layout the strides above describe,
 /// so a client crosses into the core once per view. `views` are the regions
 /// the entities name by index. A malformed entity, one whose numbers run
-/// short, ends the input there.
+/// short, ends the input there. `hold_refinement` is the previous
+/// selection's.
+#[allow(clippy::too_many_arguments)]
 pub fn select_batch(
     views: &[ChunkView],
     entities: &[f64],
     previous: &[f64],
+    hold_refinement: bool,
     budget: Cost,
     share: f64,
     lookahead: Lookahead,
@@ -1105,7 +1141,10 @@ pub fn select_batch(
         at = end;
     }
 
-    let mut last = PreviousSelection::default();
+    let mut last = PreviousSelection {
+        hold_refinement,
+        ..PreviousSelection::default()
+    };
     let (previous, _) = previous.as_chunks::<PREVIOUS_STRIDE>();
     for numbers in previous {
         let (Some(entity), Some(level), Some(x), Some(y), Some(z)) = (
@@ -1159,6 +1198,7 @@ pub fn select_batch(
         selection.counts.after_frustum as f64,
         selection.ancestors_used.cpu,
         selection.ancestors_used.gpu,
+        f64::from(u8::from(selection.refinement_held)),
     ]);
     let mut push = |cell: Cell, measure: f64, distance: f64, ancestor: bool| {
         out.extend_from_slice(&[
@@ -1280,6 +1320,7 @@ mod tests {
             kept: selection.cells.iter().map(|c| c.cell).collect(),
             refined: selection.refined.iter().copied().collect(),
             ancestors: selection.ancestors.iter().map(|c| c.cell).collect(),
+            hold_refinement: false,
         }
     }
 
@@ -1531,6 +1572,120 @@ mod tests {
         }
     }
 
+    fn held(selection: &LevelSelection) -> PreviousSelection {
+        PreviousSelection {
+            hold_refinement: true,
+            ..previous(selection)
+        }
+    }
+
+    #[test]
+    fn a_held_zoom_in_keeps_its_level_and_looks_ahead_to_what_it_held_back() {
+        let levels = image(2048);
+        let before = select(&[entity(&slice_view(0.1), &levels)], cells_budget(1e9));
+        let view = slice_view(0.6);
+        let kept = select_levels(
+            &[entity(&view, &levels)],
+            cells_budget(1e9),
+            1.0,
+            &held(&before),
+            Lookahead::Finer,
+            None,
+        );
+        assert_eq!(levels_of(&kept), levels_of(&before));
+        assert!(kept.refinement_held);
+        assert_eq!(kept.limit, None, "the budget refused nothing");
+        // What it would draw once the view stops, it fetches ahead.
+        let free = select(&[entity(&view, &levels)], cells_budget(1e9));
+        let ahead: BTreeSet<Cell> = kept.lookahead.iter().map(|c| c.cell).collect();
+        assert!(set(&free).is_subset(&ahead));
+        assert!(ahead.is_disjoint(&set(&kept)));
+    }
+
+    #[test]
+    fn a_held_zoom_in_keeps_a_volume_within_what_it_held() {
+        let levels = cube_pyramid(512, 32, 5);
+        let mut arcball = Arcball::new([800, 600]);
+        let first = select(
+            &[entity(&volume_view(arcball.clone(), 512), &levels)],
+            cells_budget(400.0),
+        );
+        arcball.distance *= 0.6;
+        let nearer = volume_view(arcball, 512);
+        let run = |previous: &PreviousSelection| {
+            select_levels(
+                &[entity(&nearer, &levels)],
+                cells_budget(400.0),
+                1.0,
+                previous,
+                Lookahead::None,
+                Some(KEEP),
+            )
+        };
+        let free = run(&previous(&first));
+        let kept = run(&held(&first));
+        assert_ne!(set(&free), set(&first), "a free selection refines");
+        assert!(kept.refinement_held);
+        assert!(kept.used.cpu + kept.ancestors_used.cpu <= 400.0);
+        // A zoom in brings nothing into view, so every cell it draws the last
+        // selection drew or refined: nothing is finer than it was.
+        let before: BTreeSet<Cell> = set(&first)
+            .union(&first.refined.iter().copied().collect())
+            .copied()
+            .collect();
+        assert!(set(&kept).is_subset(&before));
+        assert!(kept.refined.iter().all(|cell| first.refined.contains(cell)));
+    }
+
+    #[test]
+    fn a_held_move_refines_what_it_brings_into_view() {
+        // Zoomed in over one corner of the image, then held over the far
+        // corner, which no cell of the first view reached.
+        let levels = image(2048);
+        let before = select(
+            &[entity(&slice_at(0.6, [400.0, 400.0]), &levels)],
+            cells_budget(1e9),
+        );
+        let view = slice_at(0.6, [1600.0, 1600.0]);
+        let run = |previous: &PreviousSelection| {
+            select_levels(
+                &[entity(&view, &levels)],
+                cells_budget(1e9),
+                1.0,
+                previous,
+                Lookahead::None,
+                None,
+            )
+        };
+        let kept = run(&held(&before));
+        assert_eq!(levels_of(&kept), [0].into());
+        assert_eq!(set(&kept), set(&run(&previous(&before))));
+        assert!(!kept.refinement_held);
+    }
+
+    #[test]
+    fn a_held_zoom_out_coarsens_as_a_free_one_does() {
+        let levels = image(2048);
+        let before = select(&[entity(&slice_view(0.6), &levels)], cells_budget(1e9));
+        let view = slice_view(0.1);
+        let run = |previous: &PreviousSelection| {
+            select_levels(
+                &[entity(&view, &levels)],
+                cells_budget(1e9),
+                1.0,
+                previous,
+                Lookahead::Coarser,
+                None,
+            )
+        };
+        let free = run(&previous(&before));
+        let kept = run(&held(&before));
+        assert!(levels_of(&kept).iter().all(|&level| level > 0));
+        assert_eq!(set(&kept), set(&free));
+        assert_eq!(kept.lookahead, free.lookahead);
+        assert!(!kept.refinement_held);
+    }
+
     #[test]
     fn a_zoom_inside_the_band_keeps_the_level() {
         let levels = image(2048);
@@ -1723,6 +1878,7 @@ mod tests {
             std::slice::from_ref(&view),
             &entities,
             &[],
+            false,
             budget,
             0.8,
             Lookahead::None,
@@ -1782,9 +1938,10 @@ mod tests {
             previous.push(1.0);
         }
         let again = select_batch(
-            &[view],
+            std::slice::from_ref(&view),
             &entities,
             &previous,
+            false,
             budget,
             0.8,
             Lookahead::None,
@@ -1793,6 +1950,25 @@ mod tests {
         let end = SELECTION_HEADER + fetched * CELL_STRIDE;
         assert_eq!(again[..5], out[..5]);
         assert_eq!(again[SELECTION_HEADER..end], out[SELECTION_HEADER..end]);
+        assert_eq!(again[SELECTION_HEADER - 1], 0.0);
+
+        // Held at a view nearer the volume, it keeps those cells, says the
+        // screen calls for finer ones, and looks ahead to them.
+        let mut nearer = Arcball::new([800, 600]);
+        nearer.distance *= 0.5;
+        let near = volume_view(nearer, 512);
+        let kept = select_batch(
+            std::slice::from_ref(&near),
+            &entities,
+            &previous,
+            true,
+            budget,
+            0.8,
+            Lookahead::Finer,
+            Some(KEEP),
+        );
+        assert_eq!(kept[SELECTION_HEADER - 1], 1.0);
+        assert!(kept[1] > 0.0, "it looks ahead to what it held back");
     }
 
     /// Ancestors for frames at a quarter of the resolution, with all of the
