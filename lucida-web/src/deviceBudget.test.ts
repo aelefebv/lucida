@@ -22,13 +22,13 @@ const phone = (memoryGiB: number): DeviceFacts => ({ memoryGiB, touchOnly: true,
 const software = (memoryGiB: number | null): DeviceFacts => ({ memoryGiB, touchOnly: false, fallbackAdapter: true });
 
 describe("fitBudgets", () => {
-  it("gives a desktop with a hardware adapter a 3 GiB GPU total and a detail store as large", () => {
+  it("gives a desktop with a hardware adapter a 4 GiB GPU total and a detail store as large", () => {
     for (const memory of [16, 32]) {
       expect(fitBudgets(desktop(memory))).toEqual({
-        gpuTotalBytes: 3 * GIB,
-        labelVolumeBytes: 1 * GIB,
-        labelTotalVolumeBytes: 1 * GIB,
-        cpuMainBytes: 3 * GIB,
+        gpuTotalBytes: 4 * GIB,
+        labelVolumeBytes: 1365 * MIB,
+        labelTotalVolumeBytes: 1365 * MIB,
+        cpuMainBytes: 4 * GIB,
         cpuOverviewBytes: 64 * MIB,
         cpuBytesInFlight: 32 * MIB,
       });
