@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.8](https://github.com/aelefebv/lucida/compare/v0.45.7...v0.45.8) (2026-11-21)
+
+
+### Performance
+
+* **web:** raise the desktop GPU total to 3 GiB ([#1726](https://github.com/aelefebv/lucida/issues/1726)) ([b71ad50](https://github.com/aelefebv/lucida/commit/b71ad505913687541bc6652c1e784b4cbc49c3ac))
+
 ## [0.45.7](https://github.com/aelefebv/lucida/compare/v0.45.6...v0.45.7) (2026-11-21)
 
 
