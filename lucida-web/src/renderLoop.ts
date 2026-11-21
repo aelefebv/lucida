@@ -752,10 +752,13 @@ export class RenderLoop implements TraceEnvironment {
         this.fullQualityFrameSeen = true;
       }
     }
+    // While the viewer's render scale is lowered, it brings the resolution
+    // back when it returns (`setRenderScale`), not input going quiet.
     const wait = this.resolution.msUntilRestore();
-    if (wait === null || this.resolutionRestoreTimer !== null) return;
+    if (wait === null || this._renderScale < 1 || this.resolutionRestoreTimer !== null) return;
     this.resolutionRestoreTimer = setTimeout(() => {
       this.resolutionRestoreTimer = null;
+      if (this._renderScale < 1) return;
       if (this.resolution.restoreIfIdle()) this.setDirty("interactive", "resolution_restored");
       else this.adaptResolution();
     }, wait);
@@ -877,10 +880,17 @@ export class RenderLoop implements TraceEnvironment {
    * for the next frame something else asks for: redrawing a view that has
    * not moved would only blur it, and a press lowers the scale before the
    * drag that moves anything, or before a click that moves nothing.
+   *
+   * The scale's return to full ends the gesture, and the adaptive resolution
+   * comes back with it, so the next frame is the full-quality one. Apart, the
+   * frames between would draw at full scale and the gesture's reduced factor:
+   * several times a gesture frame's work, for frames that show nothing new.
    */
   setRenderScale(s: number): void {
+    const ending = this._renderScale < 1 && s >= 1;
     this._renderScale = s;
-    if (s > this.drawnRenderScale) this.setDirty("interactive", "render_scale");
+    if (ending && this.resolution.endGesture()) this.setDirty("interactive", "resolution_restored");
+    else if (s > this.drawnRenderScale) this.setDirty("interactive", "render_scale");
   }
 
   setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {

@@ -308,6 +308,24 @@ export class AdaptiveResolution {
   restoreIfIdle(): boolean {
     const wait = this.msUntilRestore();
     if (wait === null || wait > 0) return false;
+    this.restore();
+    return true;
+  }
+
+  /**
+   * End the gesture now, as the end of a press says it is over, without
+   * waiting {@link RESTORE_AFTER_MS} for its input to go quiet: restore full
+   * resolution, and take the next input as a new gesture's. True when the
+   * resolution changed.
+   */
+  endGesture(): boolean {
+    this.lastInputAt = Number.NEGATIVE_INFINITY;
+    if (this.factor >= 1) return false;
+    this.restore();
+    return true;
+  }
+
+  private restore(): void {
     // A gesture that never climbed from its idle start says nothing about
     // what a warm GPU keeps up with, so the next starts from where this one
     // would have. One that climbed ended on clocks that kept up with where it
@@ -319,6 +337,5 @@ export class AdaptiveResolution {
     this.gestureStart = Math.min(1, ended * GESTURE_START_STEP_UP);
     this.factor = 1;
     this.coarsening = 1;
-    return true;
   }
 }

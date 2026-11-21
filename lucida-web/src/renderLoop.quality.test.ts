@@ -2,8 +2,8 @@
 /**
  * What the render loop draws a volume frame at on a GPU too slow for its
  * full-quality frames: a gesture starts low, the frame that shows input is
- * never the full-quality one, and input gives up a banded frame it would
- * wait behind.
+ * never the full-quality one, a gesture's end goes straight to the
+ * full-quality frame, and input gives up a banded frame it would wait behind.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -202,6 +202,49 @@ describe("volume frames on a GPU too slow for full quality", () => {
     loop.markInput("orbit");
     tick();
     expect(drawn.at(-1)).toMatchObject({ renderScale: 0.5, resolutionScale: 1, marchStepScale: INTERACTION_MARCH_STEP_SCALE });
+  });
+
+  it("goes from a gesture's frames straight to the full-quality frame when the render scale returns", () => {
+    const { loop, finish } = makeLoop();
+    tick();
+    finish(2, 2_000);
+
+    loop.setRenderScale(0.5);
+    loop.markInput("orbit");
+    tick();
+    expect(drawn.at(-1)).toMatchObject({ renderScale: 0.5, resolutionScale: MIN_ADAPTIVE_SCALE });
+    finish(3, 40);
+    tick();
+
+    // The press ends well before input has been quiet long enough to bring
+    // the resolution back on its own.
+    vi.advanceTimersByTime(50);
+    loop.setRenderScale(1);
+    tick();
+    expect(drawn).toHaveLength(3);
+    expect(drawn.at(-1)).toMatchObject({ renderScale: 1, resolutionScale: 1, marchStepScale: 1 });
+  });
+
+  it("keeps a gesture's resolution past input going quiet while the render scale is lowered", () => {
+    const { loop, finish } = makeLoop();
+    tick();
+    finish(2, 2_000);
+
+    loop.setRenderScale(0.5);
+    loop.markInput("orbit");
+    tick();
+    finish(3, 40);
+    tick();
+
+    // A press held still: no frame at the lowered scale and full resolution.
+    vi.advanceTimersByTime(RESTORE_AFTER_MS * 2);
+    tick();
+    expect(drawn).toHaveLength(2);
+
+    loop.setRenderScale(1);
+    tick();
+    expect(drawn).toHaveLength(3);
+    expect(drawn.at(-1)).toMatchObject({ renderScale: 1, resolutionScale: 1, marchStepScale: 1 });
   });
 
   it("draws a full-quality frame in bands once one ran long, and gives it up for the next input", () => {
