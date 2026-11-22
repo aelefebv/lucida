@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.10](https://github.com/aelefebv/lucida/compare/v0.45.9...v0.45.10) (2026-11-22)
+
+
+### Performance
+
+* **web:** pace a plan's changes into the stages after it ([#1732](https://github.com/aelefebv/lucida/issues/1732)) ([b110b66](https://github.com/aelefebv/lucida/commit/b110b66c2e6d775675ef27dc4a41fd6021da6b6e))
+
 ## [0.45.9](https://github.com/aelefebv/lucida/compare/v0.45.8...v0.45.9) (2026-11-21)
 
 
