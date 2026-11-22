@@ -23,6 +23,7 @@ import type { LaneCarry } from "./laneMemory.ts";
 import { detailCellKey } from "./laneMemory.ts";
 import type {
   ActiveSetEntry,
+  CellLane,
   ChunkRequest,
   DatasetView,
   EntityLevelSelection,
@@ -130,6 +131,16 @@ function chunkAlong(axis: SpatialAxis, x: number, y: number, z: number): number 
 }
 
 /**
+ * What a request's priority holds before its band. The band is a whole
+ * number, and {@link LaneRequests.finish} adds a fraction to it in place.
+ * Created holding a small integer, every request would change shape when
+ * the fraction lands, about a microsecond each on a plan of thousands.
+ * Created holding NaN, which the engine stores as it stores fractions, the
+ * field takes both without a change of shape.
+ */
+const UNPLACED = Number.NaN;
+
+/**
  * The share of its band a lane's in-lane terms spread over. Under one, so a
  * lane never reaches the next whole-number band.
  */
@@ -204,6 +215,11 @@ export class LaneRequests {
       this.keep(req.priority, key);
       return;
     }
+    this.add(req, key);
+  }
+
+  /** A request of `req.priority`'s band that no earlier plan made alike: a lane that keeps by cell knows. */
+  add(req: ChunkRequest, key: number): void {
     this.requests.push(req);
     this.keys.push(key);
     this.leading.push(false);
@@ -250,31 +266,45 @@ export class LaneRequests {
    * span, under half, and the rest the second half, each spread by its keys.
    */
   finish(): ChunkRequest[] {
-    const range = new Map<string, [number, number]>();
+    // Each band's least and greatest key, for its leading requests and for the rest.
+    const ranges = [new Map<number, [number, number]>(), new Map<number, [number, number]>()];
     const split = new Map<number, number>();
-    const group = (i: number): string => `${this.requests[i].priority}|${this.leading[i] ? 1 : 0}`;
+    const rangeOf = (i: number): Map<number, [number, number]> => ranges[this.leading[i] ? 1 : 0];
     // Kept requests never lead: a view that leads plans beside another, and
     // such a plan keeps nothing.
     for (const [band, keys] of this.keptRange) {
-      range.set(`${band}|0`, [keys[0], keys[1]]);
+      ranges[0].set(band, [keys[0], keys[1]]);
       split.set(band, 2);
     }
     for (let i = 0; i < this.requests.length; i++) {
       const band = this.requests[i].priority;
       split.set(band, (split.get(band) ?? 0) | (this.leading[i] ? 1 : 2));
       const key = this.keys[i];
-      const seen = range.get(group(i));
-      if (seen === undefined) range.set(group(i), [key, key]);
+      const range = rangeOf(i);
+      const seen = range.get(band);
+      if (seen === undefined) range.set(band, [key, key]);
       else if (key < seen[0]) seen[0] = key;
       else if (key > seen[1]) seen[1] = key;
     }
+    // A lane pushes its requests together, so a band's range is looked up
+    // once per run of them rather than once per request.
+    let band = NaN;
+    let leading = false;
+    let range: [number, number] = [0, 0];
+    let halves = false;
     for (let i = 0; i < this.requests.length; i++) {
       const req = this.requests[i];
-      const [least, greatest] = range.get(group(i))!;
-      const halves = split.get(req.priority) === 3;
-      const start = halves && !this.leading[i] ? IN_LANE_SPAN / 2 : 0;
-      const width = halves ? (this.leading[i] ? 0.99 : 1) * (IN_LANE_SPAN / 2) : IN_LANE_SPAN;
-      req.priority += start;
+      if (req.priority !== band || this.leading[i] !== leading) {
+        band = req.priority;
+        leading = this.leading[i];
+        range = rangeOf(i).get(band)!;
+        halves = split.get(band) === 3;
+      }
+      const least = range[0];
+      const greatest = range[1];
+      const start = halves && !leading ? IN_LANE_SPAN / 2 : 0;
+      const width = halves ? (leading ? 0.99 : 1) * (IN_LANE_SPAN / 2) : IN_LANE_SPAN;
+      req.priority = band + start;
       if (greatest > least) req.priority += (width * (this.keys[i] - least)) / (greatest - least);
     }
     return this.requests.sort(compareChunkRequests);
@@ -392,9 +422,10 @@ function emitChunk(
       lane: target.lane,
       tier: target.tier,
       mode: snapshot.selection.renderMode,
-      priority: target.band,
+      priority: UNPLACED,
       chunkKey: chunkKey(level, target.t, c, z, y, x),
     };
+    req.priority = target.band;
     if (holdsPlane && !whole) {
       req.plane = slice.plane;
       req.planes = slice.planes;
@@ -489,26 +520,25 @@ export function emitMinimapLane(
     const pending = minimapPending.get(entity.imageId);
     if (!pending) continue;
     for (const coord of pending) {
-      out.push(
-        {
-          datasetId,
-          entityId: entity.entityId,
-          imageId: entity.imageId,
-          level: coord.level,
-          t: coord.t,
-          c: coord.c,
-          z: coord.z,
-          y: coord.y,
-          x: coord.x,
-          lane: "minimap",
-          tier: "coarse",
-          // Minimap chunks go to no pools; the view's mode only fills the field.
-          mode,
-          priority: band,
-          chunkKey: coord.key,
-        },
-        0,
-      );
+      const req: ChunkRequest = {
+        datasetId,
+        entityId: entity.entityId,
+        imageId: entity.imageId,
+        level: coord.level,
+        t: coord.t,
+        c: coord.c,
+        z: coord.z,
+        y: coord.y,
+        x: coord.x,
+        lane: "minimap",
+        tier: "coarse",
+        // Minimap chunks go to no pools; the view's mode only fills the field.
+        mode,
+        priority: UNPLACED,
+        chunkKey: coord.key,
+      };
+      req.priority = band;
+      out.push(req, 0);
     }
   }
 }
@@ -543,45 +573,60 @@ export function emitDetailLane(
       for (const [cells, lane] of lists) emitCells(entity, cells, snapshot, config, lane, push);
       continue;
     }
-    const previous = carry.detailOf(entity);
-    // An entity whose cells all held keeps its requests whole, as the last
-    // plan recorded them; most entities of a wide collection do.
-    if (
-      previous !== undefined &&
-      previous.size === chosen.detail.length + chosen.ancestors.length &&
-      keepsEvery(previous, lists, out)
-    ) {
-      carry.setDetail(entity, previous);
-      continue;
-    }
-    const cells = new Map<number, readonly ChunkRequest[]>();
-    let emitted: ChunkRequest[] = [];
-    const collect: Push = (req, rank) => {
-      emitted.push(req);
-      out.push(req, rank);
-    };
-    for (const [list, lane] of lists) {
-      const targets = new Map<number, LaneTarget>();
-      for (const cell of list) {
-        const key = detailCellKey(cell, lane === above);
-        const kept = previous?.get(key);
-        if (kept !== undefined) {
-          out.keep(lane.band, cell.rank);
-          cells.set(key, kept);
-          continue;
-        }
-        let target = targets.get(cell.level);
-        if (target === undefined) {
-          target = laneTarget(entity, cell.level, snapshot, config, lane, false);
-          targets.set(cell.level, target);
-        }
-        emitted = [];
-        emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, collect);
-        cells.set(key, emitted);
-      }
-    }
-    carry.setDetail(entity, cells);
+    emitCarriedCells(entity, "detail", lists, snapshot, config, out, carry);
   }
+}
+
+/**
+ * One entity's cells of a lane carried by cell into `out`: a cell the
+ * previous plan asked for alike keeps its requests, and every other is
+ * emitted anew, each ranked by its place in the view's fetch order.
+ */
+function emitCarriedCells(
+  entity: EntitySnapshot,
+  carried: CellLane,
+  lists: readonly (readonly [readonly SelectedCell[], Omit<LaneTarget, "slice" | "whole" | "cut">])[],
+  snapshot: DatasetView,
+  config: PlanningConfig,
+  out: LaneRequests,
+  carry: LaneCarry,
+): void {
+  const previous = carry.cellsOf(carried, entity);
+  // An entity whose cells all held keeps its requests whole, as the last
+  // plan recorded them; most entities of a wide collection do.
+  let count = 0;
+  for (const [list] of lists) count += list.length;
+  if (previous !== undefined && previous.size === count && keepsEvery(previous, lists, out)) {
+    carry.setCells(carried, entity, previous);
+    return;
+  }
+  const cells = new Map<number, readonly ChunkRequest[]>();
+  let emitted: ChunkRequest[] = [];
+  const collect: Push = (req, rank) => {
+    emitted.push(req);
+    out.add(req, rank);
+  };
+  for (const [list, lane] of lists) {
+    const targets = new Map<number, LaneTarget>();
+    for (const cell of list) {
+      const key = detailCellKey(cell, lane.ancestor === true);
+      const kept = previous?.get(key);
+      if (kept !== undefined) {
+        out.keep(lane.band, cell.rank);
+        cells.set(key, kept);
+        continue;
+      }
+      let target = targets.get(cell.level);
+      if (target === undefined) {
+        target = laneTarget(entity, cell.level, snapshot, config, lane, false);
+        targets.set(cell.level, target);
+      }
+      emitted = [];
+      emitChunk(entity, cell.level, cell.x, cell.y, cell.z, cell.rank, snapshot, target, collect);
+      cells.set(key, emitted);
+    }
+  }
+  carry.setCells(carried, entity, cells);
 }
 
 /**
@@ -633,6 +678,7 @@ export function emitPrefetchLane(
   out: LaneRequests,
   config: PlanningConfig,
   cutStep = false,
+  carry?: LaneCarry,
 ): void {
   const push: Push = (req, key) => out.push(req, key);
   const t = snapshot.selection.t;
@@ -649,9 +695,13 @@ export function emitPrefetchLane(
       }, push);
     }
     if (config.prefetchDepth > 0) {
-      emitCells(entity, chosen.lookahead, snapshot, config, {
+      const ahead = {
         lane: "prefetch", tier: "detail", band: config.prefetchLaneOffset + config.prefetchDepth * PREFETCH_STEP, t,
-      }, push);
+      } as const;
+      // A zoom moves the lookahead by thousands of cells a plan, most of
+      // which the plan before already asked for, so it carries by cell too.
+      if (carry === undefined) emitCells(entity, chosen.lookahead, snapshot, config, ahead, push);
+      else emitCarriedCells(entity, "ahead", [[chosen.lookahead, ahead]], snapshot, config, out, carry);
     }
   }
 }

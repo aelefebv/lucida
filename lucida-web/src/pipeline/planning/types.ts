@@ -259,8 +259,12 @@ export interface ViewPlanningState {
 export interface LaneMemory {
   /** What every request depends on beyond its own chunk; a change emits every request again. */
   scope: LaneScope;
-  /** The detail lane's requests, by entity, then by cell (`cellKey`), one per channel. */
-  detail: ReadonlyMap<string, EntityDetailRequests>;
+  /**
+   * The requests of the lanes carried by cell, the detail lane and the
+   * selection's lookahead, by entity, then by cell (`cellKey`), one per
+   * channel.
+   */
+  cells: Readonly<Record<CellLane, ReadonlyMap<string, EntityDetailRequests>>>;
   /** The other lanes' requests, by entity, then chunk key, each with the band it asks in. */
   others: ReadonlyMap<string, ReadonlyMap<string, readonly { req: ChunkRequest; band: number }[]>>;
   /** The plan's requests in planner order, which held every request above. */
@@ -280,7 +284,13 @@ export interface LaneScope {
   config: object;
 }
 
-/** One entity's detail requests, and the level geometry they were emitted from. */
+/**
+ * The lanes a plan carries by the selection's cells: the cells it draws and
+ * the ancestors it keeps, and the cells it looks ahead to.
+ */
+export type CellLane = "detail" | "ahead";
+
+/** One entity's requests of a lane carried by cell, and the level geometry they were emitted from. */
 export interface EntityDetailRequests {
   levels: readonly LevelGeometry[];
   cells: ReadonlyMap<number, readonly ChunkRequest[]>;

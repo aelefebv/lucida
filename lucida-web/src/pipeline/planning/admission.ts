@@ -24,6 +24,7 @@ import { decodedBytesPerSample } from "../../renderer/dataTypeUtil.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { ChunkRequest, RequestDelta } from "./types.ts";
 import { planesKeySuffix } from "../fetch/contentSource.ts";
+import { requestChunkKey } from "./requestKeys.ts";
 import type { SpatialAxis } from "../../renderer/slicePlane.ts";
 
 /** Bytes, or chunk counts, per residency tier. */
@@ -110,8 +111,7 @@ function admitWhole(
     return {
       plan,
       whole,
-      keys: plan.requests.map((req, i) =>
-        `${req.tier}/${req.entityId}/${req.chunkKey}${whole[i] ? "" : planesKeySuffix(req.planes, req.planeAxis)}`),
+      keys: plan.requests.map((req, i) => chargeKey(req, whole[i])),
       slots: plan.requests.map((req) => plan.slotOf?.(req) ?? null),
       admitted: new Set<ChunkRequest>(),
       // Chunks charged to a tier, and chunks its room refused. A chunk is
@@ -196,6 +196,14 @@ function admitWhole(
 }
 
 /**
+ * What a tier charges `req` under: its chunk, and the planes it asks for
+ * unless it costs the whole chunk.
+ */
+function chargeKey(req: ChunkRequest, whole: boolean): string {
+  return whole ? requestChunkKey(req) : requestChunkKey(req) + planesKeySuffix(req.planes, req.planeAxis);
+}
+
+/**
  * What each plan's coarse chunks took beyond the coarse tier's own room,
  * its charges counted after the plans before it.
  */
@@ -223,7 +231,8 @@ interface Charge {
  * added or removed charges or refunds its share alone.
  */
 class Charges {
-  private readonly byKey = new Map<string, Charge>();
+  /** Per plan, its chunks by charge key. */
+  private readonly byKey: Map<string, Charge>[];
   private readonly held = new Map<ChunkRequest, { plan: number; key: string; slot: GpuSlot | null }>();
   private readonly slotsUsed = new Map<string, { used: number; slots: number }>();
   /** Pools holding more than their slots. */
@@ -238,14 +247,15 @@ class Charges {
 
   constructor(plans: number) {
     this.coarseByPlan = new Array<number>(plans).fill(0);
+    this.byKey = Array.from({ length: plans }, () => new Map<string, Charge>());
   }
 
   charge(plan: number, req: ChunkRequest, key: string, slot: GpuSlot | null, bytes: number): void {
-    const scoped = `${plan}|${key}`;
-    let charge = this.byKey.get(scoped);
+    const byKey = this.byKey[plan];
+    let charge = byKey.get(key);
     if (charge === undefined) {
       charge = { tier: req.tier, bytes, view: 0, all: 0 };
-      this.byKey.set(scoped, charge);
+      byKey.set(key, charge);
       if (req.tier === "coarse") {
         this.coarse += bytes;
         this.coarseByPlan[plan] += bytes;
@@ -261,7 +271,7 @@ class Charges {
       if (++pool.used === pool.slots + 1) this.overfull++;
       this.gpuUsed += slot.slotBytes;
     }
-    this.held.set(req, { plan, key: scoped, slot });
+    this.held.set(req, { plan, key, slot });
   }
 
   /** Refund what `req` was charged; false when it was never charged. */
@@ -269,10 +279,11 @@ class Charges {
     const held = this.held.get(req);
     if (held === undefined) return false;
     this.held.delete(req);
-    const charge = this.byKey.get(held.key)!;
+    const byKey = this.byKey[held.plan];
+    const charge = byKey.get(held.key)!;
     if (req.tier === "detail" && req.lane !== "prefetch" && --charge.view === 0) this.detailView -= charge.bytes;
     if (--charge.all === 0) {
-      this.byKey.delete(held.key);
+      byKey.delete(held.key);
       if (charge.tier === "coarse") {
         this.coarse -= charge.bytes;
         this.coarseByPlan[held.plan] -= charge.bytes;
@@ -382,8 +393,7 @@ function applyDeltas(
     for (const req of delta.removed) if (!charges.refund(req)) return null;
     for (const req of delta.added) {
       const whole = req.planes === undefined || (plan.heldWhole?.(req) ?? false);
-      const key = `${req.tier}/${req.entityId}/${req.chunkKey}${whole ? "" : planesKeySuffix(req.planes, req.planeAxis)}`;
-      charges.charge(i, req, key, plan.slotOf?.(req) ?? null, plan.bytesOf(req, whole));
+      charges.charge(i, req, chargeKey(req, whole), plan.slotOf?.(req) ?? null, plan.bytesOf(req, whole));
     }
   }
   if (!charges.fits(capacity, gpuRoom)) return null;

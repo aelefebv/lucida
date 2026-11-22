@@ -224,7 +224,7 @@ function createMockContent(): DatasetManifest {
  * Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles,
  * each a pyramid of `levelCount` levels halving from 1024² with 256² chunks.
  */
-function createMockContentWithTiles(n: number, levelCount = 1): DatasetManifest {
+function createMockContentWithTiles(n: number, levelCount = 1, chunkSide = 256): DatasetManifest {
   const entities: Array<Record<string, unknown>> = [
     { id: "group-0", kind: "Group", parent: null, labels: {} },
   ];
@@ -232,7 +232,7 @@ function createMockContentWithTiles(n: number, levelCount = 1): DatasetManifest 
   const levels: Array<Record<string, unknown>> = [];
   for (let level = 0; level < levelCount; level++) {
     const side = 1024 >> level;
-    const chunk = Math.min(256, side);
+    const chunk = Math.min(chunkSide, side);
     levels.push({
       level_index: level,
       shape: [1, 1, 1, side, side],
@@ -2589,6 +2589,287 @@ describe("incremental delta fold", () => {
       const detail = moved.wantedChunks.find((change) => change.tier === "detail")!;
       expect(detail.removed).toHaveLength(16);
       expect(detail.added).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands a gesture's large change to the stages a budget a tick, and holds the view unsettled until they take it", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2, 16) }],
+      ]);
+      // No time to spare: each tick takes the fewest changes a tick takes.
+      const orch = new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan, { gesture: 0, idle: 0 });
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [
+          fullPayload([foldRow({ target_level: 0 })]),
+          deltaPayload([], [], []),
+          deltaPayload([], [], [foldRow({ target_level: 1 })]),
+        ],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      let zoom = 1;
+      const scene = {
+        ...fold.scene,
+        visible_region: () => JSON.stringify({
+          xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: zoom, sort_center: null, frustum_planes: null,
+        }),
+      };
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = (gesture = false) =>
+        ({ ...(makeCtx(scene, datasets) as object), client, cpuCache, gesture }) as unknown as TickContext;
+      const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
+
+      /** Ticks that plan nothing new, until the stages hold what the plans want; in a gesture, the camera moves on each. */
+      let frame = 100;
+      const drain = (gesture = false): void => {
+        for (let tick = 0; orch.owesPlanChanges(); tick++) {
+          expect(tick).toBeLessThan(20);
+          vi.advanceTimersByTime(16);
+          if (gesture) fold.setView(frame++);
+          orch.planAndFetch(ctx(gesture), emptyMinimap);
+        }
+      };
+
+      // A dataset new to the stages starts from nothing, a budget of its requests a tick.
+      orch.planAndFetch(ctx(), emptyMinimap);
+      const opened = planSpy.mock.results[0].value as RequestPlan;
+      expect(opened.requests.filter((r) => r.lane === "detail")).toHaveLength(4096);
+      expect(submits()[0].requests.length).toBeLessThanOrEqual(1024);
+      expect(submits()[0].delta).toBeUndefined();
+      drain();
+      const first = submits().at(-1)!;
+      expect(first.requests).toBe(opened.requests);
+      const before = { submits: submits().length, deltas: client.coldStateDelta.mock.calls.length };
+
+      // A gesture a frame at a time: its first change replans at once, and
+      // the replan after the window, while the views move, changes the levels.
+      vi.advanceTimersByTime(500);
+      for (let view = 2; planSpy.mock.calls.length < 3; view++) {
+        if (view > 2) zoom = 0.4;
+        fold.setView(view);
+        orch.planAndFetch(ctx(true), emptyMinimap);
+        if (planSpy.mock.calls.length < 3) vi.advanceTimersByTime(16);
+      }
+      const planned = planSpy.mock.results.at(-1)!.value as RequestPlan;
+      expect(planned.delta!.removed.length + planned.delta!.added.length).toBeGreaterThan(5000);
+      // The replan's own tick hands over nothing; the change is owed.
+      const zoomed = submits().at(-1)!;
+      expect(zoomed.delta!.base).toBe(first.requests);
+      expect(zoomed.delta!.added.length + zoomed.delta!.removed.length).toBe(0);
+      expect(orch.owesPlanChanges()).toBe(true);
+      expect(orch.hasPendingRebuild()).toBe(true);
+
+      // Ticks of the gesture that plan nothing new hand the rest over a
+      // budget at a time, each on what the last took.
+      const from = submits().length;
+      drain(true);
+      expect(planSpy).toHaveBeenCalledTimes(3);
+      const all = submits().slice(before.submits);
+      for (const taken of submits().slice(from)) {
+        expect(taken.delta!.added.length + taken.delta!.removed.length).toBeLessThanOrEqual(1024 * 1.25);
+      }
+      expect(submits().length - from).toBeGreaterThan(3);
+      for (let i = 1; i < all.length; i++) expect(all[i].delta!.base).toBe(all[i - 1].requests);
+      expect(all.at(-1)!.requests).toBe(planned.requests);
+      // Nothing is owed; the camera's last moves wait on the coalescing window.
+      expect(orch.owesPlanChanges()).toBe(false);
+      // The worker heard every change once.
+      const detail = client.coldStateDelta.mock.calls.slice(before.deltas)
+        .flatMap(([msg]) => (msg as ColdStateDeltaMessage).wantedChunks)
+        .filter((change) => change.tier === "detail");
+      expect(detail.flatMap((change) => change.removed)).toHaveLength(4096);
+      expect(detail.flatMap((change) => change.added)).toHaveLength(1024);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands a large change made between gestures to the stages whole", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2, 16) }],
+      ]);
+      const orch = new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan, { gesture: 0, idle: 0 });
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [
+          fullPayload([foldRow({ target_level: 0 })]),
+          deltaPayload([], [], [foldRow({ target_level: 1 })]),
+        ],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      let zoom = 1;
+      const scene = {
+        ...fold.scene,
+        visible_region: () => JSON.stringify({
+          xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: zoom, sort_center: null, frustum_planes: null,
+        }),
+      };
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = () => ({ ...(makeCtx(scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
+      orch.planAndFetch(ctx(), emptyMinimap);
+      for (let tick = 0; orch.owesPlanChanges(); tick++) {
+        expect(tick).toBeLessThan(20);
+        vi.advanceTimersByTime(16);
+        orch.planAndFetch(ctx(), emptyMinimap);
+      }
+
+      vi.advanceTimersByTime(500);
+      fold.setView(2);
+      zoom = 0.4;
+      orch.planAndFetch(ctx(), emptyMinimap);
+      const planned = planSpy.mock.results.at(-1)!.value as RequestPlan;
+      expect(planned.delta!.removed.length + planned.delta!.added.length).toBeGreaterThan(5000);
+      const taken = vi.mocked(cpuCache.submit).mock.lastCall![0] as RequestPlan;
+      expect(taken.requests).toBe(planned.requests);
+      expect(orch.owesPlanChanges()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands what a plan owes over in larger shares between gestures than while one runs", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2, 16) }],
+      ]);
+      const orch = new TickCoordinator(new Uploader(), planSpy as unknown as typeof plan, { gesture: 0, idle: 1_000 });
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [fullPayload([foldRow({ target_level: 0 })])],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = (gesture: boolean) =>
+        ({ ...(makeCtx(fold.scene, datasets) as object), client, cpuCache, gesture }) as unknown as TickContext;
+      const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
+
+      // The plan's own tick takes the fewest changes a tick takes, and so
+      // does a tick while the camera moves. A frame waiting on the move goes
+      // out first, so the stages take nothing on its first call.
+      orch.planAndFetch(ctx(false), emptyMinimap);
+      const opened = planSpy.mock.results[0].value as RequestPlan;
+      expect(submits()[0].requests.length).toBeLessThanOrEqual(1024);
+      vi.advanceTimersByTime(8);
+      fold.setView(2);
+      orch.planAndFetch(ctx(true), emptyMinimap, true);
+      vi.advanceTimersByTime(8);
+      fold.setView(3);
+      orch.planAndFetch(ctx(true), emptyMinimap);
+      expect(submits()[1].requests.length).toBeLessThanOrEqual(2048);
+      expect(orch.owesPlanChanges()).toBe(true);
+
+      // Once the camera holds still, the next tick takes the rest.
+      vi.advanceTimersByTime(STILL_MS);
+      orch.planAndFetch(ctx(false), emptyMinimap);
+      expect(submits()[2].requests).toBe(opened.requests);
+      expect(orch.owesPlanChanges()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands a moving view's change to the stages on the tick after its replan", () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([
+        ["ds1", { manifest: createMockContentWithTiles(1, 2) }],
+      ]);
+      const orch = makeOrch();
+      const fold = makeFoldScene({
+        fullRows: [foldRow({ target_level: 0 })],
+        deltaScript: [
+          fullPayload([foldRow({ target_level: 0 })]),
+          deltaPayload([], [], []),
+          deltaPayload([], [], [foldRow({ target_level: 1 })]),
+        ],
+        memberPositions: { "tile-0": [0, 0] },
+      });
+      let zoom = 1;
+      const scene = {
+        ...fold.scene,
+        visible_region: () => JSON.stringify({
+          xy_bounds: [0, 0, 1024, 1024], z_range: [0, 1], effective_zoom: zoom, sort_center: null, frustum_planes: null,
+        }),
+      };
+      const cpuCache = createMockCpuCache();
+      vi.mocked(cpuCache.beginCarriedPlan).mockReturnValue(true);
+      const client = {
+        coldState: vi.fn(),
+        gpuCapacity: () => null,
+        coldStateDisplay: vi.fn(),
+        coldStateSelection: vi.fn(),
+        coldStateDelta: vi.fn(),
+        viewHotState: vi.fn(),
+        datasetLevels: vi.fn(() => null),
+      };
+      const ctx = () =>
+        ({ ...(makeCtx(scene, datasets) as object), client, cpuCache }) as unknown as TickContext;
+      const submits = () => vi.mocked(cpuCache.submit).mock.calls.map(([plan]) => plan as RequestPlan);
+
+      orch.planAndFetch(ctx(), emptyMinimap);
+      // The camera moves a frame at a time: the first change replans at
+      // once, the window holds the next replan 200 ms, and that one comes
+      // while the views move.
+      vi.advanceTimersByTime(500);
+      let view = 2;
+      for (; planSpy.mock.calls.length < 3; view++) {
+        if (view > 2) zoom = 0.4;
+        fold.setView(view);
+        orch.planAndFetch(ctx(), emptyMinimap);
+        if (planSpy.mock.calls.length < 3) vi.advanceTimersByTime(16);
+      }
+      const planned = planSpy.mock.results.at(-1)!.value as RequestPlan;
+      expect(planned.delta!.removed.length).toBeGreaterThan(0);
+      const replanned = submits().at(-1)!;
+      expect(replanned.delta).toEqual({ base: replanned.requests, added: [], removed: [] });
+      expect(orch.owesPlanChanges()).toBe(true);
+
+      // The next tick, within the window, takes the change.
+      vi.advanceTimersByTime(16);
+      fold.setView(view);
+      orch.planAndFetch(ctx(), emptyMinimap);
+      expect(planSpy).toHaveBeenCalledTimes(3);
+      const taken = submits().at(-1)!;
+      expect(taken.requests).toBe(planned.requests);
+      expect(taken.delta!.removed).toHaveLength(planned.delta!.removed.length);
+      expect(orch.owesPlanChanges()).toBe(false);
     } finally {
       vi.useRealTimers();
     }

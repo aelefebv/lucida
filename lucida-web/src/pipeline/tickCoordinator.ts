@@ -44,6 +44,7 @@ import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests, labelFormsFor } from "./planning/labelRequests.ts";
 import { AdmissionLedger, admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
+import { RequestPacing } from "./planning/pacing.ts";
 import { tallyViewCoverage, type ViewCoverage } from "./planning/viewCoverage.ts";
 import { requestIdentity } from "./planning/plan.ts";
 import { gpuChunkRoomBytes, gpuSlotsFor, slotsReadFrom } from "./planning/gpuCapacity.ts";
@@ -283,6 +284,15 @@ interface HeldActiveSet {
   visibleChannels: readonly number[];
   /** memberId → descriptor index, as the worker numbers the active set's members. */
   indexByMember: Map<string, number>;
+  /** What the last cold state or delta carried beside its requests, which a tick that changes only them sends again. */
+  sent: SentColdState;
+}
+
+type SentColdState = Omit<Parameters<Uploader["sendColdStateDelta"]>[0], "ctx" | "requests" | "requestDelta" | "previousActiveSet">;
+
+/** `plan` as admission took it. */
+function admittedPlan(plan: RequestPlan, admission: Admission): RequestPlan {
+  return { ...plan, requests: admission.admitted, shortfall: admission.shortfall, coarseLoanBytes: admission.borrowed };
 }
 
 /** Whether `activeSet` over `visibleChannels` names the members `held` does, in the same order. */
@@ -315,6 +325,32 @@ const VIEW_REPLAN_INTERVAL_MS = 200;
  * value always renders.
  */
 const SELECTION_COALESCE_INTERVAL_MS = 150;
+
+/**
+ * The main thread's time a tick gives the stages after the plan (admission,
+ * the CPU cache and the worker's wanted set) to take a plan's changes when
+ * it also planned or a gesture runs; the rest wait for the ticks after
+ * ({@link RequestPacing}). A frame at 60 Hz has 16 ms, and the replan's
+ * selection and lanes, or the gesture's frame, take much of it.
+ */
+const PACED_APPLY_MS = 4;
+
+/**
+ * What a tick that plans nothing new gives those stages of a dataset's
+ * first plan while no gesture runs. No frame answers an input then, so a
+ * larger share fills the view sooner.
+ */
+const PACED_IDLE_APPLY_MS = 12;
+
+/**
+ * The fewest changes a tick takes: about what an orbit or a pan replan
+ * changes, which pacing would only spread over ticks that each cost more
+ * than the change, and enough that a slow measure still drains what is owed.
+ */
+const MIN_PACED_CHANGES = 1024;
+
+/** What one change costs those stages before a pass has measured it, in ms: about what a workstation takes. */
+const INITIAL_CHANGE_COST_MS = 0.003;
 
 /**
  * Per-dataset carry-forward captured at each full rebuild. Lets the next
@@ -789,10 +825,21 @@ export class TickCoordinator {
    * shuffled tests. Production never passes it.
    */
   private readonly planFn: typeof plan;
+  /**
+   * The main thread's time a tick gives the stages after the plan, as a
+   * gesture runs and between gestures ({@link PACED_APPLY_MS},
+   * {@link PACED_IDLE_APPLY_MS}); tests shrink them.
+   */
+  private readonly applyMs: { gesture: number; idle: number };
 
-  constructor(uploader: Uploader, planFn: typeof plan = plan) {
+  constructor(
+    uploader: Uploader,
+    planFn: typeof plan = plan,
+    applyMs: { gesture: number; idle: number } = { gesture: PACED_APPLY_MS, idle: PACED_IDLE_APPLY_MS },
+  ) {
     this.uploader = uploader;
     this.planFn = planFn;
+    this.applyMs = applyMs;
     // Config tweaks don't bump any WASM epoch, so without this hook the
     // epoch fast-path would keep returning the cached plan and the
     // user's slider would have no visible effect until something else
@@ -814,6 +861,12 @@ export class TickCoordinator {
   private capacityReplanOwed = false;
   /** What the last admission charged, which the next carries where the plans say how they changed. */
   private readonly admission = new AdmissionLedger();
+  /** The plans' changes the stages after the plan have yet to take, per dataset. */
+  private readonly pacing = new RequestPacing();
+  /** The last full plan pass, when it was paced: what a tick hands the stages the rest of its changes against. */
+  private pacedPass: PlannedDataset[] | null = null;
+  /** About what one change costs the stages after the plan, in ms, as paced passes measured it. */
+  private changeCostMs = INITIAL_CHANGE_COST_MS;
 
   /** What the last level selection chose, which the next leans toward. */
   private levelMemory: LevelSelectionMemory = initialLevelSelectionMemory();
@@ -935,6 +988,138 @@ export class TickCoordinator {
   }
 
   /**
+   * Hand the stages after the plan at most a tick's budget of a dataset's
+   * changes while the views move or while its first plan is owed, owing the
+   * rest to the ticks after, when every dataset is drawn by one view,
+   * submits nothing beside its plan's requests, and either carried them
+   * from its last plan or is new to the stages, which then take it from
+   * nothing. Otherwise the stages take every plan whole. Returns how many
+   * changes they take now.
+   *
+   * While the views move, the replan's own tick hands them none: its
+   * selection and lanes have spent that frame's share, and a gesture frame
+   * follows every tick, so the change lands one frame later, beside the
+   * next frame rather than on top of this one.
+   *
+   * Between gestures a carried plan goes whole. The refinement once a zoom
+   * stops turns thousands of chunks the lookahead fetched into ones the view
+   * draws, and handed over a share a tick it left them waiting to upload
+   * until the view settled seconds later.
+   */
+  private pace(planned: PlannedDataset[], labelRequests: readonly (readonly ChunkRequest[])[], moving: boolean): number {
+    // A dataset the stages hold nothing of takes its plan as additions to nothing.
+    const changes = planned.map(({ dsId, result }) =>
+      this.heldActiveSets.has(dsId) ? result.delta : { base: [], added: result.requests, removed: [] });
+    const paceable = planned.length > 0 && planned.every((dataset, i) =>
+      dataset.views.length === 1 && labelRequests[i].length === 0 && changes[i] !== undefined);
+    if (!paceable) {
+      this.pacing.clear();
+      this.pacedPass = null;
+      return 0;
+    }
+    this.pacing.retain(new Set(planned.map((dataset) => dataset.dsId)));
+    const budget = this.changeBudget(planned.length);
+    let taken = 0;
+    for (const [i, dataset] of planned.entries()) {
+      const opening = !this.heldActiveSets.has(dataset.dsId) || this.pacing.opening(dataset.dsId);
+      const share = moving ? 0 : opening ? budget : Number.POSITIVE_INFINITY;
+      const { requests, delta } = this.pacing.offer(dataset.dsId, dataset.result.requests, changes[i]!, share);
+      dataset.result = { ...dataset.result, requests, delta };
+      taken += delta.added.length + delta.removed.length;
+    }
+    this.pacedPass = planned;
+    return taken;
+  }
+
+  /**
+   * On a tick that plans nothing new, hand the stages after the plan the
+   * next budget of the changes the last paced pass owes them: admission, the
+   * CPU cache, and each view's wanted chunks on the worker. What the views
+   * draw is the pass's, so nothing else is sent.
+   */
+  private applyOwedChanges(ctx: TickContext): void {
+    const pass = this.pacedPass;
+    if (pass === null || !this.pacing.owes()) return;
+    if (pass.some((dataset) => !ctx.datasets.has(dataset.dsId))) {
+      this.pacing.clear();
+      this.pacedPass = null;
+      return;
+    }
+    const start = performance.now();
+    // A gesture ends, for pacing, once the camera holds still, not when the
+    // render loop's hold on gesture quality lets go half a second later:
+    // what it still owes then goes whole, as a plan between gestures does.
+    const gesture = this.motion.moving(start);
+    const budget = this.changeBudget(pass.length, gesture ? this.applyMs.gesture : this.applyMs.idle);
+    // Between gestures only a dataset's first plan is still paced.
+    const taken = pass.map((dataset) => this.pacing.take(
+      dataset.dsId,
+      gesture || this.pacing.opening(dataset.dsId) ? budget : Number.POSITIVE_INFINITY,
+    )!);
+    const admissions = this.admit(ctx, pass.map((dataset, i) => ({ dsId: dataset.dsId, ...taken[i] })));
+    const deltas = admissions.map((admission) => admission.delta);
+    const carried = deltas.every((delta) => delta !== undefined) &&
+      ctx.cpuCache.beginCarriedPlan(deltas.map((delta) => delta!.base));
+    if (!carried) ctx.cpuCache.onPlanRebuildStart();
+    let changes = 0;
+    pass.forEach((dataset, i) => {
+      const admission = admissions[i];
+      const result = admittedPlan(dataset.result, admission);
+      this._lastPlanByDataset.set(dataset.dsId, result);
+      const size = taken[i].delta.added.length + taken[i].delta.removed.length;
+      changes += size;
+      if (size > 0 || !carried) {
+        for (const view of dataset.views) {
+          const held = this.heldActiveSets.get(dataset.dsId)?.get(view.view.id);
+          if (held === undefined) continue;
+          this.uploader.sendColdStateDelta({
+            ...held.sent,
+            ctx,
+            previousActiveSet: held.activeSet,
+            requests: admission.admitted,
+            ...(admission.delta && { requestDelta: admission.delta }),
+          });
+        }
+      }
+      this.submitPlan(ctx, dataset.dsId, result, admission.admitted, carried ? admission.delta : undefined);
+    });
+    this.noteChangeCost(changes, performance.now() - start);
+  }
+
+  /** Hand the CPU cache one dataset's admitted plan, whole or as `delta` on what it holds. */
+  private submitPlan(
+    ctx: TickContext,
+    dsId: string,
+    result: RequestPlan,
+    requests: readonly ChunkRequest[],
+    delta: RequestDelta | undefined,
+  ): void {
+    ctx.cpuCache.submit({
+      requests,
+      ...(delta && { delta }),
+      activeSet: result.activeSet,
+      epochs: result.epochs,
+      stats: result.stats,
+      // `nextState` is required on RequestPlan but unused by submit();
+      // forward the planner's pointer so the shape stays honest.
+      nextState: result.nextState,
+      shortfall: result.shortfall,
+      coarseLoanBytes: result.coarseLoanBytes,
+    }, chunkBytesFor(ctx.datasets.get(dsId)!.manifest));
+  }
+
+  /** How many changes each of `datasets` hands the stages a tick: what `ms` holds at the measured cost. */
+  private changeBudget(datasets: number, ms = this.applyMs.gesture): number {
+    return Math.max(MIN_PACED_CHANGES, Math.floor(ms / this.changeCostMs / Math.max(1, datasets)));
+  }
+
+  /** Fold one pass's cost per change into the estimate, when it took enough changes to measure. */
+  private noteChangeCost(changes: number, ms: number): void {
+    if (changes < MIN_PACED_CHANGES) return;
+    this.changeCostMs += (ms / changes - this.changeCostMs) * 0.3;
+  }
+
+  /**
    * Tell the worker of each dataset it holds a plan for that no view plans
    * now, so it wants none of its chunks: they keep their slots for a quick
    * return, and are the first to go when a planned dataset needs room.
@@ -1037,6 +1222,8 @@ export class TickCoordinator {
       if (isHit) {
         this.pendingDeferredRebuild = false;
       }
+      // A frame waiting on this tick goes out before the stages take more.
+      if (!frameWaiting) this.applyOwedChanges(ctx);
       this.serveCachedTelemetry(tickStart);
       return this.cachedResult;
     }
@@ -1230,15 +1417,6 @@ export class TickCoordinator {
     this.lastRebuildByDataset.clear();
     this.releaseUnplanned(ctx, plannedDatasets);
 
-    const admissions = this.admit(
-      ctx,
-      plannedDatasets.map((planned) => ({
-        dsId: planned.dsId,
-        requests: planned.result.requests,
-        ...(planned.result.delta && { delta: planned.result.delta }),
-      })),
-    );
-
     // Categorical label overlays are invisible to the WASM planner
     // (labels live outside `manifest.images`/`entities`), so their chunk
     // requests are synthesized here from the label's own geometry and
@@ -1259,6 +1437,17 @@ export class TickCoordinator {
       config: planningConfig,
       cutStep: view.cutStep,
     })));
+    const pacedChanges = this.pace(plannedDatasets, labelRequests, this.motion.moving(tickStart));
+    const applyStart = performance.now();
+    const admissions = this.admit(
+      ctx,
+      plannedDatasets.map((planned) => ({
+        dsId: planned.dsId,
+        requests: planned.result.requests,
+        ...(planned.result.delta && { delta: planned.result.delta }),
+      })),
+    );
+
     // CpuCache owns wanted-generation and delivery/rejection state, so the
     // rebuild lifecycle advances there exactly once before the submits. A
     // plan every dataset of which carried its requests, and admitted whole,
@@ -1283,12 +1472,7 @@ export class TickCoordinator {
         ]]);
         tallyViewCoverage(viewCoverage, byView, admission.admitted);
       }
-      const result: RequestPlan = {
-        ...planned.result,
-        requests: admission.admitted,
-        shortfall: admission.shortfall,
-        coarseLoanBytes: admission.borrowed,
-      };
+      const result = admittedPlan(planned.result, admission);
       this._lastPlanByDataset.set(dsId, result);
 
       const matrixEpochKey = `${currentEpochs.content}|${currentEpochs.layout}`;
@@ -1327,11 +1511,9 @@ export class TickCoordinator {
           tileMatrixCache: matrixCacheEntry.matrices,
         });
         memberRosterByDatasetView.set(key, rosterEntries);
-        const coldArgs = {
-          ctx,
+        const sent: SentColdState = {
           datasetId: dsId,
           activeSet: share.activeSet,
-          requests: share.requests,
           labels: drawsLabels(plannedView) ? labelFormsFor({
             datasetId: dsId,
             manifest: ctx.datasets.get(dsId)!.manifest,
@@ -1353,6 +1535,7 @@ export class TickCoordinator {
           view: view.id,
           drawnViews,
         };
+        const coldArgs = { ...sent, ctx, requests: share.requests };
 
         // View-move fast path: only the camera moved and the worker holds
         // exactly the active set last sent for this view, so ship only the
@@ -1392,7 +1575,7 @@ export class TickCoordinator {
           epochs: result.epochs,
         });
         // A later pure view move can take the delta path against this.
-        held.set(view.id, { mode, activeSet: share.activeSet, visibleChannels, indexByMember });
+        held.set(view.id, { mode, activeSet: share.activeSet, visibleChannels, indexByMember, sent });
       }
 
       const labels = labelRequests[index];
@@ -1401,18 +1584,7 @@ export class TickCoordinator {
       // Submit image and label chunks in a single call so they don't cancel
       // each other. Cancellation contract: a request omitted by the
       // next plan has its in-flight fetch aborted.
-      ctx.cpuCache.submit({
-        requests: requestsWithLabels,
-        ...(carried && { delta: submitDeltas[index] }),
-        activeSet: result.activeSet,
-        epochs: result.epochs,
-        stats: result.stats,
-        // `nextState` is required on RequestPlan but unused by submit();
-        // forward the planner's pointer so the shape stays honest.
-        nextState: result.nextState,
-        shortfall: result.shortfall,
-        coarseLoanBytes: result.coarseLoanBytes,
-      }, chunkBytesFor(ctx.datasets.get(dsId)!.manifest));
+      this.submitPlan(ctx, dsId, result, requestsWithLabels, carried ? submitDeltas[index] : undefined);
 
       // Capture this dataset's display-only fast-path signature: the
       // display state now on the worker, plus every non-display signal a
@@ -1425,6 +1597,8 @@ export class TickCoordinator {
         nonDisplayKey: nonDisplayKeyForDataset(dsSettings),
       });
     }
+
+    if (this.pacedPass !== null) this.noteChangeCost(pacedChanges, performance.now() - applyStart);
 
     this.lastViewCoverage = viewCoverage;
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
@@ -1789,7 +1963,10 @@ export class TickCoordinator {
 
     // Advance the fetch lifecycle once. The delivery ledger stays: the worker
     // reports any slot the new T/Z leaves stale. The active set is unchanged,
-    // so `planningState` keeps it and takes only the new z.
+    // so `planningState` keeps it and takes only the new z. The stages take
+    // these requests whole, so nothing a paced pass owed is left.
+    this.pacing.clear();
+    this.pacedPass = null;
     ctx.cpuCache.onPlanRebuildStart();
     const admissions = this.admit(ctx, planned);
     for (const [index, scrubbed] of planned.entries()) {
@@ -2056,11 +2233,17 @@ export class TickCoordinator {
   }
 
   /**
-   * True while a coalesced change's trailing rebuild is owed, or the
-   * refinement a moving view held. The view is not settled until it lands.
+   * True while a coalesced change's trailing rebuild is owed, the refinement
+   * a moving view held, or changes of a plan the stages after it have yet to
+   * take. The view is not settled until they land.
    */
   hasPendingRebuild(): boolean {
-    return this.pendingDeferredRebuild || this.refinementOwed;
+    return this.pendingDeferredRebuild || this.refinementOwed || this.pacing.owes();
+  }
+
+  /** Whether a plan's changes wait for the stages after it to take them, which the next tick does. */
+  owesPlanChanges(): boolean {
+    return this.pacing.owes();
   }
 
   /**
