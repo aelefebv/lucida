@@ -21,6 +21,13 @@ To find where the viewer is slow, run `uv run scripts/perf.py`; see `docs/perf.m
 If `tsc` reports a missing method on a `Wasm*` type, `lucida-core/pkg` is stale. Rebuild it
 with `pnpm build:wasm` from `lucida-web/`.
 
+Before pushing, run every command in `.github/workflows/ci.yml`, not a subset. CI builds on
+unpinned stable Rust, so run `rustup update stable` first: a new release brings clippy lints
+that an older local toolchain won't report.
+
+Give each concurrent worktree its own `CARGO_TARGET_DIR`. Cargo names the workspace's own
+crates the same in every worktree, so a shared target dir mixes their builds.
+
 Comments say why: the invariant, the constraint, the choice a reader would otherwise undo.
 History and issue numbers belong in commit messages.
 
