@@ -123,7 +123,7 @@ describe("render loop trace wiring", () => {
     expect(doc.runs[1].header.cause).toEqual(interactionCause("orbit"));
   });
 
-  it("says whether a pan, zoom or orbit landed since a time, for the readout to tell a camera drag", () => {
+  it("says whether a pan, zoom, orbit or fly move landed since a time, for the readout to tell a camera drag", () => {
     const { loop } = makeLoop();
     const pressed = performance.now();
     loop.markInput("scrub");
@@ -150,6 +150,25 @@ describe("render loop trace wiring", () => {
       expect(told).toEqual([true, false]);
       loop.markInput("pan");
       expect(told).toEqual([true, false, true]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("runs a fly move as a camera gesture, with a view run of its own", () => {
+    vi.useFakeTimers();
+    try {
+      const told: boolean[] = [];
+      const { loop } = makeLoop((running) => told.push(running));
+      loop.addDataset("ds-1", MANIFEST);
+      traceRecorder.closeRun("quiescent");
+      const pressed = performance.now();
+      loop.markInput("fly");
+      expect(told).toEqual([true]);
+      expect(loop.cameraMovedSince(pressed)).toBe(true);
+      const runs = window.lucidaTrace!.exportTrace().runs;
+      expect(runs[runs.length - 1].header.cause).toEqual(interactionCause("fly"));
+      expect(interactionCause("fly").epoch).toBe("view");
     } finally {
       vi.useRealTimers();
     }

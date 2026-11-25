@@ -150,9 +150,6 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
   }, [loopRef]);
   const scheduleFullRes = useCallback((delayMs: number = SCALE_RESTORE_DELAY_MS) => {
     clearTimeout(scaleTimerRef.current);
-    // A deferred write inside a debounced callback, not a render-phase
-    // mutation.
-    // eslint-disable-next-line react-hooks/immutability
     scaleTimerRef.current = window.setTimeout(() => {
       loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
     }, delayMs);
