@@ -62,7 +62,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 # the crypto backend explicit. We pick `aws_lc_rs` over `rust_crypto`: the latter
 # pulls the `rsa` crate (RUSTSEC-2023-0071 "Marvin", unpatched), which would add a
 # new advisory.
-jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12.0", features = ["aws_lc_rs"] }
 base64 = "0.23"
 urlencoding = "2"
 
