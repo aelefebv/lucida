@@ -1,24 +1,27 @@
 //! The trace driver's script: an ordered list of steps
 //! the driver performs on the page once the open has settled, so an agent
-//! can reproduce what a person does headlessly: pan, zoom, orbit, scrub,
-//! select, switch mode, fit, resize, set contrast, add or remove a
+//! can reproduce what a person does headlessly: pan, zoom, orbit, fly,
+//! scrub, select, switch mode, fit, resize, set contrast, add or remove a
 //! dataset, click or drag on the minimap, and swipe or blink a comparison.
 //!
 //! Steps go through the page's own input handling. Pan, zoom, and orbit are
 //! synthesized as the pointer and wheel events a mouse would raise, over the
 //! DevTools protocol, in CSS pixels at the run's device pixel ratio, so a
-//! scripted orbit measures the path a person's orbit takes. A mode switch
-//! and a fit press the viewer's keys, or tap where the view has no key, and
-//! a resize changes the window the page lays out in. Scrub, select,
-//! contrast, and adding or removing a dataset have nothing to click on the
-//! capture surface, where the selectors, the layer panel, and the add-data
-//! dialog are hidden, so they go through the handlers those controls call,
-//! which the page exposes on the trace seam for this purpose.
+//! scripted orbit measures the path a person's orbit takes. A fly holds the
+//! fly camera's keys down as a keyboard does, and looks around with the drag
+//! a mouse makes. A mode switch and a fit press the viewer's keys, or tap
+//! where the view has no key, and a resize changes the window the page lays
+//! out in. Scrub, select, contrast, and adding or removing a dataset have
+//! nothing to click on the capture surface, where the selectors, the layer
+//! panel, and the add-data dialog are hidden, so they go through the
+//! handlers those controls call, which the page exposes on the trace seam
+//! for this purpose.
 //!
 //! By default a pan, zoom, or orbit lands as one quick burst and a scrub as
 //! one jump. A duration spreads the gesture's events across that time at
 //! display rate, and an interval plays a scrub one position at a time, so
-//! the lag a sustained drag or playback shows is exercised.
+//! the lag a sustained drag or playback shows is exercised. A fly always has
+//! a duration: how long its keys are held.
 //!
 //! After each step the driver reads the view from the seam and records it
 //! beside the view before the step, the run the step opened, and what the
@@ -186,6 +189,18 @@ pub enum ScriptStep {
         )]
         duration_ms: Option<u64>,
     },
+    /// Hold the fly camera's `keys` down for `durationMs`, and with `look`,
+    /// drag the pointer by that screen delta in CSS pixels over the same
+    /// span to look around. The keys are the viewer's: W, A, S, D move, Q
+    /// and E go down and up, I, J, K, L look, U and O roll.
+    Fly {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        keys: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        look: Option<[f64; 2]>,
+        #[serde(rename = "durationMs")]
+        duration_ms: u64,
+    },
     /// Move a selector by a count of positions. On `c` it moves the solo of
     /// the dataset in hand, the composite counting as the position before
     /// the first channel. One jump, or one position every `intervalMs`.
@@ -307,7 +322,8 @@ pub enum ScriptStep {
     },
     /// Send the pans, zooms, orbits and hovers that follow to the `view`th view, by
     /// its place in the layout from 0, which a press or a wheel there makes
-    /// the active view; to the canvas again when `view` is absent.
+    /// the active view; to the canvas again when `view` is absent. A fly's
+    /// look drag goes there too, and its keys steer the active view.
     Target {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         view: Option<usize>,
@@ -336,6 +352,7 @@ impl ScriptStep {
             Self::Pan { .. } => "pan",
             Self::Zoom { .. } => "zoom",
             Self::Orbit { .. } => "orbit",
+            Self::Fly { .. } => "fly",
             Self::Scrub { .. } => "scrub",
             Self::Select { .. } => "select",
             Self::Mode { .. } => "mode",
@@ -406,6 +423,29 @@ impl ScriptStep {
                     return Err("an orbit by 0,0 moves nothing".to_string());
                 }
                 validate_duration("an orbit", *duration_ms)
+            }
+            Self::Fly {
+                keys,
+                look,
+                duration_ms,
+            } => {
+                if *duration_ms == 0 {
+                    return Err("a fly over 0 ms holds nothing".to_string());
+                }
+                validate_fly_keys(keys)?;
+                match look {
+                    Some(delta) if !(delta[0].is_finite() && delta[1].is_finite()) => {
+                        Err("a look delta is two finite numbers".to_string())
+                    }
+                    Some([dx, dy]) if *dx == 0.0 && *dy == 0.0 => Err(
+                        "a look by 0,0 moves nothing; leave it out to fly without looking"
+                            .to_string(),
+                    ),
+                    None if keys.is_empty() => {
+                        Err("a fly holds a key down or looks around".to_string())
+                    }
+                    _ => Ok(()),
+                }
             }
             Self::Scrub { count: 0, .. } => Err("a scrub by 0 moves nothing".to_string()),
             Self::Scrub {
@@ -549,9 +589,32 @@ impl ScriptStep {
             | Self::Orbit { duration_ms, .. }
             | Self::Minimap { duration_ms, .. }
             | Self::Swipe { duration_ms, .. } => duration_ms.map(Duration::from_millis),
+            Self::Fly { duration_ms, .. } => Some(Duration::from_millis(*duration_ms)),
             _ => None,
         }
     }
+}
+
+/// The fly camera's keys, as the viewer binds them. A rebinding in the
+/// viewer has to be made here as well.
+const FLY_KEYS: &str = "WASDQEIJKLUO";
+
+/// A fly's keys: the fly camera's, in either case, each once.
+fn validate_fly_keys(keys: &str) -> Result<(), String> {
+    for (index, key) in keys.char_indices() {
+        if !FLY_KEYS.contains(key.to_ascii_uppercase()) {
+            return Err(format!(
+                "a fly key is one of W, A, S, D, Q, E, I, J, K, L, U and O, not {key}"
+            ));
+        }
+        if keys[..index]
+            .chars()
+            .any(|held| held.eq_ignore_ascii_case(&key))
+        {
+            return Err(format!("a fly holds each key once, not {key} twice"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_with(with: Option<&str>) -> Result<(), String> {
@@ -597,6 +660,17 @@ impl std::fmt::Display for ScriptStep {
                 phi,
                 duration_ms,
             } => write!(f, "orbit {theta}°,{phi}°{}", pace_suffix(*duration_ms)),
+            Self::Fly {
+                keys,
+                look,
+                duration_ms,
+            } => {
+                write!(f, "fly {keys}")?;
+                if let Some([dx, dy]) = look {
+                    write!(f, ":{dx},{dy}")?;
+                }
+                f.write_str(&pace_suffix(Some(*duration_ms)))
+            }
             Self::Scrub {
                 axis,
                 count,
@@ -707,7 +781,7 @@ impl Script {
         let steps: Vec<ScriptStep> = serde_json::from_value(steps).map_err(|error| {
             format!(
                 "a step could not be read: {error}; the kinds are wait, hold, pan, zoom, orbit, \
-                 scrub, select, mode, plane, fit, resize, contrast, add, remove, minimap, \
+                 fly, scrub, select, mode, plane, fit, resize, contrast, add, remove, minimap, \
                  swipe, and blink"
             )
         })?;
@@ -833,12 +907,13 @@ pub struct ScriptArgs {
 
 /// The flag ids, in the order their help prints. `wait`, `hold`, and `fit`
 /// carry no text to parse; the rest go through `step_from_flag`.
-const STEP_FLAGS: [&str; 17] = [
+const STEP_FLAGS: [&str; 18] = [
     "wait",
     "hold",
     "pan",
     "zoom_by",
     "orbit",
+    "fly",
     "scrub",
     "select",
     "mode",
@@ -920,6 +995,19 @@ impl clap::Args for ScriptArgs {
                     .help(
                         "Orbit by two angles in degrees, as a drag in volume mode. Add /MS to \
                          spread the drag over that many milliseconds at display rate",
+                    ),
+            )
+            .arg(
+                Arg::new("fly")
+                    .long("fly")
+                    .value_name("KEYS[:DX,DY]/MS")
+                    .action(ArgAction::Append)
+                    .help(
+                        "Hold the fly camera's keys down for MS milliseconds, for example W/2000: \
+                         W, A, S, D move, Q and E go down and up, I, J, K, L look, U and O roll. \
+                         Add :DX,DY to drag the pointer by that screen delta in CSS pixels over \
+                         the same span, which looks around. Needs the fly camera, which \
+                         --camera fly starts in",
                     ),
             )
             .arg(
@@ -1150,9 +1238,9 @@ fn flag_of(step: &ScriptStep) -> &'static str {
 }
 
 /// One flag's text as a step: `DX,DY`, `FACTOR[@X,Y]`, `THETA,PHI`, or
-/// `AXIS:COUNT`, each with an optional `/MS`; `channel:N[=off]` /
-/// `layer:ID[=off]`; `2d` / `3d`; `WIDTHxHEIGHT`; `CHANNEL:MIN,MAX`; or a
-/// dataset URL.
+/// `AXIS:COUNT`, each with an optional `/MS`; `KEYS[:DX,DY]/MS`;
+/// `channel:N[=off]` / `layer:ID[=off]`; `2d` / `3d`; `WIDTHxHEIGHT`;
+/// `CHANNEL:MIN,MAX`; or a dataset URL.
 pub fn step_from_flag(id: &str, text: &str) -> Result<ScriptStep, String> {
     match id {
         "pan" => {
@@ -1170,6 +1258,20 @@ pub fn step_from_flag(id: &str, text: &str) -> Result<ScriptStep, String> {
             Ok(ScriptStep::Orbit {
                 theta,
                 phi,
+                duration_ms,
+            })
+        }
+        "fly" => {
+            let (text, Some(duration_ms)) = split_pace(text)? else {
+                return Err("a fly is KEYS[:DX,DY]/MS, for example W/2000".to_string());
+            };
+            let (keys, look) = match text.split_once(':') {
+                Some((keys, look)) => (keys, Some(parse_pair(look)?)),
+                None => (text, None),
+            };
+            Ok(ScriptStep::Fly {
+                keys: keys.trim().to_string(),
+                look: look.map(|(dx, dy)| [dx, dy]),
                 duration_ms,
             })
         }
@@ -1552,6 +1654,16 @@ pub enum SentInput {
     },
     /// A key pressed and released, named as the viewer's shortcuts name it.
     Key { key: String },
+    /// Keys held down, named as the viewer's shortcuts name them, for
+    /// `span_ms` by the driver's clock from the first press to the first
+    /// release, and with `look`, the drag made over the same span.
+    #[serde(rename_all = "camelCase")]
+    Fly {
+        keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        look: Option<Box<SentInput>>,
+        span_ms: f64,
+    },
     /// A left-button press and release at `at`, in CSS pixels.
     Click { at: [f64; 2] },
     /// `taps` touch taps at `at`, in CSS pixels.
@@ -1572,6 +1684,7 @@ impl SentInput {
             | Self::Move { span_ms, .. }
             | Self::Wheel { span_ms, .. }
             | Self::Control { span_ms, .. } => *span_ms,
+            Self::Fly { span_ms, .. } => Some(*span_ms),
             _ => None,
         }
     }
@@ -1798,6 +1911,14 @@ const FIT_KEY: KeyPress = KeyPress {
     code: "Digit0",
     virtual_key: 48,
 };
+/// The key the viewer binds to switching the volume view between the orbit
+/// and the fly camera. A rebinding in the viewer has to be made here as well.
+const TOGGLE_FLY_KEY: KeyPress = KeyPress {
+    combo: "F",
+    key: "f",
+    code: "KeyF",
+    virtual_key: 70,
+};
 
 /// Run `script` on `page`, which has finished its open at `viewport`. Each
 /// gesture step waits for the run it opened to conclude, under the same
@@ -1875,6 +1996,20 @@ async fn run_step(
                     drag(page, rect, delta, false, pace, wait).await?
                 }
                 other => withheld("an orbit", "the volume view", other),
+            });
+        }
+        // Only the fly camera reads the fly keys, and a drag there looks
+        // around where elsewhere it would orbit or pan.
+        ScriptStep::Fly {
+            keys,
+            look,
+            duration_ms,
+        } => {
+            let (rect, mode) = gesture_target(page, *target, mode, wait).await?;
+            let span = Duration::from_millis(*duration_ms);
+            input = Some(match mode.as_deref() {
+                Some("fly") => fly(page, rect, keys, *look, span, wait).await?,
+                other => withheld("a fly", "the fly camera", other),
             });
         }
         ScriptStep::Zoom { factor, at, .. } => {
@@ -2444,19 +2579,113 @@ fn elapsed_ms(start: tokio::time::Instant) -> f64 {
 /// Press and release a key, as a keyboard sends it, on whatever the page has
 /// focused: the viewer's shortcuts listen on the window.
 async fn press_key(page: &mut Page, key: &KeyPress, wait: Duration) -> Result<SentInput, CliError> {
-    page.dispatch_key_event(
-        json!({ "type": "keyDown", "key": key.key, "code": key.code, "text": key.key, "unmodifiedText": key.key, "windowsVirtualKeyCode": key.virtual_key }),
-        wait,
-    )
-    .await?;
-    page.dispatch_key_event(
-        json!({ "type": "keyUp", "key": key.key, "code": key.code, "windowsVirtualKeyCode": key.virtual_key }),
-        wait,
-    )
-    .await?;
+    for down in [true, false] {
+        page.dispatch_key_event(key_event(down, key.key, key.code, key.virtual_key), wait)
+            .await?;
+    }
     Ok(SentInput::Key {
         key: key.combo.to_string(),
     })
+}
+
+/// The DevTools protocol's event for a key going down or up, as a keyboard
+/// sends it. Going down, it carries the character the key types.
+fn key_event(down: bool, key: &str, code: &str, virtual_key: u32) -> Value {
+    if down {
+        json!({ "type": "keyDown", "key": key, "code": code, "text": key, "unmodifiedText": key, "windowsVirtualKeyCode": virtual_key })
+    } else {
+        json!({ "type": "keyUp", "key": key, "code": code, "windowsVirtualKeyCode": virtual_key })
+    }
+}
+
+/// A letter key going down or up: it types the lowercase letter, and its
+/// code and virtual key code are its capital's.
+fn letter_key_event(letter: char, down: bool) -> Value {
+    let capital = letter.to_ascii_uppercase();
+    let key = letter.to_ascii_lowercase().to_string();
+    key_event(down, &key, &format!("Key{capital}"), u32::from(capital))
+}
+
+/// Hold `keys` down for `span`, and with `look`, drag the pointer by that
+/// delta over the same span, as a person flies with one hand on the keys and
+/// one on the mouse. The keys go down first and come up once the span has
+/// passed and the drag is released. Each goes down once: the viewer holds a
+/// key's action from its press to its release, so a keyboard's repeats
+/// change nothing.
+async fn fly(
+    page: &mut Page,
+    rect: CanvasRect,
+    keys: &str,
+    look: Option<[f64; 2]>,
+    span: Duration,
+    wait: Duration,
+) -> Result<SentInput, CliError> {
+    let keys: Vec<char> = keys.chars().map(|key| key.to_ascii_uppercase()).collect();
+    let start = tokio::time::Instant::now();
+    for key in &keys {
+        page.dispatch_key_event(letter_key_event(*key, true), wait)
+            .await?;
+    }
+    let look = match look {
+        Some([dx, dy]) => Some(Box::new(
+            drag(page, rect, (dx, dy), false, Some(span), wait).await?,
+        )),
+        None => None,
+    };
+    tokio::time::sleep_until(start + span).await;
+    let span_ms = elapsed_ms(start);
+    for key in keys.iter().rev() {
+        page.dispatch_key_event(letter_key_event(*key, false), wait)
+            .await?;
+    }
+    Ok(SentInput::Fly {
+        keys: keys.iter().map(char::to_string).collect(),
+        look,
+        span_ms,
+    })
+}
+
+/// Switch the page's view from the orbit camera to the fly camera with the
+/// viewer's key, as a person does, so the fly speed is the one the viewer
+/// sets from the volume's size. Then wait until the page is quiescent again,
+/// so the steps after it start from a settled view.
+pub async fn enter_fly_camera(page: &mut Page, wait: Duration) -> Result<(), CliError> {
+    wait_for_script_seam(page, wait).await?;
+    let before = read_step_state(page, wait).await?;
+    match before.camera_mode() {
+        Some("fly") => return Ok(()),
+        Some("arcball") => {}
+        other => {
+            return Err(CliError::new(
+                ErrorKind::RejectedCommand,
+                format!(
+                    "the fly camera starts from the orbit camera; the page is in {} mode",
+                    other.unwrap_or("no")
+                ),
+            ));
+        }
+    }
+    press_key(page, &TOGGLE_FLY_KEY, wait).await?;
+    let deadline = tokio::time::Instant::now() + RUN_OPEN_GRACE.min(wait);
+    loop {
+        let state = read_step_state(page, wait).await?;
+        match state.camera_mode() {
+            Some("fly") => break,
+            other if tokio::time::Instant::now() >= deadline => {
+                return Err(CliError::new(
+                    ErrorKind::RejectedCommand,
+                    format!(
+                        "the page did not switch to the fly camera on {}; it is in {} mode",
+                        TOGGLE_FLY_KEY.combo,
+                        other.unwrap_or("no")
+                    ),
+                ));
+            }
+            _ => tokio::time::sleep(POLL).await,
+        }
+    }
+    wait_for_quiescence(page, wait, before.hold_ms).await?;
+    Ok(())
 }
 
 /// A comparison step's dataset as the seam takes it: a JSON string, or null.
@@ -2958,11 +3187,11 @@ mod tests {
 
     #[test]
     fn a_script_file_names_the_step_it_cannot_use() {
-        let unknown = Script::from_json(r#"[{"kind": "fly"}]"#).unwrap_err();
+        let unknown = Script::from_json(r#"[{"kind": "teleport"}]"#).unwrap_err();
         assert!(
             unknown.contains(
-                "wait, hold, pan, zoom, orbit, scrub, select, mode, plane, fit, resize, contrast, \
-                 add, remove, minimap, swipe, and blink"
+                "wait, hold, pan, zoom, orbit, fly, scrub, select, mode, plane, fit, resize, \
+                 contrast, add, remove, minimap, swipe, and blink"
             ),
             "{unknown}"
         );
@@ -4433,6 +4662,145 @@ mod tests {
             })
             .unwrap(),
             json!({ "sent": "move", "from": [10.0, 20.0], "to": [5.0, 20.0], "moves": 2 })
+        );
+    }
+
+    #[test]
+    fn a_fly_step_holds_keys_down_and_can_look_around() {
+        let script = Script::from_json(
+            r#"[
+                {"kind": "fly", "keys": "W", "durationMs": 3000},
+                {"kind": "fly", "keys": "WD", "look": [300, -60], "durationMs": 2000},
+                {"kind": "fly", "look": [-120, 0], "durationMs": 500}
+            ]"#,
+        )
+        .unwrap();
+        let forward = ScriptStep::Fly {
+            keys: "W".to_string(),
+            look: None,
+            duration_ms: 3000,
+        };
+        let looking = ScriptStep::Fly {
+            keys: "WD".to_string(),
+            look: Some([300.0, -60.0]),
+            duration_ms: 2000,
+        };
+        let look_only = ScriptStep::Fly {
+            keys: String::new(),
+            look: Some([-120.0, 0.0]),
+            duration_ms: 500,
+        };
+        assert_eq!(
+            script.steps,
+            vec![forward.clone(), looking.clone(), look_only.clone()]
+        );
+        assert_eq!(step_from_flag("fly", "W/3000").unwrap(), forward);
+        assert_eq!(step_from_flag("fly", "WD:300,-60/2000").unwrap(), looking);
+        assert_eq!(step_from_flag("fly", ":-120,0/500").unwrap(), look_only);
+        assert_eq!(forward.to_string(), "fly W/3000");
+        assert_eq!(looking.to_string(), "fly WD:300,-60/2000");
+        assert_eq!(look_only.to_string(), "fly :-120,0/500");
+        assert_eq!(looking.kind(), "fly");
+        assert_eq!(looking.pace(), Some(Duration::from_secs(2)));
+        assert_eq!(
+            serde_json::to_value(&look_only).unwrap(),
+            json!({ "kind": "fly", "look": [-120.0, 0.0], "durationMs": 500 })
+        );
+        assert!(Script::from_json(r#"[{"kind": "fly", "keys": "wq", "durationMs": 1}]"#).is_ok());
+        let args = parse_flags(&["--fly", "W/3000", "--orbit", "30,0", "ds.zarr"]).unwrap();
+        assert_eq!(args.steps.first(), Some(&forward));
+        assert_eq!(args.steps.len(), 2);
+
+        let refused = |json: &str| Script::from_json(json).unwrap_err();
+        assert!(refused(r#"[{"kind": "fly", "keys": "W"}]"#).contains("durationMs"));
+        assert_eq!(
+            refused(r#"[{"kind": "fly", "keys": "W", "durationMs": 0}]"#),
+            "step 1 (fly): a fly over 0 ms holds nothing"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "fly", "keys": "WF", "durationMs": 100}]"#),
+            "step 1 (fly): a fly key is one of W, A, S, D, Q, E, I, J, K, L, U and O, not F"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "fly", "keys": "Ww", "durationMs": 100}]"#),
+            "step 1 (fly): a fly holds each key once, not w twice"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "fly", "durationMs": 100}]"#),
+            "step 1 (fly): a fly holds a key down or looks around"
+        );
+        assert_eq!(
+            refused(r#"[{"kind": "fly", "keys": "W", "look": [0, 0], "durationMs": 100}]"#),
+            "step 1 (fly): a look by 0,0 moves nothing; leave it out to fly without looking"
+        );
+        assert_eq!(
+            step_from_flag("fly", "W").unwrap_err(),
+            "a fly is KEYS[:DX,DY]/MS, for example W/2000"
+        );
+        assert_eq!(
+            step_from_flag("fly", "W:300/2000").unwrap_err(),
+            "two numbers separated by a comma, not 300"
+        );
+        let error = parse_flags(&["--fly", "X/2000", "ds.zarr"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("step 1 (--fly): a fly key is one of"),
+            "{error}"
+        );
+    }
+
+    /// A fly key goes down and up as a keyboard sends it, and the record says
+    /// which keys were held, for how long, and the drag that looked around.
+    #[test]
+    fn a_fly_sends_the_keys_a_keyboard_would_and_records_them() {
+        assert_eq!(
+            letter_key_event('W', true),
+            json!({ "type": "keyDown", "key": "w", "code": "KeyW", "text": "w", "unmodifiedText": "w", "windowsVirtualKeyCode": 87 })
+        );
+        assert_eq!(
+            letter_key_event('d', false),
+            json!({ "type": "keyUp", "key": "d", "code": "KeyD", "windowsVirtualKeyCode": 68 })
+        );
+        match withheld("a fly", "the fly camera", Some("arcball")) {
+            SentInput::Withheld { reason } => assert_eq!(
+                reason,
+                "a fly needs the fly camera; the page is in arcball mode"
+            ),
+            other => panic!("{other:?}"),
+        }
+        let sent = SentInput::Fly {
+            keys: vec!["W".to_string(), "D".to_string()],
+            look: Some(Box::new(SentInput::Drag {
+                from: [570.0, 480.0],
+                to: [870.0, 420.0],
+                moves: 120,
+                shift: false,
+                span_ms: Some(2001.5),
+            })),
+            span_ms: 2004.0,
+        };
+        let json = serde_json::to_value(&sent).unwrap();
+        assert_eq!(json["sent"], "fly");
+        assert_eq!(json["keys"], json!(["W", "D"]));
+        assert_eq!(json["look"]["sent"], "drag");
+        assert_eq!(json["spanMs"], 2004.0);
+        assert_eq!(serde_json::from_value::<SentInput>(json).unwrap(), sent);
+
+        let mut flew = record(
+            ScriptStep::Fly {
+                keys: "WD".to_string(),
+                look: Some([300.0, -60.0]),
+                duration_ms: 2000,
+            },
+            Some("run-5"),
+            true,
+        );
+        flew.input = Some(sent);
+        let text = format_script_human(&ScriptRecord { steps: vec![flew] });
+        assert!(
+            text.contains("1  fly WD:300,-60/2000    run run-5 (orbit) · quiescent · 1.50 s · input over 2.00 s"),
+            "{text}"
         );
     }
 

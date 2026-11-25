@@ -38,9 +38,9 @@
       "ratios": [1, 2]
     },
     "large-3d": {
-      "description": "volumes whose finest level outgrows memory many times over, opened, zoomed and orbited at ratio 2, on a large canvas too",
+      "description": "volumes whose finest level outgrows memory many times over, opened, zoomed, orbited and flown through at ratio 2, on a large canvas too",
       "datasets": ["deep-volume", "large-aniso-volume", "huge-volume"],
-      "scenarios": ["volume-open", "volume-zoom", "large-canvas-orbit", "orbit-sustained"],
+      "scenarios": ["volume-open", "volume-zoom", "large-canvas-orbit", "orbit-sustained", "fly-forward", "fly-look", "large-canvas-fly"],
       "ratios": [2]
     }
   }

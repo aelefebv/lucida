@@ -32,8 +32,8 @@ use crate::session::{connect_workspace_socket, incoming_messages, wait_for_works
 use crate::trace_knobs::KnobSettings;
 use crate::trace_replay::{ReplayRecord, format_replay_block};
 use crate::trace_script::{
-    Script, ScriptRecord, describe_script, failing_verdict, format_script_human, run_script,
-    script_gate_failure,
+    Script, ScriptRecord, describe_script, enter_fly_camera, failing_verdict, format_script_human,
+    run_script, script_gate_failure,
 };
 
 /// The run file's own version, independent of the trace schema it carries.
@@ -370,12 +370,14 @@ fn cores_script(cores: u32) -> String {
 }
 
 /// Which camera the driver frames the dataset with: the slice camera of the
-/// page's 2D mode, or the orbiting camera of its 3D mode.
+/// page's 2D mode, or the orbiting camera of its 3D mode, or its fly camera,
+/// which starts where the orbiting camera's framing puts it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum CameraKind {
     Slice,
     Arcball,
+    Fly,
 }
 
 impl std::fmt::Display for CameraKind {
@@ -383,6 +385,7 @@ impl std::fmt::Display for CameraKind {
         f.write_str(match self {
             CameraKind::Slice => "slice",
             CameraKind::Arcball => "arcball",
+            CameraKind::Fly => "fly",
         })
     }
 }
@@ -1668,6 +1671,11 @@ pub fn pin_display(
 /// what lets a caller name the level they expect the page to reach. The
 /// composition runs through `lucida-core`'s own scene, so the recorded
 /// target is the rule's answer and not a restatement of it here.
+///
+/// A fly camera goes into the view as the orbit camera's framing, and the
+/// driver switches the page to the fly camera once it has opened, as a
+/// person does. The switch keeps the eye and the view direction, and the
+/// record measures the fly camera the run then has.
 pub fn compose_camera(
     document: &DocumentState,
     dataset_id: &DatasetId,
@@ -1692,7 +1700,7 @@ pub fn compose_camera(
     scene.load_document(document.clone());
     match request.kind {
         CameraKind::Slice => scene.set_mode_2d(),
-        CameraKind::Arcball => scene.set_mode_3d(),
+        CameraKind::Arcball | CameraKind::Fly => scene.set_mode_3d(),
     }
     if !scene.fit_camera_to_dataset(&dataset_id.0) {
         return Err(CliError::new(
@@ -1714,6 +1722,10 @@ pub fn compose_camera(
     // The driver records the level this exact camera targets, so the page
     // must keep it rather than fit its own.
     scene.active_view_mut().camera.set_framing(Framing::Placed);
+    let camera = scene.active_view().camera.clone();
+    if request.kind == CameraKind::Fly {
+        scene.set_mode_fly();
+    }
 
     let view = scene.active_view().id();
     let zoom = scene.pixels_per_sample(view, dataset_id).ok_or_else(|| {
@@ -1741,7 +1753,7 @@ pub fn compose_camera(
     };
 
     Ok(ComposedFraming {
-        camera: scene.active_view().camera.clone(),
+        camera,
         record: ComposedCamera {
             mode: request.kind,
             zoom,
@@ -2496,6 +2508,11 @@ pub async fn drive_run(
         cores: facts.composed_view.cores,
         screenshot: facts.screenshot.as_deref(),
         script: (!facts.script.is_empty()).then_some(&facts.script),
+        fly: facts
+            .composed_view
+            .camera
+            .as_ref()
+            .is_some_and(|camera| camera.mode == CameraKind::Fly),
     };
     let driven = drive_and_export(
         url,
@@ -2561,6 +2578,9 @@ struct DriveRequest<'a> {
     cores: Option<u32>,
     screenshot: Option<&'a Path>,
     script: Option<&'a Script>,
+    /// Switch the page to the fly camera once the open has settled, before
+    /// the script.
+    fly: bool,
 }
 
 /// What runs in the page before its own scripts: the knobs' preference seed and
@@ -2594,6 +2614,7 @@ fn new_document_script(request: &DriveRequest<'_>) -> Option<String> {
 /// `request.script` runs once the open has settled or been given up on,
 /// step by step, each gesture settling before the next. The frame is then
 /// the last step's, and the run the export reads is the last step's run.
+/// With `request.fly`, the page switches to the fly camera before it.
 ///
 /// `request.knobs` are handed to the page before it loads, as the preferences
 /// the Dev controls panel writes, so the run starts under them. They ride a
@@ -2623,6 +2644,9 @@ async fn drive_and_export(
             page.evaluate(CLOSE_AS_TIMEOUT, wait).await?;
             let closed = read_run_state(&mut page, wait).await?;
             pin_run(&mut page, closed.last_concluded_run_id.as_deref(), wait).await?;
+        }
+        if request.fly {
+            enter_fly_camera(&mut page, wait).await?;
         }
         // A resize step leaves the page at another size, and the frame is
         // taken at the size the page is left at.
@@ -5163,6 +5187,28 @@ mod tests {
                 "zoom {zoom}"
             );
         }
+    }
+
+    /// A fly camera opens as the orbit camera's framing, which the driver
+    /// switches on the page, and the record measures the fly camera that
+    /// switch makes: the same eye looking the same way.
+    #[test]
+    fn a_fly_camera_opens_as_the_orbit_framing_and_records_the_fly_camera() {
+        for zoom in [Some(0.177), None] {
+            let orbit = compose(CameraKind::Arcball, zoom);
+            let fly = compose(CameraKind::Fly, zoom);
+            assert_eq!(fly.camera, orbit.camera, "zoom {zoom:?}");
+            assert_eq!(fly.record.mode, CameraKind::Fly);
+            assert!(
+                (fly.record.zoom - orbit.record.zoom).abs() <= orbit.record.zoom * 1e-6,
+                "zoom {zoom:?}: the fly camera measures {}, the orbit camera {}",
+                fly.record.zoom,
+                orbit.record.zoom
+            );
+            assert_eq!(fly.record.target_level, orbit.record.target_level);
+        }
+        assert_eq!(CameraKind::Fly.to_string(), "fly");
+        assert_eq!(serde_json::to_value(CameraKind::Fly).unwrap(), json!("fly"));
     }
 
     /// Without a zoom the camera is the fit the page would make, and the

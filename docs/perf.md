@@ -139,8 +139,10 @@ dataset that declares length units and so lines up with another over the same re
 
 `scripts/perf/scenarios/` holds one file per interaction. A file has `steps` in the trace
 script format, the `camera` that frames the dataset, the traits it `requires`, and an
-optional `width` and `height`. `"mobile": true` drives the page as a phone, with a mobile
-layout, touch input and a mobile user agent (`lucida trace --mobile`). `"fullUi": true` loads
+optional `width` and `height`. The camera `fly` frames the dataset as `arcball` does, then
+switches to the fly camera with the viewer's F key before the steps, so a `fly` step can
+hold its keys. `"mobile": true` drives the page as a phone, with a mobile layout, touch
+input and a mobile user agent (`lucida trace --mobile`). `"fullUi": true` loads
 the full viewer page instead of the chrome-free capture surface (`lucida trace --full-ui`), so
 the run also checks that the top bar and a phone's bottom sheet sit wholly on screen. The
 `phone` suite runs `phone-cold-open`, `phone-full-ui` and `phone-settle-then-orbit` at ratio 3. The runner hands the file
@@ -156,11 +158,13 @@ back about 300 ms into a gesture. A gesture after a pause of a few seconds start
 side of a step the pause left it, so its lag reads the clocks, not the code. So a gesture that
 follows another step starts as soon as that step's run settles, about 0.8 s after the last
 frame, on top clocks: `large-canvas-orbit`, `volume-zoomed-orbit`, `slice-zoomed-pan`,
-`settle-then-orbit` and `phone-settle-then-orbit` do. They take no `wait` step, which would
-add the page's half-second quiescence hold, since each gesture step already waits for its
-run to settle. `large-canvas-orbit-cold` waits and then holds 12 s instead, past the lowest
-step on a desktop GPU, so its orbit starts on idle clocks. The `GPU idle` column says
-how long each step's GPU had been idle, and so which state it started in.
+`settle-then-orbit`, `phone-settle-then-orbit`, `fly-look` and `large-canvas-fly` do. They
+take no `wait` step, which would add the page's half-second quiescence hold, since each
+gesture step already waits for its run to settle. The switch to the fly camera draws a
+frame, so `fly-forward`, whose fly is its first step, starts about 0.6 s after it.
+`large-canvas-orbit-cold` waits and then holds 12 s instead, past the lowest step on a
+desktop GPU, so its orbit starts on idle clocks. The `GPU idle` column says how long each
+step's GPU had been idle, and so which state it started in.
 
 ## Builds
 

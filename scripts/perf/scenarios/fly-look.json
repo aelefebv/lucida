@@ -1,0 +1,9 @@
+{
+  "description": "switch the volume view to the fly camera and fly forward for 1 s, then keep flying forward for 2 s while dragging to look right and up, as soon as it settles, while the GPU is still on its top clocks",
+  "requires": ["volume"],
+  "camera": "fly",
+  "steps": [
+    { "kind": "fly", "keys": "W", "durationMs": 1000 },
+    { "kind": "fly", "keys": "W", "look": [160, -40], "durationMs": 2000 }
+  ]
+}
