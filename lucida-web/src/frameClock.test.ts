@@ -65,6 +65,19 @@ describe("FrameClock", () => {
     unsubscribe();
   });
 
+  it("draws once a frame when a callback wakes it, as a move that dirties the render loop does", () => {
+    const clock = new FrameClock();
+    const frames = vi.fn(() => {
+      clock.wake();
+      return true;
+    });
+    const unsubscribe = clock.subscribe(frames);
+    vi.advanceTimersByTime(16 * 20);
+    expect(frames.mock.calls.length).toBeGreaterThanOrEqual(19);
+    expect(frames.mock.calls.length).toBeLessThanOrEqual(21);
+    unsubscribe();
+  });
+
   it("requests nothing while the page is hidden and wakes when it shows", () => {
     const clock = new FrameClock();
     const frames = vi.fn();
