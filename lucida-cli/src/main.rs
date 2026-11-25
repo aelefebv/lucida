@@ -7220,6 +7220,7 @@ mod tests {
             "pan",
             "zoom_by",
             "orbit",
+            "fly",
             "scrub",
             "select",
             "mode",

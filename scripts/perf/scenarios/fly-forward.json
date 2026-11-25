@@ -1,0 +1,8 @@
+{
+  "description": "switch the volume view to the fly camera, then fly forward into the volume for 3 s at a person's pace and hold still while it settles",
+  "requires": ["volume"],
+  "camera": "fly",
+  "steps": [
+    { "kind": "fly", "keys": "W", "durationMs": 3000 }
+  ]
+}

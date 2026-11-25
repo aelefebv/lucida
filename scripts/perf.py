@@ -60,7 +60,7 @@ EXE = ".exe" if os.name == "nt" else ""
 
 # What a scenario can require of a dataset.
 TRAITS = ("volume", "time", "channels", "collection", "labels", "physical")
-CAMERAS = ("slice", "arcball")
+CAMERAS = ("slice", "arcball", "fly")
 SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "mobile", "fullUi", "steps"}
 DEFAULT_SUITE = "quick"
 # Each network is the server's source throttle profile, on its reads, and its

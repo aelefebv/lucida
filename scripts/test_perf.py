@@ -137,6 +137,9 @@ def test_scenarios_name_what_they_need() -> None:
     assert needs["orbit-sustained"] == {"volume"}
     assert needs["playback"] == {"time"}
     assert SCENARIOS["orbit-sustained"].camera == "arcball"
+    for name in ("fly-forward", "fly-look", "large-canvas-fly"):
+        assert needs[name] == {"volume"}, name
+        assert SCENARIOS[name].camera == "fly", name
     assert needs["label-open"] == {"labels"}
     assert needs["label-z-scrub"] == {"volume", "labels"}
     assert needs["label-z-play"] == {"volume", "labels"}
@@ -144,7 +147,7 @@ def test_scenarios_name_what_they_need() -> None:
 
 def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
     kinds = {step["kind"] for scenario in SCENARIOS.values() for step in scenario.steps}
-    assert {"mode", "plane", "fit", "resize", "contrast", "add", "remove", "minimap", "swipe", "blink", "hover"} <= kinds
+    assert {"mode", "plane", "fit", "resize", "contrast", "add", "remove", "minimap", "swipe", "blink", "hover", "fly"} <= kinds
     paced = {
         name
         for name, scenario in SCENARIOS.items()
@@ -162,6 +165,9 @@ def test_the_suite_has_a_scenario_for_each_new_step_and_paced_input() -> None:
         "slice-zoomed-pan",
         "large-canvas-orbit",
         "large-canvas-orbit-cold",
+        "fly-forward",
+        "fly-look",
+        "large-canvas-fly",
         "settle-then-orbit",
         "phone-settle-then-orbit",
         "minimap-navigate",
@@ -447,7 +453,15 @@ def test_the_large_3d_suite_runs_the_volumes_larger_than_memory_at_ratio_2_and_n
     assert [case.id for case in cases] == [
         f"{dataset}.{scenario}.dpr2"
         for dataset in ("deep-volume", "large-aniso-volume", "huge-volume")
-        for scenario in ("volume-open", "volume-zoom", "large-canvas-orbit", "orbit-sustained")
+        for scenario in (
+            "volume-open",
+            "volume-zoom",
+            "large-canvas-orbit",
+            "orbit-sustained",
+            "fly-forward",
+            "fly-look",
+            "large-canvas-fly",
+        )
     ]
     for suite in ("quick", "gate"):
         assert not {"large-aniso-volume", "huge-volume"} & set(SUITES[suite].datasets), suite

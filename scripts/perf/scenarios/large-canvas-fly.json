@@ -1,0 +1,11 @@
+{
+  "description": "fly-look in a 1674x921 window, a 3348x1842 canvas at ratio 2",
+  "requires": ["volume"],
+  "camera": "fly",
+  "width": 1674,
+  "height": 921,
+  "steps": [
+    { "kind": "fly", "keys": "W", "durationMs": 1000 },
+    { "kind": "fly", "keys": "W", "look": [160, -40], "durationMs": 2000 }
+  ]
+}
