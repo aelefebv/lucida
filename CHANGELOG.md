@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.46.0](https://github.com/aelefebv/lucida/compare/v0.45.10...v0.46.0) (2026-11-25)
+
+
+### Features
+
+* **cli:** trace and perf scenarios can drive the fly camera ([#1741](https://github.com/aelefebv/lucida/issues/1741)) ([b2d0136](https://github.com/aelefebv/lucida/commit/b2d013610cc4f29df5dc10e01e489e72f201e4a5)), closes [#1736](https://github.com/aelefebv/lucida/issues/1736)
+
+
+### Bug Fixes
+
+* **deps:** update url to 2.5.9 and cookie to 0.18.3 ([#1739](https://github.com/aelefebv/lucida/issues/1739)) ([47680ec](https://github.com/aelefebv/lucida/commit/47680ec3a55d1c8a90cf24d2140deb756f80cf50))
+* **web:** the fly camera moves once a frame, as a camera gesture ([#1737](https://github.com/aelefebv/lucida/issues/1737)) ([65cb456](https://github.com/aelefebv/lucida/commit/65cb4562e2afc71024bd64fd973c932da8570b88)), closes [#1735](https://github.com/aelefebv/lucida/issues/1735)
+
 ## [0.45.10](https://github.com/aelefebv/lucida/compare/v0.45.9...v0.45.10) (2026-11-22)
 
 
