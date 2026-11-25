@@ -46,7 +46,7 @@ export interface PixelReadoutHandle {
 export interface ReadoutLoop {
   markHover(atMs: number): void;
   noteHoverDrawn(throughMs: number, dispatchedMs: number): void;
-  /** Whether a pan, zoom or orbit has landed since `atMs`, on the `performance.now()` clock. */
+  /** Whether a pan, zoom, orbit or fly move has landed since `atMs`, on the `performance.now()` clock. */
   cameraMovedSince(atMs: number): boolean;
 }
 

@@ -68,7 +68,10 @@ export class FrameClock {
       if (callback(time) === true) keepAwake = true;
     }
     if (this.subscribers === 0 || isHidden()) return;
-    if (keepAwake || performance.now() < this.awakeUntil) {
+    // A callback that dirties the render loop wakes the clock, which
+    // requests the next frame already; a second request would run the tick
+    // twice in it, and each of those twice in the frame after.
+    if (this.rafId === null && (keepAwake || performance.now() < this.awakeUntil)) {
       this.rafId = requestAnimationFrame(this.tick);
     }
   };

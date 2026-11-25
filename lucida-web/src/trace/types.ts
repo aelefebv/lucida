@@ -176,7 +176,7 @@ export interface RunCause {
  * The inputs that open an interaction run. A closed set, so a run's label is
  * comparable across runs and across machines. Two orbits are two orbits.
  *
- * Pan, zoom and orbit move the camera, resize changes the viewport it
+ * Pan, zoom, orbit and fly move the camera, resize changes the viewport it
  * frames, and plane cuts another plane with the slice camera, so they bump
  * the `view` epoch. Scrub moves a selector along an
  * axis; select shows or hides a channel, a dataset, or a label; contrast
@@ -187,11 +187,11 @@ export interface RunCause {
  * canvas, the readouts and the crosshairs, so its run carries no epoch.
  */
 export const INPUT_KINDS = [
-  "pan", "zoom", "orbit", "scrub", "select", "resize", "contrast", "remove", "plane", "compare", "hover",
+  "pan", "zoom", "orbit", "fly", "scrub", "select", "resize", "contrast", "remove", "plane", "compare", "hover",
 ] as const;
 export type InputKind = (typeof INPUT_KINDS)[number];
 
-const VIEW_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "resize", "plane"];
+const VIEW_INPUTS: readonly InputKind[] = ["pan", "zoom", "orbit", "fly", "resize", "plane"];
 
 /** The inputs that move only what is drawn over the canvas, which no viewport frame answers. */
 export const OVERLAY_INPUTS: readonly InputKind[] = ["hover"];
