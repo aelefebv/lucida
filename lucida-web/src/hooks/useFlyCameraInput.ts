@@ -4,6 +4,18 @@ import type { HeldAction } from "../config/keyBindings.ts";
 import type { ViewportCommand } from "../commands.ts";
 import { frameClock } from "../frameClock.ts";
 
+/** What the viewer does around the fly camera's moves. */
+export interface FlyCameraCallbacks {
+  /**
+   * The camera moved on this frame. `atMs` is the earliest pointer event the
+   * move answers, on the `performance.now()` clock, or undefined for a move
+   * from held keys alone.
+   */
+  moved: (atMs: number | undefined) => void;
+  /** The frame after the last move: no key is held and the pointer is still. */
+  stopped: () => void;
+}
+
 /**
  * Drives the fly camera from the frame clock: held keys for translation and
  * rotation, accumulated mouse delta for mouselook. Returns the pointer handlers
@@ -14,15 +26,16 @@ export function useFlyCameraInput(
   applyViewportCommand: (scene: WasmScene, cmd: ViewportCommand) => void,
   pressedKeysRef: React.RefObject<ReadonlySet<HeldAction>>,
   isActive: boolean,
-  emitPresence: () => void,
-  markInteractiveDirty: () => void,
-  setLowRes: () => void,
-  scheduleFullRes: () => void,
+  callbacks: FlyCameraCallbacks,
 ) {
-  const mouseDeltaRef = useRef({ dx: 0, dy: 0 });
+  const mouseDeltaRef = useRef<{ dx: number; dy: number; atMs: number | undefined }>({ dx: 0, dy: 0, atMs: undefined });
   const draggingRef = useRef(false);
   const lastTimeRef = useRef(0);
   const hadInputRef = useRef(false);
+  const callbacksRef = useRef(callbacks);
+  useEffect(() => {
+    callbacksRef.current = callbacks;
+  });
 
   useEffect(() => {
     if (!isActive) {
@@ -65,13 +78,15 @@ export function useFlyCameraInput(
       if (pressed.has("rollRight")) roll -= ROTATION_SPEED;
 
       const md = mouseDeltaRef.current;
+      const lookedAtMs = md.atMs;
       if (md.dx !== 0 || md.dy !== 0) {
         // 0.005 rad per pixel, matching arcball, as a per-second rate.
         yaw -= md.dx * 0.005 / Math.max(dt, 0.001);
         pitch -= md.dy * 0.005 / Math.max(dt, 0.001);
-        md.dx = 0;
-        md.dy = 0;
       }
+      md.dx = 0;
+      md.dy = 0;
+      md.atMs = undefined;
 
       const hasInput =
         forward !== 0 ||
@@ -92,14 +107,10 @@ export function useFlyCameraInput(
           pitch,
           roll,
         });
-        markInteractiveDirty();
-        setLowRes();
-        emitPresence();
+        callbacksRef.current.moved(lookedAtMs);
         hadInputRef.current = true;
       } else if (hadInputRef.current) {
-        // Input just stopped.
-        scheduleFullRes();
-        emitPresence();
+        callbacksRef.current.stopped();
         hadInputRef.current = false;
       }
       // Held keys move the camera every frame without further input.
@@ -107,19 +118,12 @@ export function useFlyCameraInput(
     }
 
     return frameClock.subscribe(tick);
-  }, [
-    isActive,
-    sceneRef,
-    pressedKeysRef,
-    applyViewportCommand,
-    emitPresence,
-    markInteractiveDirty,
-    setLowRes,
-    scheduleFullRes,
-  ]);
+  }, [isActive, sceneRef, pressedKeysRef, applyViewportCommand]);
 
   const onPointerDown = useCallback(
     (e: PointerEvent) => {
+      // The right button opens the view's menu instead.
+      if (e.button === 2) return;
       draggingRef.current = true;
       (e.currentTarget as HTMLElement)?.setPointerCapture(e.pointerId);
     },
@@ -129,8 +133,10 @@ export function useFlyCameraInput(
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
       if (!draggingRef.current) return;
-      mouseDeltaRef.current.dx += e.movementX;
-      mouseDeltaRef.current.dy += e.movementY;
+      const md = mouseDeltaRef.current;
+      md.dx += e.movementX;
+      md.dy += e.movementY;
+      md.atMs ??= e.timeStamp;
     },
     [],
   );

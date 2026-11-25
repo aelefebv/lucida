@@ -142,29 +142,37 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
     enabled: active && (canFly || isFlyMode),
   });
 
-  // A fly-specific dirty source: fly ticks every frame, so attribution is useful
-  // here, and the rate limiter collapses it to one log line per second.
-  const fly = useFlyCameraInput(
-    sceneRef,
-    applyViewportCommand,
-    flyKeysRef,
-    isFlyMode && active,
-    emitPresence,
-    useCallback(() => loopRef.current?.markInteractiveDirty("fly_camera_input"), [loopRef]),
-    useCallback(() => {
-      clearTimeout(scaleTimerRef.current);
-      loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
-    }, [loopRef]),
-    useCallback(() => {
-      clearTimeout(scaleTimerRef.current);
-      // scaleTimerRef is captured by useFlyCameraInput's callback chain;
-      // .current writes here are deferred (timer body), not render-phase.
-      // eslint-disable-next-line react-hooks/immutability
-      scaleTimerRef.current = window.setTimeout(() => {
-        loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
-      }, SCALE_RESTORE_DELAY_MS);
-    }, [loopRef]),
-  );
+  // Resolution scaling during interaction
+  const scaleTimerRef = useRef<number>(0);
+  const setLowRes = useCallback(() => {
+    clearTimeout(scaleTimerRef.current);
+    loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
+  }, [loopRef]);
+  const scheduleFullRes = useCallback((delayMs: number = SCALE_RESTORE_DELAY_MS) => {
+    clearTimeout(scaleTimerRef.current);
+    // A deferred write inside a debounced callback, not a render-phase
+    // mutation.
+    // eslint-disable-next-line react-hooks/immutability
+    scaleTimerRef.current = window.setTimeout(() => {
+      loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
+    }, delayMs);
+  }, [loopRef]);
+  useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
+
+  // A fly move is a camera gesture like an orbit: it breaks a follow, goes
+  // out as presence, and draws at the interaction scale until it stops.
+  const fly = useFlyCameraInput(sceneRef, applyViewportCommand, flyKeysRef, isFlyMode && active, {
+    moved: (atMs) => {
+      breakFollow();
+      emitPresence();
+      loopRef.current?.markInput("fly", atMs);
+      setLowRes();
+    },
+    stopped: () => {
+      emitPresence();
+      scheduleFullRes();
+    },
+  });
 
   // Held clip keys.
   useEffect(() => {
@@ -189,23 +197,6 @@ function VolumeViewerBody({ scene, surface, canvas, active, emitPresence, breakF
       return true;
     });
   }, [loopRef, scene, clipKeys, emitPresence]);
-
-  // Resolution scaling during interaction
-  const scaleTimerRef = useRef<number>(0);
-  const setLowRes = useCallback(() => {
-    clearTimeout(scaleTimerRef.current);
-    loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
-  }, [loopRef]);
-  const scheduleFullRes = useCallback((delayMs: number = SCALE_RESTORE_DELAY_MS) => {
-    clearTimeout(scaleTimerRef.current);
-    // Same reasoning as the inline callback above: deferred write inside
-    // a debounced callback, not a render-phase mutation.
-    // eslint-disable-next-line react-hooks/immutability
-    scaleTimerRef.current = window.setTimeout(() => {
-      loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
-    }, delayMs);
-  }, [loopRef]);
-  useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
 
   // Arcball input handling
   const [dragging, setDragging] = useState(false);
